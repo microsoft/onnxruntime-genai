@@ -1,0 +1,63 @@
+# =============================================================================
+# version-stage.yml — Package version computation stage (Phase 5).
+#
+# Computes the GenAI package version ONCE for the whole run and exposes it as a
+# stage output variable, so every downstream packaging stage stamps the SAME
+# version (no cross-job date skew when parallel jobs straddle midnight).
+#
+# Format:
+#   stable : X.Y.Z                         (from VERSION_INFO)
+#   dev    : X.Y.Z-dev.<yyyymmdd>.<BuildId> (SemVer 2.0; BuildId is unique/run)
+#
+# Consume downstream via (stage must dependsOn 'version'):
+#   variables:
+#   - name: genai_version
+#     value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
+#
+# Display-name convention:
+#   Stage:  Version
+#   Job:    version · compute
+# =============================================================================
+
+parameters:
+- name: version_type
+  type: string
+  default: 'dev'
+  values:
+    - 'dev'
+    - 'stable'
+
+stages:
+- stage: version
+  displayName: 'Version'
+  dependsOn: []
+  jobs:
+  - job: set_version
+    displayName: 'version · compute'
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+    steps:
+    - checkout: self
+      clean: true
+    - task: PowerShell@2
+      name: setver
+      displayName: 'Compute genai_version (${{ parameters.version_type }})'
+      inputs:
+        workingDirectory: $(Build.SourcesDirectory)
+        targetType: inline
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $version_info = (Get-Content -Path .\VERSION_INFO).Trim()
+          $build_id = $env:BUILD_BUILDID
+          $date = (Get-Date).ToString('yyyyMMdd')
+          $version = switch ('${{ parameters.version_type }}') {
+            'dev'    { "$version_info-dev.$date.$build_id" }
+            'stable' { "$version_info" }
+            default  { throw "unknown version_type: ${{ parameters.version_type }}" }
+          }
+          Write-Host "VERSION_INFO   : $version_info"
+          Write-Host "version_type   : ${{ parameters.version_type }}"
+          Write-Host "build_id       : $build_id"
+          Write-Host "genai_version  : $version"
+          Write-Host "##vso[task.setvariable variable=genai_version;isOutput=true]$version"

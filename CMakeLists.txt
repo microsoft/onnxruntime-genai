@@ -26,40 +26,10 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # Add compiler options for security standards
-  # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
-
-  # Explicitly enable (/GS) stack protection to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/GS>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/GS>")
-
-  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/guard:cf>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
-  add_link_options(/guard:cf /DYNAMICBASE)
-
-  # Determine the target platform (from MSBuild generator)
-  if (CMAKE_VS_PLATFORM_NAME)
-    set(onnxruntime_target_platform ${CMAKE_VS_PLATFORM_NAME})
-  else()
-    set(onnxruntime_target_platform ${CMAKE_SYSTEM_PROCESSOR})
-  endif()
-
-  # Enable CET shadow stack unless building for ARM64 (not supported there)
-  if (onnxruntime_target_platform STREQUAL "x64" OR
-      onnxruntime_target_platform STREQUAL "Win32" OR
-      onnxruntime_target_platform STREQUAL "x86")
-    add_link_options("/CETCOMPAT")
-    message(STATUS "CET shadow stack enabled (/CETCOMPAT).")
-  else()
-    message(STATUS "CET shadow stack skipped.")
-  endif()
-
-  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
-  add_compile_options(
-    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
-  )
+  # BinSkim-required security flags: /GS, /guard:cf, /DYNAMICBASE, /CETCOMPAT, /Qspectre.
+  # Factored into a shared module so standalone SDK sub-projects (src/python, src/java)
+  # can include the same flags without rebuilding the full core.
+  include(cmake/msvc_security.cmake)
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
@@ -191,11 +161,26 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
 else()
-  add_library(onnxruntime-genai SHARED)
+  # Xcode does not reliably emit a framework product for a source-less SHARED target whose
+  # implementation is supplied only through an OBJECT library in target_link_libraries().
+  # Keep one real source on the target so the framework binary exists before its POST_BUILD rules.
+  add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/shared_library_anchor.cpp")
 endif()
 # Bring in the object library's compiled objects and its (PUBLIC) usage requirements. PRIVATE so
 # the requirements are not re-exported to consumers of the shared library.
-target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
+if(CMAKE_GENERATOR STREQUAL "Xcode")
+  # Linking an OBJECT target directly leaves Xcode framework builds referencing sibling-target
+  # object paths without a reliable build-order dependency. The documented TARGET_OBJECTS pattern
+  # adds that dependency, while the INTERFACE target also forwards the object's usage requirements.
+  add_library(onnxruntime-genai-obj-link INTERFACE)
+  target_link_libraries(onnxruntime-genai-obj-link INTERFACE
+    onnxruntime-genai-obj
+    $<TARGET_OBJECTS:onnxruntime-genai-obj>
+  )
+  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj-link)
+else()
+  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
+endif()
 
 # Group the genai library targets under one Visual Studio solution folder so the object library and
 # the shared library it produces appear together rather than as loose entries at the solution root.
@@ -273,8 +258,8 @@ endif()
 
 
 if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai-obj PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  target_link_libraries(onnxruntime-genai-obj PUBLIC llguidance)
+  target_include_directories(onnxruntime-genai-obj PUBLIC $<BUILD_INTERFACE:${llguidance_SOURCE_DIR}/parser/>)
+  target_link_libraries(onnxruntime-genai-obj PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
     target_link_libraries(onnxruntime-genai-obj PUBLIC bcrypt)

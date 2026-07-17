@@ -1,0 +1,167 @@
+# =============================================================================
+# core-packaging-stage.yml — Core binary packaging stages (Phase 1).
+#
+# Two logical stages, each gated by a single per-EP toggle. When an EP is
+# enabled its whole fixed platform matrix is built (goal 8):
+#   Core · CPU  — win-x64, win-arm64, osx-arm64, linux-x64, linux-arm64
+#   Core · CUDA — win-x64, win-arm64, linux-x64
+#
+# (iOS and Android are CPU targets but use bespoke builds; they live in their own
+#  stages, gated by enable_cpu at the pipeline level.)
+#
+# Display-name convention (plan.md §Display-name convention):
+#   Stages:  Core · CPU  /  Core · CUDA
+#   Jobs:    core · <os>-<arch> · <ep>   (set by core-build-job.yml)
+# =============================================================================
+
+parameters:
+# ORT version to download from the Lotus feed for the CPU / CUDA / WinML builds.
+- name: ort_version
+  type: string
+
+# CUDA SDK version (default 13.1; override to 12.8 via pipeline parameter).
+- name: cuda_version
+  type: string
+  default: '13.1'
+
+# WinML SDK (Microsoft.Windows.AI.MachineLearning) version — used by the WinML EP.
+- name: winml_sdk_version
+  type: string
+  default: '2.1.1'
+
+# ---- Per-EP enable toggles -------------------------------------------------
+- name: enable_cpu
+  type: boolean
+  default: true
+- name: enable_cuda
+  type: boolean
+  default: true
+- name: enable_winml
+  type: boolean
+  default: true
+
+stages:
+
+# ---------------------------------------------------------------------------
+# Core · CPU  (built when the CPU EP is enabled)
+# ---------------------------------------------------------------------------
+- ${{ if eq(parameters.enable_cpu, true) }}:
+  - stage: core_cpu
+    displayName: 'Core · CPU'
+    # Depend on the version stage (shared package version) for the archive name.
+    # Independent of Core · CUDA (override ADO's implicit previous-stage depend).
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
+    jobs:
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: x64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: osx
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: linux
+        arch: x64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: linux
+        arch: arm64
+        ep: cpu
+        ort_version: ${{ parameters.ort_version }}
+
+# ---------------------------------------------------------------------------
+# Core · CUDA  (built when the CUDA EP is enabled)
+# ---------------------------------------------------------------------------
+- ${{ if eq(parameters.enable_cuda, true) }}:
+  - stage: core_cuda
+    displayName: 'Core · CUDA'
+    # Depend on the version stage (shared package version) for the archive name.
+    # Independent of Core · CPU (override ADO's implicit previous-stage depend).
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
+    jobs:
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: x64
+        ep: cuda
+        ort_version: ${{ parameters.ort_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: arm64
+        ep: cuda
+        ort_version: ${{ parameters.ort_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: linux
+        arch: x64
+        ep: cuda
+        ort_version: ${{ parameters.ort_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+
+# ---------------------------------------------------------------------------
+# Core · WinML  (built when the WinML EP is enabled)
+#
+# WinML is a Windows-only EP that enables CUDA + DML + WinML together. It does
+# not consume an ORT feed package — cmake/ortlib.cmake downloads the WinML SDK
+# (Microsoft.Windows.AI.MachineLearning, version = winml_sdk_version) instead, so
+# the ort_version parameter carries that SDK version for the WinML jobs.
+# ---------------------------------------------------------------------------
+- ${{ if eq(parameters.enable_winml, true) }}:
+  - stage: core_winml
+    displayName: 'Core · WinML'
+    # Depend on the version stage (shared package version) for the archive name.
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
+    jobs:
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: x64
+        ep: winml
+        ort_version: ${{ parameters.winml_sdk_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+
+    - template: jobs/core-build-job.yml
+      parameters:
+        os: win
+        arch: arm64
+        ep: winml
+        ort_version: ${{ parameters.winml_sdk_version }}
+        cuda_version: ${{ parameters.cuda_version }}

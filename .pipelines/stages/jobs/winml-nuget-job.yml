@@ -1,0 +1,129 @@
+# =============================================================================
+# winml-nuget-job.yml — WinML NuGet repackage job (Phase 5 / WinML EP).
+#
+# Repackages the prebuilt WinML core native binaries into the NuGet package
+# Microsoft.ML.OnnxRuntimeGenAI.WinML, which depends on the WinML SDK NuGet
+# (Microsoft.Windows.AI.MachineLearning). Consumes the WinML core archives
+# (core-win-<arch>-winml-archive) — win-x64 and win-arm64.
+#
+# genai_version is inherited from the enclosing stage (the shared 'version' stage).
+# =============================================================================
+
+parameters:
+- name: winml_sdk_version
+  type: string
+
+jobs:
+- job: csharp_winml_nuget
+  displayName: 'csharp · nuget · winml'
+  pool:
+    name: 'onnxruntime-Win-CPU-2022'
+    os: windows
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: genai_nuget_package_name
+    value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
+  # Normalized SDK·C# pipeline artifact name (mirrors the job name csharp · nuget · <ep>).
+  - name: nugetArtifactName
+    value: 'csharp-nuget-winml'
+  - name: ort_nuget_package_name
+    value: 'Microsoft.Windows.AI.MachineLearning'
+  - name: downloadsDir
+    value: '$(Build.BinariesDirectory)/artifact-downloads'
+  - name: ridRoot
+    value: '$(Build.BinariesDirectory)/rids'
+
+  steps:
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download WinML core archive (win-x64)'
+    inputs:
+      artifactName: 'core-win-x64-winml-archive'
+      targetPath: '$(downloadsDir)/win-x64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download WinML core archive (win-arm64)'
+    inputs:
+      artifactName: 'core-win-arm64-winml-archive'
+      targetPath: '$(downloadsDir)/win-arm64'
+
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
+  # genai_version is inherited from the enclosing stage (computed once by the
+  # 'version' stage), so no per-job version computation is needed here.
+
+  # --- Extract each downloaded RID archive to a platform dir with lib/+include/
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $rids = @('win-x64','win-arm64')
+      New-Item -ItemType Directory -Force -Path '$(ridRoot)' | Out-Null
+      foreach ($rid in $rids) {
+        $dst = Join-Path '$(ridRoot)' $rid
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null   # placeholder (may stay empty)
+        $src = Join-Path '$(downloadsDir)' $rid
+        if (-not (Test-Path $src)) { Write-Host "RID $rid not enabled — empty placeholder"; continue }
+        $archive = Get-ChildItem -Path $src -Include *.zip,*.tar.gz -File -Recurse | Select-Object -First 1
+        if (-not $archive) { Write-Host "No archive for $rid"; continue }
+        Write-Host "Extracting $($archive.FullName) → $dst"
+        if ($archive.Name -like '*.zip') {
+          Expand-Archive -Path $archive.FullName -DestinationPath $dst -Force
+        } else {
+          tar -xf $archive.FullName -C $dst
+        }
+        # CPACK_INCLUDE_TOPLEVEL_DIRECTORY nests everything under a single top-level
+        # dir; the winml nuspec generator expects <platform_dir>/lib and /include, so
+        # flatten the top-level dir (located by its lib/ child) up into the RID dir.
+        $top = Get-ChildItem -Path $dst -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1
+        if ($top) {
+          Get-ChildItem -Path $top.FullName -Force | Move-Item -Destination $dst -Force
+          Remove-Item -Path $top.FullName -Recurse -Force
+        }
+        Get-ChildItem -Path $dst -Recurse | Select-Object FullName
+      }
+    displayName: 'Extract WinML core archives per-RID'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.11
+      addToPath: true
+
+  # --- Generate the WinML nuspec (depends on the WinML SDK NuGet) ------------
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_winml_nuget.py `
+        --package_name $(genai_nuget_package_name) `
+        --package_version $(genai_version) `
+        --ort_package_name $(ort_nuget_package_name) `
+        --ort_package_version ${{ parameters.winml_sdk_version }} `
+        --root_dir $(Build.Repository.LocalPath) `
+        --nuspec_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec `
+        --win_x64 '$(ridRoot)/win-x64' `
+        --win_arm64 '$(ridRoot)/win-arm64' `
+        --commit_id $(Build.SourceVersion)
+      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"
+    displayName: 'Generate WinML nuspec'
+
+  - task: NuGetCommand@2
+    displayName: 'Pack WinML NuGet'
+    inputs:
+      command: 'pack'
+      packagesToPack: '$(nuspec_path)'
+      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+
+  # --- ESRP sign the WinML NuGet --------------------------------------------
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign WinML NuGet package'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish WinML NuGet ($(nugetArtifactName))'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: '$(nugetArtifactName)'

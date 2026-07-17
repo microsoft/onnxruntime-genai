@@ -1,0 +1,40 @@
+# =============================================================================
+# lotus-feed-variables.yml — Single source of truth for the internal Lotus feed.
+#
+# Included at pipeline scope so every stage/job/step resolves packages ONLY from
+# the aiinfra org-scoped Lotus feed — no public feeds (nuget.org / pypi.org /
+# crates.io) are contacted during a packaging build (goal 4 / Phase 2).
+#
+# The Lotus feed is ORG-SCOPED (note: no project segment in the URL) and requires
+# authentication. Auth is provided by the pipeline's own build identity via:
+#   - PipAuthenticate@1  (pip)
+#   - the cargo:token credential provider + System.AccessToken  (cargo)
+#   - a Bearer System.AccessToken header  (ORT content download)
+#   - NuGetAuthenticate@1 (nuget restore — wired in with the C# SDK in Phase 3)
+# =============================================================================
+variables:
+# Feed name (org-scoped). Used by PipAuthenticate@1 (artifactFeeds) and the ORT
+# content API path.
+- name: lotusFeedName
+  value: 'Lotus'
+
+# PyPI (pip) index — org-scoped Lotus.
+- name: lotusPyPiIndex
+  value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/pypi/simple/'
+
+# Cargo sparse registry index — org-scoped Lotus.
+- name: lotusCargoSparse
+  value: 'sparse+https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/Cargo/index/'
+
+# NuGet v3 index — org-scoped Lotus (used by C# restore in Phase 3).
+- name: lotusNuGetFeed
+  value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/nuget/v3/index.json'
+
+# Maven feed — org-scoped Lotus (used by gradle for the Java SDK in Phase 3).
+- name: lotusMavenFeed
+  value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/maven/v1'
+
+# Base of the NuGet package *content* API for the ORT download (org-scoped feed).
+# Full URL: <base>/<package>/versions/<version>/content?api-version=6.0-preview.1
+- name: lotusOrtContentBase
+  value: 'https://pkgs.dev.azure.com/aiinfra/_apis/packaging/feeds/Lotus/nuget/packages'

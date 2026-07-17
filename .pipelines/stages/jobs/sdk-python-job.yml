@@ -1,0 +1,135 @@
+# =============================================================================
+# sdk-python-job.yml — Reusable Python SDK (wheel) build job (Phase 3).
+#
+# Selects the agent pool for the requested OS/arch, defines job-level variables
+# (core artifact download dir, ORT home, SDK build dir), and dispatches to the
+# OS-specific step template.
+#
+# Consumes the core artifact  core-<os>-<arch>-<ep>-cmake-pkg  produced by the
+# core packaging stage, and publishes  python-<os>-<arch>-<ep>-wheel.
+# =============================================================================
+
+parameters:
+- name: os
+  type: string
+  values: [win, linux, osx]
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: python_versions
+  type: object
+  default: [ '3.11', '3.12', '3.13', '3.14' ]
+- name: python_dependency_version
+  type: string
+  default: '1.27.0'
+
+jobs:
+- job: python_${{ parameters.os }}_${{ parameters.arch }}_${{ parameters.ep }}
+  displayName: 'python · ${{ parameters.os }}-${{ parameters.arch }} · ${{ parameters.ep }}'
+
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-linux-ARM64-CPU-2019'
+        hostArchitecture: Arm64
+      ${{ else }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+
+  ${{ if eq(parameters.os, 'win') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-genai-windows-vs-2022-arm64'
+        hostArchitecture: Arm64
+      ${{ else }}:
+        name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: 'Azure Pipelines'
+      image: 'macOS-latest'
+      os: macOS
+
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: artifactName
+    value: 'python-wheel-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}'
+  - name: coreArtifact
+    value: 'core-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}-cmake-pkg'
+  # Prebuilt core download dir (→ build.py --prebuilt_genai_home)
+  - name: corePkgDir
+    ${{ if eq(parameters.os, 'win') }}:
+      value: '$(Build.SourcesDirectory)\core_pkg'
+    ${{ else }}:
+      value: '$(Build.SourcesDirectory)/core_pkg'
+  - name: ortHome
+    ${{ if eq(parameters.os, 'win') }}:
+      value: '$(Build.SourcesDirectory)\ort_home'
+    ${{ else }}:
+      value: '$(Build.SourcesDirectory)/ort_home'
+  # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)
+  - name: pysdkBuildDir
+    value: 'build/pysdk'
+  # Scope Guardian's post-build codesign/SARIF analysis to a small staging dir
+  # (matches the in-tree capi-packaging-job) so the injected 'sarifpatternmatcher'
+  # does not scan the whole native/wheel build tree and crash Guardian Post
+  # Analysis. Only relevant on Windows where signing runs.
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  steps:
+  - checkout: self
+    submodules: recursive
+    lfs: true
+    clean: true
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/sdk-python-win-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+        python_versions: ${{ parameters.python_versions }}
+        python_dependency_version: ${{ parameters.python_dependency_version }}
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/sdk-python-linux-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+        cuda_version: ${{ parameters.cuda_version }}
+        python_versions: ${{ parameters.python_versions }}
+        python_dependency_version: ${{ parameters.python_dependency_version }}
+
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/sdk-python-macos-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+        python_versions: ${{ parameters.python_versions }}
+        python_dependency_version: ${{ parameters.python_dependency_version }}
+
+  - template: steps/compliant-and-cleanup-step.yml

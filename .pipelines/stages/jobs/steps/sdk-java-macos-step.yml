@@ -1,0 +1,165 @@
+# =============================================================================
+# sdk-java-macos-step.yml — macOS Java SDK (desktop JVM jar) build step (Phase 5).
+#
+# Builds the per-platform macOS (arm64) desktop jar *incrementally* against a
+# prebuilt core. The jar bundles its native libs under
+# ai/onnxruntime/genai/native/osx-aarch64/; the combine job later merges all
+# platforms' native subdirs into a single multi-platform jar.
+#
+# Job-level variables expected from the parent job:
+#   corePkgDir   - dir the core cmake-pkg artifact is downloaded into
+#   ortHome      - dir ORT headers+libs are unpacked into
+#   jsdkBuildDir - build.py --build_dir for the SDK (e.g. build/jsdk)
+#   artifactName - artifact name prefix (e.g. java-osx-arm64-cpu)
+# =============================================================================
+
+parameters:
+- name: arch
+  type: string
+  values: [arm64]
+- name: ep
+  type: string
+  values: [cpu]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+- name: core_artifact
+  type: string
+
+steps:
+
+# --- Resolve JAVA_HOME (JDK 17) ---------------------------------------------
+- bash: |
+    set -e
+    JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+    echo "Resolved JAVA_HOME=$JAVA_HOME"
+    [ -f "$JAVA_HOME/include/jni.h" ] || { echo "ERROR: jni.h missing under $JAVA_HOME/include"; exit 1; }
+    echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+    echo "##vso[task.prependpath]$JAVA_HOME/bin"
+  displayName: 'Resolve JAVA_HOME (JDK 17)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+- script: python3 -m pip install --user --break-system-packages requests wheel
+  displayName: 'Install build-time Python deps'
+
+# --- Download prebuilt core CMake package -----------------------------------
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download core CMake package (${{ parameters.core_artifact }})'
+  inputs:
+    artifactName: '${{ parameters.core_artifact }}'
+    targetPath: '$(corePkgDir)'
+
+# --- Download ORT from Lotus feed (authenticated) ---------------------------
+- bash: |
+    set -e
+    pkg_name='Microsoft.ML.OnnxRuntime'
+    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
+    mkdir -p ort_home/include ort_home/lib
+    # No `set -x` — do not echo the token.
+    curl --fail --retry 5 --retry-all-errors -L \
+      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+      -o ort.zip "$url"
+    unzip -o ort.zip -d ort_extracted >/dev/null
+    cp -r ort_extracted/build/native/include/* ort_home/include/
+    cp -r ort_extracted/runtimes/osx-arm64/native/* ort_home/lib/
+    ls -la ort_home/include ort_home/lib
+  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Build the desktop jar incrementally against the prebuilt core ----------
+- bash: |
+    set -e -x
+    export MACOSX_DEPLOYMENT_TARGET=12.0
+    python3 build.py --sdk java \
+      --config ${{ parameters.build_config }} \
+      --parallel \
+      --prebuilt_genai_home "$(corePkgDir)" \
+      --ort_home "$(Build.SourcesDirectory)/ort_home" \
+      --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64 \
+      --build_dir "$(jsdkBuildDir)"
+  displayName: 'Build Java jar (incremental)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # Gradle feed isolation: resolve deps + plugins from the Lotus Maven feed.
+    ORG_GRADLE_PROJECT_lotusMavenUrl: '$(lotusMavenFeed)'
+    ORG_GRADLE_PROJECT_lotusMavenToken: '$(System.AccessToken)'
+    # Pin the jar/POM's onnxruntime Maven dependency to the same ORT the JNI was built against.
+    ONNXRUNTIME_VERSION: '${{ parameters.ort_version }}'
+
+# --- Assert the jar is produced + stage for publishing ----------------------
+- bash: |
+    set -e
+    jar=$(find "$(Build.SourcesDirectory)/$(jsdkBuildDir)" -name "onnxruntime-genai*.jar" \
+      ! -name "*sources*" ! -name "*javadoc*" | head -n1)
+    if [ -z "$jar" ]; then echo "ASSERT FAIL: no jar produced"; exit 1; fi
+    echo "Jar: $jar"
+    listing=$(unzip -l "$jar")
+    if ! echo "$listing" | grep -Eq 'libonnxruntime-genai-jni\.dylib'; then
+      echo "ASSERT FAIL: jar does not contain the JNI native library (libonnxruntime-genai-jni.dylib)"; exit 1
+    fi
+    if ! echo "$listing" | grep -Eq 'libonnxruntime-genai\.dylib'; then
+      echo "ASSERT FAIL: jar does not contain the core native library (libonnxruntime-genai.dylib)"; exit 1
+    fi
+    echo "ASSERT OK: jar contains the JNI + core native libraries"
+    mkdir -p "$(Build.SourcesDirectory)/jar_stage"
+    find "$(Build.SourcesDirectory)/$(jsdkBuildDir)" -name "onnxruntime-genai*.jar" \
+      -exec cp {} "$(Build.SourcesDirectory)/jar_stage/" \;
+  displayName: 'Assert: jar produced + bundles native lib'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Apple-sign the JNI shim inside the jar ---------------------------------
+# The core dylib embedded in the jar is already ESRP-signed at the core stage,
+# but the JNI shim (libonnxruntime-genai-jni.dylib) is built here and unsigned.
+# Extract it, sign via the zip container ESRP requires, then update the jar entry.
+- bash: |
+    set -e
+    jar=$(find "$(Build.SourcesDirectory)/jar_stage" -name 'onnxruntime-genai*.jar' \
+      ! -name '*sources*' ! -name '*javadoc*' | head -n1)
+    [ -n "$jar" ] || { echo "no main jar to sign"; exit 1; }
+    entry='ai/onnxruntime/genai/native/osx-aarch64/libonnxruntime-genai-jni.dylib'
+    work="$(Build.SourcesDirectory)/jni_sign_mac"
+    signdir="$(Build.SourcesDirectory)/mac_jni_sign"
+    rm -rf "$work" "$signdir"; mkdir -p "$work" "$signdir"
+    ( cd "$work" && jar xf "$jar" "$entry" )
+    [ -f "$work/$entry" ] || { echo "JNI dylib not extracted: $entry"; exit 1; }
+    cp "$work/$entry" "$signdir/libonnxruntime-genai-jni.dylib"
+    ( cd "$signdir" && zip --symlinks jni.zip 'libonnxruntime-genai-jni.dylib' )
+    echo "##vso[task.setvariable variable=jniMainJar]$jar"
+    echo "##vso[task.setvariable variable=jniWorkDir]$work"
+    echo "##vso[task.setvariable variable=jniEntry]$entry"
+  displayName: 'Extract JNI shim for signing'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- template: compliant/mac-esrp-archive-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)/mac_jni_sign'
+    Pattern: '*.zip'
+
+- bash: |
+    set -e
+    signdir="$(Build.SourcesDirectory)/mac_jni_sign"
+    ( cd "$signdir" && unzip -o jni.zip )
+    cp "$signdir/libonnxruntime-genai-jni.dylib" "$(jniWorkDir)/$(jniEntry)"
+    ( cd "$(jniWorkDir)" && jar uf "$(jniMainJar)" "$(jniEntry)" )
+    echo "Updated $(jniEntry) in $(jniMainJar) with the signed JNI shim"
+  displayName: 'Update jar with signed JNI shim'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Publish per-platform jar ------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Java jar ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)-jar'
+    targetPath: '$(Build.SourcesDirectory)/jar_stage'
