@@ -195,7 +195,7 @@ void GenAiTelemetry::Initialize() {
     // per-event property). An explicit, SDK-independent correlator that answers
     // "which events came from the same process run?" and makes the lightweight
     // per-event sessionId / generatorId counters globally unique.
-    app_session_guid_ = GenerateGuidV4();
+    if (app_session_guid_.empty()) app_session_guid_ = GenerateGuidV4();
     impl_->logger->SetContext("AppSessionGuid", app_session_guid_);
     impl_->logger->SetContext("LibraryName", "ONNXRuntimeGenAI");
     impl_->logger->SetContext("LibraryVersion", ORTGENAI_VERSION);
