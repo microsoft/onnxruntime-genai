@@ -141,6 +141,9 @@ class GenAiTelemetry {
   std::atomic<bool> env_disabled_{false};
   std::atomic<bool> initialized_{false};
   std::atomic<bool> process_info_logged_{false};
+#if defined(__ANDROID__)
+  std::atomic<bool> android_readiness_warning_logged_{false};
+#endif
   std::atomic<uint32_t> next_session_id_{1};
   std::string app_session_guid_;  // Tier 1 identity: process-wide GUID (logger context)
   std::mutex init_mutex_;

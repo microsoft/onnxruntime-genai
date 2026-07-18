@@ -4,6 +4,7 @@
 #include "telemetry.h"
 #include "device_info.h"
 #include "error_scrubber.h"
+#include "logging.h"
 #include "telemetry_environment.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
@@ -128,7 +129,7 @@ bool GenAiTelemetry::IsDestroyed() {
 
 void GenAiTelemetry::Initialize() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-  std::lock_guard<std::mutex> lock(init_mutex_);
+  std::unique_lock<std::mutex> lock(init_mutex_);
   if (initialized_.load()) return;
 
   // In a CI / build-pipeline environment, or inside onnxruntime-genai's own unit-test binaries,
@@ -150,7 +151,19 @@ void GenAiTelemetry::Initialize() {
 #if defined(__ANDROID__)
   // The Android SDK requires its Java HTTP bridge before native initialization. AAR builds install
   // it automatically; native-only consumers without a Java context safely run without telemetry.
-  if (!OrtGenAIIsAndroidTelemetryReady()) return;
+  if (!OrtGenAIIsAndroidTelemetryReady()) {
+    const bool should_warn =
+        g_log.enabled && g_log.warning && !android_readiness_warning_logged_.exchange(true);
+    lock.unlock();
+    if (should_warn) {
+      try {
+        Log("warning", "Android telemetry is waiting for the 1DS Java HttpClient");
+      } catch (...) {
+        // Diagnostics must not affect host control flow.
+      }
+    }
+    return;
+  }
 #endif
 
   // Telemetry must never affect host control flow: any SDK failure here is
@@ -289,6 +302,7 @@ std::unique_lock<std::mutex> GenAiTelemetry::LockForLogging(bool require_enabled
 void GenAiTelemetry::LogProcessInfo() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   bool emitted = false;
+  bool warn_device_id_fallback = false;
   // require_enabled=false: ProcessInfo emits whenever telemetry is initialized (outside CI/testing),
   // even when ORT_GENAI_TELEMETRY_DISABLED or SetEnabled(false) has disabled detailed lifecycle events.
   RunLocked([&] {
@@ -300,6 +314,7 @@ void GenAiTelemetry::LogProcessInfo() {
     }
 
     const auto& device = GetDeviceInfo();
+    warn_device_id_fallback = device.device_id_status == "Failed";
 
     MAT::EventProperties event("OnnxRuntimeGenAI.ProcessInfo");
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
@@ -319,6 +334,13 @@ void GenAiTelemetry::LogProcessInfo() {
     emitted = true;
   },
             /*require_enabled=*/false);
+  if (warn_device_id_fallback && g_log.enabled && g_log.warning) {
+    try {
+      Log("warning", "Failed to persist telemetry device ID; using an in-memory identifier");
+    } catch (...) {
+      // Diagnostics must not affect host control flow.
+    }
+  }
   // Allow a retry if telemetry was not live (or threw before emitting).
   if (!emitted) process_info_logged_.store(false);
 #endif

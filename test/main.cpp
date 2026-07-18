@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include <array>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -12,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include "ort_genai.h"
+#include "telemetry_test_environment.h"
 
 // Global variable to store custom model base path
 std::string g_custom_model_path;
@@ -86,11 +86,7 @@ int main(int argc, char** argv) {
   // Fully suppress telemetry for the unit-test process before any Oga call (and therefore the
   // telemetry provider) runs, so local non-CI test runs never spin up the 1DS uploader, write a
   // device id, or emit events. Read by GenAiTelemetry::Initialize (shared name with ONNX Runtime).
-#if defined(_WIN32)
-  _putenv_s("ORT_RUNNING_UNIT_TESTS", "1");
-#else
-  setenv("ORT_RUNNING_UNIT_TESTS", "1", 1);
-#endif
+  Generators::test::SuppressTelemetryForTests();
 
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();

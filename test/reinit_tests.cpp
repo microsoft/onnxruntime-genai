@@ -14,7 +14,7 @@
 // cycle.
 
 #include <cstring>
-#include <cstdlib>
+
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -30,6 +30,7 @@
 #include <gtest/gtest.h>
 
 #include "ep_registration.h"
+#include "telemetry_test_environment.h"
 #include "test_utils.h"
 
 // Plugin EPs discovered at startup (WinML packages by default, plus any --ep_dir). Registered on
@@ -209,11 +210,7 @@ TEST(ReInitTests, DmlInterfaceNotCachedAcrossReload) {
 
 int main(int argc, char** argv) {
   // Suppress telemetry before any Oga call, including across each re-initialization cycle.
-#if defined(_WIN32)
-  _putenv_s("ORT_RUNNING_UNIT_TESTS", "1");
-#else
-  setenv("ORT_RUNNING_UNIT_TESTS", "1", 1);
-#endif
+  Generators::test::SuppressTelemetryForTests();
 
   ::testing::InitGoogleTest(&argc, argv);
 

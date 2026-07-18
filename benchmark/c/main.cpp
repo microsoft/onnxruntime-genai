@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "ort_genai.h"
+#include "telemetry_test_environment.h"
 
 #include "options.h"
 #include "resource_utils.h"
@@ -330,6 +331,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  Generators::test::SuppressTelemetryForTests();
   OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);
