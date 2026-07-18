@@ -602,10 +602,9 @@ void Generator::LogTelemetryGenerateEnd() {
   // so post-generation idle before the next prompt/generator free is excluded.
   // Guard against access during static deinitialization
   if (telemetry_generated_tokens_ > 0 && !GenAiTelemetry::IsDestroyed()) {
-    auto& telemetry = GenAiTelemetry::Instance();
-    // If GenerateStart was already emitted, emit the matching GenerateEnd even if telemetry was disabled
-    // after generation began. This preserves paired lifecycle events for downstream aggregation.
-    if (telemetry.IsEnabled() || ShouldContinueStartedTelemetry()) {
+    // Emit GenerateEnd only when GenerateStart was accepted. Runtime telemetry may have been
+    // disabled since then, but closing the pair preserves downstream lifecycle aggregation.
+    if (telemetry_generate_start_logged_) {
       auto total_time_ms = std::chrono::duration<double, std::milli>(
                                telemetry_last_token_time_ - telemetry_start_time_)
                                .count();
@@ -617,7 +616,7 @@ void Generator::LogTelemetryGenerateEnd() {
       }
       double tps = total_time_ms > 0 ? (telemetry_generated_tokens_ * 1000.0 / total_time_ms) : 0.0;
 
-      telemetry.LogGenerateEnd(
+      GenAiTelemetry::Instance().LogGenerateEnd(
           model_->telemetry_session_id_,
           telemetry_generator_id_,
           telemetry_prompt_tokens_ + telemetry_generated_tokens_,
@@ -696,8 +695,6 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-  const bool track_telemetry =
-      !telemetry_suppress_append_tracking_ && (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry());
   std::string append_input_modality = transducer_state_ ? "audio" : "text";
   std::chrono::steady_clock::time_point append_start_time{};
 
@@ -705,11 +702,12 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // GenerateStart/End pair so each request is reported separately. Prompt-token
   // counters are committed only after AppendTokens succeeds, so failed validation
   // or prefill work cannot skew the next request.
-  if (track_telemetry) {
-    if (telemetry_generated_tokens_ > 0) {
-      LogTelemetryGenerateEnd();
-    }
+  if (!telemetry_suppress_append_tracking_ && telemetry_generated_tokens_ > 0) {
+    LogTelemetryGenerateEnd();
+  }
 
+  const bool track_telemetry = !telemetry_suppress_append_tracking_ && ShouldTrackTelemetry();
+  if (track_telemetry) {
     append_start_time = std::chrono::steady_clock::now();
     bool used_vision = false, used_audio = false;
     for (const auto& extra : extra_inputs_) {
@@ -908,10 +906,9 @@ void Generator::GenerateNextToken() {
         telemetry_first_token_time_ = telemetry_now;
         telemetry_first_token_logged_ = true;
         if (ShouldTrackTelemetry()) {
-          GenAiTelemetry::Instance().LogGenerateStart(
+          telemetry_generate_start_logged_ = GenAiTelemetry::Instance().LogGenerateStart(
               model_->telemetry_session_id_, telemetry_generator_id_, telemetry_prompt_tokens_,
               telemetry_input_modality_);
-          telemetry_generate_start_logged_ = true;
         }
       }
     }
@@ -985,12 +982,11 @@ void Generator::GenerateNextToken() {
       telemetry_first_token_time_ = telemetry_now;
       telemetry_first_token_logged_ = true;
       if (ShouldTrackTelemetry()) {
-        GenAiTelemetry::Instance().LogGenerateStart(
+        telemetry_generate_start_logged_ = GenAiTelemetry::Instance().LogGenerateStart(
             model_->telemetry_session_id_,
             telemetry_generator_id_,
             telemetry_prompt_tokens_,
             telemetry_input_modality_);
-        telemetry_generate_start_logged_ = true;
       }
     }
   }

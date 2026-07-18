@@ -427,8 +427,9 @@ void GenAiTelemetry::LogGeneratorCreate(uint32_t session_id, uint32_t generator_
 #endif
 }
 
-void GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id,
+bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id,
                                       int prompt_tokens, const std::string& input_modality) {
+  bool emitted = false;
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.GenerateStart");
@@ -438,8 +439,10 @@ void GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id
     event.SetProperty("inputModality", input_modality);
 
     impl_->logger->LogEvent(event);
+    emitted = true;
   });
 #endif
+  return emitted;
 }
 
 void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,

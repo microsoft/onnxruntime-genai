@@ -88,7 +88,8 @@ class GenAiTelemetry {
   // GenerateStart/End: Paired events tracing inference lifecycle.
   // input_modality is the modality actually used for this request (grouped):
   // text / vision / audio / multimodal.
-  void LogGenerateStart(uint32_t session_id, uint32_t generator_id, int prompt_tokens,
+  // Returns true only when the event was accepted by the live logger.
+  bool LogGenerateStart(uint32_t session_id, uint32_t generator_id, int prompt_tokens,
                         const std::string& input_modality);
   void LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
                       int total_tokens,
