@@ -419,6 +419,7 @@ bool CreateDirectoryTreeOwnerOnly(const std::filesystem::path& dir, bool leaf = 
       ec.clear();
       std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
                                    std::filesystem::perm_options::replace, ec);
+      if (ec) return false;
     }
     return true;
   }
@@ -438,6 +439,7 @@ bool CreateDirectoryTreeOwnerOnly(const std::filesystem::path& dir, bool leaf = 
   if (leaf) {
     std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace, ec);
+    if (ec) return false;
   }
   return true;
 }

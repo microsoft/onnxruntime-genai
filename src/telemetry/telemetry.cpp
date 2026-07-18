@@ -3,8 +3,8 @@
 
 #include "telemetry.h"
 #include "device_info.h"
-#include "error_scrubber.h"
 #include "telemetry_environment.h"
+#include "telemetry_redaction.h"
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
@@ -395,10 +395,7 @@ void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
     event.SetProperty("isSuccess", is_success);
     event.SetProperty("loadTimeMs", load_time_ms);
     if (!error_message.empty()) {
-      // Scrub filesystem paths (privacy), then cap length (size guard).
-      auto scrubbed = TelemetryInternal::TruncateUtf8AtBoundary(
-          TelemetryInternal::ScrubErrorMessage(error_message), 256);
-      event.SetProperty("errorMessage", scrubbed);
+      event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));
     }
 
     impl_->logger->LogEvent(event);
@@ -488,10 +485,7 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
     MAT::EventProperties event("OnnxRuntimeGenAI.RuntimeError");
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("errorType", error_type);
-    // Scrub filesystem paths (privacy), then cap length (size guard).
-    auto scrubbed = TelemetryInternal::TruncateUtf8AtBoundary(
-        TelemetryInternal::ScrubErrorMessage(error_message), 256);
-    event.SetProperty("errorMessage", scrubbed);
+    event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));
     event.SetProperty("context", context);
 
     impl_->logger->LogEvent(event);

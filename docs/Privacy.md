@@ -21,7 +21,7 @@ The 1DS SDK is obtained one of two ways (see [`cmake/telemetry.cmake`](../cmake/
 
 ### Private builds
 
-Telemetry is enabled by default — including in builds compiled from source — so it is present unless you turn it off (see [Disabling Telemetry](#disabling-telemetry)).
+The standard `build.sh` and `build.bat` wrappers enable telemetry. Direct `build.py` or CMake builds include telemetry only when explicitly configured with `--use_telemetry`.
 
 ## Technical details
 
