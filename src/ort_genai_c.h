@@ -115,9 +115,10 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
  *
  * Telemetry can also be disabled at compile time (ENABLE_TELEMETRY=OFF) or via
  * the environment variable ORT_TELEMETRY_DISABLED=1 (shared with ONNX Runtime) or
- * ORT_GENAI_TELEMETRY_DISABLED=1. Runtime controls suppress
- * detailed model, generation, adapter, and error telemetry. To produce a binary that collects no telemetry,
- * build with ENABLE_TELEMETRY=OFF.
+ * ORT_GENAI_TELEMETRY_DISABLED=1. Runtime controls suppress new detailed model,
+ * generation, adapter, and error telemetry. A minimal process information event remains enabled,
+ * and an end event may still be emitted for an operation that started before telemetry was disabled.
+ * To produce a binary that collects no telemetry, build with ENABLE_TELEMETRY=OFF.
  *
  * \param[in] enabled true to enable telemetry, false to disable.
  */

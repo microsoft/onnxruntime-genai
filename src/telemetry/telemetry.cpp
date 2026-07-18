@@ -439,6 +439,8 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
 
     impl_->logger->LogEvent(event);
   },
+            // Complete a GenerateStart/GenerateEnd pair even if runtime telemetry was disabled
+            // while generation was in flight. Callers suppress end events for requests not started.
             /*require_enabled=*/false);
 #endif
 }
