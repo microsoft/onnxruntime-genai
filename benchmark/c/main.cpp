@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <random>
 #include <iostream>
 #include <numeric>
@@ -15,7 +16,6 @@
 #include <vector>
 
 #include "ort_genai.h"
-#include "telemetry_test_environment.h"
 
 #include "options.h"
 #include "resource_utils.h"
@@ -331,7 +331,11 @@ void RunBenchmark(const benchmark::Options& opts) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  Generators::test::SuppressTelemetryForTests();
+#if defined(_WIN32)
+  _putenv_s("ORT_RUNNING_UNIT_TESTS", "1");
+#else
+  setenv("ORT_RUNNING_UNIT_TESTS", "1", 1);
+#endif
   OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);
