@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "filesystem.h"
 #include "config.h"
 
 #include <string_view>

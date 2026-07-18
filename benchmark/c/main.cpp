@@ -394,7 +394,7 @@ void RunBenchmark(const benchmark::Options& opts) {
     WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
     WriteE2EStats("E2E generation (entire generation loop)", e2e_gen_stats);
 
-    auto human_bytes = [](size_t bytes) -> std::string {
+    auto human_bytes = [](uint64_t bytes) -> std::string {
       std::ostringstream oss;
       oss << std::fixed << std::setprecision(2);
       if (bytes >= (1ULL << 40))
