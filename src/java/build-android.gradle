@@ -9,6 +9,10 @@ def minSdkVer = System.properties['minSdkVer']
 def targetSdkVer = System.properties['targetSdkVer']
 def telemetryJavaSrcDir = System.properties['telemetryJavaSrcDir']
 def telemetryResourceDir = System.properties['telemetryResourceDir']
+if ((telemetryJavaSrcDir == null) != (telemetryResourceDir == null)) {
+	throw new GradleException('telemetryJavaSrcDir and telemetryResourceDir must be set together')
+}
+def telemetryEnabled = telemetryJavaSrcDir != null
 
 // Since Android requires a higher numbers indicating more recent versions
 // This function assumes the version number will be in format of A.B.C such as 1.7.0.
@@ -66,7 +70,7 @@ android {
 		versionName = project.version
 
 		testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-		if (telemetryJavaSrcDir != null) {
+		if (telemetryEnabled) {
 			consumerProguardFiles 'src/main/android/consumer-rules.pro'
 		}
 	}
@@ -95,11 +99,11 @@ android {
 			jniLibs.srcDirs = [jniLibsDir]
 			java {
 				srcDirs = ['src/main/java']
-				if (telemetryJavaSrcDir != null) {
+				if (telemetryEnabled) {
 					srcDirs += ['src/main/android/java', telemetryJavaSrcDir]
 				}
 			}
-			if (telemetryJavaSrcDir != null) {
+			if (telemetryEnabled) {
 				manifest.srcFile 'src/main/android/AndroidManifest.xml'
 				resources.srcDirs += [telemetryResourceDir]
 			}
@@ -139,7 +143,7 @@ artifacts {
 }
 
 dependencies {
-	if (telemetryJavaSrcDir != null) {
+	if (telemetryEnabled) {
 		compileOnly 'androidx.annotation:annotation:1.7.1'
 	}
 	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.0'
