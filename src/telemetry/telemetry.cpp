@@ -26,6 +26,10 @@
 #define ORTGENAI_VERSION "unknown"
 #endif
 
+#if defined(ORTGENAI_ENABLE_TELEMETRY) && defined(__ANDROID__)
+extern "C" bool OrtGenAIIsAndroidTelemetryReady() noexcept;
+#endif
+
 namespace Generators {
 
 namespace {
@@ -143,6 +147,12 @@ void GenAiTelemetry::Initialize() {
     enabled_.store(false);
   }
 
+#if defined(__ANDROID__)
+  // The Android SDK requires its Java HTTP bridge before native initialization. AAR builds install
+  // it automatically; native-only consumers without a Java context safely run without telemetry.
+  if (!OrtGenAIIsAndroidTelemetryReady()) return;
+#endif
+
   // Telemetry must never affect host control flow: any SDK failure here is
   // swallowed and simply leaves telemetry uninitialized (a later call retries).
   // enabled_ is not cleared on failure paths, so a successful retry still emits.
@@ -170,6 +180,7 @@ void GenAiTelemetry::Initialize() {
     // run. 0 keeps Shutdown non-blocking and avoids adding exit latency to host apps.
     config[MAT::CFG_INT_MAX_TEARDOWN_TIME] = 0;
 
+#if !defined(__ANDROID__)
     const std::string cache_dir = GetTelemetryStorageDir();
     if (!cache_dir.empty()) {
       // Product-specific cache file name: the .onnxruntime directory is shared with ONNX Runtime (and
@@ -177,6 +188,7 @@ void GenAiTelemetry::Initialize() {
       // with different tenant tokens never share one SQLite db (which could mix or misroute events).
       config[MAT::CFG_STR_CACHE_FILE_PATH] = (std::filesystem::path{cache_dir} / "onnxruntime-genai.db").string();
     }
+#endif
 
     // Create a dedicated log manager via LogManagerProvider (recommended over the
     // LOGMANAGER_INSTANCE singleton for library use). wantController=true makes this

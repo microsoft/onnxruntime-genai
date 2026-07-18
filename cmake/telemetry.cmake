@@ -5,15 +5,15 @@
 #
 # The 1DS SDK is obtained one of two ways, in priority order:
 #
-#   1. vcpkg port "cpp-client-telemetry" (preferred): exposes the MSTelemetry::mat
+#   1. vcpkg port "cpp-client-telemetry" (preferred on desktop): exposes the MSTelemetry::mat
 #      CONFIG target with its include dirs and transitive dependencies (sqlite3 / zlib /
 #      nlohmann-json) already wired up. Selected automatically when the vcpkg toolchain
 #      provides the package (e.g. build.py --use_telemetry with a vcpkg root). A static
 #      triplet lets the linker dead-strip the unused SDK for minimum binary footprint.
 #
 #   2. FetchContent source build (fallback): when the vcpkg package is NOT available, the
-#      SDK source (pinned in cmake/deps.txt) is downloaded, patched, and built as a static
-#      `mat` library. This lets telemetry be enabled without vcpkg, matching the rest of
+#      SDK source (pinned in cmake/deps.txt) is downloaded, patched, and built locally.
+#      This lets telemetry be enabled without vcpkg, matching the rest of
 #      onnxruntime-genai's dependency model (ORT_HOME + FetchContent), and works on supported
 #      platforms since genai uses 1DS everywhere (unlike ONNX Runtime, which uses ETW on Windows).
 #
@@ -24,11 +24,19 @@ if(NOT ENABLE_TELEMETRY)
   return()
 endif()
 
+if(ANDROID AND NOT ENABLE_JAVA)
+  message(WARNING
+    "Android telemetry requires the host app to initialize the 1DS Java HttpClient before using GenAI. "
+    "Build with ENABLE_JAVA=ON to package the automatic AAR initializer.")
+endif()
+
 # ---------------------------------------------------------------------------
 # Path 1: vcpkg port (preferred)
 # ---------------------------------------------------------------------------
-find_package(MSTelemetry CONFIG QUIET)
-if(TARGET MSTelemetry::mat)
+if(NOT ANDROID)
+  find_package(MSTelemetry CONFIG QUIET)
+endif()
+if(NOT ANDROID AND TARGET MSTelemetry::mat)
   message(STATUS "Telemetry: using the 1DS SDK from the cpp-client-telemetry vcpkg port (MSTelemetry::mat).")
 
   add_library(onnxruntime-genai-telemetry INTERFACE)
@@ -93,10 +101,16 @@ set(BUILD_OBJC_WRAPPER OFF CACHE BOOL "Disable 1DS ObjC wrapper" FORCE)
 set(BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
-# selects mat's library type from it. Save it, force static for the SDK (so mat links into genai and is
-# dead-stripped), and restore it after the SDK is configured.
+# selects mat's library type from it. Save it and restore it after the SDK is configured. Desktop and
+# Apple builds use a dead-strippable static library. Android Java/AAR builds use libmat.so so the
+# SDK's Java HTTP bridge and GenAI resolve against the same process-wide SDK state; native-only
+# Android builds stay static and safely disable telemetry when no Java context is available.
 set(_ortgenai_build_shared_libs_saved "${BUILD_SHARED_LIBS}")
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build 1DS SDK as a static library" FORCE)
+if(ANDROID AND ENABLE_JAVA)
+  set(BUILD_SHARED_LIBS ON CACHE BOOL "Build the Android 1DS SDK as a shared library" FORCE)
+else()
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build the 1DS SDK as a static library" FORCE)
+endif()
 
 # Build sqlite3 and zlib from the SDK's vendored sources (MATSDK_BUNDLE_VENDORED_DEPS) on every
 # platform so the build is self-contained and the resulting static `mat` is complete: it references
@@ -118,6 +132,13 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
+if(ANDROID)
+  set(ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR
+    "${cpp_client_telemetry_SOURCE_DIR}/lib/android_build/maesdk/src/main/java")
+  set(ORTGENAI_TELEMETRY_LICENSE_FILE "${cpp_client_telemetry_SOURCE_DIR}/LICENSE")
+  target_sources(mat PRIVATE
+    "${PROJECT_SOURCE_DIR}/cmake/telemetry/android_telemetry_bridge.cpp")
+endif()
 foreach(_ortgenai_1ds_cache_var
     BUILD_UNIT_TESTS
     BUILD_FUNC_TESTS

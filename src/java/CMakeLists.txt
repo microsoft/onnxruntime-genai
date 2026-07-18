@@ -15,6 +15,34 @@ set(JAVA_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 # <build output dir>/src/java (path used with add_subdirectory in root CMakeLists.txt)
 set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
+if(ANDROID AND ENABLE_TELEMETRY)
+  if(NOT ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR OR NOT ORTGENAI_TELEMETRY_LICENSE_FILE)
+    message(FATAL_ERROR "Android telemetry requires the FetchContent 1DS Java bridge sources.")
+  endif()
+
+  set(ANDROID_TELEMETRY_JAVA_DIR ${JAVA_OUTPUT_DIR}/telemetry-java)
+  set(ANDROID_TELEMETRY_JAVA_PACKAGE_DIR
+      ${ANDROID_TELEMETRY_JAVA_DIR}/com/microsoft/applications/events)
+  file(MAKE_DIRECTORY ${ANDROID_TELEMETRY_JAVA_PACKAGE_DIR})
+  foreach(_telemetry_java_file HttpClient.java HttpClientRequest.java)
+    configure_file(
+      ${ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR}/com/microsoft/applications/events/${_telemetry_java_file}
+      ${ANDROID_TELEMETRY_JAVA_PACKAGE_DIR}/${_telemetry_java_file}
+      COPYONLY)
+  endforeach()
+
+  set(ANDROID_TELEMETRY_RESOURCE_DIR ${JAVA_OUTPUT_DIR}/telemetry-resources)
+  file(MAKE_DIRECTORY ${ANDROID_TELEMETRY_RESOURCE_DIR}/META-INF)
+  configure_file(
+    ${ORTGENAI_TELEMETRY_LICENSE_FILE}
+    ${ANDROID_TELEMETRY_RESOURCE_DIR}/META-INF/LICENSE-1DS
+    COPYONLY)
+
+  set(ANDROID_TELEMETRY_GRADLE_ARGS
+    -DtelemetryJavaSrcDir=${ANDROID_TELEMETRY_JAVA_DIR}
+    -DtelemetryResourceDir=${ANDROID_TELEMETRY_RESOURCE_DIR})
+endif()
+
 # Should we use onnxruntime-genai or onnxruntime-genai-static? Using onnxruntime-genai for now.
 # Add dependency on native target
 set(JAVA_DEPENDS onnxruntime-genai)
@@ -169,6 +197,13 @@ if (ANDROID)
                        $<TARGET_FILE:onnxruntime-genai-jni>
                        ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai-jni>)
 
+  if(ENABLE_TELEMETRY)
+    add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                         $<TARGET_FILE:mat>
+                         ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:mat>)
+  endif()
+
   # Generate the Android AAR package
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E echo "Generating Android AAR package..."
@@ -177,6 +212,7 @@ if (ANDROID)
                        -b build-android.gradle -c settings-android.gradle
                        -DjniLibsDir=${ANDROID_PACKAGE_DIR} -DbuildDir=${ANDROID_PACKAGE_OUTPUT_DIR}
                        -DminSdkVer=${ANDROID_MIN_SDK} -DheadersDir=${ANDROID_PACKAGE_HEADERS_DIR}
+                       ${ANDROID_TELEMETRY_GRADLE_ARGS}
                      WORKING_DIRECTORY ${JAVA_SRC_ROOT})
 
   # unit tests
