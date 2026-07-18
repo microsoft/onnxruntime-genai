@@ -4,8 +4,8 @@
 #include "telemetry.h"
 #include "device_info.h"
 #include "error_scrubber.h"
-#include "logging.h"
 #include "telemetry_environment.h"
+#include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
 #include "Enums.hpp"
