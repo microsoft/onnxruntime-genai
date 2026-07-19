@@ -85,8 +85,6 @@ variables:
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
-    featureFlags:
-      skipPoliciesValidation: true
     pool:
       name: 'onnxruntime-Win-CPU-2022'
       os: windows
@@ -98,6 +96,7 @@ extends:
       tsa:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      skipPoliciesValidation: true
     stages:
     # ---- Version (compute the shared package version once) -----------------
     - template: stages/version-stage.yml
