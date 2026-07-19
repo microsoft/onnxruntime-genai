@@ -12,7 +12,7 @@ ONNX Runtime GenAI collects a small number of trace events with the goal of impr
 
 ### Default behavior
 
-Telemetry is turned **ON** by default in official packages on supported platforms; all official packaging pipelines explicitly enable `--use_telemetry`. The standard build scripts (`build.sh` / `build.bat`) also add `--use_telemetry` automatically, while direct `build.py` or CMake builds include telemetry only when explicitly configured.
+Telemetry is turned **ON** by default in official packages on supported platforms; all official packaging pipelines explicitly enable telemetry with `--use_telemetry` or `-DENABLE_TELEMETRY=ON`. The standard build scripts (`build.sh` / `build.bat`) also add `--use_telemetry` automatically, while direct `build.py` or CMake builds include telemetry only when explicitly configured.
 
 The 1DS SDK is obtained one of two ways (see [`cmake/telemetry.cmake`](../cmake/telemetry.cmake)):
 
