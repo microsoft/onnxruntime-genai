@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
@@ -18,6 +19,7 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "dll_load_error.h"
 
 namespace Generators {
 
@@ -47,6 +49,15 @@ struct OgaAbstract {
 // As the Oga* types are just typedefs, we can use them as the actual types in the C API.
 // We still need to cast from internal types to the external ones, but these definitions ensure that the types are correct.
 // But do not use reinterpret_cast!
+//
+// IMPORTANT: Objects handed out through these opaque handles are actually allocated as their
+// internal base type (see `ReturnUnique<OgaX>(std::make_unique<BaseX>(...))`). On some ABIs
+// (notably MSVC without `__declspec(empty_bases)`), the multiple-inheritance with `OgaAbstract`
+// makes `sizeof(OgaX) > sizeof(BaseX)`. If the corresponding `OgaDestroyX` function does
+// `delete p` on the `OgaX*`, C++17 sized-delete will pass `sizeof(OgaX)` to the allocator while
+// the object was actually allocated with `sizeof(BaseX)` — a new-delete-type-mismatch that
+// corrupts heap metadata. Every `OgaDestroyX` below MUST therefore delete through the base type,
+// i.e. `delete static_cast<BaseX*>(p)`, to match what was allocated.
 struct OgaAdapters : Generators::Adapters, OgaAbstract {};
 struct OgaAudios : Generators::Audios, OgaAbstract {};
 struct OgaConfig : Generators::Config, OgaAbstract {};
@@ -161,10 +172,16 @@ size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
 }
 
 size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return 0;
+  }
   return (*p)[sequence].size();
 }
 
 const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return nullptr;
+  }
   return (*p)[sequence].data();
 }
 
@@ -749,9 +766,19 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
+  if (shape_dims_count > 0 && shape_dims == nullptr)
+    throw std::runtime_error("shape_dims must not be null when shape_dims_count is non-zero");
   auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
-  for (size_t i = 0; i < shape_dims_count; i++)
-    byte_count *= shape_dims[i];
+  for (size_t i = 0; i < shape_dims_count; i++) {
+    if (shape_dims[i] < 0)
+      throw std::runtime_error("shape dimension must be non-negative");
+    if (static_cast<uint64_t>(shape_dims[i]) > std::numeric_limits<size_t>::max())
+      throw std::runtime_error("shape dimension exceeds size_t range");
+    const size_t dim = static_cast<size_t>(shape_dims[i]);
+    if (dim != 0 && byte_count > std::numeric_limits<size_t>::max() / dim)
+      throw std::runtime_error("tensor byte count overflow");
+    byte_count *= dim;
+  }
   std::unique_ptr<OrtValue> ort_tensor;
   if (data)
     ort_tensor = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);
@@ -1093,29 +1120,57 @@ OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) { delete string_array; }
-void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete p; }
+// NOTE: Every `delete` below casts the Oga* handle back to the internal base type that was
+// actually allocated by the matching OgaCreate*/ReturnUnique call. Deleting through the Oga*
+// pointer directly would trigger a new-delete-type-mismatch (heap corruption) on ABIs where
+// sizeof(OgaX) > sizeof(BaseX) — e.g. MSVC does not apply empty-base optimization to the
+// `OgaAbstract` secondary base across multiple inheritance by default, so the C++17 sized-delete
+// would hand a mismatched allocation size to the allocator.
+void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) { delete static_cast<std::vector<std::string>*>(string_array); }
+void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete static_cast<Generators::Result*>(p); }
 void OGA_API_CALL OgaDestroyString(const char* p) { delete[] p; }
-void OGA_API_CALL OgaDestroySequences(OgaSequences* p) { delete p; }
-void OGA_API_CALL OgaDestroyConfig(OgaConfig* p) { delete p; }
+void OGA_API_CALL OgaDestroySequences(OgaSequences* p) { delete static_cast<Generators::TokenSequences*>(p); }
+void OGA_API_CALL OgaDestroyConfig(OgaConfig* p) { delete static_cast<Generators::Config*>(p); }
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete p; }
+void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete static_cast<Generators::Generator*>(p); }
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete p; }
+void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete static_cast<Generators::TokenizerStream*>(p); }
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete p; }
-void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete p; }
-void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
+void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete static_cast<Generators::Images*>(p); }
+void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete static_cast<Generators::Audios*>(p); }
+void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete static_cast<Generators::NamedTensors*>(p); }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
+void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete static_cast<Generators::RuntimeSettings*>(p); }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4297: this extern "C" entry point is assumed non-throwing under /EHc, but it intentionally
+// throws to report a registration failure to the caller -- exactly as the ORT registration call it
+// wraps already does (that throw is simply not visible to the compiler because it is in another
+// translation unit). The exception propagates and is caught by callers normally.
+#pragma warning(disable : 4297)
+#endif
 void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
+  // Pre-flight the provider library before registering it. A failed ORT registration (e.g. a
+  // hardware EP whose native runtime cannot initialize because the GPU was removed or disabled) can
+  // leave ONNX Runtime with a half-registered library that crashes at environment teardown. By
+  // verifying the library and its native dependencies load first, a broken EP fails cleanly here
+  // with a descriptive error instead of destabilizing the process (see CanLoadLibrary).
+  if (!CanLoadLibrary(library_path))
+    throw std::runtime_error("Failed to register execution provider library '" + std::string(registration_name) +
+                             "'. " + DetermineLoadLibraryError(library_path) +
+                             " The required hardware or driver may be unavailable (for example, a GPU that has been "
+                             "removed or disabled).");
+
   Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
 }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
@@ -1153,7 +1208,7 @@ OgaResult* OGA_API_CALL OgaStreamingProcessorFlush(OgaStreamingProcessor* proces
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete p; }
+void OGA_API_CALL OgaDestroyStreamingProcessor(OgaStreamingProcessor* p) { delete static_cast<Generators::StreamingProcessor*>(p); }
 
 OgaResult* OGA_API_CALL OgaStreamingProcessorSetOption(OgaStreamingProcessor* processor, const char* key, const char* value) {
   OGA_TRY

@@ -1399,6 +1399,57 @@ void ClearProviders(Config& config) {
   config.model.decoder.session_options.providers.clear();
 }
 
+// Escape a string for safe embedding inside a JSON string literal. Prevents JSON
+// injection when caller-supplied values are concatenated into a JSON document that
+// will subsequently be parsed (e.g. in SetProviderOption below). Handles the
+// mandatory JSON escapes: quote, backslash, and the C0 control-character shortcuts
+// that the local JSON parser understands (\b \f \n \r \t).
+//
+// Other C0 control characters (< 0x20) have no shortcut and would require a
+// \uXXXX escape, which the local JSON parser in src/json.cpp does not support
+// (it throws "Unsupported uXXXX code used"). Since provider option names and
+// values are configuration strings that are not expected to contain raw
+// control characters, reject them here with a clear error rather than
+// producing JSON that the parser cannot consume.
+static std::string EscapeJsonString(std::string_view s) {
+  std::string result;
+  result.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        result += "\\\"";
+        break;
+      case '\\':
+        result += "\\\\";
+        break;
+      case '\b':
+        result += "\\b";
+        break;
+      case '\f':
+        result += "\\f";
+        break;
+      case '\n':
+        result += "\\n";
+        break;
+      case '\r':
+        result += "\\r";
+        break;
+      case '\t':
+        result += "\\t";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          throw std::runtime_error(
+              "Unsupported control character in provider option string (code " +
+              std::to_string(static_cast<unsigned char>(c)) + ")");
+        }
+        result += c;
+        break;
+    }
+  }
+  return result;
+}
+
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
   // Normalize the provider name once
   auto normalized_provider = NormalizeProviderName(provider_name);
@@ -1421,10 +1472,14 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     }
   }
 
+  // JSON-escape all caller-supplied string fragments before concatenating them into the
+  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // option_name, or option_value would let a caller inject arbitrary JSON structure
+  // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
-  json << R"({")" << provider_name << R"(":{)";
+  json << R"({")" << EscapeJsonString(provider_name) << R"(":{)";
   if (!option_name.empty()) {
-    json << R"(")" << option_name << R"(":")" << option_value << R"(")";
+    json << R"(")" << EscapeJsonString(option_name) << R"(":")" << EscapeJsonString(option_value) << R"(")";
   }
   json << R"(}})";
 
@@ -1623,24 +1678,22 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
-namespace {
-
-constexpr std::string_view kPackageScheme = "package:";
-
-}  // namespace
-
 fs::path Config::ResolvePath(std::string_view value) const {
   if (value.empty()) {
     return config_path;
   }
-  if (value.size() >= kPackageScheme.size() &&
-      value.compare(0, kPackageScheme.size(), kPackageScheme) == 0) {
-    if (package_root.string().empty()) {
-      throw std::runtime_error("Cannot resolve \"" + std::string{value} +
-                               "\": this model was not loaded from a model package.");
-    }
-    const std::string remainder{value.substr(kPackageScheme.size())};
-    return remainder.empty() ? package_root : package_root / remainder;
+  if (package_resolver) {
+    // Loaded from a model package: ORT owns all path-reference resolution (sha256: shared
+    // assets with manifest overrides, relative paths, confinement).
+    return package_resolver(config_path, value);
+  }
+  // Flat directory: sha256: shared-asset references are only meaningful inside a model package.
+  constexpr std::string_view kSharedAssetPrefix = "sha256:";
+  if (value.substr(0, kSharedAssetPrefix.size()) == kSharedAssetPrefix) {
+    throw std::runtime_error(
+        "\"" + std::string{value} +
+        "\" is a sha256: shared-asset reference, which is only valid when loading from a model "
+        "package; this model was loaded from a plain directory.");
   }
   return config_path / std::string{value};
 }
