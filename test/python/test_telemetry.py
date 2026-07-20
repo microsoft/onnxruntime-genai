@@ -19,6 +19,7 @@ import os
 import stat
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Add the telemetry source to the path
@@ -228,6 +229,17 @@ class TestPathRedaction(unittest.TestCase):
         self.assertNotIn("alice", message)
         self.assertIn("<path>", message)
 
+    def test_format_exception_message_keeps_external_basename(self):
+        from telemetry.telemetry import _format_exception_message
+
+        with patch(
+            "telemetry.telemetry.traceback.format_exception",
+            return_value=['  File "/home/Alice Smith/project/external.py", line 7, in run\n'],
+        ):
+            message = _format_exception_message(RuntimeError("boom"))
+
+        self.assertEqual(message, 'File "external.py", line 7, in run')
+
     def test_public_log_error_redacts_paths(self):
         from telemetry.telemetry_extensions import log_error
 
@@ -256,6 +268,22 @@ class TestDeviceId(unittest.TestCase):
             # Should be uppercase hex
             self.assertTrue(all(c in "0123456789ABCDEF" for c in device_id))
         self.assertIn(status, list(DeviceIdStatus))
+
+    def test_windows_base_dir_uses_shared_developer_tools_path(self):
+        from telemetry.deviceid import get_telemetry_base_dir
+
+        get_telemetry_base_dir.cache_clear()
+        try:
+            with patch("telemetry.deviceid.platform.system", return_value="Windows"), patch.dict(
+                os.environ, {"LOCALAPPDATA": r"C:\Users\test\AppData\Local"}, clear=False
+            ):
+                path = get_telemetry_base_dir()
+            self.assertEqual(
+                path,
+                Path(r"C:\Users\test\AppData\Local") / "Microsoft" / "DeveloperTools" / ".onnxruntime",
+            )
+        finally:
+            get_telemetry_base_dir.cache_clear()
 
     def test_device_id_consistent(self):
         from telemetry.deviceid import get_encrypted_device_id_and_status

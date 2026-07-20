@@ -47,7 +47,7 @@ def get_telemetry_base_dir() -> Path:
         base_dir = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if not base_dir:
             base_dir = str(Path.home() / "AppData" / "Local")
-        return Path(base_dir) / "Microsoft" / ".onnxruntime"
+        return Path(base_dir) / ORT_SUPPORT_DIR
 
     if os_name == "Darwin":
         home = _resolve_home_dir()

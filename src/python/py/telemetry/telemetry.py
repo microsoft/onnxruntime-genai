@@ -125,12 +125,15 @@ def _format_exception_message(ex: BaseException, tb=None) -> str:
             line_trunc = raw_line.strip()
             # Trim file paths to a relative path within the package.
             if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
-                idx = line_trunc.find("onnxruntime_genai")
-                if idx != -1:
-                    line_trunc = line_trunc[idx:]
+                path_end = line_trunc.find('"', len('File "'))
+                path = line_trunc[len('File "') : path_end]
+                safe_path = path[path.find("onnxruntime_genai") :].replace("\\", "/")
+                line_trunc = f'File "{safe_path}"{line_trunc[path_end + 1:]}'
             elif line_trunc.startswith('File "'):
-                idx = line_trunc[len('File "') :].find('"')
-                line_trunc = line_trunc[idx + len('File "') :]
+                path_end = line_trunc.find('"', len('File "'))
+                path = line_trunc[len('File "') : path_end]
+                basename = path.replace("\\", "/").rsplit("/", 1)[-1]
+                line_trunc = f'File "{basename}"{line_trunc[path_end + 1:]}'
             # Redact any absolute path that remains (source lines, message, and
             # the tail of File lines).
             line_trunc = _redact_paths(line_trunc)
