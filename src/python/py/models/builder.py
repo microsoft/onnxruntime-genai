@@ -532,6 +532,8 @@ def get_args():
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
+                    Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
+                    config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
