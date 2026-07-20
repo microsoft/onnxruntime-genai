@@ -557,11 +557,10 @@ class GenAITelemetry:
             if self._uploader is not None:
                 old_uploader = self._uploader
                 old_uploader.signal_stop()
-                if old_uploader.stop_loop(0):
-                    old_uploader.close()
-                # If a send is still in flight, the old uploader retains the
-                # process lock until it exits. The replacement waits on that
-                # lock, so rows cannot be double-sent.
+                stop_timeout = max(5.0, getattr(old_uploader, "_send_timeout", 10.0) + 1.0)
+                if not old_uploader.stop_loop(stop_timeout):
+                    return
+                old_uploader.close()
                 self._uploader = None
             if self._store is None:
                 try:
