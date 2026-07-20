@@ -138,54 +138,58 @@ endif()
 
 find_package(Threads REQUIRED)
 
-# genai is split into an OBJECT library (all sources + their compile/link usage requirements) and
-# the SHARED library that ships it. White-box test binaries (e.g. reinit_tests) link the object
-# library directly to reach internal symbols; the shipped DLL and every other consumer keep linking
-# the SHARED onnxruntime-genai target. Usage requirements are PUBLIC on the object library so both
-# the shared library and such tests inherit them. The shared library links the object library
-# PRIVATE, so DLL consumers (python / java / benchmark / unit_tests) do not inherit genai's private
-# dependencies -- they just link the shared onnxruntime-genai library directly.
-add_library(onnxruntime-genai-obj OBJECT ${generator_srcs})
-target_include_directories(onnxruntime-genai-obj PUBLIC ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai-obj PUBLIC ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
-target_link_libraries(onnxruntime-genai-obj PUBLIC onnxruntime_extensions)
-target_link_directories(onnxruntime-genai-obj PUBLIC ${ORT_LIB_DIR})
-target_link_libraries(onnxruntime-genai-obj PUBLIC Threads::Threads)
+# GenAI normally uses an OBJECT library so white-box tests (e.g. reinit_tests) can link its internal
+# symbols while consumers link only the shipped SHARED library. Xcode framework builds are the
+# exception: Xcode's link phase references the OBJECT target's per-architecture .o paths before they
+# exist. Framework builds disable tests, so compile the sources directly into the framework target.
+set(ORTGENAI_XCODE_FRAMEWORK OFF)
+if(CMAKE_GENERATOR STREQUAL "Xcode" AND BUILD_APPLE_FRAMEWORK)
+  set(ORTGENAI_XCODE_FRAMEWORK ON)
+  if(ENABLE_TESTS)
+    message(FATAL_ERROR "Xcode Apple framework builds require ENABLE_TESTS=OFF.")
+  endif()
+  set(ORTGENAI_COMPILE_TARGET onnxruntime-genai)
+  set(ORTGENAI_USAGE_SCOPE PRIVATE)
+  add_library(onnxruntime-genai SHARED ${generator_srcs})
+else()
+  set(ORTGENAI_COMPILE_TARGET onnxruntime-genai-obj)
+  set(ORTGENAI_USAGE_SCOPE PUBLIC)
+  add_library(onnxruntime-genai-obj OBJECT ${generator_srcs})
+
+  if(WIN32)
+    add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+  else()
+    add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/shared_library_anchor.cpp")
+  endif()
+
+  # Bring in the object library's compiled objects and usage requirements without re-exporting
+  # GenAI's private dependencies to DLL consumers.
+  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
+endif()
+
+target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
+target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime_extensions)
+target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_LIB_DIR})
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Threads::Threads)
 
 if(WIN32)
-  add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MINOR=${VERSION_MINOR})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
-else()
-  # Xcode does not reliably emit a framework product for a source-less SHARED target whose
-  # implementation is supplied only through an OBJECT library in target_link_libraries().
-  # Keep one real source on the target so the framework binary exists before its POST_BUILD rules.
-  add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/shared_library_anchor.cpp")
-endif()
-# Bring in the object library's compiled objects and its (PUBLIC) usage requirements. PRIVATE so
-# the requirements are not re-exported to consumers of the shared library.
-if(CMAKE_GENERATOR STREQUAL "Xcode")
-  # Linking an OBJECT target directly leaves Xcode framework builds referencing sibling-target
-  # object paths without a reliable build-order dependency. The documented TARGET_OBJECTS pattern
-  # adds that dependency, while the INTERFACE target also forwards the object's usage requirements.
-  add_library(onnxruntime-genai-obj-link INTERFACE)
-  target_link_libraries(onnxruntime-genai-obj-link INTERFACE
-    onnxruntime-genai-obj
-    $<TARGET_OBJECTS:onnxruntime-genai-obj>
-  )
-  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj-link)
-else()
-  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
 endif()
 
 # Group the genai library targets under one Visual Studio solution folder so the object library and
 # the shared library it produces appear together rather than as loose entries at the solution root.
 # Cosmetic only (IDE generators); no effect on the build.
-set_target_properties(onnxruntime-genai-obj onnxruntime-genai PROPERTIES FOLDER "GenAI")
+if(ORTGENAI_XCODE_FRAMEWORK)
+  set_target_properties(onnxruntime-genai PROPERTIES FOLDER "GenAI")
+else()
+  set_target_properties(onnxruntime-genai-obj onnxruntime-genai PROPERTIES FOLDER "GenAI")
+endif()
 
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
@@ -195,14 +199,14 @@ list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
-  target_link_libraries(onnxruntime-genai-obj PUBLIC ${ONNXRUNTIME_LIB})
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ONNXRUNTIME_LIB})
   if(USE_WINML)
     target_link_options(onnxruntime-genai PRIVATE "/DELAYLOAD:${ONNXRUNTIME_LIB}")
   endif()
 endif()
 
 if(APPLE)
-target_link_libraries(onnxruntime-genai-obj PUBLIC "-framework Foundation" "-framework CoreML")
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} "-framework Foundation" "-framework CoreML")
 endif()
 
 
@@ -258,11 +262,11 @@ endif()
 
 
 if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai-obj PUBLIC $<BUILD_INTERFACE:${llguidance_SOURCE_DIR}/parser/>)
-  target_link_libraries(onnxruntime-genai-obj PRIVATE llguidance)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} $<BUILD_INTERFACE:${llguidance_SOURCE_DIR}/parser/>)
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
-    target_link_libraries(onnxruntime-genai-obj PUBLIC bcrypt)
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} bcrypt)
   endif()
   if(MSVC)
     # The Rust llguidance static library is always compiled against the release MSVC CRT
@@ -277,12 +281,12 @@ if(USE_GUIDANCE)
     # auto-linking). Also suppress the conflicting release CRT to avoid LNK4098 warnings.
     # PUBLIC/INTERFACE so any binary linking the object library (the shared lib and white-box tests)
     # gets the same fixups.
-    target_link_libraries(onnxruntime-genai-obj PUBLIC
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE}
       $<$<CONFIG:Debug>:msvcrtd.lib>
       $<$<CONFIG:Debug>:ucrtd.lib>
       $<$<CONFIG:Debug>:vcruntimed.lib>
     )
-    target_link_options(onnxruntime-genai-obj INTERFACE
+    target_link_options(${ORTGENAI_COMPILE_TARGET} INTERFACE
       $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
       $<$<CONFIG:Debug>:/NODEFAULTLIB:ucrt.lib>
       $<$<CONFIG:Debug>:/NODEFAULTLIB:vcruntime.lib>
@@ -294,24 +298,24 @@ if(USE_GUIDANCE)
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_compile_options(onnxruntime-genai-obj PRIVATE "/sdl")
+  target_compile_options(${ORTGENAI_COMPILE_TARGET} PRIVATE "/sdl")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai-obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai-obj PUBLIC dl)  # For dlopen & co
+  set_target_properties(${ORTGENAI_COMPILE_TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} dl)  # For dlopen & co
 endif()
 
 if(USE_DML)
   list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
-  target_include_directories(onnxruntime-genai-obj PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-obj PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
-  target_include_directories(onnxruntime-genai-obj PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-obj PRIVATE ${DML_HEADER_DIR})
-  target_include_directories(onnxruntime-genai-obj PRIVATE ${D3D12_HEADER_DIR})
-  target_link_directories(onnxruntime-genai-obj PUBLIC ${DML_LIB_DIR})
-  target_link_directories(onnxruntime-genai-obj PUBLIC ${D3D12_LIB_DIR})
-  target_link_libraries(onnxruntime-genai-obj PUBLIC d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${DML_HEADER_DIR})
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${D3D12_HEADER_DIR})
+  target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${DML_LIB_DIR})
+  target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${D3D12_LIB_DIR})
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
@@ -335,7 +339,7 @@ if(USE_DML)
   )
 
   add_dependencies(RESTORE_PACKAGES nuget)
-  add_dependencies(onnxruntime-genai-obj RESTORE_PACKAGES)
+  add_dependencies(${ORTGENAI_COMPILE_TARGET} RESTORE_PACKAGES)
 endif()
 
 if(ANDROID)
