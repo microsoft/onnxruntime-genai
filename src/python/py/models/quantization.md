@@ -1,11 +1,16 @@
 # INT4 Weight Quantization Methods
 
 This document describes the INT4 weight-only quantization methods exposed by the
-ONNX Runtime GenAI model builder via the `int4_algo_config` extra option, and the
+ONNX Runtime GenAI model builder via the `algo_config` extra option, and the
 **orthogonal `matmul_mixed_precision`** that can be combined with any base method.
 
+> **Note:** The weight-only quantization options were formerly prefixed with `int4_`
+> (e.g. `int4_algo_config`, `int4_block_size`). Since they apply to both int4 and int8
+> weight quantization the prefix was dropped; the old `int4_`-prefixed names still work as
+> deprecated aliases.
+
 All methods quantize the constant weight `B` of `MatMul` nodes block-wise (default
-block size 32, set with `int4_block_size`) into a `MatMulNBits` contrib op. They are
+block size 32, set with `block_size`) into a `MatMulNBits` contrib op. They are
 all *round-to-nearest* (RTN) — none of them use calibration data or error feedback
 (unlike GPTQ/AWQ/HQQ).
 
@@ -21,7 +26,7 @@ These used to be entangled in compound names (e.g. `rtn_last` = `rtn` + int8 LM 
 
 | Concept | Option | Values |
 | --- | --- | --- |
-| Base method | `int4_algo_config` | `default`, `rtn`, `k_quant` |
+| Base method | `algo_config` | `default`, `rtn`, `k_quant` |
 | Mixed precision | `matmul_mixed_precision` | comma-separated `selector:quant_type` pairs |
 
 `matmul_mixed_precision` maps a node-group **selector** to a **quant type**:
@@ -36,7 +41,7 @@ Supported quant types are `int4` and `int8`. Using a quant-type name (rather tha
 bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option.
 
 `matmul_mixed_precision` can be combined with **any** base method. For example
-`int4_algo_config=rtn` + `matmul_mixed_precision=last_matmul:int8` is equivalent to the legacy `rtn_last`.
+`algo_config=rtn` + `matmul_mixed_precision=last_matmul:int8` is equivalent to the legacy `rtn_last`.
 
 ## Base methods
 
@@ -44,7 +49,7 @@ bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a n
 `algo_config` passed to `MatMulNBitsQuantizer` is `None`, so it uses ONNX Runtime's
 built-in `DefaultWeightOnlyQuantizer` (C++ MLAS kernel `quantize_matmul_4bits`).
 
-For **symmetric** int4 (the GenAI default, `int4_is_symmetric=true`) the per-block
+For **symmetric** int4 (the GenAI default, `is_symmetric=true`) the per-block
 scale is:
 
 ```
@@ -174,15 +179,15 @@ softmax normalization), so a higher-precision quant type helps there.
 
 ## Legacy aliases (still supported)
 
-These compound `int4_algo_config` values are kept as backward-compatible aliases and
+These compound `algo_config` values are kept as backward-compatible aliases and
 expand to a base method plus flags, producing identical models:
 
 | Legacy value | Equivalent |
 | --- | --- |
-| `rtn_last` | `int4_algo_config=rtn` + `matmul_mixed_precision=last_matmul:int8` |
-| `k_quant_last` | `int4_algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8` |
-| `k_quant_mixed` | `int4_algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8,mixed_layers:int8` |
-| `k_quant_linear` | `int4_algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8,linear_attn:int8` |
+| `rtn_last` | `algo_config=rtn` + `matmul_mixed_precision=last_matmul:int8` |
+| `k_quant_last` | `algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8` |
+| `k_quant_mixed` | `algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8,mixed_layers:int8` |
+| `k_quant_linear` | `algo_config=k_quant` + `matmul_mixed_precision=last_matmul:int8,linear_attn:int8` |
 
 Only the legacy aliases (`k_quant_last`, `k_quant_mixed`, `k_quant_linear`) and/or an explicit `matmul_mixed_precision=last_matmul:int8` upgrade the LM head; the bare `k_quant` base method does not imply any mixed precision.
 
@@ -191,9 +196,9 @@ Only the legacy aliases (`k_quant_last`, `k_quant_mixed`, `k_quant_linear`) and/
 ```bash
 # default body (best int4 accuracy) + int8 LM head
 python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
-  --extra_options int4_algo_config=default matmul_mixed_precision=last_matmul:int8 int4_block_size=32
+  --extra_options algo_config=default matmul_mixed_precision=last_matmul:int8 block_size=32
 
 # rtn body + int8 LM head (== legacy rtn_last)
 python -m onnxruntime_genai.models.builder -m <model> -o <out> -p int4 -e cuda \
-  --extra_options int4_algo_config=rtn matmul_mixed_precision=last_matmul:int8
+  --extra_options algo_config=rtn matmul_mixed_precision=last_matmul:int8
 ```

@@ -280,30 +280,30 @@ This scenario is for when you want to enable weight sharing between the embeddin
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant
 ```
 
 ##### Example 2: INT4 weights + INT8 embeddings (for RTN Last and K-Quant Last)
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant_last
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant_last
 ```
 
 ##### Example 3: INT4 weights + FP16 embeddings
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=rtn nodes_to_exclude=/lm_head/MatMul
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=rtn nodes_to_exclude=/lm_head/MatMul
 ```
 
 ##### Example 4: FP16 weights + FP16 embeddings
@@ -370,16 +370,19 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights (and quantizes MoE experts to 8-bit to match).
 
+> **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are still accepted as deprecated aliases and will be removed in a future release.
+
+
 ##### Accuracy Level
 
 This scenario is for when you want to control the accuracy level used for MatMul activation handling.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_accuracy_level=4
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options accuracy_level=4
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_accuracy_level=4
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options accuracy_level=4
 ```
 
 ##### MatMul Block Size
@@ -388,10 +391,10 @@ This scenario is for when you want to set the block size for MatMul quantization
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_block_size=32
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options block_size=32
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_block_size=32
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options block_size=32
 ```
 
 ##### QMoE Block Size
@@ -437,10 +440,10 @@ This scenario is for when you want to choose symmetric (`int4`) or asymmetric (`
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_is_symmetric=false
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options is_symmetric=false
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_is_symmetric=false
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options is_symmetric=false
 ```
 
 ##### Op Types To Quantize
@@ -449,10 +452,10 @@ This scenario is for when you want to target specific operator types for quantiz
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_op_types_to_quantize=MatMul/Gather
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options op_types_to_quantize=MatMul/Gather
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_op_types_to_quantize=MatMul/Gather
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options op_types_to_quantize=MatMul/Gather
 ```
 
 ##### Nodes To Exclude
@@ -461,10 +464,10 @@ This scenario is for when you want to skip quantizing specific nodes.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
 ```
 
 ##### Algo Config
@@ -473,10 +476,10 @@ This scenario is for when you want to select the base quantization algorithm mod
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default
 ```
 
 Supported base values are: `default`, `rtn`, `k_quant`.
@@ -489,10 +492,10 @@ This scenario is for when you want to quantize selected MatMul groups with a dif
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=default matmul_mixed_precision=last_matmul:int8
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default matmul_mixed_precision=last_matmul:int8
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options int4_algo_config=k_quant matmul_mixed_precision=last_matmul:int8,mixed_layers:int8
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=k_quant matmul_mixed_precision=last_matmul:int8,mixed_layers:int8
 ```
 
 `matmul_mixed_precision` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
@@ -501,7 +504,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 - `mixed_layers`: The most quantization-sensitive layers, using the mixed strategy from llama.cpp.
 - `linear_attn`: Linear-attention projections and their MLPs, for hybrid attention models.
 
-Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `matmul_mixed_precision` is orthogonal to `int4_algo_config` and can be combined with any base method.
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `matmul_mixed_precision` is orthogonal to `algo_config` and can be combined with any base method.
 
 ##### Use QDQ Pattern for Quantization
 

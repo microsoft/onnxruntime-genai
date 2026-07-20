@@ -242,13 +242,13 @@ def test_extra_options_trt_rtx_default_qmoe_block_size():
 
 
 def test_extra_options_legacy_rtn_last_alias():
-    cfg = QuantConfig.from_extra_options({"int4_algo_config": "rtn_last"}, precision="int4")
+    cfg = QuantConfig.from_extra_options({"algo_config": "rtn_last"}, precision="int4")
     assert cfg.weights.method == "rtn"
     assert cfg.weights.overrides == [Override(match={"preset": "last_matmul"}, type="int8")]
 
 
 def test_extra_options_legacy_k_quant_mixed_alias():
-    cfg = QuantConfig.from_extra_options({"int4_algo_config": "k_quant_mixed"}, precision="int4")
+    cfg = QuantConfig.from_extra_options({"algo_config": "k_quant_mixed"}, precision="int4")
     assert cfg.weights.method == "k_quant"
     presets = [(o.match["preset"], o.type) for o in cfg.weights.overrides]
     assert presets == [("last_matmul", "int8"), ("mixed_layers", "int8")]
@@ -256,7 +256,7 @@ def test_extra_options_legacy_k_quant_mixed_alias():
 
 def test_extra_options_matmul_mixed_precision_string():
     cfg = QuantConfig.from_extra_options(
-        {"int4_algo_config": "k_quant", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"},
+        {"algo_config": "k_quant", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"},
         precision="int4",
     )
     assert cfg.weights.method == "k_quant"
@@ -266,7 +266,7 @@ def test_extra_options_matmul_mixed_precision_string():
 
 def test_extra_options_explicit_mixed_precision_overrides_alias_default():
     cfg = QuantConfig.from_extra_options(
-        {"int4_algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"},
+        {"algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"},
         precision="int4",
     )
     presets = {o.match["preset"]: o.type for o in cfg.weights.overrides}
@@ -274,7 +274,7 @@ def test_extra_options_explicit_mixed_precision_overrides_alias_default():
 
 
 def test_extra_options_nodes_to_exclude_become_overrides():
-    cfg = QuantConfig.from_extra_options({"int4_nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4")
+    cfg = QuantConfig.from_extra_options({"nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4")
     excludes = [o for o in cfg.weights.overrides if o.exclude]
     assert excludes == [Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True)]
 

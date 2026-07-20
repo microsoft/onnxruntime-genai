@@ -39,10 +39,10 @@ def _make_model_for_tied_embeddings(
     exclude_embeds=False,
     exclude_lm_head=False,
     prune_lm_head=False,
-    int4_algo_config="default",
+    algo_config="default",
 ):
     model = Model.__new__(Model)
-    model.extra_options = {"int4_algo_config": int4_algo_config}
+    model.extra_options = {"algo_config": algo_config}
     if shared_embeddings is not None:
         model.extra_options["shared_embeddings"] = shared_embeddings
     model.onnx_dtype = onnx_dtype
@@ -107,7 +107,7 @@ def test_shared_embeddings_are_disabled_when_embeddings_or_lm_head_are_excluded(
 
 
 @pytest.mark.parametrize(
-    "onnx_dtype, op_types, nodes_to_exclude, exclude_embeds, exclude_lm_head, prune_lm_head, int4_algo_config, expected_tied_quantized, expected_tied_unquantized",
+    "onnx_dtype, op_types, nodes_to_exclude, exclude_embeds, exclude_lm_head, prune_lm_head, algo_config, expected_tied_quantized, expected_tied_unquantized",
     [
         (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, False, "default", True, False),
         (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, False, "rtn", True, False),
@@ -140,7 +140,7 @@ def test_tied_embedding_path_selection_matches_current_base_logic(
     exclude_embeds,
     exclude_lm_head,
     prune_lm_head,
-    int4_algo_config,
+    algo_config,
     expected_tied_quantized,
     expected_tied_unquantized,
 ):
@@ -153,7 +153,7 @@ def test_tied_embedding_path_selection_matches_current_base_logic(
         exclude_embeds=exclude_embeds,
         exclude_lm_head=exclude_lm_head,
         prune_lm_head=prune_lm_head,
-        int4_algo_config=int4_algo_config,
+        algo_config=algo_config,
     )
 
     assert model.tied_quantized_embeddings is expected_tied_quantized
@@ -180,7 +180,7 @@ def test_tied_unquantized_embeddings_can_be_true_in_int4_mode_when_both_quant_pa
         onnx_dtype=onnx_dtype,
         op_types=op_types,
         nodes_to_exclude=nodes_to_exclude,
-        int4_algo_config="rtn",
+        algo_config="rtn",
     )
 
     assert model.tied_quantized_embeddings is False
@@ -188,7 +188,7 @@ def test_tied_unquantized_embeddings_can_be_true_in_int4_mode_when_both_quant_pa
 
 
 @pytest.mark.parametrize(
-    "quantized_embeds, quantized_lm_head, int4_algo_config, expected_tied_quantized, expected_tied_unquantized",
+    "quantized_embeds, quantized_lm_head, algo_config, expected_tied_quantized, expected_tied_unquantized",
     [
         (True, True, "default", True, False),
         (True, True, "rtn", True, False),
@@ -205,7 +205,7 @@ def test_tied_unquantized_embeddings_can_be_true_in_int4_mode_when_both_quant_pa
 def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quantized(
     quantized_embeds,
     quantized_lm_head,
-    int4_algo_config,
+    algo_config,
     expected_tied_quantized,
     expected_tied_unquantized,
 ):
@@ -215,7 +215,7 @@ def test_shared_embeddings_prefers_quantized_path_only_when_both_layers_are_quan
         tie_word_embeddings=False,
         onnx_dtype=ir.DataType.INT4,
         op_types=op_types,
-        int4_algo_config=int4_algo_config,
+        algo_config=algo_config,
     )
 
     assert model.tied_quantized_embeddings is expected_tied_quantized
@@ -243,11 +243,11 @@ _TIED_QUANTIZED_EMBEDDING_WEIGHT_NAME_CASES = [
 
 
 @pytest.mark.parametrize(
-    "int4_algo_config, matmul_block_size, is_symmetric, expected_bits, expected_weight, expected_scale, expected_zp",
+    "algo_config, matmul_block_size, is_symmetric, expected_bits, expected_weight, expected_scale, expected_zp",
     _TIED_QUANTIZED_EMBEDDING_WEIGHT_NAME_CASES,
 )
 def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
-    int4_algo_config,
+    algo_config,
     matmul_block_size,
     is_symmetric,
     expected_bits,
@@ -256,8 +256,8 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
     expected_zp,
 ):
     model = Model.__new__(Model)
-    model.extra_options = {"int4_algo_config": int4_algo_config}
-    model.algo_config_name = int4_algo_config
+    model.extra_options = {"algo_config": algo_config}
+    model.algo_config_name = algo_config
     model.matmul_block_size = matmul_block_size
     model.quant_attrs = {"is_symmetric": is_symmetric}
 
@@ -271,7 +271,7 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
 
 def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
     model = Model.__new__(Model)
-    model.extra_options = {"int4_algo_config": "unexpected"}
+    model.extra_options = {"algo_config": "unexpected"}
     model.algo_config_name = "unexpected"
     model.matmul_block_size = 32
     model.quant_attrs = {"is_symmetric": True}
@@ -280,10 +280,10 @@ def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
         model.make_tied_quantized_embedding_input_names()
 
 
-def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_symmetric=True, quant_type=None):
+def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
-    model.extra_options = {"int4_algo_config": int4_algo_config}
-    model.algo_config_name = int4_algo_config
+    model.extra_options = {"algo_config": algo_config}
+    model.algo_config_name = algo_config
     model.matmul_block_size = 32
     model.hidden_size = 64
     model.vocab_size = 32000
@@ -320,7 +320,7 @@ def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_sym
 
 
 @pytest.mark.parametrize(
-    "int4_algo_config, is_symmetric, quant_type, expected_weight_name, expected_scale_name, expected_zp_name, expect_zp_input",
+    "algo_config, is_symmetric, quant_type, expected_weight_name, expected_scale_name, expected_zp_name, expect_zp_input",
     [
         ("default", True, None, "lm_head.MatMul.weight_Q4", "lm_head.MatMul.weight_scales", None, False),
         ("default", False, None, "lm_head.MatMul.weight", "", None, False),
@@ -355,7 +355,7 @@ def _make_minimal_model_for_quantized_tied_embedding(*, int4_algo_config, is_sym
     ],
 )
 def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_quantized_embeddings(
-    int4_algo_config,
+    algo_config,
     is_symmetric,
     quant_type,
     expected_weight_name,
@@ -364,7 +364,7 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     expect_zp_input,
 ):
     model = _make_minimal_model_for_quantized_tied_embedding(
-        int4_algo_config=int4_algo_config,
+        algo_config=algo_config,
         is_symmetric=is_symmetric,
         quant_type=quant_type,
     )
@@ -504,7 +504,7 @@ def _make_minimal_model_for_int4_matmul():
 def test_nbits_matmul_defers_float_weight_to_graph_quantizer():
     # Raw float weights are not quantized inside make_matmul_nbits. They are emitted as a
     # float MatMul and quantized later by the graph-level `to_nbits` pass (which honors
-    # `int4_algo_config`). Because base.py runs for every EP, the CUDA-only CudaQuantizer
+    # `algo_config`). Because base.py runs for every EP, the CUDA-only CudaQuantizer
     # must never be invoked here.
     model = _make_minimal_model_for_int4_matmul()
 

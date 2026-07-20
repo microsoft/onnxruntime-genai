@@ -262,10 +262,10 @@ class RuntimeConfig:
 # 4. Top-level config
 # ---------------------------------------------------------------------------
 
-# Legacy compound ``int4_algo_config`` names -> (base method, mixed-precision presets).
+# Legacy compound ``algo_config`` values -> (base method, mixed-precision presets).
 # This is the single source of truth for the alias desugaring shared by the builder
-# (via ``desugar_int4_algo_config``) and ``QuantConfig``.
-_LEGACY_INT4_ALGO_ALIASES: dict[str, tuple[str, dict[str, str]]] = {
+# (via ``desugar_algo_config``) and ``QuantConfig``.
+_LEGACY_ALGO_ALIASES: dict[str, tuple[str, dict[str, str]]] = {
     "rtn_last": ("rtn", {"last_matmul": "int8"}),
     "k_quant_last": ("k_quant", {"last_matmul": "int8"}),
     "k_quant_mixed": ("k_quant", {"last_matmul": "int8", "mixed_layers": "int8"}),
@@ -282,20 +282,20 @@ _PRECISION_TO_WEIGHTS_TYPE = {
 }
 
 
-def desugar_int4_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, str]]:
-    """Desugar the flat int4 options into ``(base_method, {preset: quant_type})``.
+def desugar_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    """Desugar the flat weight-only quant options into ``(base_method, {preset: quant_type})``.
 
-    Expands ``int4_algo_config`` (including the legacy compound aliases) and merges the
+    Expands ``algo_config`` (including the legacy compound aliases) and merges the
     explicit ``matmul_mixed_precision`` entries on top. The base method is **not** validated
     here — the builder defers rejecting an unknown method to algo-config creation, and
     ``WeightsConfig`` validates it for the structured surface. This is the single source of
     truth for the desugaring shared by the builder and ``QuantConfig``.
     """
-    algo = extra_options.get("int4_algo_config", "default")
+    algo = extra_options.get("algo_config", "default")
     base_method = algo
     placement: dict[str, str] = {}
-    if algo in _LEGACY_INT4_ALGO_ALIASES:
-        base_method, implied = _LEGACY_INT4_ALGO_ALIASES[algo]
+    if algo in _LEGACY_ALGO_ALIASES:
+        base_method, implied = _LEGACY_ALGO_ALIASES[algo]
         placement.update(implied)
     placement.update(_normalize_mixed_precision(extra_options.get("matmul_mixed_precision", {})))
     return base_method, placement
@@ -356,7 +356,7 @@ class QuantConfig:
 
         This is the §9 back-compat mapping, scoped to the weights / moe / runtime
         targets the builder implements. It intentionally mirrors the desugaring in
-        ``Model`` (``resolve_int4_quant_config`` / ``moe_quant_type`` handling) so the
+        ``Model`` (``resolve_quant_config`` / ``moe_quant_type`` handling) so the
         two surfaces stay in lock-step.
         """
         extra_options = dict(extra_options or {})
@@ -364,24 +364,24 @@ class QuantConfig:
         weights_type = _PRECISION_TO_WEIGHTS_TYPE.get(precision, "none")
 
         # --- weights: method + mixed-precision placement -----------------
-        base_method, placement = desugar_int4_algo_config(extra_options)
+        base_method, placement = desugar_algo_config(extra_options)
 
         overrides: list[Override] = [
             Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
         ]
-        for node in extra_options.get("int4_nodes_to_exclude", []) or []:
+        for node in extra_options.get("nodes_to_exclude", []) or []:
             overrides.append(Override(match={"name": node}, exclude=True))
 
-        is_symmetric = extra_options.get("int4_is_symmetric", True)
+        is_symmetric = extra_options.get("is_symmetric", True)
         weights = WeightsConfig(
             type=weights_type,
-            block_size=int(extra_options.get("int4_block_size", 32)),
+            block_size=int(extra_options.get("block_size", 32)),
             symmetric=bool(is_symmetric),
             method=base_method,
             accuracy_level=int(
-                extra_options.get("int4_accuracy_level", 4 if execution_provider in ("cpu", "webgpu") else 0)
+                extra_options.get("accuracy_level", 4 if execution_provider in ("cpu", "webgpu") else 0)
             ),
-            op_types=tuple(extra_options.get("int4_op_types_to_quantize", ("MatMul",))),
+            op_types=tuple(extra_options.get("op_types_to_quantize", ("MatMul",))),
             overrides=overrides,
         )
 
@@ -426,7 +426,7 @@ def _normalize_mixed_precision(value: Any) -> dict[str, str]:
 
     Accepts an already-parsed dict or a ``"selector:quant_type[,...]"`` string. This is the
     single source of truth for ``matmul_mixed_precision`` parsing shared by the builder
-    (via ``desugar_int4_algo_config``) and ``QuantConfig``.
+    (via ``desugar_algo_config``) and ``QuantConfig``.
     """
     if not value:
         return {}

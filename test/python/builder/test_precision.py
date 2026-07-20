@@ -42,10 +42,10 @@ def _load_builder_entrypoint_module():
     # model builder.
     builders_stub = types.ModuleType("builders")
 
-    def __getattr__(name):  # PEP 562: satisfies `from builders import <ModelClass>`
+    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
         return type(name, (), {})
 
-    builders_stub.__getattr__ = __getattr__
+    builders_stub.__getattr__ = _stub_getattr
     sys.modules["builders"] = builders_stub
 
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
@@ -72,7 +72,7 @@ Model = base_module.Model
     ],
 )
 def test_int8_onnx_dtype_is_int8(is_symmetric, expected):
-    assert builder_module.set_onnx_dtype("int8", {"int4_is_symmetric": is_symmetric}) == expected
+    assert builder_module.set_onnx_dtype("int8", {"is_symmetric": is_symmetric}) == expected
 
 
 @pytest.mark.parametrize(
@@ -83,7 +83,7 @@ def test_int8_onnx_dtype_is_int8(is_symmetric, expected):
     ],
 )
 def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
-    assert builder_module.set_onnx_dtype("int4", {"int4_is_symmetric": is_symmetric}) == expected
+    assert builder_module.set_onnx_dtype("int4", {"is_symmetric": is_symmetric}) == expected
 
 
 @pytest.mark.parametrize(
@@ -194,3 +194,44 @@ def test_int8_with_qdq_is_rejected():
 def test_int4_with_qdq_is_allowed():
     # QDQ is only rejected for int8; int4 still supports it.
     builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
+
+
+# ---------------------------------------------------------------------------
+# Deprecated int4_* extra_option names still map to the generalized names.
+# ---------------------------------------------------------------------------
+
+
+def test_deprecated_int4_aliases_are_renamed():
+    kv = {
+        "int4_accuracy_level": "2",
+        "int4_block_size": "64",
+        "int4_is_symmetric": "false",
+        "int4_op_types_to_quantize": "MatMul/Gather",
+        "int4_nodes_to_exclude": "/lm_head/MatMul",
+        "int4_algo_config": "k_quant",
+    }
+    builder_module.apply_deprecated_extra_option_aliases(kv)
+    assert kv == {
+        "accuracy_level": "2",
+        "block_size": "64",
+        "is_symmetric": "false",
+        "op_types_to_quantize": "MatMul/Gather",
+        "nodes_to_exclude": "/lm_head/MatMul",
+        "algo_config": "k_quant",
+    }
+
+
+def test_deprecated_alias_does_not_override_new_name():
+    # If both the old and new names are provided, the new name wins and the old key is dropped.
+    kv = {"int4_algo_config": "rtn", "algo_config": "k_quant"}
+    builder_module.apply_deprecated_extra_option_aliases(kv)
+    assert kv == {"algo_config": "k_quant"}
+
+
+def test_check_extra_options_accepts_deprecated_int4_names():
+    # End-to-end through check_extra_options: deprecated names are normalized in-place.
+    kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
+    builder_module.check_extra_options(kv, "int4", "cpu")
+    assert kv["algo_config"] == "k_quant"
+    assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
+    assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv

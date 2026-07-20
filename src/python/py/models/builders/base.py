@@ -33,7 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
-from .quant_config import QuantConfig, desugar_int4_algo_config, resolve_dtype
+from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
@@ -565,13 +565,13 @@ class Model:
         # Decouple the int4 quantization *method* (how weights are rounded) from the
         # *mixed-precision placement* (which MatMuls use a different quant type than the
         # int4 body). The base method is one of {"default", "rtn", "k_quant"}; placement is
-        # resolved from `matmul_mixed_precision` in `resolve_int4_quant_config`. Legacy
+        # resolved from `matmul_mixed_precision` in `resolve_quant_config`. Legacy
         # compound names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
         #
         # `matmul_mixed_precision` maps a node-group selector to a quant-type name (int4/int8,
         # extensible to fp8/fp4); the bit width is resolved on demand via `resolve_dtype`, so a
         # new scheme needs no new option and no stored bit table.
-        self.resolve_int4_quant_config(self.extra_options)
+        self.resolve_quant_config(self.extra_options)
         self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
@@ -634,7 +634,7 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
-            self.resolve_int4_quant_config(getattr(self, "extra_options", {}))
+            self.resolve_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -826,10 +826,10 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def resolve_int4_quant_config(self, extra_options):
-        """Split `int4_algo_config` into a base method and a mixed-precision map.
+    def resolve_quant_config(self, extra_options):
+        """Split `algo_config` into a base method and a mixed-precision map.
 
-        Uses the shared `desugar_int4_algo_config` helper (the same desugaring `QuantConfig`
+        Uses the shared `desugar_algo_config` helper (the same desugaring `QuantConfig`
         applies), so both surfaces stay consistent. Sets ``self.quantization_algo`` (one of
         ``{"default", "rtn", "k_quant"}``) and ``self.matmul_mixed_precision`` (a dict mapping
         node-group selectors to a quant type, e.g. ``{"last_matmul": "int8"}``). Explicit
@@ -837,7 +837,7 @@ class Model:
         compound name. An unknown base method is passed through unchanged and rejected later
         (in `make_algo_config` / `make_tied_quantized_embedding_input_names`).
         """
-        base_method, placement = desugar_int4_algo_config(extra_options)
+        base_method, placement = desugar_algo_config(extra_options)
         self.quantization_algo = base_method
         self.matmul_mixed_precision = placement
 
@@ -906,7 +906,7 @@ class Model:
             return KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         raise ValueError(
-            f"Unsupported int4_algo_config base method '{quant_method}'. "
+            f"Unsupported algo_config base method '{quant_method}'. "
             "Expected one of 'default', 'rtn', 'k_quant' (optionally with a mixed_precision_config), "
             "or a legacy alias ('rtn_last', 'k_quant_last', 'k_quant_mixed', 'k_quant_linear')."
         )
@@ -994,7 +994,7 @@ class Model:
         Prepacking only rearranges the already-quantized weight bytes into the layout the
         CUDA mixed-GEMM kernel consumes directly; it does not change the numeric values and
         is independent of the quantization method (default/rtn/k_quant) and bit width
-        (int4/int8) used to produce them. This lets any `int4_algo_config` (e.g. `k_quant`)
+        (int4/int8) used to produce them. This lets any `algo_config` (e.g. `k_quant`)
         be combined with `matmulnbits_weights_prepacked > 0`.
 
         Eligibility mirrors the runtime fpA_intB kernel: bits in {4, 8}, block_size supported
@@ -1447,7 +1447,7 @@ class Model:
         #
         # Raw float weights are NOT quantized here. Instead emit a float `MatMul` and defer
         # the int4/int8 quantization to the graph-level pass `to_nbits`, which honors the
-        # selected `int4_algo_config` (default/rtn/k_quant) and any per-node int8 bit
+        # selected `algo_config` (default/rtn/k_quant) and any per-node int8 bit
         # placement. Only pre-quantized weights (e.g. AWQ/GPTQ, already carrying `qweight`/
         # `scales`) are emitted directly below. Keeping quantization in `to_nbits` also means
         # this path never depends on the CUDA-only `CudaQuantizer`, so it is safe for every EP

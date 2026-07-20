@@ -57,12 +57,45 @@ from transformers import (
 )
 
 
+def apply_deprecated_extra_option_aliases(kv_pairs):
+    """
+    Rename any deprecated extra_options keys to their new names in-place.
+
+    The weight-only quantization options were generalized from int4-specific names to
+    precision-agnostic names (they apply to int4/int8/... MatMulNBits quantization), so the
+    `int4_` prefix was dropped. The old names are kept as deprecated aliases so existing
+    consumers (e.g. Olive recipes) that still pass the old `int4_`-prefixed names keep working.
+    If both the old and new names are provided, the new name wins. Emits a deprecation warning
+    for each old name encountered. Remove this method (and its call sites) once consumers migrate.
+    """
+    # Maps deprecated old name -> new name.
+    deprecated_aliases = {
+        "int4_accuracy_level": "accuracy_level",
+        "int4_block_size": "block_size",
+        "int4_is_symmetric": "is_symmetric",
+        "int4_op_types_to_quantize": "op_types_to_quantize",
+        "int4_nodes_to_exclude": "nodes_to_exclude",
+        "int4_algo_config": "algo_config",
+    }
+    for old_name, new_name in deprecated_aliases.items():
+        if old_name not in kv_pairs:
+            continue
+        print(
+            f"WARNING: extra_option '{old_name}' is deprecated and will be removed in a future release. "
+            f"Please use '{new_name}' instead."
+        )
+        kv_pairs.setdefault(new_name, kv_pairs[old_name])
+        del kv_pairs[old_name]
+
+
 def check_extra_options(kv_pairs, precision, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
+    apply_deprecated_extra_option_aliases(kv_pairs)
+
     bools = [
-        "int4_is_symmetric",
+        "is_symmetric",
         "exclude_embeds",
         "exclude_lm_head",
         "include_hidden_states",
@@ -90,14 +123,14 @@ def check_extra_options(kv_pairs, precision, execution_provider):
     if "hf_token" in kv_pairs:
         kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
 
-    if "int4_op_types_to_quantize" in kv_pairs:
+    if "op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
-        for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
+        for op_type in kv_pairs["op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type,)
-        kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+        kv_pairs["op_types_to_quantize"] = op_types_to_quantize
 
-    if "int4_nodes_to_exclude" in kv_pairs:
-        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
+    if "nodes_to_exclude" in kv_pairs:
+        kv_pairs["nodes_to_exclude"] = kv_pairs["nodes_to_exclude"].split(",")
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in kv_pairs:
@@ -132,7 +165,7 @@ def check_extra_options(kv_pairs, precision, execution_provider):
                 raise ValueError(
                     f"moe_quant_type=mxfp4 is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
-            if not (precision == "int4" and kv_pairs.get("int4_is_symmetric", True)):
+            if not (precision == "int4" and kv_pairs.get("is_symmetric", True)):
                 raise ValueError(
                     "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the int4 build "
                     "precision is what exports the quantized QMoE op, and mxfp4 only sets the MoE expert weights to "
@@ -214,10 +247,10 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
     if precision == "int4":
-        return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
+        return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
 
     if precision == "int8":
-        return ir.DataType.INT8 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT8
+        return ir.DataType.INT8 if extra_options.get("is_symmetric", True) else ir.DataType.UINT8
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -237,6 +270,10 @@ def create_model(
     cache_dir,
     **extra_options,
 ):
+    # Normalize any deprecated extra_options names for direct API callers (the CLI
+    # path already handles this in check_extra_options).
+    apply_deprecated_extra_option_aliases(extra_options)
+
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
@@ -467,13 +504,15 @@ def get_args():
         nargs="+",
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
+                The weight-only MatMulNBits quantization options below apply to both `--precision int4` and `--precision int8`.
+                    (The former `int4_`-prefixed names, e.g. `int4_algo_config`, are deprecated aliases that still work but will be removed in a future release.)
+                accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
+                block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
                     Default value is 32.
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
@@ -486,19 +525,19 @@ def get_args():
                     0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
                     Only applies to the CUDA EP. An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant nbits.
                     Default is 0.
-                int4_is_symmetric = Quantize the weights symmetrically. Default is true.
-                    If true, quantization is done to int4. If false, quantization is done to uint4.
-                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
+                is_symmetric = Quantize the weights symmetrically. Default is true.
+                    If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
+                op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
                     Use this option when you want to quantize specific ops.
-                    Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
-                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization.
+                    Separate the op types with a '/' when passing them here (e.g. op_types_to_quantize=MatMul/Gather)
+                nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
-                    Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
-                int4_algo_config = Base method for int4 quantization. Default is 'default'.
+                    Separate the node names with a ',' when passing them here (e.g. nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                algo_config = Base method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported base methods are: 'default', 'rtn', 'k_quant'.
-                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4. Uses different node naming conventions to `rtn`.
-                    rtn = RTN algorithm for int4 quantization.
-                    k_quant = k_quant algorithm for int4 quantization.
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
+                    rtn = RTN algorithm for weight-only quantization.
+                    k_quant = k_quant algorithm for weight-only quantization.
                     The following legacy compound values are still accepted as aliases (base method + matmul_mixed_precision):
                     rtn_last = rtn + matmul_mixed_precision=last_matmul:int8.
                     k_quant_last = k_quant + matmul_mixed_precision=last_matmul:int8.
@@ -512,7 +551,7 @@ def get_args():
                     mixed_layers = the most quantization-sensitive MatMuls (llama.cpp mixed strategy: first/last eighth of layers plus every third layer's qkv_proj/v_proj/down_proj).
                     linear_attn = linear-attention projections and their MLPs (for hybrid attention models like Qwen3.5).
                     Quant types: 'int4', 'int8'. Using a quant-type name (not a bare bit count) lets new schemes (e.g. fp8/fp4) be added without a new option.
-                    Orthogonal to int4_algo_config; can be combined with any base method ('default', 'rtn', 'k_quant').
+                    Orthogonal to algo_config; can be combined with any base method ('default', 'rtn', 'k_quant').
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').

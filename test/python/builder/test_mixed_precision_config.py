@@ -6,7 +6,7 @@
 `matmul_mixed_precision` decouples *which* MatMul groups are upgraded (selectors
 ``last_matmul`` / ``mixed_layers`` / ``linear_attn``) from *what* quant type they use
 (``int4`` / ``int8``, extensible to fp8/fp4). It replaces the removed per-target int8
-boolean flags while keeping the pre-existing compound ``int4_algo_config`` aliases
+boolean flags while keeping the pre-existing compound ``algo_config`` aliases
 (``rtn_last`` / ``k_quant_last`` / ``k_quant_mixed`` / ``k_quant_linear``) working.
 """
 
@@ -40,13 +40,13 @@ Model = base_module.Model
 
 
 # ---------------------------------------------------------------------------
-# matmul_mixed_precision parsing (via resolve_int4_quant_config -> quant_config)
+# matmul_mixed_precision parsing (via resolve_quant_config -> quant_config)
 # ---------------------------------------------------------------------------
 
 
 def _resolve_mixed_precision(value):
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config({"int4_algo_config": "default", "matmul_mixed_precision": value})
+    model.resolve_quant_config({"algo_config": "default", "matmul_mixed_precision": value})
     return model.matmul_mixed_precision
 
 
@@ -85,21 +85,21 @@ def test_normalize_rejects_unknown_quant_type():
 
 
 # ---------------------------------------------------------------------------
-# resolve_int4_quant_config
+# resolve_quant_config
 # ---------------------------------------------------------------------------
 
 
 def test_resolve_base_method_only_has_no_mixed_precision():
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config({"int4_algo_config": "k_quant"})
+    model.resolve_quant_config({"algo_config": "k_quant"})
     assert model.quantization_algo == "k_quant"
     assert model.matmul_mixed_precision == {}
 
 
 def test_resolve_reads_matmul_mixed_precision_string():
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config(
-        {"int4_algo_config": "default", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"}
+    model.resolve_quant_config(
+        {"algo_config": "default", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"}
     )
     assert model.quantization_algo == "default"
     assert model.matmul_mixed_precision == {"last_matmul": "int8", "linear_attn": "int4"}
@@ -107,14 +107,14 @@ def test_resolve_reads_matmul_mixed_precision_string():
 
 def test_resolve_expands_legacy_compound_alias():
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config({"int4_algo_config": "k_quant_mixed"})
+    model.resolve_quant_config({"algo_config": "k_quant_mixed"})
     assert model.quantization_algo == "k_quant"
     assert model.matmul_mixed_precision == {"last_matmul": "int8", "mixed_layers": "int8"}
 
 
 def test_resolve_explicit_config_overrides_legacy_alias_defaults():
     model = Model.__new__(Model)
-    model.resolve_int4_quant_config({"int4_algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"})
+    model.resolve_quant_config({"algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"})
     assert model.quantization_algo == "k_quant"
     # Explicit last_matmul:int4 overrides the alias-implied last_matmul:int8.
     assert model.matmul_mixed_precision == {"last_matmul": "int4"}
