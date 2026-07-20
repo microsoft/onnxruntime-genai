@@ -630,7 +630,10 @@ def get_args():
     parser.add_argument(
         "--disable_telemetry",
         action="store_true",
-        help="Disable collection of anonymous usage telemetry (equivalent to setting ORT_DISABLE_TELEMETRY=1).",
+        help=(
+            "Disable detailed anonymous usage telemetry; a device-id heartbeat remains enabled outside CI/CD "
+            "(equivalent to setting ORT_DISABLE_TELEMETRY=1)."
+        ),
     )
 
     parser.add_argument(
