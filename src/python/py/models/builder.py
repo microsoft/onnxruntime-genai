@@ -214,9 +214,6 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
-_PATH_OPTION_KEYS = {"adapter_path"}
-
-
 def _sanitize_path_value(value):
     """Reduce a filesystem path to its basename to avoid leaking usernames/local paths.
 
@@ -236,10 +233,7 @@ def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, str]:
     for key, value in extra_options.items():
         if key == "hf_token":
             continue
-        if key in _PATH_OPTION_KEYS:
-            sanitized[key] = _sanitize_path_value(str(value))
-        else:
-            sanitized[key] = _sanitize_path_value(str(value))
+        sanitized[key] = _sanitize_path_value(str(value))
     return sanitized
 
 

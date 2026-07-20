@@ -15,7 +15,6 @@ Provides high-level telemetry for:
 
 import base64
 import os
-import platform
 import re
 import threading
 import traceback
