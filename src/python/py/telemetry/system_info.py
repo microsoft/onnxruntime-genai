@@ -137,20 +137,19 @@ def _get_gpu_info() -> dict[str, Any]:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,driver_version,memory.total,count",
+                "--query-gpu=name,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            line = result.stdout.strip().split("\n")[0]
-            parts = [p.strip() for p in line.split(",")]
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            parts = [p.strip() for p in lines[0].split(",")]
             if len(parts) >= 3:
                 info["gpu_name"] = parts[0]
                 info["gpu_driver_version"] = parts[1]
                 info["gpu_memory_mb"] = int(float(parts[2]))
-            if len(parts) >= 4:
-                info["gpu_count"] = int(parts[3])
+                info["gpu_count"] = len(lines)
     except Exception:
         pass
 

@@ -220,6 +220,10 @@ class GenAITelemetry:
                 # delivery.
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
+                if not self._store.is_open:
+                    self._store = None
+                    self._enabled = False
+                    return
                 self._uploader = EventUploader(
                     self._store, instrumentation_key=self._instrumentation_key
                 )
@@ -383,7 +387,7 @@ class GenAITelemetry:
                 "has_adapter": has_adapter,
             }
             if extra_options:
-                attributes["extra_options"] = str(extra_options)
+                attributes["extra_options"] = extra_options
             self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
             pass
@@ -556,6 +560,9 @@ class GenAITelemetry:
                 try:
                     db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                     self._store = OfflineEventStore(db_path)
+                    if not self._store.is_open:
+                        self._store = None
+                        return
                 except Exception:
                     self._store = None
                     return
