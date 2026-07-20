@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+
 """EventSource-style logging for OneCollector exporter.
 
 Provides structured logging similar to .NET EventSource for diagnostics and monitoring.
