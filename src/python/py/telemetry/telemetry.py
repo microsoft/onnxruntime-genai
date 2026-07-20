@@ -64,7 +64,7 @@ def _get_app_version() -> str:
         v = getattr(onnxruntime_genai, "__version__", None)
         if v:
             return v
-    except ImportError:
+    except Exception:
         pass
 
     # 2. Try importlib.metadata (works for pip-installed packages)
