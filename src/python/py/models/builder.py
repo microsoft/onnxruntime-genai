@@ -256,6 +256,20 @@ def create_model(
         )
         config.update(peft_config.__dict__)
 
+    # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
+    # embedding and the LM head. That is only valid when the model actually ties them. For an
+    # untied model (config.tie_word_embeddings is False) the token embedding and LM head are
+    # distinct weights, so tying them would make the embedding read from the wrong matrix and
+    # silently export a broken model (e.g. gpt-oss-20b generating gibberish). Reject the
+    # combination up front instead of producing a corrupt model.
+    if extra_options.get("shared_embeddings", False) and getattr(config, "tie_word_embeddings", None) is False:
+        raise ValueError(
+            "shared_embeddings=true requires a model that ties its input and output embeddings, "
+            "but this model's config has tie_word_embeddings=false (the token embedding and LM head "
+            "are separate weights). Sharing them would corrupt the exported model. Remove "
+            "shared_embeddings=true from --extra_options for this model."
+        )
+
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
