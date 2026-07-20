@@ -99,8 +99,7 @@ class GPTOSSModel(Model):
 
         raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in {snapshot_dir}.")
 
-    @staticmethod
-    def pack_original_mxfp4_blocks_for_qmoe(blocks):
+    def pack_original_mxfp4_blocks_for_qmoe(self, blocks):
         """Pack GPT-OSS checkpoint MXFP4 blocks to QMoE's column-major layout.
 
         GPT-OSS stores blocks as [E, N, K/32, 16], with each byte holding two

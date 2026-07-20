@@ -198,7 +198,7 @@ def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
 
 def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():
     blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
-    packed = GPTOSSModel.pack_original_mxfp4_blocks_for_qmoe(blocks)
+    packed = GPTOSSModel.__new__(GPTOSSModel).pack_original_mxfp4_blocks_for_qmoe(blocks)
 
     low_codes = blocks & 0x0F
     high_codes = blocks >> 4

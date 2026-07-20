@@ -424,8 +424,9 @@ class QuantConfig:
 def _normalize_mixed_precision(value: Any) -> dict[str, str]:
     """Normalize a ``matmul_mixed_precision`` value into a ``{preset: quant_type}`` dict.
 
-    Accepts an already-parsed dict or a ``"selector:quant_type[,...]"`` string, matching
-    ``Model.normalize_matmul_mixed_precision``.
+    Accepts an already-parsed dict or a ``"selector:quant_type[,...]"`` string. This is the
+    single source of truth for ``matmul_mixed_precision`` parsing shared by the builder
+    (via ``desugar_int4_algo_config``) and ``QuantConfig``.
     """
     if not value:
         return {}

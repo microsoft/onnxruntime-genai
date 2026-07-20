@@ -193,7 +193,11 @@ def test_to_dict_is_reloadable():
     cfg = QuantConfig.from_dict(
         {
             "io_dtype": "fp16",
-            "weights": {"type": "int4", "method": "rtn", "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}]},
+            "weights": {
+                "type": "int4",
+                "method": "rtn",
+                "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}],
+            },
             "moe": {"type": "mxfp4"},
         }
     )
@@ -270,9 +274,7 @@ def test_extra_options_explicit_mixed_precision_overrides_alias_default():
 
 
 def test_extra_options_nodes_to_exclude_become_overrides():
-    cfg = QuantConfig.from_extra_options(
-        {"int4_nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4"
-    )
+    cfg = QuantConfig.from_extra_options({"int4_nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4")
     excludes = [o for o in cfg.weights.overrides if o.exclude]
     assert excludes == [Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True)]
 

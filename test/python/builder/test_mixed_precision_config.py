@@ -40,42 +40,48 @@ Model = base_module.Model
 
 
 # ---------------------------------------------------------------------------
-# normalize_matmul_mixed_precision
+# matmul_mixed_precision parsing (via resolve_int4_quant_config -> quant_config)
 # ---------------------------------------------------------------------------
 
 
+def _resolve_mixed_precision(value):
+    model = Model.__new__(Model)
+    model.resolve_int4_quant_config({"int4_algo_config": "default", "matmul_mixed_precision": value})
+    return model.matmul_mixed_precision
+
+
 def test_normalize_parses_selector_quant_type_string():
-    result = Model.normalize_matmul_mixed_precision("last_matmul:int8,mixed_layers:int8,linear_attn:int4")
+    result = _resolve_mixed_precision("last_matmul:int8,mixed_layers:int8,linear_attn:int4")
     assert result == {"last_matmul": "int8", "mixed_layers": "int8", "linear_attn": "int4"}
 
 
 def test_normalize_tolerates_whitespace_and_empty_entries():
-    result = Model.normalize_matmul_mixed_precision(" last_matmul : int8 , , linear_attn:int4 ")
+    result = _resolve_mixed_precision(" last_matmul : int8 , , linear_attn:int4 ")
     assert result == {"last_matmul": "int8", "linear_attn": "int4"}
 
 
 def test_normalize_accepts_dict_passthrough():
-    assert Model.normalize_matmul_mixed_precision({"last_matmul": "int8"}) == {"last_matmul": "int8"}
+    assert _resolve_mixed_precision({"last_matmul": "int8"}) == {"last_matmul": "int8"}
 
 
 def test_normalize_empty_returns_empty_dict():
-    assert Model.normalize_matmul_mixed_precision("") == {}
-    assert Model.normalize_matmul_mixed_precision({}) == {}
+    assert _resolve_mixed_precision("") == {}
+    assert _resolve_mixed_precision({}) == {}
 
 
 def test_normalize_rejects_missing_colon():
     with pytest.raises(ValueError, match="must be 'selector:quant_type'"):
-        Model.normalize_matmul_mixed_precision("last_matmul")
+        _resolve_mixed_precision("last_matmul")
 
 
 def test_normalize_rejects_unknown_selector():
     with pytest.raises(ValueError, match="selector must be one of"):
-        Model.normalize_matmul_mixed_precision("first_matmul:int8")
+        _resolve_mixed_precision("first_matmul:int8")
 
 
 def test_normalize_rejects_unknown_quant_type():
-    with pytest.raises(ValueError, match="quant type must be one of"):
-        Model.normalize_matmul_mixed_precision("last_matmul:int6")
+    with pytest.raises(ValueError, match="unknown quant dtype"):
+        _resolve_mixed_precision("last_matmul:int6")
 
 
 # ---------------------------------------------------------------------------
