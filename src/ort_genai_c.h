@@ -88,7 +88,25 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
  */
 
 /**
- * \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ * \brief Shuts down the GenAI library and releases all GenAI-owned ONNX Runtime globals.
+ *
+ * \warning Callers SHOULD invoke OgaShutdown() before process exit. If it is not called, GenAI's globals are destroyed
+ *          at static-destruction time in undefined order, which may crash.
+ *
+ * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
+ *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
+ *
+ * \note Lifetime contract: no OgaModel / OgaGenerator / OgaTokenizer / OgaTensor / OgaEngine / OgaRequest, or any
+ *       object that holds device memory, may outlive OgaShutdown(). The caller MUST destroy every such object before
+ *       calling OgaShutdown(). Calling OgaShutdown() with such objects still alive is undefined behavior (typically a
+ *       crash when the buffer is freed through a now-invalid allocator).
+ *
+ * \note Re-initialization: OgaShutdown() is a full teardown -- it destroys GenAI's ONNX Runtime environment and unloads
+ *       GenAI's add-on libraries. GenAI may be used again after OgaShutdown(); the next GenAI call re-initializes with a
+ *       fresh environment.
+ *
+ * \note If a host registered execution provider libraries directly on its own OrtEnv reference, it should unregister
+ *       them (on that reference) and release the reference after OgaShutdown(), once all GenAI usage is finished.
  */
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
@@ -165,7 +183,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSe
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
- * \return The number of tokens in the sequence at the given index
+ * \return The number of tokens in the sequence at the given index. Returns 0 if
+ *         sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* sequences, size_t sequence_index);
 
@@ -175,6 +194,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
+ *         Returns nullptr if sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 
@@ -237,6 +257,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
  * \return OgaResult containing the error message if the creation of the config failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
+
+/**
+ * \brief Creates an OgaConfig from a model package directory, using the supplied execution
+ *        provider to select a variant.
+ *
+ * `config_path` must refer to a model package; passing a flat directory returns an error.
+ * When the package declares exactly one execution provider across its variants, `ep` may
+ * be null or empty (the EP is auto-detected). Otherwise `ep` selects which variant is
+ * loaded.
+ *
+ * To load a model with an explicit EP, pass the resulting OgaConfig to
+ * OgaCreateModelFromConfig. OgaCreateModel does not accept an ep argument because the
+ * config carries everything needed.
+ *
+ * \param[in] config_path Path to the model package, encoded in UTF-8.
+ * \param[in] ep Execution provider name, or null/empty for auto-detection.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out);
 
 /**
  * \brief Clear the list of providers in the given config

@@ -2,7 +2,6 @@
 #include "softmax.h"
 #include "search.h"
 #include "beam_search_scorer.h"
-#include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
 #include <limits>
@@ -11,7 +10,7 @@ namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      cpu_device_{*GetCpuInterface()} {
+      cpu_device_{*GetDeviceInterface(DeviceType::CPU)} {
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_ = cpu_device_.Allocate<int32_t>(batch_beam_size);
@@ -117,7 +116,12 @@ void BeamSearch_Cpu::SelectTop() {
   // Use partial_sort to find only the top 2*num_beams elements per batch,
   // instead of heapifying the entire vocab*beams array via priority_queue.
   const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
-  assert(total_elements >= top_k);
+  // Defense-in-depth: a plain assert() is compiled out under NDEBUG (release
+  // builds), so enforce the invariant that partial_sort relies on at runtime.
+  // This is normally guaranteed by the vocab_size >= 2 validation for beam
+  // search in Generator::Generator.
+  if (total_elements < top_k)
+    throw std::runtime_error("Beam search requires num_beams * vocab_size (" + std::to_string(total_elements) + ") to be at least 2 * num_beams (" + std::to_string(top_k) + "); vocab_size is too small");
 
   // Reuse class member to avoid re-allocating on every call (size is constant).
   select_top_idx_.resize(total_elements);
@@ -170,6 +174,7 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   const int vocab_size = params_->config.model.vocab_size;
+  k = std::min(k, vocab_size);
   std::vector<int> indices(vocab_size);
   std::vector<float> top_k_scores(k);
 
@@ -328,6 +333,9 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   assert(temperature > 0.0f);
+
+  // Clamp k to vocab_size to prevent out-of-bounds access in partial_sort
+  k = std::min(k, params_->config.model.vocab_size);
 
   // --- Buffers allocated once to avoid re-allocations in the batch loop ---
   std::vector<int32_t> indices(params_->config.model.vocab_size);

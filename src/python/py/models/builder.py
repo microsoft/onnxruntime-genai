@@ -59,12 +59,43 @@ from transformers import (
 )
 
 
-def check_extra_options(kv_pairs, execution_provider):
+def apply_deprecated_extra_option_aliases(kv_pairs):
+    """
+    Rename any deprecated extra_options keys to their new names in-place.
+
+    Kept for backward compatibility so existing consumers (e.g. Olive recipes) that
+    still pass the old `int4_`-prefixed names keep working. If both the old and new
+    names are provided, the new name wins. Emits a deprecation warning for each old
+    name encountered. Remove this method (and its call sites) once consumers migrate.
+    """
+    # Maps deprecated old name -> new name.
+    deprecated_aliases = {
+        "int4_accuracy_level": "accuracy_level",
+        "int4_block_size": "block_size",
+        "int4_is_symmetric": "is_symmetric",
+        "int4_op_types_to_quantize": "op_types_to_quantize",
+        "int4_nodes_to_exclude": "nodes_to_exclude",
+        "int4_algo_config": "algo_config",
+    }
+    for old_name, new_name in deprecated_aliases.items():
+        if old_name not in kv_pairs:
+            continue
+        print(
+            f"WARNING: extra_option '{old_name}' is deprecated and will be removed in a future release. "
+            f"Please use '{new_name}' instead."
+        )
+        kv_pairs.setdefault(new_name, kv_pairs[old_name])
+        del kv_pairs[old_name]
+
+
+def check_extra_options(kv_pairs, precision, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
+    apply_deprecated_extra_option_aliases(kv_pairs)
+
     bools = [
-        "int4_is_symmetric",
+        "is_symmetric",
         "exclude_embeds",
         "exclude_lm_head",
         "include_hidden_states",
@@ -88,14 +119,17 @@ def check_extra_options(kv_pairs, execution_provider):
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
-    if "int4_op_types_to_quantize" in kv_pairs:
-        op_types_to_quantize = ()
-        for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
-            op_types_to_quantize += (op_type,)
-        kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+    if "hf_token" in kv_pairs:
+        kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
 
-    if "int4_nodes_to_exclude" in kv_pairs:
-        kv_pairs["int4_nodes_to_exclude"] = kv_pairs["int4_nodes_to_exclude"].split(",")
+    if "op_types_to_quantize" in kv_pairs:
+        op_types_to_quantize = ()
+        for op_type in kv_pairs["op_types_to_quantize"].split("/"):
+            op_types_to_quantize += (op_type,)
+        kv_pairs["op_types_to_quantize"] = op_types_to_quantize
+
+    if "nodes_to_exclude" in kv_pairs:
+        kv_pairs["nodes_to_exclude"] = kv_pairs["nodes_to_exclude"].split(",")
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -110,8 +144,12 @@ def check_extra_options(kv_pairs, execution_provider):
         )
         kv_pairs["enable_webgpu_graph"] = False
 
+    if precision == "int8" and kv_pairs.get("use_qdq", False):
+        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
+        raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
-def parse_extra_options(kv_items, execution_provider):
+
+def parse_extra_options(kv_items, precision, execution_provider):
     """
     Parse key-value pairs that are separated by '='
     """
@@ -123,7 +161,7 @@ def parse_extra_options(kv_items, execution_provider):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs, execution_provider)
+    check_extra_options(kv_pairs, precision, execution_provider)
     return kv_pairs
 
 
@@ -145,11 +183,11 @@ def parse_hf_token(hf_token):
 
 
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
-    int4_cpu = precision == "int4" and execution_provider == "cpu"
+    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
     bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
-    if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
+    if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
         return ir.DataType.FLOAT
 
@@ -163,7 +201,10 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
     if precision == "int4":
-        return ir.DataType.INT4 if extra_options.get("int4_is_symmetric", True) else ir.DataType.UINT4
+        return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
+
+    if precision == "int8":
+        return ir.DataType.INT8 if extra_options.get("is_symmetric", True) else ir.DataType.UINT8
 
     to_onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
@@ -304,6 +345,10 @@ def _create_model_impl(
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
 
+    # Normalize any deprecated extra_options names for direct API callers (the CLI
+    # path already handles this in check_extra_options).
+    apply_deprecated_extra_option_aliases(extra_options)
+
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -311,8 +356,12 @@ def _create_model_impl(
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
-    hf_remote = extra_options.get("hf_remote", True)
+    hf_token = extra_options.get("hf_token", True)
+    # Default to False so we never execute arbitrary code shipped inside a
+    # Hugging Face repository unless the user has explicitly opted in. This
+    # matches the safe default that `transformers` itself uses for
+    # `trust_remote_code`.
+    hf_remote = extra_options.get("hf_remote", False)
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
@@ -563,7 +612,7 @@ def get_args():
         "-p",
         "--precision",
         required=True,
-        choices=["int4", "bf16", "fp16", "fp32"],
+        choices=["int4", "int8", "bf16", "fp16", "fp32"],
         help="Precision of model",
     )
 
@@ -572,7 +621,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU, INT8 WebGPU)",
     )
 
     parser.add_argument(
@@ -597,37 +646,35 @@ def get_args():
         nargs="+",
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
+                The options below control weight-only MatMulNBits quantization for both `--precision int4` and `--precision int8`.
+                    (The former `int4_`-prefixed names, e.g. `int4_algo_config`, are deprecated aliases that still work but will be removed in a future release.)
+                accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4/int8 weight-only (MatMulNBits) quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
-                int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization (MatMulNBits).
+                block_size = 16/32/64/128/256: Specify the block size for int4/int8 weight-only (MatMulNBits) quantization.
                     Default value is 32.
                 qmoe_block_size = 16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Default is 128 for CUDA and TRT-RTX, 32 for others. Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
-                int4_is_symmetric = Quantize the weights symmetrically. Default is true.
-                    If true, quantization is done to int4. If false, quantization is done to uint4.
-                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
+                is_symmetric = Quantize the weights symmetrically. Default is true.
+                    If true, quantization uses signed ints (int4/int8). If false, it uses unsigned ints (uint4/uint8).
+                op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
                     Use this option when you want to quantize specific ops.
-                    Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
-                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization.
+                    Separate the op types with a '/' when passing them here (e.g. op_types_to_quantize=MatMul/Gather)
+                nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
-                    Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
-                int4_algo_config = Method for int4 quantization. Default is 'default'.
+                    Separate the node names with a ',' when passing them here (e.g. nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                algo_config = Method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last', 'k_quant_linear'.
-                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
-                    rtn = RTN algorithm for int4 quantization.
-                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                    k_quant = k_quant algorithm for int4 quantization.
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
+                    rtn = RTN algorithm for weight-only quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls use the requested bit width.
+                    k_quant = k_quant algorithm for weight-only quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
-                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls use the requested bit width.
                     k_quant_linear = k_quant algorithm with linear attention layer projections and MLPs promoted to int8 (for hybrid attention models like Qwen3.5).
-                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
-                    Use this option to share weights and reduce model size by eliminating duplicate weights.
-                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.
-                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
@@ -640,41 +687,53 @@ def get_args():
                     If token, you can provide a custom authentication token that differs from the one stored in your environment.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 hf_remote = Use this to manage trusting remote code in Hugging Face repos.
-                    Default behavior is set to true. If false, remote code stored in Hugging Face repos will not be used.
+                    Default behavior is set to false. When false, transformers `from_pretrained()`
+                    calls will refuse to import or execute custom Python code shipped inside
+                    a Hugging Face repository (`trust_remote_code=False`).
+                    Set to true to opt in to executing repository-supplied code; only do this
+                    for repositories you fully trust because it is equivalent to running
+                    arbitrary code from that repository as the current user.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
+                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
+                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
+                    Use this option to share weights and reduce model size by eliminating duplicate weights.
+                    Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
-                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
-                    If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
+                    Not supported with `--precision int8` (8-bit MatMulNBits is QOperator-only).
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                    Always true for `--precision int8`, which quantizes MoE experts to 8-bit to match the dense weights.
+                disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
+                    If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
-                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
-                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
             """),
     )
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU, INT8 CPU, INT8 WebGPU"
     )
     return args
 
@@ -685,7 +744,7 @@ if __name__ == "__main__":
     # singleton, so a disabled run records no detailed events.
     if args.disable_telemetry:
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
-    extra_options = parse_extra_options(args.extra_options, args.execution_provider)
+    extra_options = parse_extra_options(args.extra_options, args.precision, args.execution_provider)
     create_model(
         args.model_name,
         args.input,

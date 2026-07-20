@@ -281,25 +281,36 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  // Auto-detect per-layer head_dim from ONNX session input shapes.
-  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
-  // full-attention layers use global_head_dim=512.
+  // Auto-detect per-layer KV cache shape from ONNX session input shapes.
+  // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
+  // (e.g. num_kv_heads=8, head_dim=256) while global/full-attention layers are MQA
+  // (num_kv_heads=1, head_dim=512). Both the KV-head count and the head_dim can vary
+  // per layer, so detect and store both. (Previously only head_dim was handled, which
+  // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
+  // "past_key_values.5.key index 1 Got 8 Expected 1".)
   {
-    bool has_varying_head_dim = false;
-    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
+    constexpr size_t kKvHeadsAxis = 1;
+    constexpr size_t kHeadDimAxis = 3;
+    std::vector<int64_t> per_layer_kv_heads(layer_count_, shape_[kKvHeadsAxis]);
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[kHeadDimAxis]);
+    // num_kv_heads and head_dim are static per-layer model properties known ahead of
+    // time, and shape_ already holds the config defaults (decoder.num_key_value_heads /
+    // .head_size), so a single flag suffices: set it if any layer's KV shape differs from
+    // those defaults. (The > 0 checks ignore any non-concrete dim, leaving that layer at
+    // the config default.)
+    bool has_per_layer_variation = false;
     for (int i = 0; i < layer_count_; ++i) {
-      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
-      if (!input_shape.empty()) {
-        int64_t layer_head_dim = input_shape.back();
-        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
-          has_varying_head_dim = true;
-        }
-        if (layer_head_dim > 0) {
-          per_layer_head_dim[i] = layer_head_dim;
-        }
+      const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (input_shape.size() == 4) {
+        if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
+        if (input_shape[kHeadDimAxis] > 0) per_layer_head_dim[i] = input_shape[kHeadDimAxis];
+        if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
+            per_layer_head_dim[i] != shape_[kHeadDimAxis])
+          has_per_layer_variation = true;
       }
     }
-    if (has_varying_head_dim) {
+    if (has_per_layer_variation) {
       if (layer_shapes_.empty()) {
         layer_shapes_.resize(layer_count_);
         for (int i = 0; i < layer_count_; ++i) {
@@ -307,14 +318,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         }
       }
       for (int i = 0; i < layer_count_; ++i) {
-        layer_shapes_[i][3] = per_layer_head_dim[i];
+        layer_shapes_[i][kKvHeadsAxis] = per_layer_kv_heads[i];
+        layer_shapes_[i][kHeadDimAxis] = per_layer_head_dim[i];
       }
       if (g_log.enabled) {
-        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
-                        std::to_string(layer_count_) + " KV cache layers");
+        Log("info",
+            "DefaultKeyValueCache: Detected per-layer KV shape variation "
+            "(num_kv_heads/head_dim) across " +
+                std::to_string(layer_count_) + " KV cache layers");
       }
 
-      // Create per-layer empty past tensors since head_dim varies across layers
+      // Create per-layer empty past tensors since the KV shape varies across layers
       empty_pasts_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
         std::array<int64_t, 4> empty_shape = layer_shapes_[i];
@@ -402,6 +416,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         // Per-layer allocation: use layer-specific shape
         // i/2 gives us the layer index since we have 2 tensors per layer
         tensor_shape = layer_shapes_[i / 2];
+      }
+
+      // Non-share-buffer caches start with a zero-length sequence dim; these
+      // tensors are placeholders (Update() reallocates presents_ at the real
+      // total_length before every Run), but the DML allocator rejects
+      // zero-sized buffers. Clamp the placeholder to one position so DML
+      // decoder sessions without past_present_share_buffer can be created.
+      // DML-only: on other EPs a zero-sized buffer needs no allocation, so
+      // clamping there would only add startup memory overhead.
+      if (Device().GetType() == DeviceType::DML) {
+        tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
       }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));

@@ -254,20 +254,104 @@ struct InterfaceImpl : DeviceInterface {
         input_type,
         output_type,
         element_count,
-        "WebGPU",
+        GetType(),
+        "WebGpuExecutionProvider",
         ort_memory_info_,
         session_config_keys,
         session_config_values);
 
     return true;
   }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (batch_beam_size != 1) {
+      return false;
+    }
+    if (new_kv_length <= 0 || total_length < new_kv_length) {
+      return false;
+    }
+    if (type != Ort::TypeToTensorType<int32_t> && type != Ort::TypeToTensorType<int64_t>) {
+      return false;
+    }
+
+    int start = total_length - new_kv_length;
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      UploadPositionIds<int32_t>(position_ids, start, new_kv_length);
+    } else {
+      UploadPositionIds<int64_t>(position_ids, start, new_kv_length);
+    }
+
+    return true;
+  }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+
+    // Forward only global/singleton WebGPU options to the init session so that the
+    // process-wide WebGpuContext singleton is initialized with the correct settings.
+    // Per-session options (preferredLayout, enableGraphCapture, sessionBufferPoolGenerations,
+    // enableInt64, multiRotaryCacheConcatOffset, forceCpuNodeNames, enablePIXCapture) are
+    // excluded because they are meaningless for the trivial initialization model.
+    // Keep this list in sync with ParseWebGpuContextConfig in
+    // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
+    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+        "deviceId",
+        "webgpuInstance",
+        "webgpuDevice",
+        "dawnProcTable",
+        "dawnBackendType",
+        "powerPreference",
+        "validationMode",
+        "preserveDevice",
+        "maxStorageBufferBindingSize",
+        "maxNumPendingDispatches",
+        "storageBufferCacheMode",
+        "uniformBufferCacheMode",
+        "queryResolveBufferCacheMode",
+        "defaultBufferCacheMode",
+    };
+    for (const auto& opt : user_options->options) {
+      if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
+        init_options.options.emplace_back(opt);
+      }
+    }
+  }
+
+ private:
+  template <typename T>
+  void UploadPositionIds(void* position_ids, int start, int new_kv_length) {
+    // For the common single-token decode, use a stack variable to avoid heap allocation
+    T stack_val;
+    std::vector<T> heap_buf;
+    T* cpu_data;
+    if (new_kv_length == 1) {
+      stack_val = static_cast<T>(start);
+      cpu_data = &stack_val;
+    } else {
+      heap_buf.resize(new_kv_length);
+      for (int i = 0; i < new_kv_length; i++) {
+        heap_buf[i] = static_cast<T>(start + i);
+      }
+      cpu_data = heap_buf.data();
+    }
+
+    size_t byte_size = static_cast<size_t>(new_kv_length) * sizeof(T);
+    int64_t shape_val = static_cast<int64_t>(byte_size);
+    std::span<const int64_t> shape{&shape_val, 1};
+    static const auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, position_ids, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+  }
 };
 
 }  // namespace WebGPU
 
-DeviceInterface* GetWebGPUInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<WebGPU::InterfaceImpl>();
-  return g_device.get();
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface() {
+  return std::make_unique<WebGPU::InterfaceImpl>();
 }
 
 }  // namespace Generators

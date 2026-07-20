@@ -49,10 +49,10 @@ WinML builds require explicit SDK version specification:
 
 ```bash
 # WinML build - WINML_SDK_VERSION is mandatory
-python build.py --use_winml -DWINML_SDK_VERSION=1.8.2084
+python build.py --use_winml -DWINML_SDK_VERSION=2.1.1
 ```
 
-WinML integration downloads `Microsoft.WindowsAppSDK.ML` via NuGet and copies headers/libs to a local `ort/` directory.
+WinML integration downloads `Microsoft.Windows.AI.MachineLearning` via NuGet and copies headers/libs to a local `ort/` directory.
 
 ### Testing
 

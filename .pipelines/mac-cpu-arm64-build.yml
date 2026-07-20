@@ -53,7 +53,7 @@ jobs:
       architecture: 'arm64'
 
   - bash: |
-      set -e -x
+      set -euo pipefail
       brew update --quiet
       brew install --quiet cmake gradle ccache jq
       # Temurin is distributed as a Homebrew cask, not a formula.
@@ -191,12 +191,6 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)'
 
   - bash: |
-      set -e -x
-      rm -rf ort
-    displayName: 'Remove the ort lib and header files'
-    workingDirectory: '$(Build.SourcesDirectory)'
-
-  - bash: |
       ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64
       ls -l $(Build.SourcesDirectory)/build/cpu/osx-arm64/wheel
     displayName: 'Verify build artifacts'
@@ -216,7 +210,7 @@ jobs:
       set -e -x
       export ORTGENAI_LOG_ORT_LIB=1
       cd test/csharp
-      dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" --verbosity normal
+      dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64" /p:OrtLibDir="../../ort/lib" --verbosity normal
     displayName: 'Build the C# API and run the C# tests'
     workingDirectory: '$(Build.SourcesDirectory)'
 

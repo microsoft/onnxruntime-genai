@@ -8,9 +8,7 @@ import pathlib
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import download_models, run_subprocess
-from models.test_gemma4_models import run_gemma4_vision_tests
-from models.test_qwen_fara_models import run_qwen_fara_vision_tests
+from _test_utils import download_models, is_webgpu_ep_available, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
@@ -21,7 +19,7 @@ def run_onnxruntime_genai_api_tests(
     log: logging.Logger,
     test_models: str | bytes | os.PathLike,
 ):
-    log.debug("Running: ONNX Runtime GenAI API Tests")
+    log.debug("Running: ONNX Runtime GenAI API, builder, and model tests")
 
     command = [
         sys.executable,
@@ -29,6 +27,8 @@ def run_onnxruntime_genai_api_tests(
         "pytest",
         "-sv",
         "test_onnxruntime_genai_api.py",
+        "builder",
+        "models",
         "--test_models",
         test_models,
     ]
@@ -95,8 +95,8 @@ def main():
             eps_to_build.append("cuda")
         if og.is_dml_available():
             eps_to_build.append("dml")
-        # Only build WebGPU models if TEST_WEBGPU environment variable is set
-        if og.is_webgpu_available() and os.environ.get("TEST_WEBGPU", "").lower() in ["true", "1", "yes"]:
+        # Only build WebGPU models if the WebGPU EP plugin package is installed
+        if is_webgpu_ep_available():
             eps_to_build.append("webgpu")
         log.info(f"Auto-detected available EPs: {eps_to_build}")
 
@@ -107,10 +107,6 @@ def main():
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
-
-    # Run vision model tests (tests auto-skip if models are not present)
-    run_gemma4_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
-    run_qwen_fara_vision_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
 
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)

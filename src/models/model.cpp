@@ -4,16 +4,19 @@
 // Modifications Copyright (C) 2024-2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "../generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -30,6 +33,7 @@
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
+#include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
 #include "session_options.h"
 
@@ -48,6 +52,15 @@ namespace {
 
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
+constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+// Session-option config keys whose values are file/folder path references. When a model is loaded
+// from a package these may be sha256: shared-asset URIs or relative paths, so their values are
+// resolved against the model root (Config::ResolvePath) before reaching ORT.
+bool IsPathValuedSessionOption(std::string_view key) {
+  return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
+         key == kOrtSessionOptionEpContextFilePath;
+}
 
 }  // namespace
 
@@ -61,7 +74,8 @@ State::State(const GeneratorParams& params, const Model& model)
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_ = std::to_string(dis(gen));
+    graph_id_value_ = dis(gen);
+    graph_id_ = std::to_string(graph_id_value_);
   }
 }
 
@@ -91,6 +105,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
+    graph_capture_session_ = &session;
     if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
     } else {
@@ -220,6 +235,25 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
 }
 
 State::~State() {
+  // Release captured graph resources in the EP.
+  // Note: the EP contract is to no-op when the id was never captured (e.g., when
+  // graph_capture_this_run was always false for this State). The call is wrapped
+  // in try/catch because destructors must not throw -- a throw during unwinding
+  // would call std::terminate.
+#if ORT_API_VERSION >= 27
+  if (graph_capture_session_ && graph_id_value_ > 0) {
+    try {
+      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
+    } catch (...) {
+      // Best-effort cleanup; swallow to keep the destructor non-throwing.
+      if (g_log.enabled && g_log.ort_lib) {
+        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
+                       << ") failed: unknown exception" << std::endl;
+      }
+    }
+  }
+#endif
+
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {
       adapters_->ReleaseAdapter(adapter_name);
@@ -279,7 +313,9 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
+  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -335,6 +371,15 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
 }
 
 std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  if (strings.empty()) {
+    throw std::runtime_error("EncodeBatch: input strings must not be empty");
+  }
+  for (size_t i = 0; i < strings.size(); i++) {
+    if (strings[i] == nullptr) {
+      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
+    }
+  }
+
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
@@ -368,17 +413,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-// Trivial ONNX model that just returns a single float constant. Used below to create an OrtSession that
-// lets us get a device Ort::Allocator for each device type. This is necessary because the Ort::Allocator
-// needs to persist and is valid for the lifetime of this OrtSession.
-static const uint8_t g_trivial_model[] = {
-    0x08, 0x0a, 0x12, 0x01, 0x61, 0x3a, 0x53, 0x0a, 0x38, 0x12, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65,
-    0x73, 0x22, 0x08, 0x43, 0x6f, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x74, 0x2a, 0x24, 0x0a, 0x05, 0x76,
-    0x61, 0x6c, 0x75, 0x65, 0x2a, 0x18, 0x08, 0x01, 0x10, 0x01, 0x42, 0x0c, 0x63, 0x6f, 0x6e, 0x73,
-    0x74, 0x5f, 0x74, 0x65, 0x6e, 0x73, 0x6f, 0x72, 0x4a, 0x04, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01,
-    0x04, 0x12, 0x01, 0x62, 0x62, 0x14, 0x0a, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x12, 0x0a,
-    0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x04, 0x0a, 0x00, 0x10, 0x15};
-
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
@@ -400,26 +434,40 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  // QnnHtpShared is a special case. This allocator is only made available when the provider option
-  // 'enable_htp_shared_memory_allocator' is set to 1.
-  if (type == DeviceType::QNN) {
-    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
-  }
+  const char* provider_name = device_type_names[static_cast<int>(type)];
+  Config::ProviderOptions init_session_provider_options{provider_name, {}};
+
+  // Look up the user-supplied provider options entry for this provider (if any),
+  // then let the EP shape the trivial-model init session options. Most EPs use
+  // the default no-op; WebGPU forwards global/singleton options and QNN injects
+  // the QnnHtpShared allocator gating option.
+  const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
+  const auto user_provider_options_it = std::find_if(
+      user_provider_options_list.begin(), user_provider_options_list.end(),
+      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+  const Config::ProviderOptions* user_provider_options =
+      user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
+  if (user_provider_options)
+    init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
+
+  device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+
+  provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
-  allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
+  const auto trivial_model = GetTrivialModel();
+  allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -626,7 +674,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
   for (auto& config_entry : config_session_options.config_entries) {
-    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
+      const std::string resolved = config_->ResolvePath(config_entry.second).string();
+      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
+    } else {
+      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    }
   }
 
   // Register custom ops libraries only if explicitly configured
@@ -745,11 +798,15 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // For models loaded from memory that reference external data files, tell ORT where to find them
-    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
-    const fs::path external_initializers_path = fs::absolute(config_->config_path);
-    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
-                                    external_initializers_path.string().c_str());
+    // For models loaded from memory that reference external data files, ORT has no model
+    // directory to resolve them against. Default the external-initializers folder to the config
+    // directory, but only when the config did not already set it (a genai_config session option,
+    // resolved in CreateSessionOptionsFromConfig, takes precedence).
+    if (!session_options->HasConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath)) {
+      const fs::path external_initializers_path = fs::absolute(config_->config_path);
+      session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                      external_initializers_path.string().c_str());
+    }
     return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
@@ -778,8 +835,46 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
-  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  auto config = CreateConfig(ort_env, config_path, /*ep=*/nullptr, config_overlay);
   return CreateModel(ort_env, std::move(config));
+}
+
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, const char* ep,
+                                     std::string_view json_overlay) {
+  const std::string ep_str = (ep != nullptr) ? std::string{ep} : std::string{};
+  const fs::path path{config_path};
+
+  if (IsModelPackage(path)) {
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+    if (!json_overlay.empty()) {
+      throw std::runtime_error(
+          "Loading a model package with runtime settings is not supported.");
+    }
+    auto load = OpenAndSelectVariant(ort_env, path, ep_str);
+    auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
+    config->package_root = load.package_root;
+    // Delegate genai_config path resolution to ORT's package resolver, capturing the package
+    // context to keep it alive for the lifetime of the config.
+    auto package_context = load.context;
+    config->package_resolver = [package_context](const fs::path& base_dir,
+                                                 std::string_view value) -> fs::path {
+      return fs::path{package_context->ResolveStringRef(base_dir.string(), std::string{value},
+                                                        /*must_exist=*/false)};
+    };
+    return config;
+#else
+    throw std::runtime_error(
+        "Model package support requires building onnxruntime-genai against "
+        "ONNX Runtime with the OrtModelPackageApi experimental functions.");
+#endif
+  }
+
+  if (!ep_str.empty()) {
+    throw std::runtime_error(
+        "An execution provider was specified, but \"" + path.string() +
+        "\" is not a model package. Drop the ep argument to load a flat directory.");
+  }
+  return std::make_unique<Config>(path, json_overlay);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {

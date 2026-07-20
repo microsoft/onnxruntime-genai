@@ -33,23 +33,6 @@ from transformers import (
 )
 
 
-def parse_hf_token(hf_token):
-    """
-    Returns the authentication token needed for Hugging Face.
-    Token is obtained either from the user or the environment.
-    """
-    if hf_token.lower() in {"false", "0"}:
-        # Default is `None` for disabling authentication
-        return None
-
-    if hf_token.lower() in {"true", "1"}:
-        # Return token in environment
-        return True
-
-    # Return user-provided token as string
-    return hf_token
-
-
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
@@ -102,8 +85,12 @@ class Model:
 
         self.cache_dir = cache_dir
         self.filename = extra_options.get("filename", "model.onnx")
-        self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
-        self.hf_remote = extra_options.get("hf_remote", True)
+        self.hf_token = extra_options.get("hf_token", True)
+        # Default to False so transformers `from_pretrained()` calls do not
+        # execute arbitrary Python from a Hugging Face repository unless the
+        # caller has explicitly opted in via `hf_remote=true` in
+        # `--extra_options`. See the security note in builder.py.
+        self.hf_remote = extra_options.get("hf_remote", False)
         self.extra_options = extra_options
 
         # States for building the model
@@ -298,11 +285,14 @@ class Model:
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
         }
 
+        # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes weights to 8-bit at save time.
+        quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
+
         # MoE-specific variables
-        moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
+        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
+        expert_weight_bits = 8 if (quantize_to_8bits or extra_options.get("use_8bits_moe", False)) else 4
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         self.moe_attrs = {
             "op_type": moe_op_type,                          # MoE op to use
@@ -328,17 +318,18 @@ class Model:
         self.make_lm_head_init(config)
 
         # Quantization-specific variables (INT4, INT8, etc.)
-        algo_config = self.make_algo_config(extra_options.get("int4_algo_config", "default"))
-        self.matmul_block_size = int(extra_options.get("int4_block_size", 32))
+        self.algo_config_name = extra_options.get("algo_config", "default")
+        self.matmul_block_size = int(extra_options.get("block_size", 32))
         self.qmoe_block_size = int(extra_options.get("qmoe_block_size", 128 if self.ep in {"cuda", "trt-rtx"} else 32))
         self.quant_attrs = {
-            "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
+            "accuracy_level": int(extra_options.get("accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
             "qmoe_block_size": int(self.qmoe_block_size),
             "qdq_block_size": int(self.matmul_block_size),
-            "is_symmetric": extra_options.get("int4_is_symmetric", True),
-            "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul",)),
-            "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
-            "algo_config": algo_config,
+            "bits": 8 if quantize_to_8bits else 4,
+            "is_symmetric": extra_options.get("is_symmetric", True),
+            "op_types_to_quantize": extra_options.get("op_types_to_quantize", ("MatMul",)),
+            "nodes_to_exclude": extra_options.get("nodes_to_exclude", []),
+            "algo_config": self.make_algo_config(),
             "use_qdq": extra_options.get("use_qdq", False),
         }
         self.make_quant_init(config)
@@ -519,17 +510,81 @@ class Model:
             )
 
     def make_tied_embeddings_init(self, config):
-        # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
-        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
-        self.shared_embeddings = self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
-        self.int8_lm_head = self.extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"}
+        # Determine if tied embeddings is even possible on the graph
+        shared_embeddings = (
+            self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
+            and not self.exclude_embeds
+            and not self.exclude_lm_head
+            and not self.prune_lm_head
+        )
 
-        # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
-        if self.exclude_embeds or self.exclude_lm_head:
-            self.shared_embeddings = False
-        elif self.shared_embeddings and not self.unquantized_lm_head:
-            # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            self.shared_embeddings = self.int8_lm_head or self.extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
+        # Determine if embeddings and lm_head will be quantized or not.
+        # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
+        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
+        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+        quantized_embeds = (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            and "Gather" in self.quant_attrs["op_types_to_quantize"]
+            and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
+        )
+        quantized_lm_head = (
+            matmul_is_quantized
+            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
+            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
+        )
+
+        if shared_embeddings:
+            self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head
+            self.tied_unquantized_embeddings = not quantized_embeds and not quantized_lm_head
+        else:
+            self.tied_quantized_embeddings = False
+            self.tied_unquantized_embeddings = False
+
+    def make_tied_quantized_embedding_input_names(self):
+        # Quantized tied embeddings in make_embedding() consume lm_head weights using
+        # algorithm-specific naming.
+        #
+        # Reference for quantized input names that will be produced:
+        # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
+        # | Symmetry   | Algorithm   | Weight Input Name Format             | Scales Input Name Format | Zero-Points Input Name Format |
+        # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
+        # | asymmetric | default     | *.MatMul.weight                      | N/A                      | N/A                           |
+        # | symmetric  | default     | *.MatMul.weight_Q4                   | *.MatMul.weight_scales   | N/A                           |
+        # | asymmetric | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
+        # | symmetric  | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | N/A                           |
+        # | asymmetric | k_quant*    | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
+        # | symmetric  | k_quant*    | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
+        # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
+        # where rtn* = rtn, rtn_last
+        #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
+
+        bits = 8 if self.algo_config_name in {"k_quant_mixed", "k_quant_last", "k_quant_linear", "rtn_last"} else 4
+        is_symmetric = self.quant_attrs["is_symmetric"]
+
+        if self.algo_config_name in {"rtn", "rtn_last"}:
+            return (
+                bits,
+                f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
+                "lm_head.MatMul.weight_scale",
+                "lm_head.MatMul.weight_zp" if not is_symmetric else "",
+            )
+
+        if self.algo_config_name in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
+            return (
+                bits,
+                f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
+                "lm_head.MatMul.weight_scale",
+                "lm_head.MatMul.weight_zp",
+            )
+
+        # Fallback to default convention for unknown values.
+        assert self.algo_config_name == "default", "Unknown quantization algo config name detected"
+        return (
+            bits,
+            f"lm_head.MatMul.weight_Q{bits}" if is_symmetric else "lm_head.MatMul.weight",
+            "lm_head.MatMul.weight_scales" if is_symmetric else "",
+            "",
+        )
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
@@ -690,20 +745,21 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def make_algo_config(self, quant_method: str):
+    def make_algo_config(self):
+        # Create a quantization configuration based on the algorithm name.
         customized_weight_config = {}
         algo_config = None
 
-        if quant_method in {"rtn", "rtn_last"}:
-            if quant_method == "rtn_last":
+        if self.algo_config_name in {"rtn", "rtn_last"}:
+            if self.algo_config_name == "rtn_last":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
-            if quant_method != "k_quant":
+        elif self.algo_config_name in {"k_quant", "k_quant_mixed", "k_quant_last", "k_quant_linear"}:
+            if self.algo_config_name != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
-            if quant_method == "k_quant_mixed":
+            if self.algo_config_name == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
                 # We also consider some MatMuls are more senstive to quantization than other MatMuls.
@@ -719,7 +775,7 @@ class Model:
                     customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
 
-            if quant_method == "k_quant_linear" and hasattr(self, "layer_types"):
+            if self.algo_config_name == "k_quant_linear" and hasattr(self, "layer_types"):
                 # Promote linear attention projections and their MLPs to INT8.
                 # Linear attention recurrence accumulates quantization errors across
                 # the full sequence (no softmax normalization).
@@ -730,14 +786,14 @@ class Model:
                         for proj in ("gate_proj", "up_proj", "down_proj"):
                             customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": 8}
 
-            customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
             algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         return algo_config
 
-    def to_int4(self) -> ir.Model:
+    def to_nbits(self) -> ir.Model:
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
+            bits=self.quant_attrs["bits"],
             block_size=self.quant_attrs["qdq_block_size"],
             is_symmetric=self.quant_attrs["is_symmetric"],
             accuracy_level=self.quant_attrs["accuracy_level"],
@@ -752,11 +808,10 @@ class Model:
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
 
-        already_quantized_in_qdq_format = (
-            self.quant_type is not None and self.quant_attrs["use_qdq"]
-        )  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
-            model = self.to_int4()
+        # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
+            model = self.to_nbits()
         else:
             model = self.model
 
@@ -1124,11 +1179,11 @@ class Model:
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
             if self.quant_attrs["use_qdq"]:
-                return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
+                return self.make_matmul_nbits_qdq(matmul, basename, root_input, **kwargs)
             else:
-                return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
+                return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
@@ -1144,7 +1199,7 @@ class Model:
 
         return name
 
-    def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
+    def make_matmul_nbits(self, matmul, basename, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
             # TODO: quantize weights, then save new MatMul weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
@@ -1238,7 +1293,7 @@ class Model:
 
         return dequantize_output
 
-    def make_matmul_int4_qdq(self, matmul, matmul_name, root_input, **kwargs):
+    def make_matmul_nbits_qdq(self, matmul, matmul_name, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
             # TODO: quantize weights, then save new MatMul weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
@@ -1313,16 +1368,16 @@ class Model:
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
-            return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
+            return self.make_packed_matmul_nbits(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
     def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
-        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
-            return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
+            return self.make_packed_matmul_nbits_class(q_matmul, k_matmul, v_matmul)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
@@ -1345,7 +1400,7 @@ class Model:
         matmul = PackedMatMul()
         return matmul
     
-    def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
+    def make_packed_matmul_nbits_class(self, q_matmul, k_matmul, v_matmul):
         if not hasattr(q_matmul, "qweight"):
             return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
 
@@ -1374,15 +1429,15 @@ class Model:
         new_name = self.make_matmul(matmul, basename, root_input, **kwargs)
         return new_name
 
-    def make_packed_matmul_int4(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+    def make_packed_matmul_nbits(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if not hasattr(q_matmul, "qweight"):
             # TODO: quantize weights, then save new MatMul weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
 
-        matmul = self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
-        new_name = self.make_matmul_int4(matmul, basename, root_input, **kwargs)
+        matmul = self.make_packed_matmul_nbits_class(q_matmul, k_matmul, v_matmul)
+        new_name = self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         return new_name
 
     def make_add_bias(self, add, name, root_input, **kwargs):
@@ -1413,24 +1468,28 @@ class Model:
         basename = "/model/embed_tokens"
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.shared_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        if self.tied_quantized_embeddings:
+            bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
+
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
             weight_reshape_name = f"{basename}/Reshape"
-            bits = 8 if self.int8_lm_head else 4
             flat_dim = self.hidden_size * bits // 8
             weight_reshape_inputs = [
-                f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
+                tied_weight_name,
                 f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]",
             ]
             weight_reshape_output = f"{weight_reshape_name}/output_0"
+
             # Quantized weight dtype is uint8. See here for more info:
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
-            input_names = [weight_reshape_output, self.input_names["input_ids"], "lm_head.MatMul.weight_scale"];
-            if not self.quant_attrs["is_symmetric"]:
-                input_names.append("lm_head.MatMul.weight_zp")
+            input_names = [weight_reshape_output, self.input_names["input_ids"]]
+            if tied_weight_scale_name:
+                input_names.append(tied_weight_scale_name)
+            if tied_weight_zp_name:
+                input_names.append(tied_weight_zp_name)
 
             self.make_node(
                 "GatherBlockQuantized",
@@ -1445,7 +1504,7 @@ class Model:
             )
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.shared_embeddings and self.unquantized_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(

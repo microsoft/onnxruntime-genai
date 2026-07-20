@@ -8,10 +8,13 @@ import os
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import download_model, get_ci_data_path, run_subprocess
+from _test_utils import download_model, get_ci_data_path, register_webgpu_plugin, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
+
+# Register the WebGPU EP plugin once at import time so WebGPU models can be loaded when available.
+register_webgpu_plugin(log)
 
 
 def run_model(model_path: str | bytes | os.PathLike):

@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <cctype>
+
 #include "session_options.h"
 #include "../models/session_options.h"
 
@@ -35,10 +38,25 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
     InitDmlInterface(p_device_luid, p_device_index);
   }
 
+  // Graph capture can also be opted out per model via the provider option
+  // "enable_graph_capture": "0" — captured-command-list replay computes wrong
+  // logits on some D3D12 devices (see IsGraphCaptureEnabled in config.cpp).
+  bool graph_capture_opt_out = false;
+  for (const auto& [name, value] : provider_options.options) {
+    if (name == "enable_graph_capture") {
+      std::string lower_value = value;
+      std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                     [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+      if (lower_value == "0" || lower_value == "false") {
+        graph_capture_opt_out = true;
+      }
+    }
+  }
+
   // Non-decoder sessions (vision, speech, embedding) have control-flow nodes
   // that are incompatible with graph capture, so the caller sets
   // disable_graph_capture=true for those sessions.
-  if (!disable_graph_capture) {
+  if (!disable_graph_capture && !graph_capture_opt_out) {
     session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
   }
 

@@ -52,10 +52,14 @@ steps:
 - bash: |
     set -e -x
     python3 -m pip install requests
-    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
+    cuda_dockerfile_version="$(cuda_version)"
+    if [[ "$(cuda_version)" == 13.* ]]; then
+      cuda_dockerfile_version="13"
+    fi
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$cuda_dockerfile_version \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
+      --container-registry onnxruntimebuildcache.azurecr.io \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get CUDA Docker Image $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
@@ -72,7 +76,7 @@ steps:
     python3 tools/ci_build/get_docker_image.py --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
+      --container-registry onnxruntimebuildcache.azurecr.io \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
   condition: ne(variables['ep'], 'cuda')
@@ -161,15 +165,28 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
+      docker_env_args=()
+      if [ "$(ep)" = "cuda" ]; then
+        docker_env_args=(-e CMAKE_EXTRA_ARGS="$(CMAKE_EXTRA_ARGS)")
+      fi
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF $(CMAKE_EXTRA_ARGS) $(ORT_HOME_CMAKE_ARG) && \
+      -w /ort_genai_src/ \
+      "${docker_env_args[@]}" \
+      ortgenai$(ep)build$(arch) \
+      bash -c '
+          set -e -x
+          cmake_args=(-DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF)
+          if [ -n "$CMAKE_EXTRA_ARGS" ]; then
+            eval "cmake_args+=($CMAKE_EXTRA_ARGS)"
+          fi
+          if [ "${{ parameters.ort_build_version }}" != "default" ]; then
+            cmake_args+=("-DORT_HOME=/ort_genai_src/ort_build")
+          fi
+          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) "${cmake_args[@]}"
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target onnxruntime-genai"
+            --target onnxruntime-genai'
     displayName: 'Build GenAi'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -252,4 +269,3 @@ steps:
 - script: |
     ls $(Build.Repository.LocalPath) -R
   displayName: 'List files from SourceDirectory'
-

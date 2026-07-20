@@ -43,12 +43,7 @@ struct QnnMemory final : DeviceBuffer {
   bool owned_;
 };
 
-struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl() {
-  }
-
-  DeviceType GetType() const override { return DeviceType::QNN; }
-
+struct QnnInterfaceBase : DeviceInterface {
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
@@ -72,11 +67,62 @@ struct InterfaceImpl : DeviceInterface {
   void Synchronize() override {}  // Nothing to do
 };
 
+struct HtpInterfaceImpl : QnnInterfaceBase {
+  HtpInterfaceImpl() {}
+  DeviceType GetType() const override { return DeviceType::QnnHtp; }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    // NOTE: QNN EP currently exposes two allocators (HTP shared memory allocator and DX12 shared memory allocator), with
+    //       the first only being supported with the HTP backend and the second only supported by the GPU backend.
+    //       As a result, note the following:
+    //         1.) We only look to copy over the "enable_htp_shared_memory_allocator" option here, and likewise only look for
+    //             "enable_dx12_shared_memory_allocator" in `GpuInterfaceImpl::ShapeInitSessionProviderOptions`.
+    //         2.) Oga keeps one global allocator for HTP and one for GPU, each of which is created once. Because each device
+    //             only supports once allocator, the fact that each device's chosen allocator is sticky is ok.
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        if (opt.first == "enable_htp_shared_memory_allocator") {
+          init_options.options.emplace_back(opt);
+        }
+      }
+    }
+
+    init_options.device_filtering_options = Generators::DeviceFilteringOptions{OrtHardwareDeviceType_NPU};
+  }
+};
+
+struct GpuInterfaceImpl : QnnInterfaceBase {
+  GpuInterfaceImpl() {}
+  DeviceType GetType() const override { return DeviceType::QnnGpu; }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        if (opt.first == "enable_dx12_shared_memory_allocator") {
+          init_options.options.emplace_back(opt);
+        }
+      }
+    }
+
+    init_options.device_filtering_options = Generators::DeviceFilteringOptions{OrtHardwareDeviceType_GPU};
+  }
+};
+
 }  // namespace QNN
 
-DeviceInterface* GetQNNInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<QNN::InterfaceImpl>();
-  return g_device.get();
+std::unique_ptr<DeviceInterface> CreateQNNInterface(DeviceType device_type) {
+  assert(type == DeviceType::QnnHtp || type == DeviceType::QnnGpu);
+
+  switch (device_type) {
+    case DeviceType::QnnHtp:
+      return std::make_unique<QNN::HtpInterfaceImpl>();
+    case DeviceType::QnnGpu:
+      return std::make_unique<QNN::GpuInterfaceImpl>();
+    default:
+      return nullptr;
+  }
 }
 
 bool IsQNNStatefulModel(const Model& model) {
