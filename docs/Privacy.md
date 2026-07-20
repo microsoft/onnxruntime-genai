@@ -19,7 +19,7 @@ The 1DS SDK is obtained one of two ways (see [`cmake/telemetry.cmake`](../cmake/
 
 ### Private Builds
 
-The standard `build.sh` and `build.bat` wrappers enable telemetry. Direct `build.py` or CMake builds include telemetry only when explicitly configured with `--use_telemetry` or `-DENABLE_TELEMETRY=ON`. For information on how to disable telemetry, see [Disabling Telemetry](#disabling-telemetry) below.
+The standard `build.sh` and `build.bat` wrappers enable telemetry. For information on how to disable telemetry, see [Disabling Telemetry](#disabling-telemetry) below.
 
 #### Technical Details
 
@@ -35,6 +35,6 @@ For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetr
 
 Telemetry can be disabled in any of these ways:
 
-- **Don't build it in.** Telemetry is only compiled when configuring with `--use_telemetry` (`-DENABLE_TELEMETRY=ON`). To produce a binary that collects no data, invoke `build.py` directly without `--use_telemetry` (the `build.py` driver does not add the flag itself — only the `build.sh` / `build.bat` convenience scripts do).
-- **At runtime, via environment variable.** Set `ORT_GENAI_TELEMETRY_DISABLED=1` before the library initializes to disable non-essential telemetry. The variable also accepts `true` / `yes` / `on` / `y`, case-insensitive. ONNX Runtime GenAI may still send a minimal initialization event for aggregate heartbeat metrics.
+- **Don't build it in.** Telemetry is only compiled when configuring with `--use_telemetry` (`-DENABLE_TELEMETRY=ON`). To produce a binary that collects no data, run the `build.bat` and `build.sh` scripts without `--use_telemetry`.
+- **At runtime, via environment variable.** Set `ORT_GENAI_TELEMETRY_DISABLED=1` before the library initializes to disable non-essential telemetry. The variable also accepts `true` / `yes` / `on` / `y`, case-insensitive. ONNX Runtime GenAI may still send a minimal initialization event.
 - **At runtime, via the API.** Call `OgaSetTelemetryEnabled(false)` in the C API, or `Oga::SetTelemetryEnabled(false)` in the C++ wrapper to disable non-essential telemetry. ONNX Runtime GenAI may still send a minimal initialization event.
