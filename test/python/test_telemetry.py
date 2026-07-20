@@ -16,6 +16,7 @@ These tests verify:
 """
 
 import os
+import stat
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -154,9 +155,10 @@ class TestOptOut(_HermeticTelemetryTestCase):
         from telemetry.telemetry import GenAITelemetry
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
-        # Detailed events are not recorded, but the heartbeat is durably queued.
+        # Detailed events are not recorded or drained; the heartbeat is sent directly.
         self.assertFalse(t._enabled)
-        self.assertIsNotNone(t._store)
+        self.assertIsNone(t._store)
+        self.assertIsNone(t._uploader)
         self.assertIsNotNone(t._heartbeat_thread)
         # A detailed-event method must be a no-op and must not raise.
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
@@ -193,10 +195,9 @@ class TestOptOut(_HermeticTelemetryTestCase):
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         self._join_heartbeat()
-        # Opt-out still creates the store (for the heartbeat) but keeps detailed
-        # events disabled.
+        # Opt-out sends the heartbeat directly and never opens the detailed-event store.
         self.assertFalse(t._enabled)
-        self.assertIsNotNone(t._store)
+        self.assertIsNone(t._store)
         # The environment opt-out is the master switch: a programmatic enable
         # must not silently resume detailed telemetry.
         t.enable_telemetry()
@@ -208,12 +209,14 @@ class TestPathRedaction(unittest.TestCase):
 
     def test_keeps_filenames_drops_directories_and_usernames(self):
         from telemetry.telemetry import _redact_paths
-        self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err model.onnx")
-        self.assertEqual(_redact_paths("/var/data/run/output.log"), "output.log")
+        self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err <path>")
+        self.assertEqual(_redact_paths("/var/data/run/output.log"), "<path>")
         # Last segment is a directory/username (no extension) -> fully redacted.
         self.assertEqual(_redact_paths("at /home/bob"), "at <path>")
         # UNC paths are redacted too.
         self.assertEqual(_redact_paths(r"unc \\server\share\secret"), "unc <path>")
+        self.assertEqual(_redact_paths(r"err C:\Users\Alice Smith\models\phi.onnx"), "err <path>")
+        self.assertEqual(_redact_paths("err /home/Alice Smith/models/phi.onnx"), "err <path>")
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
@@ -223,7 +226,21 @@ class TestPathRedaction(unittest.TestCase):
             message = _format_exception_message(exc, exc.__traceback__)
         # The username must not survive in the source line or the message.
         self.assertNotIn("alice", message)
-        self.assertIn("weights.bin", message)
+        self.assertIn("<path>", message)
+
+    def test_public_log_error_redacts_paths(self):
+        from telemetry.telemetry_extensions import log_error
+
+        telemetry = MagicMock()
+        with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry):
+            log_error(
+                "FileNotFoundError",
+                r"missing C:\Users\Alice Smith\models\phi.onnx",
+                metadata={"exception_message": r"C:\Users\Mallory\secret.txt"},
+            )
+
+        attributes = telemetry.log.call_args.args[1]
+        self.assertEqual(attributes["exception_message"], "missing <path>")
 
 
 
@@ -532,8 +549,15 @@ class TestOfflineEventStore(unittest.TestCase):
         import sqlite3
         from telemetry.offline_store import SCHEMA_VERSION
         s = self._new_store()
-        v = sqlite3.connect(s.db_path).execute("PRAGMA user_version").fetchone()[0]
+        with sqlite3.connect(s.db_path) as conn:
+            v = conn.execute("PRAGMA user_version").fetchone()[0]
         self.assertEqual(v, SCHEMA_VERSION)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_store_uses_owner_only_permissions(self):
+        s = self._new_store()
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(s.db_path)).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(s.db_path).st_mode), 0o600)
 
 
 class TestProcessDrainLock(unittest.TestCase):
@@ -598,6 +622,49 @@ class TestUploaderDrainLogic(unittest.TestCase):
         delivered, left = uploader.drain_once()
         self.assertEqual((delivered, left), (0, 1))
         self.assertEqual(store.count(), 1)  # kept for retry
+
+    def test_oversized_first_row_is_dropped(self):
+        import telemetry.uploader as uploader_module
+
+        store, uploader = self._setup()
+        store.store(b"12345")
+        uploader._transport.send = MagicMock()
+        with patch.object(
+            uploader_module.OneCollectorTransportOptions,
+            "DEFAULT_MAX_PAYLOAD_SIZE_BYTES",
+            4,
+        ):
+            delivered, left = uploader.drain_once()
+        self.assertEqual((delivered, left), (1, 0))
+        self.assertEqual(store.count(), 0)
+        uploader._transport.send.assert_not_called()
+
+    def test_flush_releases_process_lock(self):
+        _, uploader = self._setup()
+        uploader.flush(0.01)
+        self.assertFalse(uploader._drain_lock.held)
+
+    def test_stop_keeps_lock_when_thread_does_not_stop(self):
+        _, uploader = self._setup()
+        uploader.stop_loop = MagicMock(return_value=False)
+        uploader._drain_lock.release = MagicMock()
+        uploader.stop(0)
+        uploader._drain_lock.release.assert_not_called()
+
+
+class TestShutdownSafety(unittest.TestCase):
+    def test_live_uploader_keeps_store_open(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._heartbeat_thread = None
+        telemetry._uploader = MagicMock()
+        telemetry._uploader.stop_loop.return_value = False
+        telemetry._store = MagicMock()
+
+        telemetry.shutdown(0)
+
+        telemetry._store.close.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -249,10 +249,10 @@ def _emit_model_build_telemetry(
                 if graph is not None:
                     op_type_set = set()
                     for node in graph:
+                        num_ops += 1
                         op_type_set.add(node.op_type)
                         if node.domain and not node.domain.startswith("ai.onnx"):
                             has_custom_ops = True
-                    num_ops = len(op_type_set)
                     op_types = ",".join(sorted(op_type_set))
             except Exception:
                 pass
@@ -288,13 +288,14 @@ def _emit_model_build_telemetry(
 
 
 @torch.no_grad
-def create_model(
+def _create_model_impl(
     model_name,
     input_path,
     output_dir,
     precision,
     execution_provider,
     cache_dir,
+    _telemetry_state,
     **extra_options,
 ):
     overall_start = time.perf_counter()
@@ -473,6 +474,7 @@ def create_model(
         raise
     finally:
         overall_duration_ms = (time.perf_counter() - overall_start) * 1000
+        _telemetry_state["emitted"] = True
         _emit_model_build_telemetry(
             action_name="create_model",
             duration_ms=overall_duration_ms,
@@ -485,6 +487,46 @@ def create_model(
             extra_options=extra_options,
             source_format=source_format,
         )
+
+
+def create_model(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    **extra_options,
+):
+    """Create a model and emit a minimal failure event even before model selection."""
+    overall_start = time.perf_counter()
+    telemetry_state = {"emitted": False}
+    try:
+        return _create_model_impl(
+            model_name,
+            input_path,
+            output_dir,
+            precision,
+            execution_provider,
+            cache_dir,
+            telemetry_state,
+            **extra_options,
+        )
+    except Exception:
+        if not telemetry_state["emitted"]:
+            _emit_model_build_telemetry(
+                action_name="create_model",
+                duration_ms=(time.perf_counter() - overall_start) * 1000,
+                success=False,
+                config=None,
+                onnx_model=None,
+                precision=precision,
+                execution_provider=execution_provider,
+                output_dir="",
+                extra_options=extra_options,
+                source_format="gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface",
+            )
+        raise
 
 
 def get_args():

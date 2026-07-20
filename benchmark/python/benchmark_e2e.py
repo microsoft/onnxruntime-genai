@@ -506,7 +506,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             tokens_generated=generation_length,
             tokenization_latency_ms=avg_tokenization_latency_ms,
             tokenization_throughput=avg_tokenization_thrpt,
-            prompt_processing_latency_ms=avg_per_token_prompt_latency_ms,
+            prompt_processing_latency_ms=avg_prompt_latency_ms,
             prompt_processing_throughput=avg_per_token_prompt_thrpt,
             token_generation_latency_ms=avg_token_gen_latency_ms,
             token_generation_throughput=avg_token_gen_thrpt,
