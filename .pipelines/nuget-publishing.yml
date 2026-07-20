@@ -96,7 +96,9 @@ extends:
       tsa:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
-      skipPoliciesValidation: true
+    settings:
+      onebranch:
+        skipPoliciesValidation: true
     stages:
     # ---- Version (compute the shared package version once) -----------------
     - template: stages/version-stage.yml
