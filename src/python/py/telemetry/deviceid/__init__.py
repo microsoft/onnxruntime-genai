@@ -69,7 +69,7 @@ class _FileStore:
     @property
     def retrieve_id(self) -> str:
         if not self._file_path.is_file():
-            raise FileExistsError(f"File {self._file_path.stem} does not exist")
+            raise FileNotFoundError(f"File {self._file_path.stem} does not exist")
         return self._file_path.read_text(encoding="utf-8").strip()
 
     def store_id(self, device_id: str) -> None:

@@ -18,6 +18,7 @@ These tests verify:
 import os
 import stat
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -259,6 +260,27 @@ class TestPathRedaction(unittest.TestCase):
 class TestDeviceId(unittest.TestCase):
     """Test device ID generation."""
 
+    def setUp(self):
+        import telemetry.deviceid as deviceid
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._get_telemetry_base_dir = deviceid.get_telemetry_base_dir
+        self._platform_patcher = patch("telemetry.deviceid.platform.system", return_value="Linux")
+        self._dir_patcher = patch(
+            "telemetry.deviceid.get_telemetry_base_dir", return_value=Path(self._tmpdir.name)
+        )
+        self._platform_patcher.start()
+        self._dir_patcher.start()
+        deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
+
+    def tearDown(self):
+        import telemetry.deviceid as deviceid
+
+        self._dir_patcher.stop()
+        self._platform_patcher.stop()
+        deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
+        self._tmpdir.cleanup()
+
     def test_get_encrypted_device_id(self):
         from telemetry.deviceid import get_encrypted_device_id_and_status, DeviceIdStatus
         device_id, status = get_encrypted_device_id_and_status()
@@ -270,20 +292,18 @@ class TestDeviceId(unittest.TestCase):
         self.assertIn(status, list(DeviceIdStatus))
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
-        from telemetry.deviceid import get_telemetry_base_dir
-
-        get_telemetry_base_dir.cache_clear()
+        self._get_telemetry_base_dir.cache_clear()
         try:
             with patch("telemetry.deviceid.platform.system", return_value="Windows"), patch.dict(
                 os.environ, {"LOCALAPPDATA": r"C:\Users\test\AppData\Local"}, clear=False
             ):
-                path = get_telemetry_base_dir()
+                path = self._get_telemetry_base_dir()
             self.assertEqual(
                 path,
                 Path(r"C:\Users\test\AppData\Local") / "Microsoft" / "DeveloperTools" / ".onnxruntime",
             )
         finally:
-            get_telemetry_base_dir.cache_clear()
+            self._get_telemetry_base_dir.cache_clear()
 
     def test_device_id_consistent(self):
         from telemetry.deviceid import get_encrypted_device_id_and_status
@@ -315,6 +335,20 @@ class TestSystemInfo(unittest.TestCase):
 
         # Python version should match
         self.assertTrue(info["python_version"].startswith(str(sys.version_info.major)))
+
+    def test_nvidia_gpu_count_uses_output_rows(self):
+        from telemetry.system_info import _get_gpu_info
+
+        result = MagicMock(
+            returncode=0,
+            stdout="GPU A, 555.1, 8192\nGPU B, 555.1, 16384\n",
+        )
+        with patch("telemetry.system_info.subprocess.run", return_value=result):
+            info = _get_gpu_info()
+
+        self.assertEqual(info["gpu_name"], "GPU A")
+        self.assertEqual(info["gpu_memory_mb"], 8192)
+        self.assertEqual(info["gpu_count"], 2)
 
     def test_system_info_cached(self):
         from telemetry.system_info import get_system_info
