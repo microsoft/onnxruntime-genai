@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -115,12 +116,12 @@ class GenAiTelemetry {
   GenAiTelemetry(const GenAiTelemetry&) = delete;
   GenAiTelemetry& operator=(const GenAiTelemetry&) = delete;
 
-  // Acquires init_mutex_ and returns an owned lock only when telemetry is live (initialized, logger
-  // valid, and -- when require_enabled is true -- enabled); otherwise returns an empty lock. ProcessInfo
-  // passes require_enabled=false so it emits whenever telemetry is initialized (i.e. outside CI/testing)
-  // even when detailed lifecycle events are disabled. Held across event emission so Log* is serialized with Shutdown,
-  // preventing a use-after-free on impl_ during teardown.
-  std::unique_lock<std::mutex> LockForLogging(bool require_enabled = true);
+  // Acquires a shared lock and returns it only when telemetry is live (initialized, logger valid,
+  // and -- when require_enabled is true -- enabled); otherwise returns an empty lock. Initialize and
+  // Shutdown take the same mutex exclusively, so the logger cannot be torn down during LogEvent while
+  // independent logging threads may proceed concurrently, matching ORT and 1DS ILogger's concurrent
+  // ActiveLoggerCall synchronization. ProcessInfo passes require_enabled=false.
+  std::shared_lock<std::shared_mutex> LockForLogging(bool require_enabled = true);
 
   // Runs fn under LockForLogging(require_enabled) with a catch-all guard, so telemetry emission
   // can never throw into the caller (Log* run from destructors and extern-C
@@ -149,7 +150,7 @@ class GenAiTelemetry {
 #endif
   std::atomic<uint32_t> next_session_id_{1};
   std::string app_session_guid_;  // Tier 1 identity: process-wide GUID (logger context)
-  std::mutex init_mutex_;
+  std::shared_mutex mutex_;
 };
 
 }  // namespace Generators

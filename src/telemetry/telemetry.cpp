@@ -137,7 +137,7 @@ bool GenAiTelemetry::IsDestroyed() {
 
 void GenAiTelemetry::Initialize() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-  std::unique_lock<std::mutex> lock(init_mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   if (initialized_.load()) return;
 
   // In a CI / build-pipeline environment, or inside onnxruntime-genai's own unit-test binaries,
@@ -250,12 +250,11 @@ void GenAiTelemetry::Initialize() {
 
 void GenAiTelemetry::Shutdown() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-  std::lock_guard<std::mutex> lock(init_mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_.load()) return;
 
-  // Mark uninitialized first so concurrent Log* calls bail in IsEnabled() before
-  // teardown begins. Log* and Shutdown must not run concurrently (OgaShutdown API
-  // contract); this only narrows the window.
+  // The exclusive lock waits for active LogEvent calls to release their shared locks and prevents
+  // new ones from observing the logger while teardown is in progress.
   initialized_.store(false);
 
   // 1DS-recommended shutdown sequence: Flush() persists in-memory events to disk,
@@ -298,8 +297,8 @@ uint32_t GenAiTelemetry::AllocateSessionId() {
 }
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-std::unique_lock<std::mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
-  std::unique_lock<std::mutex> lock(init_mutex_);
+std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   if ((require_enabled && !enabled_.load()) || !initialized_.load() || !impl_ || !impl_->logger)
     return {};  // empty (unlocked) -> caller bails
   return lock;  // locked; ownership moves to caller
