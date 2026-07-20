@@ -8,13 +8,11 @@
 
 Logs real events and verifies they reach OneCollector (HTTP 2xx):
 
-- The device-id heartbeat is sent directly on a background thread (item_count=1).
-- The five detailed events are persisted to the SQLite store and shipped by the
-  background uploader, then the store is confirmed empty.
+- The device-id heartbeat and five detailed events are persisted to the SQLite
+  store and shipped by the background uploader, then the store is confirmed empty.
 
-Every outgoing HTTP send is recorded by wrapping the transport, so both the
-direct heartbeat and the uploader batches are observed. This makes actual HTTP
-requests; it is NOT a unit test.
+Every outgoing HTTP send is recorded by wrapping the transport, so uploader
+batches are observed. This makes actual HTTP requests; it is NOT a unit test.
 
 Usage:
     python test/python/test_telemetry_live.py

@@ -206,6 +206,19 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertFalse(t._enabled)
 
 
+class TestVersionResolution(unittest.TestCase):
+    def test_variant_distribution_version_is_resolved(self):
+        from telemetry.telemetry import _get_app_version
+
+        with patch.dict(sys.modules, {"onnxruntime_genai": None}), patch(
+            "importlib.metadata.packages_distributions",
+            return_value={"onnxruntime_genai": ["onnxruntime-genai-cuda"]},
+        ), patch("importlib.metadata.version", return_value="0.15.0") as mock_version:
+            self.assertEqual(_get_app_version(), "0.15.0")
+
+        mock_version.assert_called_once_with("onnxruntime-genai-cuda")
+
+
 class TestPathRedaction(unittest.TestCase):
     """Test absolute-path redaction in error telemetry."""
 
