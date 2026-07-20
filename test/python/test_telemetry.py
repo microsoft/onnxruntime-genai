@@ -741,6 +741,27 @@ class TestShutdownSafety(unittest.TestCase):
 
         telemetry._store.close.assert_not_called()
 
+    def test_enable_does_not_replace_live_uploader(self):
+        from telemetry.telemetry import EventUploader, GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._instrumentation_key = "abc-def"
+        telemetry._enabled = False
+        telemetry._store = MagicMock()
+        telemetry._uploader = MagicMock(_send_timeout=10.0)
+        telemetry._uploader.stop_loop.return_value = False
+        old_uploader = telemetry._uploader
+
+        with patch("telemetry.telemetry._is_ci_environment", return_value=False), patch.object(
+            EventUploader, "__new__"
+        ) as mock_new_uploader:
+            telemetry.enable_telemetry()
+
+        self.assertIs(telemetry._uploader, old_uploader)
+        self.assertFalse(telemetry._enabled)
+        old_uploader.stop_loop.assert_called_once_with(11.0)
+        mock_new_uploader.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
