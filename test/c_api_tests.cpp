@@ -73,6 +73,134 @@ TEST(CAPITests, AppendCpuProvider) {
 #endif
 }
 
+namespace {
+
+// Cross-platform helpers so the security tests below can toggle the
+// ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY env var without pulling in extra deps.
+void SetEnvVar(const char* name, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(name, value);
+#else
+  setenv(name, value, /*overwrite=*/1);
+#endif
+}
+
+void UnsetEnvVar(const char* name) {
+#if defined(_WIN32)
+  _putenv_s(name, "");
+#else
+  unsetenv(name);
+#endif
+}
+
+// RAII: sets (or clears) an env var on construction and restores whatever
+// value the process had before entering the scope on destruction. Pass
+// nullptr for `value` to force the variable to be unset within the guarded
+// scope. Restoring the previous value keeps tests isolated from each other
+// and from the ambient environment (e.g. a developer who intentionally
+// exported ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 for a local run).
+struct ScopedEnvVar {
+  const char* name;
+  bool had_previous_value;
+  std::string previous_value;
+
+  ScopedEnvVar(const char* n, const char* v) : name(n), had_previous_value(false) {
+    if (const char* existing = std::getenv(name)) {
+      had_previous_value = true;
+      previous_value = existing;
+    }
+    if (v == nullptr) {
+      UnsetEnvVar(name);
+    } else {
+      SetEnvVar(name, v);
+    }
+  }
+  ~ScopedEnvVar() {
+    if (had_previous_value) {
+      SetEnvVar(name, previous_value.c_str());
+    } else {
+      UnsetEnvVar(name);
+    }
+  }
+  ScopedEnvVar(const ScopedEnvVar&) = delete;
+  ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+};
+
+}  // namespace
+
+// SECURITY (CWE-829): A malicious model can ship a genai_config.json whose
+// session_options.custom_ops_library points at a native library packaged
+// alongside the model. Loading that library invokes dlopen()/LoadLibrary() and
+// runs constructor/DllMain code before any inference. onnxruntime-genai must
+// refuse to honor this setting unless the operator (not the model author) has
+// opted in via the ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY environment variable.
+TEST(CAPITests, CustomOpsLibraryRefusedWithoutOptIn) {
+  // Make sure the opt-in is not leaking in from the environment, and restore
+  // whatever value was set before this test on scope exit.
+  ScopedEnvVar guard("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", nullptr);
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  // Overlay a custom_ops_library value that would trigger a native library load.
+  // The exact path does not matter: the load must be refused before it is even
+  // resolved on disk.
+  config->Overlay(R"({
+    "model": {
+      "decoder": {
+        "session_options": {
+          "custom_ops_library": "definitely_not_a_real_library.so"
+        }
+      }
+    }
+  })");
+
+  try {
+    auto model = OgaModel::Create(*config);
+    FAIL() << "OgaModel::Create should have thrown when custom_ops_library is "
+              "set without ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY.";
+  } catch (const std::exception& e) {
+    const std::string what = e.what();
+    // Refusal message must mention the opt-in env var so the operator knows
+    // how to enable the feature if they trust the model.
+    EXPECT_NE(what.find("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY"), std::string::npos)
+        << "Unexpected exception message: " << what;
+    // And it should identify the offending config value.
+    EXPECT_NE(what.find("definitely_not_a_real_library.so"), std::string::npos)
+        << "Unexpected exception message: " << what;
+  }
+}
+
+// Companion to the test above: when the operator explicitly opts in, the
+// security gate must let the load through. We don't ship a real custom ops
+// library with the test suite, so we only assert that whatever error surfaces
+// is no longer our refusal message (i.e. control reached the underlying ORT
+// RegisterCustomOpsLibrary call).
+TEST(CAPITests, CustomOpsLibraryAllowedWithOptIn) {
+  ScopedEnvVar guard("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", "1");
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({
+    "model": {
+      "decoder": {
+        "session_options": {
+          "custom_ops_library": "definitely_not_a_real_library.so"
+        }
+      }
+    }
+  })");
+
+  try {
+    auto model = OgaModel::Create(*config);
+    // If for some reason the load succeeded, that's fine — the security gate
+    // did its job. Fall through and let the guard reset the env var.
+  } catch (const std::exception& e) {
+    const std::string what = e.what();
+    // The refusal message must not appear: the opt-in should have let the
+    // request past our gate and into ORT's own library-load code path.
+    EXPECT_EQ(what.find("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY"), std::string::npos)
+        << "Opt-in did not bypass the security gate. Message: " << what;
+  }
+}
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
