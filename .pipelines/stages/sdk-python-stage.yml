@@ -5,7 +5,7 @@
 # incrementally against the prebuilt core. Fixed platform matrix per EP:
 #   CPU   — win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64
 #   CUDA  — win-x64, win-arm64, linux-x64
-#   WinML — win-x64
+#   WinML — win-x64, win-arm64
 # Wheels are built for every requested Python version (the core is Python-agnostic
 # and built once; only the pybind extension + wheel are rebuilt per version).
 #
@@ -138,7 +138,7 @@ stages:
         python_versions: ${{ parameters.python_versions }}
         python_dependency_version: ${{ parameters.ort_dependency_version }}
 
-  # ---- WinML wheels (win-x64; multi-version, incremental) ------------------
+  # ---- WinML wheels (win-x64 + win-arm64; multi-version, incremental) -------
   - ${{ if eq(parameters.enable_winml, true) }}:
     - job: python_win_x64_winml
       displayName: 'python · win-x64 · winml'
@@ -174,5 +174,43 @@ stages:
           build_config: ${{ parameters.build_config }}
           winml_sdk_version: ${{ parameters.winml_sdk_version }}
           core_artifact: 'core-win-x64-winml-cmake-pkg'
+          python_versions: ${{ parameters.python_versions }}
+      - template: jobs/steps/compliant-and-cleanup-step.yml
+
+    - job: python_win_arm64_winml
+      displayName: 'python · win-arm64 · winml'
+      pool:
+        name: 'onnxruntime-genai-windows-vs-2022-arm64'
+        hostArchitecture: Arm64
+        os: windows
+      timeoutInMinutes: 120
+      workspace:
+        clean: all
+      variables:
+      - name: artifactName
+        value: 'python-wheel-win-arm64-winml'
+      - name: corePkgDir
+        value: '$(Build.SourcesDirectory)\core_pkg'
+      - name: ortHome
+        value: '$(Build.SourcesDirectory)\ort_home'
+      - name: pysdkBuildDir
+        value: 'build/pysdk'
+      # Scope Guardian's codesign/SARIF analysis to the small wheel staging dir
+      # (matches the other Windows python jobs) so the injected sarifpatternmatcher
+      # does not scan the whole build tree.
+      - name: GDN_CODESIGN_TARGETDIRECTORY
+        value: '$(Build.ArtifactStagingDirectory)/wheel'
+      steps:
+      - checkout: self
+        submodules: recursive
+        lfs: true
+        clean: true
+      - template: jobs/steps/sdk-python-winml-win-step.yml
+        parameters:
+          arch: arm64
+          ep: winml
+          build_config: ${{ parameters.build_config }}
+          winml_sdk_version: ${{ parameters.winml_sdk_version }}
+          core_artifact: 'core-win-arm64-winml-cmake-pkg'
           python_versions: ${{ parameters.python_versions }}
       - template: jobs/steps/compliant-and-cleanup-step.yml

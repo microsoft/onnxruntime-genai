@@ -31,16 +31,10 @@ parameters:
 steps:
 
 # --- Python (to run build.py) -----------------------------------------------
-- script: |
-    MKDIR "$(Agent.ToolsDirectory)\Python\3.11.0\arm64"
-    XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" "$(Agent.ToolsDirectory)\Python\3.11.0\arm64\"
-    COPY NUL "$(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete"
-  displayName: 'Install Python 3.11 (arm64 agent)'
-  condition: eq('${{ parameters.arch }}', 'arm64')
-
+# NOTE: on the native win-arm64 agent, UsePythonVersion@0 provisions the arm64
+# interpreter and puts it on PATH (same as the core and python-wheel steps).
 - task: UsePythonVersion@0
   displayName: 'Use Python 3.11 (${{ parameters.arch }})'
-  condition: ne('${{ parameters.arch }}', 'arm64')
   inputs:
     versionSpec: '3.11'
     addToPath: true
