@@ -61,17 +61,11 @@ class ScopedEnvVar {
   std::string saved_;
 };
 
-void ExpectOptOutEnv(const char* ort_value, const char* genai_value, bool expected) {
-  ScopedEnvVar ort_guard{"ORT_TELEMETRY_DISABLED"};
+void ExpectOptOutEnv(const char* value, bool expected) {
   ScopedEnvVar genai_guard{"ORT_GENAI_TELEMETRY_DISABLED"};
 
-  if (ort_value != nullptr) {
-    SetEnv("ORT_TELEMETRY_DISABLED", ort_value);
-  } else {
-    UnsetEnv("ORT_TELEMETRY_DISABLED");
-  }
-  if (genai_value != nullptr) {
-    SetEnv("ORT_GENAI_TELEMETRY_DISABLED", genai_value);
+  if (value != nullptr) {
+    SetEnv("ORT_GENAI_TELEMETRY_DISABLED", value);
   } else {
     UnsetEnv("ORT_GENAI_TELEMETRY_DISABLED");
   }
@@ -119,17 +113,19 @@ TEST(TelemetryEnvironmentTests, CiValueTruthTable) {
 }
 
 TEST(TelemetryEnvironmentTests, OptOutEnvVarParsing) {
-  ExpectOptOutEnv("1", nullptr, true);
-  ExpectOptOutEnv("TRUE", nullptr, true);
-  ExpectOptOutEnv("0", nullptr, false);
-  ExpectOptOutEnv("random", nullptr, false);
-  ExpectOptOutEnv(nullptr, "1", true);
-  ExpectOptOutEnv(nullptr, "TRUE", true);
-  ExpectOptOutEnv(nullptr, "0", false);
-  ExpectOptOutEnv(nullptr, "random", false);
-  ExpectOptOutEnv("1", "0", true);
-  ExpectOptOutEnv(nullptr, "0", false);
-  ExpectOptOutEnv(nullptr, nullptr, false);
+  ExpectOptOutEnv("1", true);
+  ExpectOptOutEnv("TRUE", true);
+  ExpectOptOutEnv("0", false);
+  ExpectOptOutEnv("random", false);
+  ExpectOptOutEnv(nullptr, false);
+}
+
+TEST(TelemetryEnvironmentTests, OrtOptOutDoesNotDisableGenAI) {
+  ScopedEnvVar ort_guard{"ORT_TELEMETRY_DISABLED"};
+  ScopedEnvVar genai_guard{"ORT_GENAI_TELEMETRY_DISABLED"};
+  SetEnv("ORT_TELEMETRY_DISABLED", "1");
+  UnsetEnv("ORT_GENAI_TELEMETRY_DISABLED");
+  EXPECT_FALSE(Generators::TelemetryInternal::IsTelemetryDisabledByEnvVar());
 }
 
 TEST(TelemetryEnvironmentTests, CiDetectionSuppresses) {

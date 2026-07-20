@@ -148,9 +148,8 @@ void GenAiTelemetry::Initialize() {
     return;
   }
 
-  // ORT_TELEMETRY_DISABLED (shared with ONNX Runtime) and ORT_GENAI_TELEMETRY_DISABLED suppress the
-  // non-essential lifecycle events. The SDK still initializes outside CI/testing so the one-shot
-  // ProcessInfo event can report device counting metadata.
+  // ORT_GENAI_TELEMETRY_DISABLED suppresses non-essential lifecycle events. The SDK still initializes
+  // outside CI/testing so the one-shot ProcessInfo event can report device counting metadata.
   if (TelemetryInternal::IsTelemetryDisabledByEnvVar()) {
     env_disabled_.store(true);
     enabled_.store(false);

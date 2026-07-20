@@ -97,12 +97,10 @@ inline bool IsRunningUnitTests() {
   return IsCiValueTruthy(GetTelemetryEnv("ORT_RUNNING_UNIT_TESTS"));
 }
 
-// ORT_TELEMETRY_DISABLED is the shared ONNX Runtime/GenAI opt-out. ORT_GENAI_TELEMETRY_DISABLED is
-// accepted as a GenAI-specific alias. In GenAI these disable model/generate lifecycle telemetry while
-// still allowing ProcessInfo outside CI/unit tests.
+// ORT_GENAI_TELEMETRY_DISABLED disables non-essential GenAI telemetry while still allowing
+// ProcessInfo outside CI/unit tests.
 inline bool IsTelemetryDisabledByEnvVar() {
-  return IsEnvTruthy(GetTelemetryEnv("ORT_TELEMETRY_DISABLED")) ||
-         IsEnvTruthy(GetTelemetryEnv("ORT_GENAI_TELEMETRY_DISABLED"));
+  return IsEnvTruthy(GetTelemetryEnv("ORT_GENAI_TELEMETRY_DISABLED"));
 }
 
 }  // namespace Generators::TelemetryInternal

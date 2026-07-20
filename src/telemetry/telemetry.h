@@ -9,8 +9,7 @@
 //
 // Telemetry controls (in priority order):
 //   1. Compile-time:  ENABLE_TELEMETRY=OFF (telemetry SDK not linked; API calls are no-ops)
-//   2. Environment:   ORT_TELEMETRY_DISABLED=1 (shared with ONNX Runtime) or
-//                     ORT_GENAI_TELEMETRY_DISABLED=1 (disables non-essential events)
+//   2. Environment:   ORT_GENAI_TELEMETRY_DISABLED=1 (disables non-essential events)
 //   3. Runtime API:   OgaSetTelemetryEnabled(false) (disables non-essential events dynamically)
 
 #pragma once
