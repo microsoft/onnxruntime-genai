@@ -18,7 +18,8 @@
             "--cmake_generator",
             "Xcode",
             "--build_apple_framework",
-            "--skip_tests"
+            "--skip_tests",
+            "--skip_wheel"
         ],
         "macosx": [
             "--macos=MacOSX",

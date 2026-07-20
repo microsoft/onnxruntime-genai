@@ -55,14 +55,18 @@ parameters:
 stages:
 - stage: sdk_python
   displayName: 'SDK · Python'
-  # Depend only on the core stage(s) this stage actually consumes.
+  # Depend on the shared 'version' stage plus the core stage(s) this stage consumes.
   dependsOn:
+  - version
   - ${{ if eq(parameters.enable_cpu, true) }}:
     - core_cpu
   - ${{ if eq(parameters.enable_cuda, true) }}:
     - core_cuda
   - ${{ if eq(parameters.enable_winml, true) }}:
     - core_winml
+  variables:
+  - name: genai_version
+    value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
   jobs:
 
   # ---- CPU wheels ----------------------------------------------------------
@@ -167,6 +171,9 @@ stages:
         submodules: recursive
         lfs: true
         clean: true
+      - template: jobs/steps/utils/apply-genai-version.yml
+        parameters:
+          os: windows
       - template: jobs/steps/sdk-python-winml-win-step.yml
         parameters:
           arch: x64
@@ -205,6 +212,9 @@ stages:
         submodules: recursive
         lfs: true
         clean: true
+      - template: jobs/steps/utils/apply-genai-version.yml
+        parameters:
+          os: windows
       - template: jobs/steps/sdk-python-winml-win-step.yml
         parameters:
           arch: arm64

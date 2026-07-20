@@ -20,7 +20,11 @@ stages:
 - ${{ if eq(parameters.enable_cpu, true) }}:
   - stage: core_apple
     displayName: 'Core · Apple (iOS xcframework)'
-    dependsOn: []
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
     jobs:
     - job: ios_xcframework
       displayName: 'apple · ios · xcframework'

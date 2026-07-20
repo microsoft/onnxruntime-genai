@@ -39,13 +39,11 @@ jobs:
         name: 'onnxruntime-Ubuntu2204-AMD-CPU'
       os: linux
 
+  # win-arm64 has no JDK on the native arm64 agent, so the arm64 JNI shim is
+  # cross-compiled on the win-x64 pool (which has a JDK) via -A ARM64.
   ${{ if eq(parameters.os, 'win') }}:
     pool:
-      ${{ if eq(parameters.arch, 'arm64') }}:
-        name: 'onnxruntime-genai-windows-vs-2022-arm64'
-        hostArchitecture: Arm64
-      ${{ else }}:
-        name: 'onnxruntime-Win-CPU-2022'
+      name: 'onnxruntime-Win-CPU-2022'
       os: windows
 
   ${{ if eq(parameters.os, 'osx') }}:
@@ -82,6 +80,19 @@ jobs:
     submodules: recursive
     lfs: true
     clean: true
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: windows
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: linux
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: macos
 
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/sdk-java-linux-step.yml

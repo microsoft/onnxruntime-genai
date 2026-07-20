@@ -21,9 +21,6 @@ parameters:
   default: Release
 - name: ort_version
   type: string
-- name: version_type
-  type: string
-  default: 'dev'
 - name: enable_cpu
   type: boolean
   default: true
@@ -32,7 +29,11 @@ stages:
 - ${{ if eq(parameters.enable_cpu, true) }}:
   - stage: cocoapods
     displayName: 'Core · Apple (CocoaPods)'
-    dependsOn: []
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
     jobs:
     - job: macos_ios_cocoapods
       displayName: 'apple · macos-ios · cocoapods'
@@ -52,9 +53,9 @@ stages:
         clean: true
         submodules: none
 
-      - template: jobs/steps/utils/set-genai-version.yml
+      - template: jobs/steps/utils/apply-genai-version.yml
         parameters:
-          nuget_version_type: ${{ parameters.version_type }}
+          os: macos
       - template: jobs/steps/utils/set-cmake-build-type.yml
         parameters:
           build_config: ${{ parameters.build_config }}

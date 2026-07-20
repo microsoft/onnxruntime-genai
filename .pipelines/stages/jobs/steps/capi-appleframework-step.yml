@@ -11,12 +11,12 @@ steps:
   path: onnxruntime-genai
   submodules: recursive
 
-- template: utils/set-genai-version.yml
+- template: utils/apply-genai-version.yml
+  parameters:
+    os: macos
 - template: utils/set-cmake-build-type.yml
   parameters:
     build_config: ${{parameters.build_config}}
-
-- template: utils/set-nightly-build-option-variable.yml
 
 # --- Feed isolation: pip → Lotus --------------------------------------------
 - task: PipAuthenticate@1

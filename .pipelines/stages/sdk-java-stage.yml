@@ -23,7 +23,11 @@ stages:
   - stage: sdk_java
     displayName: 'SDK · Java'
     dependsOn:
+    - version
     - core_cpu
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
     jobs:
     # ---- Per-platform jars -------------------------------------------------
     - template: jobs/sdk-java-job.yml

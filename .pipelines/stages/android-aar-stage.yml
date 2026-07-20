@@ -21,7 +21,11 @@ stages:
 - ${{ if eq(parameters.enable_cpu, true) }}:
   - stage: sdk_android
     displayName: 'SDK · Android (AAR)'
-    dependsOn: []
+    dependsOn:
+    - version
+    variables:
+    - name: genai_version
+      value: $[ stageDependencies.version.set_version.outputs['setver.genai_version'] ]
     jobs:
     - template: jobs/android-java-api-aar.yml
       parameters:

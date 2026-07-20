@@ -116,7 +116,6 @@ extends:
     - template: stages/cocoapods-stage.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
-        version_type: ${{ parameters.version_type }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- Android AAR (bespoke Android build; CPU) -------------------------

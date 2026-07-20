@@ -5,9 +5,15 @@
 # stage output variable, so every downstream packaging stage stamps the SAME
 # version (no cross-job date skew when parallel jobs straddle midnight).
 #
-# Format:
-#   stable : X.Y.Z                         (from VERSION_INFO)
-#   dev    : X.Y.Z-dev.<yyyymmdd>.<BuildId> (SemVer 2.0; BuildId is unique/run)
+# The version is a SINGLE string valid simultaneously for PEP 440 (Python
+# wheels), SemVer/NuGet, and Maven (Java), so every package family stamps the
+# exact same version. Package jobs write it into VERSION_INFO on disk via
+# utils/apply-genai-version.yml before building.
+#
+# Format (VERSION_INFO's trailing '-dev' is stripped to form the base):
+#   stable : X.Y.Z                    (from VERSION_INFO)
+#   dev    : X.Y.Z-dev<yyyymmdd><BuildId>
+#            e.g. 0.15.0-dev20260720123456  (PEP 440 -> 0.15.0.dev20260720123456)
 #
 # Consume downstream via (stage must dependsOn 'version'):
 #   variables:
@@ -49,14 +55,19 @@ stages:
         script: |
           $ErrorActionPreference = 'Stop'
           $version_info = (Get-Content -Path .\VERSION_INFO).Trim()
+          # Strip a single trailing '-dev' to form the base X.Y.Z; the dev suffix
+          # (date + BuildId) is re-appended below so the string stays valid for
+          # PEP 440 / SemVer / Maven.
+          $base = $version_info -replace '-dev$', ''
           $build_id = $env:BUILD_BUILDID
           $date = (Get-Date).ToString('yyyyMMdd')
           $version = switch ('${{ parameters.version_type }}') {
-            'dev'    { "$version_info-dev.$date.$build_id" }
-            'stable' { "$version_info" }
+            'dev'    { "$base-dev$date$build_id" }
+            'stable' { "$base" }
             default  { throw "unknown version_type: ${{ parameters.version_type }}" }
           }
           Write-Host "VERSION_INFO   : $version_info"
+          Write-Host "base           : $base"
           Write-Host "version_type   : ${{ parameters.version_type }}"
           Write-Host "build_id       : $build_id"
           Write-Host "genai_version  : $version"

@@ -268,7 +268,7 @@ steps:
 
 # --- Rename archive to embed the computed package version -------------------
 # CPack names the archive with the base VERSION_INFO (e.g. 0.15.0-dev). Replace
-# that with the pipeline-computed genai_version (e.g. 0.15.0-dev.20260709.123456)
+# that with the pipeline-computed genai_version (e.g. 0.15.0-dev20260709123456)
 # so the published C/C++ archive matches the NuGet/package version. For stable
 # builds genai_version == VERSION_INFO, so this is a no-op.
 - bash: |

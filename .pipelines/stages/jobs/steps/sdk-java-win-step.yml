@@ -31,14 +31,14 @@ parameters:
 steps:
 
 # --- Python (to run build.py) -----------------------------------------------
-# NOTE: on the native win-arm64 agent, UsePythonVersion@0 provisions the arm64
-# interpreter and puts it on PATH (same as the core and python-wheel steps).
+# The win Java job always runs on the win-x64 pool (win-arm64 is cross-compiled
+# here via -A ARM64), so the host Python is always x64.
 - task: UsePythonVersion@0
-  displayName: 'Use Python 3.11 (${{ parameters.arch }})'
+  displayName: 'Use Python 3.11 (x64)'
   inputs:
     versionSpec: '3.11'
     addToPath: true
-    architecture: '${{ parameters.arch }}'
+    architecture: 'x64'
 
 - task: PipAuthenticate@1
   displayName: 'Authenticate pip to Lotus feed'
@@ -137,7 +137,8 @@ steps:
     $work = "$(Build.SourcesDirectory)\jni_sign"
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    $entry = 'ai/onnxruntime/genai/native/win-${{ parameters.arch }}/onnxruntime-genai-jni.dll'
+    $jniArch = if ('${{ parameters.arch }}' -eq 'arm64') { 'aarch64' } else { '${{ parameters.arch }}' }
+    $entry = "ai/onnxruntime/genai/native/win-$jniArch/onnxruntime-genai-jni.dll"
     $jarExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\jar.exe' } else { 'jar' }
     Push-Location $work
     & $jarExe xf $jar.FullName $entry
@@ -156,7 +157,8 @@ steps:
 
 - powershell: |
     $ErrorActionPreference = 'Stop'
-    $entry = 'ai/onnxruntime/genai/native/win-${{ parameters.arch }}/onnxruntime-genai-jni.dll'
+    $jniArch = if ('${{ parameters.arch }}' -eq 'arm64') { 'aarch64' } else { '${{ parameters.arch }}' }
+    $entry = "ai/onnxruntime/genai/native/win-$jniArch/onnxruntime-genai-jni.dll"
     $jarExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\jar.exe' } else { 'jar' }
     Push-Location "$(jniSignDir)"
     & $jarExe uf "$(jniMainJar)" $entry
