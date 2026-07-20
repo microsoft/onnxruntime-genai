@@ -1,11 +1,11 @@
 # =============================================================================
-# core-macos-step.yml — macOS core build step template (Phase 5).
+# core-macos-step.yml — macOS core build step template.
 #
 # Builds the onnxruntime-genai core natively on a macOS agent using build.py,
 # installs the exported find_package package, runs CPack (tgz), Apple-signs the
 # dylib, and publishes the two core artifacts. Mirrors core-linux-step.yml but
 # runs directly on the mac host (no docker) and uses the macOS toolchain setup
-# proven in capi-macos-step.yml (rustup + brew llvm@18).
+# (rustup + brew llvm@18).
 #
 # macOS is CPU-only. Job-level variables (ortHome/coreInstall/buildDir/
 # artifactName) come from core-build-job.yml.
@@ -26,7 +26,7 @@ parameters:
 
 steps:
 
-# --- Rust + LLVM toolchain (guidance) — mirrors capi-macos-step -------------
+# --- Rust + LLVM toolchain (guidance) -------------
 - bash: |
     set -e
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

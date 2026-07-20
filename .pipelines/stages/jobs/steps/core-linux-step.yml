@@ -1,5 +1,5 @@
 # =============================================================================
-# core-linux-step.yml — Linux core build step template (Phase 1).
+# core-linux-step.yml — Linux core build step template.
 #
 # Pulls the appropriate manylinux Docker image from ACR, downloads ORT from
 # the Lotus NuGet feed, then runs all build steps inside the container:
@@ -138,7 +138,7 @@ steps:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
 # --- Audit: no public package feeds -----------------------------------------
-# Hard gate (Phase 2c): fail the build if pip or cargo could reach a public feed.
+# Hard gate: fail the build if pip or cargo could reach a public feed.
 - bash: |
     set -e
     failed=0
@@ -216,7 +216,7 @@ steps:
       # Probe: configuring + building the committed consumer against the exported
       # package is the real proof that find_package(onnxruntime-genai) is
       # consumable. A broken export fails here rather than in a later SDK job.
-      /usr/bin/cmake -S .pipelines/scratch/genai_probe -B /tmp/probe-build \
+      /usr/bin/cmake -S .pipelines/consumer-smoke-test -B /tmp/probe-build \
         -Donnxruntime-genai_DIR=/ort_genai_src/install/lib/cmake/onnxruntime-genai
       /usr/bin/cmake --build /tmp/probe-build
       test -f /tmp/probe-build/genai_probe || { echo "ASSERT FAIL: probe exe missing"; exit 1; }

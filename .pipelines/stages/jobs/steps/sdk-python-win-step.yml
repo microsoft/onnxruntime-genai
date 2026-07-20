@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-win-step.yml — Windows Python SDK (wheel) build step (Phase 3).
+# sdk-python-win-step.yml — Windows Python SDK (wheel) build step.
 #
 # Builds the Python wheel *incrementally* against a prebuilt core:
 #   1. Download the core CMake-package artifact for this cell.

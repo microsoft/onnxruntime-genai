@@ -1,9 +1,9 @@
 # =============================================================================
-# ios-xcframework-stage.yml — iOS Apple XCFramework stage (Phase 5).
+# ios-xcframework-stage.yml — iOS Apple XCFramework stage.
 #
 # Builds the iOS/macCatalyst Apple xcframework. This is a bespoke Apple build
 # (build_apple_framework.py) that does NOT fit the core-archive + incremental
-# SDK model, so it reuses the existing, proven capi-appleframework-step.yml as a
+# SDK model, so it reuses capi-appleframework-step.yml as a
 # standalone stage. Publishes artifact 'onnxruntime-genai-ios-xcframework'
 # (consumed by the C# NuGet runtimes/ios and cocoapods).
 # =============================================================================
@@ -36,4 +36,3 @@ stages:
         parameters:
           build_config: ${{ parameters.build_config }}
           build_settings_file: 'tools/ci_build/github/apple/default_full_ios_framework_build_settings.json'
-          use_lotus_feed: true

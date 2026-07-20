@@ -1,5 +1,5 @@
 # =============================================================================
-# core-win-step.yml — Windows core build step template (Phase 1).
+# core-win-step.yml — Windows core build step template.
 #
 # Builds onnxruntime-genai core using build.py on a Windows agent, installs
 # the exported find_package CMake package, runs CPack to produce a zip archive,
@@ -119,7 +119,7 @@ steps:
 
 # On the win-arm64 agent, Azure CLI (az) and azcopy are not pre-installed, but the
 # AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Install both
-# first — mirrors the in-tree capi-win-step.
+# first.
 - powershell: |
     Write-Host "Downloading Azure CLI..."
     $azCliUrl = "https://aka.ms/installazurecliwindows"
@@ -227,7 +227,7 @@ steps:
     displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
 
 # --- Audit: no public package feeds -----------------------------------------
-# Hard gate (Phase 2c): fail the build if pip or cargo could reach a public
+# Hard gate: fail the build if pip or cargo could reach a public
 # feed. Isolation is enforced by construction (PIP_INDEX_URL points only at
 # Lotus; cargo replaces crates.io with Lotus) — this step verifies it.
 - powershell: |
@@ -360,7 +360,7 @@ steps:
 - powershell: |
     $ErrorActionPreference = 'Stop'
     $probeBuild = "$(Agent.TempDirectory)\probe-build"
-    cmake -S "$(Build.SourcesDirectory)\.pipelines\scratch\genai_probe" -B $probeBuild `
+    cmake -S "$(Build.SourcesDirectory)\.pipelines\consumer-smoke-test" -B $probeBuild `
       -Donnxruntime-genai_DIR="$(coreInstall)\lib\cmake\onnxruntime-genai"
     if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe configure failed"; exit 1 }
     cmake --build $probeBuild --config ${{ parameters.build_config }}

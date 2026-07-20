@@ -1,11 +1,11 @@
 # =============================================================================
-# core-build-job.yml — Reusable core build job template (Phase 1).
+# core-build-job.yml — Reusable core build job template.
 #
 # Selects the appropriate agent pool for the requested OS/arch, defines
 # job-level variables, and dispatches to the OS-specific step template
 # (core-win-step.yml, core-linux-step.yml).
 #
-# Artifact naming convention (matches plan.md §Display-name convention):
+# Artifact naming convention:
 #   core-<os>-<arch>-<ep>-cmake-pkg   — exported find_package CMake package
 #   core-<os>-<arch>-<ep>-archive     — CPack archive (zip/tgz)
 # =============================================================================
@@ -80,7 +80,7 @@ jobs:
   - name: buildDir
     value: 'build/core'
   # Scope Guardian's post-build codesign/SARIF analysis to a small staging dir
-  # (matches the in-tree capi-packaging-job). Without this, the 1ES-injected
+  #. Without this, the 1ES-injected
   # analysis scans the whole native + cargo/guidance build tree and the
   # 'sarifpatternmatcher' engine emits a driver-less SARIF that crashes Guardian
   # Post Analysis ("Required property 'driver' not found"). This is only needed on

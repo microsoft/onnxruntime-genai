@@ -1,10 +1,5 @@
 # =============================================================================
-# nuget-publishing.yml — Unified ONNX Runtime GenAI packaging pipeline (Phase 5).
-#
-# NOTE: this file is temporarily named `nuget-publishing.yml` so it can reuse the
-# already-registered pipeline (id 1385) for validation. It should be renamed back
-# to `packaging.yml` (and a fresh pipeline registered) before merge. See the
-# "Rename nuget-publishing.yml back to packaging.yml" todo.
+# nuget-publishing.yml — Unified ONNX Runtime GenAI packaging pipeline.
 #
 # Single entry point that builds the core once per (EP, os, arch) and layers the
 # SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
@@ -115,6 +110,13 @@ extends:
     # ---- iOS xcframework (bespoke Apple build; CPU) ------------------------
     - template: stages/ios-xcframework-stage.yml
       parameters:
+        enable_cpu: ${{ parameters.enable_cpu }}
+
+    # ---- macOS/iOS CocoaPods (bespoke Apple build; CPU) -------------------
+    - template: stages/cocoapods-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
+        version_type: ${{ parameters.version_type }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- Android AAR (bespoke Android build; CPU) -------------------------

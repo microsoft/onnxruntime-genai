@@ -1,5 +1,5 @@
 # =============================================================================
-# version-stage.yml — Package version computation stage (Phase 5).
+# version-stage.yml — Package version computation stage.
 #
 # Computes the GenAI package version ONCE for the whole run and exposes it as a
 # stage output variable, so every downstream packaging stage stamps the SAME

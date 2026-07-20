@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-java-job.yml — Reusable Java SDK (desktop JVM jar) build job (Phase 5).
+# sdk-java-job.yml — Reusable Java SDK (desktop JVM jar) build job.
 #
 # Builds a per-platform desktop JVM jar incrementally against the prebuilt core.
 # Supports win/linux/macos on x64/arm64. Each job publishes a per-platform jar

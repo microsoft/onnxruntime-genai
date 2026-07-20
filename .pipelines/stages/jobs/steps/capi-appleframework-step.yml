@@ -4,12 +4,6 @@ parameters:
   default: 'release'
 - name: build_settings_file
   type: string
-- name: use_lotus_feed
-  # When true, isolate build-time package feeds to the internal Lotus feed
-  # (pip). Off by default so the legacy pipelines that reuse this template — which
-  # do NOT define the Lotus feed variables — are unaffected.
-  type: boolean
-  default: false
 steps:
 
 - checkout: self
@@ -24,13 +18,12 @@ steps:
 
 - template: utils/set-nightly-build-option-variable.yml
 
-# --- Feed isolation: pip → Lotus (only for the unified packaging pipeline) ---
-- ${{ if eq(parameters.use_lotus_feed, true) }}:
-  - task: PipAuthenticate@1
-    displayName: 'Authenticate pip to Lotus feed'
-    inputs:
-      artifactFeeds: '$(lotusFeedName)'
-      onlyAddExtraIndex: false
+# --- Feed isolation: pip → Lotus --------------------------------------------
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
 
 - script: |
     set -e

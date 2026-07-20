@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-java-macos-step.yml — macOS Java SDK (desktop JVM jar) build step (Phase 5).
+# sdk-java-macos-step.yml — macOS Java SDK (desktop JVM jar) build step.
 #
 # Builds the per-platform macOS (arm64) desktop jar *incrementally* against a
 # prebuilt core. The jar bundles its native libs under

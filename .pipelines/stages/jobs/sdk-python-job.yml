@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-job.yml — Reusable Python SDK (wheel) build job (Phase 3).
+# sdk-python-job.yml — Reusable Python SDK (wheel) build job.
 #
 # Selects the agent pool for the requested OS/arch, defines job-level variables
 # (core artifact download dir, ORT home, SDK build dir), and dispatches to the
@@ -86,7 +86,7 @@ jobs:
   - name: pysdkBuildDir
     value: 'build/pysdk'
   # Scope Guardian's post-build codesign/SARIF analysis to a small staging dir
-  # (matches the in-tree capi-packaging-job) so the injected 'sarifpatternmatcher'
+  # so the injected 'sarifpatternmatcher'
   # does not scan the whole native/wheel build tree and crash Guardian Post
   # Analysis. Only relevant on Windows where signing runs.
   - name: GDN_CODESIGN_TARGETDIRECTORY

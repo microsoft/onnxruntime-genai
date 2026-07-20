@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-macos-step.yml — macOS Python SDK (wheel) build step (Phase 5 / Batch A).
+# sdk-python-macos-step.yml — macOS Python SDK (wheel) build step.
 #
 # Builds the macOS (arm64) Python wheel *incrementally* against a prebuilt core
 # (same model as the linux/win steps), natively on a mac agent:
@@ -111,7 +111,7 @@ steps:
       # The UsePythonVersion interpreter on macOS is universal2, so `pip wheel` would
       # otherwise tag the wheel macosx_*_universal2 even though the extension + core
       # dylib are arm64-only. Force an arm64 platform tag + build arch (cibuildwheel
-      # convention, matching the in-tree capi-macos-step).
+      # convention).
       _PYTHON_HOST_PLATFORM: 'macosx-12.0-arm64'
       ARCHFLAGS: '-arch arm64'
 

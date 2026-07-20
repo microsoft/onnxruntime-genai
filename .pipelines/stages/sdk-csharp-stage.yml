@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-csharp-stage.yml — C# NuGet SDK stage (Phase 3 / consolidated Phase 5).
+# sdk-csharp-stage.yml — C# NuGet SDK stage.
 #
 # ALL C# NuGet packages are produced by this single stage, one job per EP:
 #   cpu     — Microsoft.ML.OnnxRuntimeGenAI          (win-x64, linux-x64/arm64, osx-arm64, ios, android)

@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-linux-step.yml — Linux Python SDK (wheel) build step (Phase 3).
+# sdk-python-linux-step.yml — Linux Python SDK (wheel) build step.
 #
 # Builds a manylinux wheel *incrementally* against a prebuilt core inside the
 # manylinux docker image:

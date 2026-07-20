@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-java-stage.yml — Java SDK (desktop JVM jar) stage (Phase 5).
+# sdk-java-stage.yml — Java SDK (desktop JVM jar) stage.
 #
 # Builds a per-platform desktop jar for every CPU platform, then combines them
 # into a SINGLE multi-platform jar. Java is CPU-only. Fixed platform matrix:

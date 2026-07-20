@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-stage.yml — Python SDK (wheel) stage (Phase 3 / consolidated Phase 5).
+# sdk-python-stage.yml — Python SDK (wheel) stage.
 #
 # ALL Python wheels are produced by this single stage, one job per (os, arch, EP),
 # incrementally against the prebuilt core. Fixed platform matrix per EP:

@@ -1,9 +1,9 @@
 # =============================================================================
-# android-aar-stage.yml — Android AAR stage (Phase 5).
+# android-aar-stage.yml — Android AAR stage.
 #
 # Builds the Android AAR (multi-ABI) via build_aar_package.py. This is a bespoke
 # Android build that does NOT fit the core-archive + incremental SDK model, so it
-# reuses the existing, proven android-java-api-aar.yml job as a standalone stage.
+# reuses the android-java-api-aar.yml job as a standalone stage.
 # Publishes artifact 'drop-android' (consumed by the C# NuGet runtimes/android).
 # =============================================================================
 
@@ -27,4 +27,3 @@ stages:
       parameters:
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
-        use_lotus_feed: true

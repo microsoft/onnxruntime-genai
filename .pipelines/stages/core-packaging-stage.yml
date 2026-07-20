@@ -1,5 +1,5 @@
 # =============================================================================
-# core-packaging-stage.yml — Core binary packaging stages (Phase 1).
+# core-packaging-stage.yml — Core binary packaging stages.
 #
 # Two logical stages, each gated by a single per-EP toggle. When an EP is
 # enabled its whole fixed platform matrix is built (goal 8):
@@ -9,7 +9,7 @@
 # (iOS and Android are CPU targets but use bespoke builds; they live in their own
 #  stages, gated by enable_cpu at the pipeline level.)
 #
-# Display-name convention (plan.md §Display-name convention):
+# Display-name convention:
 #   Stages:  Core · CPU  /  Core · CUDA
 #   Jobs:    core · <os>-<arch> · <ep>   (set by core-build-job.yml)
 # =============================================================================

@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-java-win-step.yml — Windows Java SDK (desktop JVM jar) build step (Phase 5).
+# sdk-java-win-step.yml — Windows Java SDK (desktop JVM jar) build step.
 #
 # Builds the per-platform Windows desktop jar *incrementally* against a prebuilt
 # core (same model as the Linux step). The jar bundles its native libs under

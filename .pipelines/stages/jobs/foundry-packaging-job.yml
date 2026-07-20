@@ -1,5 +1,5 @@
 # =============================================================================
-# foundry-packaging-job.yml — .Foundry NuGet repackage job (Phase 4).
+# foundry-packaging-job.yml — .Foundry NuGet repackage job.
 #
 # Repackages the prebuilt core native binaries into the fixed-name NuGet package
 # Microsoft.ML.OnnxRuntimeGenAI.Foundry. The package carries NO ORT dependency.

@@ -1,19 +1,15 @@
 # =============================================================================
-# sdk-csharp-job.yml — C# NuGet combine job (Phase 3).
+# sdk-csharp-job.yml — C# NuGet combine job.
 #
 # One combine job per EP flavor. Downloads the core *archive* artifacts for every
 # enabled RID of this EP, lays out the native libraries per-RID, builds the
-# managed assembly, and packs BOTH the native and managed NuGet packages
-# (matches today's shipping layout).
+# managed assembly, and packs BOTH the native and managed NuGet packages.
 #
 # This is a "combine" job — it does NOT recompile the core; it repackages the
 # already-built core archives + the pure-C# managed assembly.
 #
 # Consumes:  core-<os>-<arch>-<ep>-archive   (per enabled RID)
 # Publishes: csharp-nuget-<ep>              (native + managed *.nupkg)
-#
-# NOTE: ESRP signing of the *.nupkg is intentionally deferred to Phase 4
-# (see plan.md §Phase 4). This job publishes UNSIGNED packages for validation.
 # =============================================================================
 
 parameters:
@@ -142,10 +138,8 @@ jobs:
 
   # --- Feed isolation: NuGet restore → Lotus --------------------------------
   # Write a dedicated Lotus nuget.config (cleared, Lotus-only) into src/csharp so
-  # `dotnet restore` uses it (auto-discovered by directory). We create it at build
-  # time (not committed) so the not-yet-removed legacy pipelines — which do a clean
-  # checkout — are unaffected (they are deleted in Phase 5). NuGetAuthenticate
-  # wires the pipeline identity to it.
+  # `dotnet restore` uses it (auto-discovered by directory). It is generated at
+  # build time (not committed). NuGetAuthenticate wires the pipeline identity to it.
   - powershell: |
       $ErrorActionPreference = 'Stop'
       $cfg = "$(Build.Repository.LocalPath)\src\csharp\nuget.config"

@@ -1,5 +1,5 @@
 # =============================================================================
-# winml-nuget-job.yml — WinML NuGet repackage job (Phase 5 / WinML EP).
+# winml-nuget-job.yml — WinML NuGet repackage job.
 #
 # Repackages the prebuilt WinML core native binaries into the NuGet package
 # Microsoft.ML.OnnxRuntimeGenAI.WinML, which depends on the WinML SDK NuGet

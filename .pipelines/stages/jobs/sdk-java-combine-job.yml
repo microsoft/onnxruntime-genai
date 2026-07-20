@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-java-combine-job.yml — Combine per-platform Java jars into one (Phase 5).
+# sdk-java-combine-job.yml — Combine per-platform Java jars into one.
 #
 # Downloads every per-platform jar (java-<os>-<arch>-cpu-jar) and merges them into
 # a SINGLE multi-platform jar. The Java classes are platform-independent, so one

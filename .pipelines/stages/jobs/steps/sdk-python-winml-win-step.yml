@@ -1,5 +1,5 @@
 # =============================================================================
-# sdk-python-winml-win-step.yml — WinML Python SDK (wheel) build step (Phase 5).
+# sdk-python-winml-win-step.yml — WinML Python SDK (wheel) build step.
 #
 # Builds the WinML Python wheel(s) (onnxruntime-genai-winml) *incrementally* and
 # multi-version against the prebuilt WinML core:
