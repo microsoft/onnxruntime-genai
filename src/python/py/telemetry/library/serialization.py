@@ -64,7 +64,7 @@ class CommonSchemaJsonSerializationHelper:
             return value.isoformat()
 
         if isinstance(value, timedelta):
-            # Format as ISO 8601 duration
+            # Format as a signed total-hours "HH:MM:SS" duration.
             total_seconds = int(value.total_seconds())
             hours, remainder = divmod(abs(total_seconds), 3600)
             minutes, seconds = divmod(remainder, 60)
