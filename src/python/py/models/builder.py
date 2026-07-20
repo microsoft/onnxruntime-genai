@@ -239,7 +239,7 @@ def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, str]:
         if key in _PATH_OPTION_KEYS:
             sanitized[key] = _sanitize_path_value(str(value))
         else:
-            sanitized[key] = _sanitize_path_value(value) if isinstance(value, str) else str(value)
+            sanitized[key] = _sanitize_path_value(str(value))
     return sanitized
 
 
