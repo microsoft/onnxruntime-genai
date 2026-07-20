@@ -36,13 +36,8 @@ class OneCollectorEventSource:
 
     def __init__(self):
         self.logger = logging.getLogger("OpenTelemetry.Exporter.OneCollector")
-        # Set default level to INFO to match .NET behavior
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-            self.logger.setLevel(logging.INFO)
+            self.logger.addHandler(logging.NullHandler())
 
     @property
     def is_informational_logging_enabled(self) -> bool:
