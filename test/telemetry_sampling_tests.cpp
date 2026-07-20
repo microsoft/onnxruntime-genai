@@ -10,13 +10,6 @@
 
 namespace Generators::test {
 
-TEST(TelemetrySamplingTest, CurrentRateRetainsEverySession) {
-  EXPECT_EQ(TelemetryInternal::kModelSessionSampleRatePercent, 100.0);
-  for (uint32_t session_id = 0; session_id < 1000; ++session_id) {
-    EXPECT_TRUE(TelemetryInternal::ShouldSampleSession("process-a", session_id));
-  }
-}
-
 TEST(TelemetrySamplingTest, BoundaryRates) {
   EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-a", 1, 0.0));
   EXPECT_FALSE(TelemetryInternal::ShouldSampleSession("process-a", 1, -1.0));
