@@ -27,6 +27,8 @@ ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to sen
 
 For Windows, Linux, and macOS, ONNX Runtime GenAI sends a product-salted hash of a locally generated per-user UUID as its device identifier. For Android and iOS, ONNX Runtime GenAI uses the platform device identifier provided by the 1DS SDK instead of creating a separate GenAI-generated mobile device id.
 
+ProcessInfo is retained at 100%. Non-essential model-session events, including errors, are deterministically sampled as a complete session so correlated events are always retained or dropped together. The current model-session sampling rate is 100%. Retained events carry the 1DS Common Schema `popSample` percentage; an absent value means 100%. To estimate the original event population, sum `100.0 / popSample` for received events, treating an absent or invalid value as 100%.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry

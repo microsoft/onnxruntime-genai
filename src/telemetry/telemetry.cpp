@@ -5,6 +5,7 @@
 #include "device_info.h"
 #include "telemetry_environment.h"
 #include "telemetry_redaction.h"
+#include "telemetry_sampling.h"
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
@@ -73,6 +74,13 @@ std::string GetToken() {
   for (size_t i = 0; i < decoded.size(); ++i)
     decoded[i] = static_cast<char>(decoded[i] ^ kMaskKey[i % klen]);
   return decoded;
+}
+
+bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_session_guid,
+                         uint32_t session_id) {
+  if (!TelemetryInternal::ShouldSampleSession(app_session_guid, session_id)) return false;
+  event.SetPopsample(TelemetryInternal::kModelSessionSampleRatePercent);
+  return true;
 }
 
 // Generate a random v4 UUID as a hex string (e.g. "f81d4fae-7dec-41d0-8f12-00a0c91e6bf6").
@@ -317,6 +325,7 @@ void GenAiTelemetry::LogProcessInfo() {
     warn_device_id_fallback = device.device_id_status == "Failed";
 
     MAT::EventProperties event("OnnxRuntimeGenAI.ProcessInfo");
+    event.SetPopsample(100.0);
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
     // correlates with model/generate events via the AppSessionGuid logger context.
     event.SetProperty("sessionId", static_cast<int64_t>(0));
@@ -346,21 +355,26 @@ void GenAiTelemetry::LogProcessInfo() {
 #endif
 }
 
-void GenAiTelemetry::LogModelLoadStart(uint32_t session_id) {
+bool GenAiTelemetry::LogModelLoadStart(uint32_t session_id) {
+  bool emitted = false;
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoadStart");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
 
     impl_->logger->LogEvent(event);
+    emitted = true;
   });
 #endif
+  return emitted;
 }
 
 void GenAiTelemetry::LogModelLoad(uint32_t session_id, const ModelLoadInfo& info) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoad");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("modelType", info.model_type);
     event.SetProperty("modelFamily", info.model_family);
@@ -391,6 +405,7 @@ void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoadEnd");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("isSuccess", is_success);
     event.SetProperty("loadTimeMs", load_time_ms);
@@ -399,7 +414,10 @@ void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
     }
 
     impl_->logger->LogEvent(event);
-  });
+  },
+            // Complete a ModelLoadStart/ModelLoadEnd pair even if telemetry was disabled
+            // while model creation was in flight. Callers invoke End only for an accepted Start.
+            /*require_enabled=*/false);
 #endif
 }
 
@@ -410,6 +428,7 @@ void GenAiTelemetry::LogGeneratorCreate(uint32_t session_id, uint32_t generator_
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.GeneratorCreate");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
     event.SetProperty("batchSize", static_cast<int64_t>(batch_size));
@@ -433,6 +452,7 @@ bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.GenerateStart");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
     event.SetProperty("promptTokens", static_cast<int64_t>(prompt_tokens));
@@ -452,6 +472,7 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.GenerateEnd");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
     event.SetProperty("totalTokens", static_cast<int64_t>(total_tokens));
@@ -471,6 +492,7 @@ void GenAiTelemetry::LogAdapterActivated(uint32_t session_id, uint32_t generator
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.AdapterActivated");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
 
@@ -486,6 +508,7 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.RuntimeError");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("errorType", error_type);
     event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));

@@ -374,24 +374,30 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
   auto session_id = telemetry.AllocateSessionId();
 
   if (telemetry.IsEnabled()) {
-    telemetry.LogModelLoadStart(session_id);
+    const bool model_load_start_logged = telemetry.LogModelLoadStart(session_id);
 
     auto start = std::chrono::steady_clock::now();
     try {
       auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
 
       // Log model details after successful config parse
-      telemetry.LogModelLoad(session_id, BuildModelLoadInfo(*model));
+      if (model_load_start_logged) {
+        telemetry.LogModelLoad(session_id, BuildModelLoadInfo(*model));
+      }
 
       auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+      if (model_load_start_logged) {
+        telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+      }
 
       model->telemetry_session_id_ = session_id;
       *out = ReturnShared<OgaModel>(model);
       return nullptr;
     } catch (const std::exception& e) {
       auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+      if (model_load_start_logged) {
+        telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+      }
       telemetry.LogRuntimeError(session_id, "std::exception", e.what(), "model_load");
       throw;
     }
@@ -533,24 +539,30 @@ OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaMod
   auto session_id = telemetry.AllocateSessionId();
 
   if (telemetry.IsEnabled()) {
-    telemetry.LogModelLoadStart(session_id);
+    const bool model_load_start_logged = telemetry.LogModelLoadStart(session_id);
 
     auto start = std::chrono::steady_clock::now();
     try {
       auto config_copy = std::make_unique<Generators::Config>(*config);
       auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
 
-      telemetry.LogModelLoad(session_id, BuildModelLoadInfo(*model));
+      if (model_load_start_logged) {
+        telemetry.LogModelLoad(session_id, BuildModelLoadInfo(*model));
+      }
 
       auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+      if (model_load_start_logged) {
+        telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+      }
 
       model->telemetry_session_id_ = session_id;
       *out = ReturnShared<OgaModel>(model);
       return nullptr;
     } catch (const std::exception& e) {
       auto elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+      if (model_load_start_logged) {
+        telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+      }
       telemetry.LogRuntimeError(session_id, "std::exception", e.what(), "model_load");
       throw;
     }

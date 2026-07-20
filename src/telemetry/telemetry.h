@@ -74,7 +74,9 @@ class GenAiTelemetry {
   void LogProcessInfo();
 
   // ModelLoadStart/End: Paired events tracing model creation lifecycle.
-  void LogModelLoadStart(uint32_t session_id);
+  // Returns true only when the start event was accepted by the live logger.
+  bool LogModelLoadStart(uint32_t session_id);
+  // Call only when LogModelLoadStart returned true.
   void LogModelLoad(uint32_t session_id, const ModelLoadInfo& info);
   void LogModelLoadEnd(uint32_t session_id, bool is_success, double load_time_ms,
                        const std::string& error_message = "");
