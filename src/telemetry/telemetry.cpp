@@ -414,10 +414,7 @@ void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
     }
 
     impl_->logger->LogEvent(event);
-  },
-            // Complete a ModelLoadStart/ModelLoadEnd pair even if telemetry was disabled
-            // while model creation was in flight. Callers invoke End only for an accepted Start.
-            /*require_enabled=*/false);
+  });
 #endif
 }
 
@@ -481,10 +478,7 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
     event.SetProperty("tokensPerSecond", tokens_per_second);
 
     impl_->logger->LogEvent(event);
-  },
-            // Complete a GenerateStart/GenerateEnd pair even if runtime telemetry was disabled
-            // while generation was in flight. Callers suppress end events for requests not started.
-            /*require_enabled=*/false);
+  });
 #endif
 }
 

@@ -592,18 +592,13 @@ bool Generator::ShouldTrackTelemetry() const {
   return !GenAiTelemetry::IsDestroyed() && GenAiTelemetry::Instance().IsEnabled();
 }
 
-bool Generator::ShouldContinueStartedTelemetry() const {
-  return !GenAiTelemetry::IsDestroyed() && telemetry_generate_start_logged_;
-}
-
 void Generator::LogTelemetryGenerateEnd() {
   // Emit GenerateEnd telemetry with accumulated stats. Times are generator-
   // request aggregates measured up to the last generated token (not destruction),
   // so post-generation idle before the next prompt/generator free is excluded.
   // Guard against access during static deinitialization
   if (telemetry_generated_tokens_ > 0 && !GenAiTelemetry::IsDestroyed()) {
-    // Emit GenerateEnd only when GenerateStart was accepted. Runtime telemetry may have been
-    // disabled since then, but closing the pair preserves downstream lifecycle aggregation.
+    // Emit GenerateEnd only when GenerateStart was accepted and telemetry remains enabled.
     if (telemetry_generate_start_logged_) {
       auto total_time_ms = std::chrono::duration<double, std::milli>(
                                telemetry_last_token_time_ - telemetry_start_time_)
@@ -702,8 +697,14 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // GenerateStart/End pair so each request is reported separately. Prompt-token
   // counters are committed only after AppendTokens succeeds, so failed validation
   // or prefill work cannot skew the next request.
-  if (!telemetry_suppress_append_tracking_ && telemetry_generated_tokens_ > 0) {
-    LogTelemetryGenerateEnd();
+  if (!telemetry_suppress_append_tracking_ &&
+      (telemetry_generated_tokens_ > 0 || telemetry_generation_abandoned_)) {
+    if (telemetry_generated_tokens_ > 0) {
+      LogTelemetryGenerateEnd();
+    } else {
+      ResetTelemetryGeneration();
+    }
+    telemetry_generation_abandoned_ = false;
   }
 
   const bool track_telemetry = !telemetry_suppress_append_tracking_ && ShouldTrackTelemetry();
@@ -896,7 +897,8 @@ void Generator::GenerateNextToken() {
     // captured with one Generate pair per request.
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
     auto telemetry_now = std::chrono::steady_clock::now();
-    if (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry()) {
+    const bool track_telemetry = ShouldTrackTelemetry();
+    if (track_telemetry && !telemetry_generation_abandoned_) {
       if (telemetry_prompt_tokens_ == 0 && telemetry_generated_tokens_ == 0) {
         telemetry_start_time_ = telemetry_now;
       }
@@ -911,6 +913,9 @@ void Generator::GenerateNextToken() {
               telemetry_input_modality_);
         }
       }
+    } else if (!track_telemetry && !telemetry_generation_abandoned_) {
+      telemetry_generation_abandoned_ = true;
+      ResetTelemetryGeneration();
     }
 #endif
     return;
@@ -972,7 +977,8 @@ void Generator::GenerateNextToken() {
   // GenerateEnd emitted when generation closes.
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   auto telemetry_now = std::chrono::steady_clock::now();
-  if (ShouldTrackTelemetry() || ShouldContinueStartedTelemetry()) {
+  const bool track_telemetry = ShouldTrackTelemetry();
+  if (track_telemetry && !telemetry_generation_abandoned_) {
     if (telemetry_prompt_tokens_ == 0 && telemetry_generated_tokens_ == 0) {
       telemetry_start_time_ = telemetry_now;
     }
@@ -989,6 +995,9 @@ void Generator::GenerateNextToken() {
             telemetry_input_modality_);
       }
     }
+  } else if (!track_telemetry && !telemetry_generation_abandoned_) {
+    telemetry_generation_abandoned_ = true;
+    ResetTelemetryGeneration();
   }
 #endif
 
@@ -1021,8 +1030,14 @@ void Generator::RewindToLength(size_t new_length) {
   if (batch_size > 1 && new_length != 0)
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-  if (!telemetry_suppress_append_tracking_ && telemetry_generated_tokens_ > 0) {
-    LogTelemetryGenerateEnd();
+  if (!telemetry_suppress_append_tracking_ &&
+      (telemetry_generated_tokens_ > 0 || telemetry_generation_abandoned_)) {
+    if (telemetry_generated_tokens_ > 0) {
+      LogTelemetryGenerateEnd();
+    } else {
+      ResetTelemetryGeneration();
+    }
+    telemetry_generation_abandoned_ = false;
   }
 #endif
   search_->RewindTo(new_length);

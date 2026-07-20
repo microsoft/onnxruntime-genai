@@ -139,6 +139,7 @@ struct Generator : LeakChecked<Generator> {
   std::chrono::steady_clock::time_point telemetry_last_token_time_;
   bool telemetry_first_token_logged_{false};
   bool telemetry_generate_start_logged_{false};
+  bool telemetry_generation_abandoned_{false};
   std::string telemetry_input_modality_{"text"};
   bool telemetry_suppress_append_tracking_{false};
 #endif
@@ -148,7 +149,6 @@ struct Generator : LeakChecked<Generator> {
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   bool ShouldTrackTelemetry() const;
-  bool ShouldContinueStartedTelemetry() const;
   void LogTelemetryGenerateEnd();
   void ResetTelemetryGeneration();
 #endif
