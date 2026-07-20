@@ -67,9 +67,17 @@ def _get_app_version() -> str:
     except Exception:
         pass
 
-    # 2. Try importlib.metadata (works for pip-installed packages)
+    # 2. Resolve the installed distribution that provides the Python module.
+    # This covers variant wheels such as onnxruntime-genai-cuda/directml.
     try:
-        from importlib.metadata import version as pkg_version
+        from importlib.metadata import packages_distributions, version as pkg_version
+
+        distributions = packages_distributions().get("onnxruntime_genai", [])
+        for distribution in distributions:
+            try:
+                return pkg_version(distribution)
+            except Exception:
+                continue
         return pkg_version("onnxruntime-genai")
     except Exception:
         pass
