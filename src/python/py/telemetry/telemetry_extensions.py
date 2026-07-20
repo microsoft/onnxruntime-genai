@@ -16,6 +16,7 @@ from .telemetry import (
     ERROR_EVENT,
     GenAITelemetry,
     _format_exception_message,
+    _redact_paths,
 )
 
 _TFunc = TypeVar("_TFunc", bound=Callable[..., Any])
@@ -34,14 +35,13 @@ def log_action(
 ) -> None:
     """Log a telemetry action event."""
     telemetry = _get_telemetry()
-    attributes = {
+    attributes = dict(metadata or {})
+    attributes.update({
         "invoked_from": invoked_from,
         "action_name": action_name,
         "duration_ms": duration_ms,
         "success": success,
-    }
-    if metadata:
-        attributes.update(metadata)
+    })
     telemetry.log(ACTION_EVENT, attributes)
 
 
@@ -52,12 +52,11 @@ def log_error(
 ) -> None:
     """Log a telemetry error event."""
     telemetry = _get_telemetry()
-    attributes = {
+    attributes = dict(metadata or {})
+    attributes.update({
         "exception_type": exception_type,
-        "exception_message": exception_message,
-    }
-    if metadata:
-        attributes.update(metadata)
+        "exception_message": _redact_paths(exception_message),
+    })
     telemetry.log(ERROR_EVENT, attributes)
 
 

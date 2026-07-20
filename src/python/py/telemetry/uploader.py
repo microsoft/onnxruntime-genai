@@ -111,8 +111,8 @@ class EventUploader:
 
     def stop(self, timeout_seconds: float = 12.0) -> None:
         """Stop the loop and release the drain lock (convenience)."""
-        self.stop_loop(timeout_seconds)
-        self.close()
+        if self.stop_loop(timeout_seconds):
+            self.close()
 
     # ----- draining ------------------------------------------------------
 
@@ -133,7 +133,10 @@ class EventUploader:
         )
         included: list[int] = []
         for row_id, payload in batch:
-            if not builder.can_add(payload) and not builder.is_empty:
+            if not builder.can_add(payload):
+                if builder.is_empty:
+                    self._store.delete([row_id])
+                    return (1, 0)
                 break
             builder.add(payload)
             included.append(row_id)
@@ -162,13 +165,16 @@ class EventUploader:
         """
         if not self._drain_lock.acquire():
             return
-        deadline = time.time() + max_seconds
-        while time.time() < deadline:
-            delivered, left = self.drain_once()
-            if delivered == 0 and left == 0:
-                return  # queue empty
-            if left:
-                return  # transient failure; leave the rest for next run
+        try:
+            deadline = time.time() + max_seconds
+            while time.time() < deadline:
+                delivered, left = self.drain_once()
+                if delivered == 0 and left == 0:
+                    return  # queue empty
+                if left:
+                    return  # transient failure; leave the rest for next run
+        finally:
+            self._drain_lock.release()
 
     def _run(self) -> None:
         try:
@@ -184,6 +190,8 @@ class EventUploader:
                         transient_failure = left
                     except Exception:
                         transient_failure = 1
+                else:
+                    transient_failure = 1
 
                 wait = self._idle_backoff if transient_failure else self._drain_interval
                 self._wake.wait(wait)

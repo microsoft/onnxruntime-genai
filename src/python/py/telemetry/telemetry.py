@@ -16,6 +16,7 @@ Provides high-level telemetry for:
 import base64
 import os
 import platform
+import re
 import threading
 import traceback
 import uuid
@@ -25,8 +26,9 @@ from typing import Any, Optional
 from .constants import CONNECTION_STRING
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
-from .library.options import OneCollectorExporterOptions
+from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
+from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
@@ -89,30 +91,22 @@ def _get_app_version() -> str:
 
 
 def _redact_paths(text: str) -> str:
-    """Replace absolute filesystem paths with a non-identifying token.
-
-    Keeps a trailing filename (one containing an extension) because it is useful
-    for debugging and is not personal data; drops everything else, including
-    paths whose last segment is itself a directory or username (e.g. /home/alice
-    or a UNC share root), which a bare-basename redaction would expose.
-    """
-    import re
-
-    # Windows drive paths (C:\Users\me\x), UNC paths (\\server\share\me\x), and
-    # POSIX absolute paths (/home/me/x).
+    """Redact path-bearing tails without leaking space-containing user names."""
     pattern = re.compile(
-        r"(?:[A-Za-z]:\\[^\s\"']+)"
-        r"|(?:\\\\[^\s\"']+)"
-        r"|(?:/[^\s\"':]+(?:/[^\s\"':]+)+)"
+        r"(?:[A-Za-z]:[\\/])"
+        r"|(?:\\\\)"
+        r"|(?:~[\\/])"
+        r"|(?:(?<![:/])/(?:[^/\r\n]+/))"
+        r"|(?:(?<![\\/\w])(?:[A-Za-z0-9_.-]+\\)[^\\/\r\n]+\\)",
+        re.IGNORECASE,
     )
-
-    def _redact(match: "re.Match") -> str:
-        base = match.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-        if base in (".", "..") or "." not in base:
-            return "<path>"
-        return base
-
-    return pattern.sub(_redact, text)
+    redacted = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body) :]
+        match = pattern.search(body)
+        redacted.append(body[: match.start()] + "<path>" + ending if match else line)
+    return "".join(redacted)
 
 
 def _format_exception_message(ex: BaseException, tb=None) -> str:
@@ -186,8 +180,8 @@ class GenAITelemetry:
                 return
 
             # User opt-out (ORT_DISABLE_TELEMETRY=1): detailed events are not
-            # recorded, but the device-id heartbeat is still written (durably) so
-            # device counting keeps working.
+            # recorded, but a direct best-effort heartbeat still supports device
+            # counting without draining prior detailed events.
             user_opt_out = os.environ.get("ORT_DISABLE_TELEMETRY") == "1"
 
             try:
@@ -202,14 +196,25 @@ class GenAITelemetry:
 
                 event_source.disable()
 
-                # Detailed events are recorded only when enabled; the heartbeat
-                # ignores this gate.
+                # Detailed events are recorded only when enabled.
                 self._enabled = not user_opt_out
+
+                # Opt-out sends only a direct best-effort heartbeat. Do not open
+                # the durable queue, which may contain detailed events from a
+                # prior enabled run.
+                if user_opt_out:
+                    self._heartbeat_thread = threading.Thread(
+                        target=self._send_heartbeat,
+                        args=(False,),
+                        name="genai-telemetry-heartbeat",
+                        daemon=True,
+                    )
+                    self._heartbeat_thread.start()
+                    return
 
                 # Durable on-disk queue + uploader. Events survive process exit,
                 # so there is no exit-time flush. The uploader retries until
-                # delivery, which makes the device-id heartbeat reliable even on
-                # opt-out.
+                # delivery.
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
                 self._uploader = EventUploader(
@@ -220,7 +225,10 @@ class GenAITelemetry:
                 # The heartbeat collects system info via blocking subprocesses;
                 # build and enqueue it off the host thread.
                 self._heartbeat_thread = threading.Thread(
-                    target=self._send_heartbeat, name="genai-telemetry-heartbeat", daemon=True
+                    target=self._send_heartbeat,
+                    args=(True,),
+                    name="genai-telemetry-heartbeat",
+                    daemon=True,
                 )
                 self._heartbeat_thread.start()
             except Exception:
@@ -280,16 +288,9 @@ class GenAITelemetry:
             "available_providers": ",".join(ep_info.get("available_providers", [])),
         }
 
-    def _send_heartbeat(self) -> None:
-        """Enqueue the device-id heartbeat in the durable store.
-
-        Runs on a background thread on every non-CI run (including user opt-out)
-        so device counting works and is retried until delivered. The heartbeat
-        deliberately ignores the ``_enabled`` gate that suppresses detailed
-        events on opt-out; only detailed events are withheld from opted-out
-        users.
-        """
-        if self._store is None:
+    def _send_heartbeat(self, durable: bool = True) -> None:
+        """Send the heartbeat durably when enabled and directly on opt-out."""
+        if durable and self._store is None:
             return
         try:
             data = {
@@ -305,9 +306,17 @@ class GenAITelemetry:
                 data=data,
             )
             payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
-            self._store.store(payload)
-            if self._uploader is not None:
-                self._uploader.request_drain()
+            if durable:
+                self._store.store(payload)
+                if self._uploader is not None:
+                    self._uploader.request_drain()
+            else:
+                transport = HttpJsonPostTransport(
+                    endpoint=OneCollectorTransportOptions.DEFAULT_ENDPOINT,
+                    ikey=self._instrumentation_key,
+                    compression=CompressionType.DEFLATE,
+                )
+                transport.send(payload, timeout_sec=2.0, item_count=1)
         except Exception:
             pass
 
@@ -399,7 +408,7 @@ class GenAITelemetry:
         peak_memory_gpu_mb: float = 0.0,
         peak_memory_cpu_mb: float = 0.0,
     ) -> None:
-        """Log a benchmark telemetry event."""
+        """Log benchmark telemetry; prompt/tokenization latency fields are total milliseconds per prompt."""
         if not self._enabled or self._store is None:
             return
         try:
@@ -509,7 +518,7 @@ class GenAITelemetry:
             pass
 
     def disable_telemetry(self) -> None:
-        """Disable telemetry and stop the background uploader (non-blocking)."""
+        """Disable detailed telemetry and stop the uploader (non-blocking)."""
         with self._lock:
             self._enabled = False
             if self._uploader is not None:
@@ -517,7 +526,6 @@ class GenAITelemetry:
                 # out never blocks the caller. The thread releases the drain lock on
                 # exit; any already-stored events go out on the next run.
                 self._uploader.signal_stop()
-                self._uploader = None
 
     def enable_telemetry(self) -> None:
         """Enable telemetry (creates/restarts the uploader if needed).
@@ -532,23 +540,31 @@ class GenAITelemetry:
             # programmatic enable must not override ORT_DISABLE_TELEMETRY.
             if os.environ.get("ORT_DISABLE_TELEMETRY") == "1" or _is_ci_environment():
                 return
-            self._enabled = True
+            if self._uploader is not None:
+                old_uploader = self._uploader
+                old_uploader.signal_stop()
+                if old_uploader.stop_loop(0):
+                    old_uploader.close()
+                # If a send is still in flight, the old uploader retains the
+                # process lock until it exits. The replacement waits on that
+                # lock, so rows cannot be double-sent.
+                self._uploader = None
             if self._store is None:
                 try:
                     db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                     self._store = OfflineEventStore(db_path)
                 except Exception:
                     self._store = None
-                    self._enabled = False
                     return
-            if self._uploader is None:
-                try:
-                    self._uploader = EventUploader(
-                        self._store, instrumentation_key=self._instrumentation_key
-                    )
-                    self._uploader.start()
-                except Exception:
-                    self._uploader = None
+            try:
+                self._uploader = EventUploader(
+                    self._store, instrumentation_key=self._instrumentation_key
+                )
+                self._uploader.start()
+                self._enabled = True
+            except Exception:
+                self._uploader = None
+                self._enabled = False
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort flush of pending events, then stop the uploader.
@@ -557,6 +573,14 @@ class GenAITelemetry:
         the on-disk store and are uploaded on the next run. Process exit is never
         blocked because the uploader runs on a daemon thread.
         """
+        heartbeat_stopped = True
+        if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
+            self._heartbeat_thread.join(max(0.0, flush_seconds))
+            heartbeat_stopped = not self._heartbeat_thread.is_alive()
+            if heartbeat_stopped:
+                self._heartbeat_thread = None
+
+        uploader_stopped = True
         if self._uploader is not None:
             try:
                 # Quiesce the background drainer first. Only drain synchronously
@@ -565,17 +589,18 @@ class GenAITelemetry:
                 # daemon thread (it releases on wind-down / at process exit);
                 # force-releasing here would let another drainer re-send the
                 # batch the thread is still processing.
-                if self._uploader.stop_loop():
+                uploader_stopped = self._uploader.stop_loop(max(0.0, flush_seconds))
+                if uploader_stopped:
                     try:
                         self._uploader.flush(flush_seconds)
                     finally:
                         self._uploader.close()
+                        self._uploader = None
             except Exception:
-                pass
-            finally:
-                self._uploader = None
-        if self._store is not None:
+                uploader_stopped = False
+        if self._store is not None and uploader_stopped and heartbeat_stopped:
             self._store.close()
+            self._store = None
 
 
 # Module-level convenience functions
@@ -585,7 +610,7 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable GenAI telemetry."""
+    """Disable detailed GenAI telemetry; the opt-out heartbeat remains enabled outside CI."""
     _get_telemetry().disable_telemetry()
 
 
