@@ -33,18 +33,10 @@ parameters:
 steps:
 
 # --- Python -----------------------------------------------------------------
-- script: |
-    MKDIR "$(Agent.ToolsDirectory)\Python\3.11.0\arm64"
-    XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" "$(Agent.ToolsDirectory)\Python\3.11.0\arm64\"
-    COPY NUL "$(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete"
-  displayName: 'Install Python 3.11 (arm64 agent)'
-  condition: eq('${{ parameters.arch }}', 'arm64')
-
 - task: UsePythonVersion@0
-  displayName: 'Use Python 3.11 (${{ parameters.arch }})'
-  condition: ne('${{ parameters.arch }}', 'arm64')
+  displayName: 'Use Python 3.12 (${{ parameters.arch }})'
   inputs:
-    versionSpec: '3.11'
+    versionSpec: '3.12'
     addToPath: true
     architecture: '${{ parameters.arch }}'
 
