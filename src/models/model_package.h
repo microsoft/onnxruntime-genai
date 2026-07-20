@@ -10,7 +10,8 @@
 
 namespace Generators {
 
-// True when `path` is a directory containing a top-level manifest.json.
+// True when `path` is a model package directory: it has a top-level manifest.json and no
+// top-level genai_config.json (a flat model directory keeps genai_config.json at its root).
 bool IsModelPackage(const fs::path& path);
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
