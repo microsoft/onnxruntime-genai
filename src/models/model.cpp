@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 
 #include "../generators.h"
 #include "../search.h"
@@ -501,6 +502,41 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   device.InitOrt(*Ort::api, *allocator.allocator_);
 }
 
+// Update provider options using values from a parent if they are not already specified in the child.
+// Used for pipeline models to ensure that top-level provider options are communicated into the options
+// for each component model in the pipeline.
+static void InheritParentProviderOptions(const std::vector<Config::ProviderOptions>& parent_provider_options,
+                                         std::vector<Config::ProviderOptions>& child_provider_options) {
+  std::unordered_set<std::string> child_provider_option_names;
+  for (const auto& parent_provider_option : parent_provider_options) {
+    auto child_provider_option_it = std::find_if(
+        child_provider_options.begin(),
+        child_provider_options.end(),
+        [&parent_provider_option](const Config::ProviderOptions& po) { return po.name == parent_provider_option.name; });
+    if (child_provider_option_it == child_provider_options.end()) {
+      // Child has no provider option for this provider, so just copy from parent.
+      child_provider_options.emplace_back(parent_provider_option);
+    } else {
+      // Use device filtering options from parent if not already set
+      if (!child_provider_option_it->device_filtering_options.has_value()) {
+        child_provider_option_it->device_filtering_options = parent_provider_option.device_filtering_options;
+      }
+
+      // Merge parent EP provider options
+      child_provider_option_names.clear();
+      for (const auto& opt : child_provider_option_it->options) {
+        child_provider_option_names.insert(opt.first);
+      }
+
+      for (const auto& parent_opt : parent_provider_option.options) {
+        if (child_provider_option_names.find(parent_opt.first) == child_provider_option_names.end()) {
+          child_provider_option_it->options.emplace_back(parent_opt);
+        }
+      }
+    }
+  }
+}
+
 void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
   for (size_t i = 0; i < input_names.size(); i++) {
@@ -622,13 +658,14 @@ Model::~Model() {
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
-                                           bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool cloned_from_parent) const {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
-  session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  if (!cloned_from_parent) {
+    session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  }
 
   if (config_session_options.intra_op_num_threads.has_value()) {
     session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
@@ -751,7 +788,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
+}
 
+void Model::AppendSessionProviders(const Config::SessionOptions& config_session_options,
+                                   OrtSessionOptions& session_options,
+                                   bool is_primary_session_options,
+                                   bool disable_graph_capture) {
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   *config_, disable_graph_capture);
@@ -767,14 +809,24 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
-      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      // Update config ProviderOptions for pipeline model with values from top-level options
+      InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
+                                   pipeline_model.session_options->provider_options);
+
+      // Clone the main OrtSessionOptions and then overlay any options explicitly set for this pipeline model
+      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone());
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, true);
+
+      AppendSessionProviders(*pipeline_model.session_options, *emplaced.first->second, false);
     }
   }
+
+  // Append providers to the main session options only after cloning it for pipeline components
+  AppendSessionProviders(config_->model.decoder.session_options, *session_options_, true);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
@@ -783,7 +835,7 @@ void Model::CreateSessionOptions() {
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   auto session_options = pipeline_session_options_.find(model_id);
-  // Use the pipeline model session options id config defined it.
+  // Use the pipeline model session options if config defined it.
   if (session_options != pipeline_session_options_.end())
     return session_options->second.get();
 
