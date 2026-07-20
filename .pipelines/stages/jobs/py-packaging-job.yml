@@ -173,7 +173,7 @@ jobs:
       script: |
         import sys
         import subprocess
-        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine', 'pybind11-stubgen'])
       workingDirectory: '$(Build.BinariesDirectory)'
     displayName: 'Install python modules'
 
