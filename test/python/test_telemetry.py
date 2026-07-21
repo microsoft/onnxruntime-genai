@@ -412,6 +412,20 @@ class TestDeviceId(unittest.TestCase):
         id2, _ = get_encrypted_device_id_and_status()
         self.assertEqual(id1, id2)
 
+    def test_file_store_uses_owner_only_creation_mode(self):
+        import telemetry.deviceid as deviceid
+
+        with patch.object(Path, "mkdir") as mock_mkdir:
+            deviceid._FileStore().store_id("test-device-id")
+
+        mock_mkdir.assert_called_once_with(mode=0o700, parents=True, exist_ok=True)
+
+    def test_permission_tightening_is_best_effort(self):
+        import telemetry.deviceid as deviceid
+
+        with patch.object(Path, "chmod", side_effect=OSError):
+            deviceid._chmod_best_effort(Path(self._tmpdir.name), 0o700)
+
 
 class TestSystemInfo(unittest.TestCase):
     """Test system information collection."""
