@@ -24,6 +24,8 @@ import numpy as np
 import onnxruntime_genai as og
 import psutil
 from metrics import BenchmarkRecord
+from telemetry_utils import get_telemetry as _get_telemetry
+from telemetry_utils import normalize_execution_provider, sanitize_model_identifier
 from tqdm import tqdm
 
 peak_cpu_memory = 0.0
@@ -40,7 +42,7 @@ except Exception:
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_gpu_memory
+    global peak_gpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         result = subprocess.run(
@@ -64,7 +66,7 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_cpu_memory
+    global peak_cpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
@@ -83,7 +85,7 @@ def get_prompt_by_length(prompt_length):
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
-    import importlib.metadata
+    import importlib.metadata  # noqa: PLC0415
 
     installed_packages_list = sorted(
         [
@@ -102,7 +104,7 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 
 def save_results(args, results, filename, print_memory_usage=False):
-    import pandas as pd
+    import pandas as pd  # noqa: PLC0415
 
     columns = [
         "Batch Size",
@@ -179,9 +181,9 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring
-    global peak_gpu_memory
-    global peak_cpu_memory
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
     # Reset the peak memory variables and the monitoring flag
     stop_monitoring = False
@@ -226,9 +228,24 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             config.append_provider(args.execution_provider)
     if args.verbose:
         print("Loading model... ")
+    model_load_start = time.time()
     model = og.Model(config)
+    model_load_time_ms = (time.time() - model_load_start) * 1000
     if args.verbose:
-        print("Model loaded")
+        print(f"Model loaded in {model_load_time_ms:.1f} ms")
+
+    # Emit model load telemetry
+    try:
+        telemetry = _get_telemetry()
+        telemetry.log_model_load(
+            model_name=sanitize_model_identifier(args.model_name),
+            execution_provider=normalize_execution_provider(args.execution_provider),
+            total_load_time_ms=model_load_time_ms,
+        )
+    except Exception:
+        # Model-load telemetry must never affect benchmark setup.
+        pass
+
     tokenizer = og.Tokenizer(model)
 
     # Get model type
@@ -247,7 +264,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
                 "Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'"
             )
     else:
-        if model_type.startswith("phi2") or model_type.startswith("phi3"):
+        if model_type.startswith(("phi2", "phi3")):
             args.chat_template = "<|user|>\n{input} <|end|>\n<|assistant|>"
         elif model_type.startswith("phi4"):
             args.chat_template = "<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>"
@@ -298,7 +315,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if override_max_length else {}),
+        **({"max_length": max_length} if override_max_length else {}),
         min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
@@ -465,6 +482,36 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
+
+    # Emit telemetry for this benchmark run
+    try:
+        telemetry = _get_telemetry()
+        telemetry.log_benchmark(
+            model_name=sanitize_model_identifier(args.model_name),
+            precision=args.precision,
+            backend="onnxruntime-genai",
+            device=normalize_execution_provider(args.execution_provider),
+            batch_size=batch_size,
+            prompt_length=prompt_length,
+            tokens_generated=generation_length,
+            tokenization_latency_ms=avg_tokenization_latency_ms,
+            tokenization_throughput=avg_tokenization_thrpt,
+            prompt_processing_latency_ms=avg_prompt_latency_ms,
+            prompt_processing_throughput=avg_per_token_prompt_thrpt,
+            token_generation_latency_ms=avg_token_gen_latency_ms,
+            token_generation_throughput=avg_token_gen_thrpt,
+            sampling_latency_ms=avg_sampling_latency_ms,
+            sampling_throughput=avg_sampling_thrpt,
+            wall_clock_time_ms=avg_wall_clock_time * 1000,
+            wall_clock_throughput=avg_wall_clock_thrpt,
+            time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
+            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=peak_cpu_memory * 1024,
+        )
+    except Exception:
+        # Benchmark telemetry must never affect benchmark results.
+        pass
+
     return metrics
 
 
@@ -500,10 +547,10 @@ def main(args):
     all_csv_metrics = []
 
     for batch_size in args.batch_sizes:
-        for l, prompt_length in enumerate(args.prompt_lengths):
+        for prompt_index, prompt_length in enumerate(args.prompt_lengths):
             for g, gen_length in enumerate(args.generation_lengths):
                 if args.max_lengths:
-                    m = l * len(args.generation_lengths) + g
+                    m = prompt_index * len(args.generation_lengths) + g
                     max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
                 else:
                     max_length = prompt_length + gen_length

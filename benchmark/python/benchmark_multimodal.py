@@ -23,6 +23,8 @@ import time
 import onnxruntime_genai as og
 import pandas as pd
 import psutil
+from telemetry_utils import get_telemetry as _get_telemetry
+from telemetry_utils import sanitize_model_identifier
 from tqdm import tqdm
 
 peak_cpu_memory = 0.0
@@ -39,7 +41,7 @@ except Exception:
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_gpu_memory
+    global peak_gpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         result = subprocess.run(
@@ -63,7 +65,7 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_cpu_memory
+    global peak_cpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
@@ -99,9 +101,9 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring
-    global peak_gpu_memory
-    global peak_cpu_memory
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
     # Reset the peak memory variables and the monitoring flag
     stop_monitoring = False
@@ -304,6 +306,31 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
+
+    # Emit telemetry for this benchmark run
+    try:
+        telemetry = _get_telemetry()
+        telemetry.log_benchmark(
+            model_name=sanitize_model_identifier(args.input_folder),
+            backend="onnxruntime-genai",
+            device="default",
+            prompt_length=prompt_length,
+            tokens_generated=generation_length,
+            prompt_processing_latency_ms=avg_prompt_latency_ms,
+            token_generation_latency_ms=avg_token_gen_latency_ms,
+            token_generation_throughput=avg_token_gen_thrpt,
+            sampling_latency_ms=avg_sampling_latency_ms,
+            sampling_throughput=avg_sampling_thrpt,
+            wall_clock_time_ms=avg_wall_clock_time * 1000,
+            wall_clock_throughput=avg_wall_clock_thrpt,
+            time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
+            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=peak_cpu_memory * 1024,
+        )
+    except Exception:
+        # Benchmark telemetry must never affect benchmark results.
+        pass
+
     return metrics
 
 
@@ -314,9 +341,24 @@ def main(args):
     model_path = args.input_folder
     if args.verbose:
         print("Loading model... ")
+    model_load_start = time.time()
     model = og.Model(f"{model_path}")
+    model_load_time_ms = (time.time() - model_load_start) * 1000
     if args.verbose:
-        print("Model loaded, loading processor...")
+        print(f"Model loaded in {model_load_time_ms:.1f} ms, loading processor...")
+
+    # Emit model load telemetry
+    try:
+        telemetry = _get_telemetry()
+        telemetry.log_model_load(
+            model_name=sanitize_model_identifier(model_path),
+            execution_provider="default",
+            total_load_time_ms=model_load_time_ms,
+        )
+    except Exception:
+        # Model-load telemetry must never affect benchmark setup.
+        pass
+
     processor = model.create_multimodal_processor()
     if args.verbose:
         print("Processor loaded, loading image...")
