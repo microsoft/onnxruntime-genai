@@ -15,7 +15,6 @@ Provides high-level telemetry for:
 
 import base64
 import os
-import re
 import threading
 import time
 import traceback
@@ -31,6 +30,11 @@ from .offline_store import OfflineEventStore
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
 
+try:
+    from ..telemetry_path_utils import scrub_string_for_telemetry
+except ImportError:
+    from telemetry_path_utils import scrub_string_for_telemetry
+
 # Event names
 HEARTBEAT_EVENT = "GenAIHeartbeat"
 MODEL_BUILD_EVENT = "GenAIModelBuild"
@@ -42,14 +46,6 @@ ERROR_EVENT = "GenAIError"
 
 # CI environment variables that auto-disable telemetry
 _CI_ENV_VARS = {"CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL", "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID"}
-_PATH_PATTERN = re.compile(
-    r"(?:[A-Za-z]:[\\/])"
-    r"|(?:\\\\)"
-    r"|(?:~[\\/])"
-    r"|(?:(?<![:/])/(?:[^/\r\n]+/))"
-    r"|(?:(?<![\\/\w])(?:[A-Za-z0-9_.-]+\\)[^\\/\r\n]+\\)",
-    re.IGNORECASE,
-)
 
 
 def _is_ci_environment() -> bool:
@@ -108,14 +104,7 @@ def _get_app_version() -> str:
 
 
 def _redact_paths(text: str) -> str:
-    """Redact path-bearing tails without leaking space-containing user names."""
-    redacted = []
-    for line in text.splitlines(keepends=True):
-        body = line.rstrip("\r\n")
-        ending = line[len(body) :]
-        match = _PATH_PATTERN.search(body)
-        redacted.append(body[: match.start()] + "<path>" + ending if match else line)
-    return "".join(redacted)
+    return scrub_string_for_telemetry(text)
 
 
 def _format_exception_message(ex: BaseException, tb=None) -> str:
@@ -132,19 +121,10 @@ def _format_exception_message(ex: BaseException, tb=None) -> str:
     for chunk in formatted:
         for raw_line in chunk.splitlines():
             line_trunc = raw_line.strip()
-            # Trim file paths to a relative path within the package.
-            if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
+            if line_trunc.startswith('File "'):
                 path_end = line_trunc.find('"', len('File "'))
-                path = line_trunc[len('File "') : path_end]
-                basename = path.replace("\\", "/").rsplit("/", 1)[-1]
-                line_trunc = f'File "{basename}"{line_trunc[path_end + 1 :]}'
-            elif line_trunc.startswith('File "'):
-                path_end = line_trunc.find('"', len('File "'))
-                path = line_trunc[len('File "') : path_end]
-                basename = path.replace("\\", "/").rsplit("/", 1)[-1]
-                line_trunc = f'File "{basename}"{line_trunc[path_end + 1 :]}'
-            # Redact any absolute path that remains (source lines, message, and
-            # the tail of File lines).
+                if path_end != -1:
+                    line_trunc = f'File "[path]"{line_trunc[path_end + 1 :]}'
             line_trunc = _redact_paths(line_trunc)
             lines.append(line_trunc)
     return "\n".join(lines)

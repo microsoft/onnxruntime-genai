@@ -37,13 +37,13 @@ builder_module = _load_builder_entrypoint_module()
 @pytest.mark.parametrize(
     "value, expected",
     [
-        (r"C:\Users\alice\models\model.onnx", "model.onnx"),
-        (r"\\server\share\models\model.onnx", "model.onnx"),
-        ("/home/alice/models/model.onnx", "model.onnx"),
-        ("~/private/model.onnx", "model.onnx"),
-        (r"..\private\model.onnx", "model.onnx"),
-        ("../private/model.onnx", "model.onnx"),
-        ("/", "<path>"),
+        (r"C:\Users\alice\models\model.onnx", "[path]"),
+        (r"\\server\share\models\model.onnx", "[path]"),
+        ("/home/alice/models/model.onnx", "[path]"),
+        ("~/private/model.onnx", "[path]"),
+        (r"..\private\model.onnx", "[path]"),
+        ("../private/model.onnx", "[path]"),
+        ("/", "[path]"),
         ("invalid\0identifier", "invalid\0identifier"),
         ("microsoft/phi-3-mini", "microsoft/phi-3-mini"),
     ],
@@ -118,5 +118,5 @@ def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatc
         fallback_model_name=r"C:\Users\alice\models\model.onnx",
     )
 
-    assert captured["model_name"] == "model.onnx"
+    assert captured["model_name"] == "[path]"
     assert captured["execution_provider"] == "trt-rtx"
