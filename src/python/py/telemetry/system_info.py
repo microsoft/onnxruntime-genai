@@ -61,7 +61,7 @@ def _get_cpu_model() -> str:
     try:
         if platform.system() == "Darwin":
             result = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5
+                ["sysctl", "-n", "machdep.cpu.brand_string"], check=False, capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -76,6 +76,7 @@ def _get_cpu_model() -> str:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
                 return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
     except Exception:
+        # Fall back to Python's portable processor description below.
         pass
     return platform.processor() or ""
 
@@ -88,7 +89,8 @@ def _get_total_memory_mb() -> int:
             import ctypes  # noqa: PLC0415
 
             class _MemoryStatusEx(ctypes.Structure):
-                _fields_ = [
+                # ctypes requires this mutable class-level field descriptor.
+                _fields_ = [  # noqa: RUF012
                     ("dwLength", ctypes.c_ulong),
                     ("dwMemoryLoad", ctypes.c_ulong),
                     ("ullTotalPhys", ctypes.c_ulonglong),
@@ -110,10 +112,13 @@ def _get_total_memory_mb() -> int:
                     if line.startswith("MemTotal:"):
                         return int(line.split()[1]) // 1024
         elif system == "Darwin":
-            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"], check=False, capture_output=True, text=True, timeout=5
+            )
             if result.returncode == 0:
                 return int(result.stdout.strip()) // (1024 * 1024)
     except Exception:
+        # Unknown memory is represented as zero below.
         pass
     return 0
 
@@ -134,6 +139,7 @@ def _get_gpu_info() -> dict[str, Any]:
                 "--query-gpu=name,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ],
+            check=False,
             capture_output=True,
             text=True,
             timeout=10,
@@ -147,6 +153,7 @@ def _get_gpu_info() -> dict[str, Any]:
                 info["gpu_memory_mb"] = int(float(parts[2]))
                 info["gpu_count"] = len(lines)
     except Exception:
+        # A Windows WMI probe is attempted below when NVIDIA discovery is unavailable.
         pass
 
     # Try DirectML / Windows WMI if nvidia-smi failed
@@ -154,6 +161,7 @@ def _get_gpu_info() -> dict[str, Any]:
         try:
             result = subprocess.run(
                 ["wmic", "path", "win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:csv"],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -169,6 +177,7 @@ def _get_gpu_info() -> dict[str, Any]:
                         info["gpu_name"] = parts[3]
                         info["gpu_count"] = len(data_lines)
         except Exception:
+            # GPU metadata is optional; return the fields discovered so far.
             pass
 
     return info
@@ -185,6 +194,7 @@ def _get_device_manufacturer() -> str:
         elif platform.system() == "Windows":
             result = subprocess.run(
                 ["wmic", "computersystem", "get", "manufacturer", "/format:value"],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -194,6 +204,7 @@ def _get_device_manufacturer() -> str:
                     if line.startswith("Manufacturer="):
                         return line.split("=", 1)[1].strip()
     except Exception:
+        # Device manufacturer metadata is optional.
         pass
     return ""
 
@@ -202,7 +213,9 @@ def _get_device_model() -> str:
     """Get device model."""
     try:
         if platform.system() == "Darwin":
-            result = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.model"], check=False, capture_output=True, text=True, timeout=5
+            )
             if result.returncode == 0:
                 return result.stdout.strip()
         elif platform.system() == "Linux":
@@ -211,6 +224,7 @@ def _get_device_model() -> str:
         elif platform.system() == "Windows":
             result = subprocess.run(
                 ["wmic", "computersystem", "get", "model", "/format:value"],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -220,6 +234,7 @@ def _get_device_model() -> str:
                     if line.startswith("Model="):
                         return line.split("=", 1)[1].strip()
     except Exception:
+        # Device model metadata is optional.
         pass
     return ""
 
@@ -231,6 +246,7 @@ def _get_ort_version() -> str:
 
         return onnxruntime.__version__
     except ImportError:
+        # ONNX Runtime is optional for source-only telemetry consumers.
         pass
     return ""
 
@@ -245,5 +261,6 @@ def get_execution_provider_info() -> dict[str, Any]:
 
         info["available_providers"] = onnxruntime.get_available_providers()
     except ImportError:
+        # No providers are reported when ONNX Runtime is not installed.
         pass
     return info

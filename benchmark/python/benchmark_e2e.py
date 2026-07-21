@@ -257,6 +257,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             total_load_time_ms=model_load_time_ms,
         )
     except Exception:
+        # Model-load telemetry must never affect benchmark setup.
         pass
 
     tokenizer = og.Tokenizer(model)
@@ -533,6 +534,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             peak_memory_cpu_mb=peak_cpu_memory * 1024,
         )
     except Exception:
+        # Benchmark telemetry must never affect benchmark results.
         pass
 
     return metrics

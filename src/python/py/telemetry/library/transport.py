@@ -14,8 +14,10 @@ import urllib.error
 import urllib.request
 import zlib
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import suppress
 from io import BytesIO
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 from .event_source import event_source
 from .options import CompressionType
@@ -28,7 +30,7 @@ class ITransport(ABC):
     """Abstract base class for transports."""
 
     @abstractmethod
-    def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, Optional[int]]:
+    def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, int | None]:
         """Send a payload. Returns (success, status_code)."""
 
     @abstractmethod
@@ -75,15 +77,13 @@ class HttpJsonPostTransport(ITransport):
 
         return self.callback_manager.register(callback, include_failures)
 
-    def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, Optional[int]]:
+    def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, int | None]:
         """Send payload via HTTP POST. Returns (success, status_code)."""
         payload_size_bytes = len(payload)
         try:
             compressed_payload = self._compress(payload)
             headers = {**self.headers, "Content-Length": str(len(compressed_payload))}
-            request = urllib.request.Request(
-                url=self.endpoint, data=compressed_payload, headers=headers, method="POST"
-            )
+            request = urllib.request.Request(url=self.endpoint, data=compressed_payload, headers=headers, method="POST")
 
             success, status_code = self._do_request(request, timeout_sec)
 
@@ -101,7 +101,7 @@ class HttpJsonPostTransport(ITransport):
             return False, None
 
     @staticmethod
-    def _do_request(request: "urllib.request.Request", timeout_sec: float) -> tuple[bool, Optional[int]]:
+    def _do_request(request: "urllib.request.Request", timeout_sec: float) -> tuple[bool, int | None]:
         """Perform the request, retrying once on a transient connection error."""
         for attempt in range(2):
             try:
@@ -111,10 +111,9 @@ class HttpJsonPostTransport(ITransport):
                     return (200 <= status < 300, status)
             except urllib.error.HTTPError as http_err:
                 # Server responded with a non-2xx status (4xx/5xx): not retried here.
-                try:
+                # The HTTP status remains authoritative if the optional body cannot be consumed.
+                with suppress(Exception):
                     http_err.read()
-                except Exception:
-                    pass
                 return (False, http_err.code)
             except (urllib.error.URLError, TimeoutError, OSError):
                 # Connection-level failure: retry once, then give up.
@@ -124,7 +123,7 @@ class HttpJsonPostTransport(ITransport):
         return (False, None)
 
     def _notify(
-        self, success: bool, status_code: Optional[int], payload_size_bytes: int, item_count: int, payload: bytes
+        self, success: bool, status_code: int | None, payload_size_bytes: int, item_count: int, payload: bytes
     ) -> None:
         if not self.callback_manager:
             return
@@ -152,7 +151,7 @@ class HttpJsonPostTransport(ITransport):
         return data
 
     @staticmethod
-    def is_retryable(status_code: Optional[int]) -> bool:
+    def is_retryable(status_code: int | None) -> bool:
         """Whether a response status indicates the request should be retried."""
         if status_code is None:
             return True  # Network errors are retryable

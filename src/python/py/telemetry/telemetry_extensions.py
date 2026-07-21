@@ -8,9 +8,10 @@
 import functools
 import inspect
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from types import TracebackType
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, TypeVar
 
 from .telemetry import (
     ACTION_EVENT,
@@ -43,7 +44,7 @@ def _scrub_metadata_value(value):
     return value
 
 
-def _scrub_metadata(metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _scrub_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return _scrub_metadata_value(metadata or {})
 
 
@@ -52,7 +53,7 @@ def log_action(
     action_name: str,
     duration_ms: float,
     success: bool,
-    metadata: Optional[dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log a telemetry action event."""
     telemetry = _get_telemetry()
@@ -71,7 +72,7 @@ def log_action(
 def log_error(
     exception_type: str,
     exception_message: str,
-    metadata: Optional[dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log a telemetry error event."""
     telemetry = _get_telemetry()
@@ -133,8 +134,8 @@ class ActionContext:
     def __init__(
         self,
         action_name: str,
-        invoked_from: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        invoked_from: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.action_name = action_name
         try:
@@ -149,7 +150,7 @@ class ActionContext:
             else "disabled"
         )
         self.metadata = metadata or {}
-        self._start_time: Optional[float] = None
+        self._start_time: float | None = None
 
     def add_metadata(self, key: str, value: Any) -> None:
         self.metadata[key] = value
@@ -160,9 +161,9 @@ class ActionContext:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> bool:
         if not self._telemetry_enabled:
             return False

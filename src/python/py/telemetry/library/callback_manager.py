@@ -6,8 +6,9 @@
 """Callback manager for payload transmission events."""
 
 import threading
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from .event_source import event_source
 
@@ -19,7 +20,7 @@ class PayloadTransmittedCallbackArgs:
     succeeded: bool
     """Whether the transmission succeeded."""
 
-    status_code: Optional[int]
+    status_code: int | None
     """HTTP status code, if available."""
 
     payload_size_bytes: int
@@ -28,7 +29,7 @@ class PayloadTransmittedCallbackArgs:
     item_count: int
     """Number of items in the payload."""
 
-    payload_bytes: Optional[bytes] = None
+    payload_bytes: bytes | None = None
     """Raw payload bytes (uncompressed), if available."""
 
 
@@ -66,12 +67,9 @@ class CallbackManager:
 
         def unregister():
             """Unregister this callback."""
-            with self._lock:
-                try:
-                    self._callbacks.remove(entry)
-                except ValueError:
-                    # The callback was already removed.
-                    pass
+            # The callback may already have been removed by another unregister call.
+            with self._lock, suppress(ValueError):
+                self._callbacks.remove(entry)
 
         return unregister
 

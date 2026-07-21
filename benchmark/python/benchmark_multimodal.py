@@ -328,6 +328,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
             peak_memory_cpu_mb=peak_cpu_memory * 1024,
         )
     except Exception:
+        # Benchmark telemetry must never affect benchmark results.
         pass
 
     return metrics
@@ -355,6 +356,7 @@ def main(args):
             total_load_time_ms=model_load_time_ms,
         )
     except Exception:
+        # Model-load telemetry must never affect benchmark setup.
         pass
 
     processor = model.create_multimodal_processor()

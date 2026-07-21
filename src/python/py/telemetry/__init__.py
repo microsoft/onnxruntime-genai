@@ -36,8 +36,8 @@ from .telemetry import GenAITelemetry, disable_telemetry, enable_telemetry
 from .telemetry_extensions import ActionContext, action, log_action, log_error
 
 __all__ = [
-    "GenAITelemetry",
     "ActionContext",
+    "GenAITelemetry",
     "action",
     "disable_telemetry",
     "enable_telemetry",

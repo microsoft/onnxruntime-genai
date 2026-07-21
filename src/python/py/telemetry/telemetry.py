@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -68,6 +69,7 @@ def _get_app_version() -> str:
         if v:
             return v
     except Exception:
+        # Installed-package metadata and the source-tree version file are tried below.
         pass
 
     # 2. Resolve the installed distribution that provides the Python module.
@@ -84,6 +86,7 @@ def _get_app_version() -> str:
                 continue
         return pkg_version("onnxruntime-genai")
     except Exception:
+        # Source-tree version discovery remains available when package metadata is unavailable.
         pass
 
     # 3. Fall back to VERSION_INFO file at repository root
@@ -98,6 +101,7 @@ def _get_app_version() -> str:
                 return candidate.read_text(encoding="utf-8").strip()
             d = d.parent
     except Exception:
+        # Version discovery is best-effort and reports "unknown" below.
         pass
 
     return "unknown"
@@ -163,7 +167,7 @@ class GenAITelemetry:
             self._app_version = "unknown"
             self._app_instance_id = uuid.uuid4().hex
             self._app_name = "onnxruntime-genai"
-            self._heartbeat_thread: Optional[threading.Thread] = None
+            self._heartbeat_thread: threading.Thread | None = None
 
             # CI / automated-testing: record and send nothing at all — not even
             # the device-id heartbeat — so pipelines don't pollute usage data.
@@ -232,7 +236,7 @@ class GenAITelemetry:
                 self._enabled = False
                 self._initialized = False
 
-    def _emit(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
+    def _emit(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
         if not self._enabled or self._store is None:
             return
@@ -255,6 +259,7 @@ class GenAITelemetry:
             if self._uploader is not None:
                 self._uploader.request_drain()
         except Exception:
+            # Telemetry persistence must never affect the host operation.
             pass
 
     @property
@@ -319,16 +324,16 @@ class GenAITelemetry:
                 )
                 transport.send(payload, timeout_sec=2.0, item_count=1)
         except Exception:
+            # Heartbeat collection and delivery are best-effort.
             pass
 
-    def log(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
+    def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
         if not self._enabled or self._store is None:
             return
-        try:
+        # Generic telemetry must never affect the host operation.
+        with suppress(Exception):
             self._emit(event_name, attributes)
-        except Exception:
-            pass
 
     def log_model_build(
         self,
@@ -352,7 +357,7 @@ class GenAITelemetry:
         has_custom_ops: bool = False,
         source_format: str = "",
         has_adapter: bool = False,
-        extra_options: Optional[dict[str, Any]] = None,
+        extra_options: dict[str, Any] | None = None,
     ) -> None:
         """Log a ModelBuilder telemetry event."""
         if not self._enabled or self._store is None:
@@ -384,6 +389,7 @@ class GenAITelemetry:
                 attributes["extra_options"] = extra_options
             self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
+            # Model-build telemetry must never affect model conversion.
             pass
 
     def log_benchmark(
@@ -437,6 +443,7 @@ class GenAITelemetry:
             }
             self._emit(BENCHMARK_EVENT, attributes)
         except Exception:
+            # Benchmark telemetry must never affect benchmark execution.
             pass
 
     def log_model_load(
@@ -462,6 +469,7 @@ class GenAITelemetry:
             }
             self._emit(MODEL_LOAD_EVENT, attributes)
         except Exception:
+            # Model-load telemetry must never affect model loading.
             pass
 
     def log_inference(
@@ -493,6 +501,7 @@ class GenAITelemetry:
             }
             self._emit(INFERENCE_EVENT, attributes)
         except Exception:
+            # Inference telemetry must never affect generation.
             pass
 
     def log_error(
@@ -516,6 +525,7 @@ class GenAITelemetry:
             }
             self._emit(ERROR_EVENT, attributes)
         except Exception:
+            # Error telemetry must never mask the host error.
             pass
 
     def disable_telemetry(self) -> None:
@@ -610,6 +620,8 @@ class GenAITelemetry:
         if self._store is not None and uploader_stopped and heartbeat_stopped:
             self._store.close()
             self._store = None
+        if self._heartbeat_thread is None and self._uploader is None and self._store is None:
+            self._initialized = False
 
 
 # Module-level convenience functions
@@ -619,7 +631,7 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable detailed GenAI telemetry; the opt-out heartbeat remains enabled outside CI."""
+    """Disable detailed GenAI telemetry at runtime without emitting an opt-out heartbeat."""
     _get_telemetry().disable_telemetry()
 
 
