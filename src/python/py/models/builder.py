@@ -11,9 +11,7 @@ Run the model builder to create the desired ONNX model.
 """
 
 import argparse
-import ntpath
 import os
-import posixpath
 import sys
 import textwrap
 import time
@@ -59,6 +57,19 @@ from builders import (
 from transformers import (
     AutoConfig,
 )
+
+try:
+    from onnxruntime_genai.telemetry_path_utils import sanitize_model_identifier
+except ImportError:
+    telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    path_added = telemetry_root not in sys.path
+    if path_added:
+        sys.path.insert(0, telemetry_root)
+    try:
+        from telemetry_path_utils import sanitize_model_identifier
+    finally:
+        if path_added:
+            sys.path.remove(telemetry_root)
 
 
 def apply_deprecated_extra_option_aliases(kv_pairs):
@@ -226,17 +237,7 @@ def _sanitize_path_value(value):
     Hugging Face repo IDs (e.g. "microsoft/phi-3-mini") are returned unchanged because
     they are neither absolute nor existing local paths.
     """
-    if not isinstance(value, str) or not value:
-        return value
-    drive, _ = ntpath.splitdrive(value)
-    is_windows_path = bool(drive) or ntpath.isabs(value)
-    is_posix_path = posixpath.isabs(value)
-    is_explicit_relative_path = value.startswith(("./", "../", ".\\", "..\\", "~/", "~\\"))
-    if is_windows_path or is_posix_path or is_explicit_relative_path or os.path.exists(value):
-        path_module = ntpath if is_windows_path or "\\" in value else posixpath
-        basename = path_module.basename(path_module.normpath(value))
-        return basename if basename not in {"", ".", ".."} else "<path>"
-    return value
+    return sanitize_model_identifier(value)
 
 
 def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, str]:
