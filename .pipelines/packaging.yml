@@ -1,5 +1,5 @@
 # =============================================================================
-# nuget-publishing.yml — Unified ONNX Runtime GenAI packaging pipeline.
+# packaging.yml — Unified ONNX Runtime GenAI packaging pipeline.
 #
 # Single entry point that builds the core once per (EP, os, arch) and layers the
 # SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
