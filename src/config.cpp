@@ -556,6 +556,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else if (name == "targets_length") {
       v_.targets_length = JSON::Get<std::string_view>(value);
+    } else if (name == "token_type_ids") {
+      v_.token_type_ids = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
