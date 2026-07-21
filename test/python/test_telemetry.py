@@ -82,6 +82,16 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         dir_patcher.start()
         self._patchers.append(dir_patcher)
 
+        system_info_patcher = patch("telemetry.telemetry.get_system_info", return_value={})
+        system_info_patcher.start()
+        self._patchers.append(system_info_patcher)
+        provider_info_patcher = patch(
+            "telemetry.telemetry.get_execution_provider_info",
+            return_value={"available_providers": []},
+        )
+        provider_info_patcher.start()
+        self._patchers.append(provider_info_patcher)
+
         deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
         deviceid_platform_patcher = patch("telemetry.deviceid.platform.system", return_value="Linux")
         deviceid_platform_patcher.start()
@@ -406,10 +416,18 @@ class TestDeviceId(unittest.TestCase):
 class TestSystemInfo(unittest.TestCase):
     """Test system information collection."""
 
+    def setUp(self):
+        from telemetry.system_info import get_system_info
+
+        get_system_info.cache_clear()
+        self.addCleanup(get_system_info.cache_clear)
+
     def test_get_system_info(self):
         from telemetry.system_info import get_system_info
 
-        info = get_system_info()
+        failed_probe = MagicMock(returncode=1, stdout="")
+        with patch("telemetry.system_info.subprocess.run", return_value=failed_probe) as mock_run:
+            info = get_system_info()
 
         # Should have all expected keys
         expected_keys = [
@@ -432,6 +450,7 @@ class TestSystemInfo(unittest.TestCase):
 
         # Python version should match
         self.assertTrue(info["python_version"].startswith(str(sys.version_info.major)))
+        mock_run.assert_called()
 
     def test_nvidia_gpu_count_uses_output_rows(self):
         from telemetry.system_info import _get_gpu_info
@@ -469,9 +488,13 @@ class TestSystemInfo(unittest.TestCase):
     def test_system_info_cached(self):
         from telemetry.system_info import get_system_info
 
-        info1 = get_system_info()
-        info2 = get_system_info()
+        failed_probe = MagicMock(returncode=1, stdout="")
+        with patch("telemetry.system_info.subprocess.run", return_value=failed_probe) as mock_run:
+            info1 = get_system_info()
+            probe_count = mock_run.call_count
+            info2 = get_system_info()
         self.assertIs(info1, info2)
+        self.assertEqual(mock_run.call_count, probe_count)
 
     def test_execution_provider_info(self):
         from telemetry.system_info import get_execution_provider_info
