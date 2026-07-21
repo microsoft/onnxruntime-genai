@@ -503,6 +503,24 @@ class TestPathRedaction(unittest.TestCase):
         attributes = telemetry.log.call_args.args[1]
         self.assertEqual(attributes["exception_message"], "missing [path]")
 
+    def test_action_and_error_metadata_are_recursively_scrubbed(self):
+        from telemetry.telemetry_extensions import log_action, log_error
+
+        telemetry = MagicMock()
+        metadata = {
+            "path": r"C:\Users\alice\models\model.onnx",
+            "nested": {"paths": ["/home/alice/model.onnx"]},
+        }
+        with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry):
+            log_action("test", "work", 1.0, True, metadata)
+            action_attributes = telemetry.log.call_args.args[1]
+            log_error("RuntimeError", "boom", metadata)
+            error_attributes = telemetry.log.call_args.args[1]
+
+        for attributes in (action_attributes, error_attributes):
+            self.assertEqual(attributes["path"], "[path]")
+            self.assertEqual(attributes["nested"]["paths"], ["[path]"])
+
 
 class TestDeviceId(unittest.TestCase):
     """Test device ID generation."""

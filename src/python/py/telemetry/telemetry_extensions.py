@@ -28,6 +28,22 @@ def _get_telemetry() -> GenAITelemetry:
     return GenAITelemetry()
 
 
+def _scrub_metadata_value(value):
+    if isinstance(value, str):
+        return _redact_paths(value)
+    if isinstance(value, dict):
+        return {key: _scrub_metadata_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_scrub_metadata_value(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_metadata_value(child) for child in value)
+    return value
+
+
+def _scrub_metadata(metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+    return {key: _scrub_metadata_value(value) for key, value in (metadata or {}).items()}
+
+
 def log_action(
     invoked_from: str,
     action_name: str,
@@ -37,7 +53,7 @@ def log_action(
 ) -> None:
     """Log a telemetry action event."""
     telemetry = _get_telemetry()
-    attributes = dict(metadata or {})
+    attributes = _scrub_metadata(metadata)
     attributes.update(
         {
             "invoked_from": invoked_from,
@@ -56,7 +72,7 @@ def log_error(
 ) -> None:
     """Log a telemetry error event."""
     telemetry = _get_telemetry()
-    attributes = dict(metadata or {})
+    attributes = _scrub_metadata(metadata)
     attributes.update(
         {
             "exception_type": exception_type,
