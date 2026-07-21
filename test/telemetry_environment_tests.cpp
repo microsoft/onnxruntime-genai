@@ -3,7 +3,7 @@
 
 #include "telemetry/telemetry_environment.h"
 
-#include <cstdlib>
+#include <stdlib.h>
 #include <string>
 
 #include <gtest/gtest.h>
