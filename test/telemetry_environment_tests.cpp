@@ -30,15 +30,28 @@ class ScopedEnvVar {
  public:
   explicit ScopedEnvVar(const char* name) : name_{name} {
 #ifdef _WIN32
-    ::SetLastError(ERROR_SUCCESS);
-    const DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
-    if (required_size == 0) {
-      had_value_ = ::GetLastError() != ERROR_ENVVAR_NOT_FOUND;
-    } else {
+    for (;;) {
+      ::SetLastError(ERROR_SUCCESS);
+      const DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
+      if (required_size == 0) {
+        had_value_ = ::GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+        return;
+      }
+
       saved_.resize(required_size);
+      ::SetLastError(ERROR_SUCCESS);
       const DWORD written = ::GetEnvironmentVariableA(name, saved_.data(), required_size);
-      had_value_ = written < required_size;
-      saved_.resize(had_value_ ? written : 0);
+      if (written == 0) {
+        had_value_ = ::GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+        saved_.clear();
+        return;
+      }
+      if (written < required_size) {
+        had_value_ = true;
+        saved_.resize(written);
+        return;
+      }
+      // The value grew between calls; retry with its new required size.
     }
 #else
     const char* value = std::getenv(name);

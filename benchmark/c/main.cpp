@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <random>
 #include <iostream>
 #include <numeric>
@@ -331,11 +330,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 }  // namespace
 
 int main(int argc, char** argv) {
-#if defined(_WIN32)
-  _putenv_s("ORT_RUNNING_UNIT_TESTS", "1");
-#else
-  setenv("ORT_RUNNING_UNIT_TESTS", "1", 1);
-#endif
+  Oga::SetTelemetryEnabled(false);
   OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);
