@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-"""Cross-platform persistent device ID with SHA-256 encryption."""
+"""Cross-platform persistent device ID with SHA-256 hashing."""
 
 import functools
 import hashlib
