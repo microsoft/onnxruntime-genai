@@ -62,7 +62,7 @@ if(ORT_HOME)
 
   # Make sure the path provided is absolute, as some tools don't react well to relative paths.
   get_filename_component(ORT_HOME ${ORT_HOME} ABSOLUTE)
-  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absloute]")
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absolute]")
 
   # The Apple packaging pipeline extracts Microsoft.ML.OnnxRuntime from Lotus
   # and passes the NuGet package root directly. Support that layout so macOS

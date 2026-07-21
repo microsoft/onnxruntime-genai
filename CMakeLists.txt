@@ -139,14 +139,14 @@ endif()
 find_package(Threads REQUIRED)
 
 # GenAI normally uses an OBJECT library so white-box tests (e.g. reinit_tests) can link its internal
-# symbols while consumers link only the shipped SHARED library. Xcode framework builds are the
-# exception: Xcode's link phase references the OBJECT target's per-architecture .o paths before they
-# exist. Framework builds disable tests, so compile the sources directly into the framework target.
-set(ORTGENAI_XCODE_FRAMEWORK OFF)
-if(CMAKE_GENERATOR STREQUAL "Xcode" AND BUILD_APPLE_FRAMEWORK)
-  set(ORTGENAI_XCODE_FRAMEWORK ON)
+# symbols while consumers link only the shipped SHARED library. Xcode iOS and framework builds are
+# the exception: Xcode's link phase references the OBJECT target's per-architecture .o paths before
+# they exist. These builds disable tests, so compile the sources directly into the shared target.
+set(ORTGENAI_XCODE_DIRECT_SOURCES OFF)
+if(CMAKE_GENERATOR STREQUAL "Xcode" AND (BUILD_APPLE_FRAMEWORK OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+  set(ORTGENAI_XCODE_DIRECT_SOURCES ON)
   if(ENABLE_TESTS)
-    message(FATAL_ERROR "Xcode Apple framework builds require ENABLE_TESTS=OFF.")
+    message(FATAL_ERROR "Xcode iOS and Apple framework builds require ENABLE_TESTS=OFF.")
   endif()
   set(ORTGENAI_COMPILE_TARGET onnxruntime-genai)
   set(ORTGENAI_USAGE_SCOPE PRIVATE)
@@ -185,7 +185,7 @@ endif()
 # Group the genai library targets under one Visual Studio solution folder so the object library and
 # the shared library it produces appear together rather than as loose entries at the solution root.
 # Cosmetic only (IDE generators); no effect on the build.
-if(ORTGENAI_XCODE_FRAMEWORK)
+if(ORTGENAI_XCODE_DIRECT_SOURCES)
   set_target_properties(onnxruntime-genai PROPERTIES FOLDER "GenAI")
 else()
   set_target_properties(onnxruntime-genai-obj onnxruntime-genai PROPERTIES FOLDER "GenAI")
@@ -319,7 +319,6 @@ if(USE_DML)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
-  set(NUGET_CONFIG ${PROJECT_SOURCE_DIR}/nuget.config)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
 
   add_custom_command(
@@ -327,8 +326,7 @@ if(USE_DML)
     ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
     DEPENDS
     ${PACKAGES_CONFIG}
-    ${NUGET_CONFIG}
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore ${PACKAGES_CONFIG} -PackagesDirectory ${PACKAGES_DIR} -ConfigFile ${NUGET_CONFIG}
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore ${PACKAGES_CONFIG} -PackagesDirectory ${PACKAGES_DIR}
     VERBATIM
   )
 

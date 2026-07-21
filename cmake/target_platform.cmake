@@ -1,4 +1,4 @@
-# Normalize the target platform to x64 or arm64. Additional architectures can be added as needed.
+# Normalize the target platform to x64, arm64, or powerpc. Additional architectures can be added as needed.
 #
 # This logic is intentionally kept in a small standalone module (rather than inline in
 # global_variables.cmake) so that standalone SDK projects (e.g. src/python, src/java) built
