@@ -61,8 +61,7 @@ def _get_cpu_model() -> str:
     try:
         if platform.system() == "Darwin":
             result = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True, text=True, timeout=5
+                ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -73,10 +72,8 @@ def _get_cpu_model() -> str:
                         return line.split(":", 1)[1].strip()
         elif platform.system() == "Windows":
             import winreg
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
-            ) as key:
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
                 return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
     except Exception:
         pass
@@ -113,10 +110,7 @@ def _get_total_memory_mb() -> int:
                     if line.startswith("MemTotal:"):
                         return int(line.split()[1]) // 1024
         elif system == "Darwin":
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 return int(result.stdout.strip()) // (1024 * 1024)
     except Exception:
@@ -140,7 +134,9 @@ def _get_gpu_info() -> dict[str, Any]:
                 "--query-gpu=name,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
             lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -158,17 +154,20 @@ def _get_gpu_info() -> dict[str, Any]:
         try:
             result = subprocess.run(
                 ["wmic", "path", "win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:csv"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
-                lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+                lines = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
                 if len(lines) > 1:
-                    parts = lines[1].split(",")
+                    data_lines = lines[1:]
+                    parts = data_lines[0].split(",")
                     if len(parts) >= 4:
                         info["gpu_memory_mb"] = int(parts[1]) // (1024 * 1024) if parts[1].isdigit() else 0
                         info["gpu_driver_version"] = parts[2]
                         info["gpu_name"] = parts[3]
-                        info["gpu_count"] = 1
+                        info["gpu_count"] = len(data_lines)
         except Exception:
             pass
 
@@ -186,7 +185,9 @@ def _get_device_manufacturer() -> str:
         elif platform.system() == "Windows":
             result = subprocess.run(
                 ["wmic", "computersystem", "get", "manufacturer", "/format:value"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -201,10 +202,7 @@ def _get_device_model() -> str:
     """Get device model."""
     try:
         if platform.system() == "Darwin":
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.model"],
-                capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 return result.stdout.strip()
         elif platform.system() == "Linux":
@@ -213,7 +211,9 @@ def _get_device_model() -> str:
         elif platform.system() == "Windows":
             result = subprocess.run(
                 ["wmic", "computersystem", "get", "model", "/format:value"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -228,6 +228,7 @@ def _get_ort_version() -> str:
     """Get ONNX Runtime version if installed."""
     try:
         import onnxruntime
+
         return onnxruntime.__version__
     except ImportError:
         pass
@@ -241,6 +242,7 @@ def get_execution_provider_info() -> dict[str, Any]:
     }
     try:
         import onnxruntime
+
         info["available_providers"] = onnxruntime.get_available_providers()
     except ImportError:
         pass

@@ -631,6 +631,24 @@ class TestSystemInfo(unittest.TestCase):
         self.assertEqual(info["gpu_memory_mb"], 8192)
         self.assertEqual(info["gpu_count"], 2)
 
+    def test_windows_wmi_gpu_count_uses_output_rows(self):
+        from telemetry.system_info import _get_gpu_info
+
+        nvidia_result = MagicMock(returncode=1, stdout="")
+        wmi_result = MagicMock(
+            returncode=0,
+            stdout=("Node,AdapterRAM,DriverVersion,Name\nHOST,8589934592,31.0,GPU A\nHOST,4294967296,30.0,GPU B\n"),
+        )
+        with (
+            patch("telemetry.system_info.platform.system", return_value="Windows"),
+            patch("telemetry.system_info.subprocess.run", side_effect=[nvidia_result, wmi_result]),
+        ):
+            info = _get_gpu_info()
+
+        self.assertEqual(info["gpu_name"], "GPU A")
+        self.assertEqual(info["gpu_memory_mb"], 8192)
+        self.assertEqual(info["gpu_count"], 2)
+
     def test_unknown_cpu_count_defaults_to_one(self):
         from telemetry.system_info import get_system_info
 
