@@ -7,6 +7,7 @@
 
 import functools
 import inspect
+import os
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -30,11 +31,13 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def _scrub_metadata_value(value):
-    if isinstance(value, str):
-        return _redact_paths(value)
+    if isinstance(value, (str, os.PathLike)):
+        return _redact_paths(os.fsdecode(value))
     if isinstance(value, dict):
         return {
-            _redact_paths(key) if isinstance(key, str) else key: _scrub_metadata_value(child)
+            _redact_paths(os.fsdecode(key)) if isinstance(key, (str, os.PathLike)) else key: _scrub_metadata_value(
+                child
+            )
             for key, child in value.items()
         }
     if isinstance(value, list):
