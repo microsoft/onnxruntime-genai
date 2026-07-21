@@ -477,6 +477,9 @@ DeviceIdFileRead ReadDeviceIdFileNoFollow(const std::filesystem::path& file) {
 #ifdef O_NOFOLLOW
   flags |= O_NOFOLLOW;
 #endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
 #ifdef O_CLOEXEC
   flags |= O_CLOEXEC;
 #endif
