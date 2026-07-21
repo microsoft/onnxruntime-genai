@@ -329,7 +329,14 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             sys.path.pop(source_index)
         try:
             before = list(sys.path)
-            with patch.dict(sys.modules, {"onnxruntime_genai": None, "telemetry": telemetry_stub}):
+            with patch.dict(
+                sys.modules,
+                {
+                    "onnxruntime_genai": None,
+                    "onnxruntime_genai.telemetry": None,
+                    "telemetry": telemetry_stub,
+                },
+            ):
                 self.assertIsInstance(module.get_telemetry(), StubTelemetry)
             self.assertEqual(sys.path, before)
         finally:
