@@ -255,11 +255,11 @@ class TestVersionResolution(unittest.TestCase):
         import importlib
 
         try:
-            import onnxruntime_genai
+            importlib.import_module("onnxruntime_genai")
         except ImportError:
             self.skipTest("onnxruntime_genai is not installed in this test environment")
 
-        telemetry = importlib.import_module(f"{onnxruntime_genai.__name__}.telemetry")
+        telemetry = importlib.import_module("onnxruntime_genai.telemetry")
         self.assertTrue(hasattr(telemetry, "GenAITelemetry"))
 
     def test_variant_distribution_version_is_resolved(self):
