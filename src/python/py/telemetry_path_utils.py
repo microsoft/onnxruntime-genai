@@ -78,7 +78,7 @@ def normalize_execution_provider(value):
 
 
 def sanitize_model_identifier(value):
-    """Preserve model IDs while reducing local paths to a safe basename."""
+    """Preserve model IDs while replacing local paths with ``[path]``."""
     if not isinstance(value, str) or not value:
         return value
 

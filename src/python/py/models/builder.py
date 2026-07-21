@@ -236,10 +236,10 @@ def _normalize_execution_provider_name(execution_provider):
 
 
 def _sanitize_path_value(value):
-    """Reduce a filesystem path to its basename to avoid leaking usernames/local paths.
+    """Redact filesystem paths while preserving non-path model identifiers.
 
     Hugging Face repo IDs (e.g. "microsoft/phi-3-mini") are returned unchanged because
-    they are neither absolute nor existing local paths.
+    they are not treated as filesystem paths.
     """
     return sanitize_model_identifier(value)
 
