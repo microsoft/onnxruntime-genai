@@ -97,10 +97,10 @@ inline bool IsRunningUnitTests() {
   return IsCiValueTruthy(GetTelemetryEnv("ORT_RUNNING_UNIT_TESTS"));
 }
 
-// ORT_GENAI_TELEMETRY_DISABLED disables non-essential GenAI telemetry while still allowing
+// ORT_TELEMETRY_DISABLED disables non-essential GenAI telemetry while still allowing
 // ProcessInfo outside CI/unit tests.
 inline bool IsTelemetryDisabledByEnvVar() {
-  return IsEnvTruthy(GetTelemetryEnv("ORT_GENAI_TELEMETRY_DISABLED"));
+  return IsEnvTruthy(GetTelemetryEnv("ORT_TELEMETRY_DISABLED"));
 }
 
 }  // namespace Generators::TelemetryInternal

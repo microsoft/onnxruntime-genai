@@ -75,12 +75,12 @@ class ScopedEnvVar {
 };
 
 void ExpectOptOutEnv(const char* value, bool expected) {
-  ScopedEnvVar genai_guard{"ORT_GENAI_TELEMETRY_DISABLED"};
+  ScopedEnvVar opt_out_guard{"ORT_TELEMETRY_DISABLED"};
 
   if (value != nullptr) {
-    SetEnv("ORT_GENAI_TELEMETRY_DISABLED", value);
+    SetEnv("ORT_TELEMETRY_DISABLED", value);
   } else {
-    UnsetEnv("ORT_GENAI_TELEMETRY_DISABLED");
+    UnsetEnv("ORT_TELEMETRY_DISABLED");
   }
 
   EXPECT_EQ(Generators::TelemetryInternal::IsTelemetryDisabledByEnvVar(), expected);
@@ -131,14 +131,6 @@ TEST(TelemetryEnvironmentTests, OptOutEnvVarParsing) {
   ExpectOptOutEnv("0", false);
   ExpectOptOutEnv("random", false);
   ExpectOptOutEnv(nullptr, false);
-}
-
-TEST(TelemetryEnvironmentTests, OrtOptOutDoesNotDisableGenAI) {
-  ScopedEnvVar ort_guard{"ORT_TELEMETRY_DISABLED"};
-  ScopedEnvVar genai_guard{"ORT_GENAI_TELEMETRY_DISABLED"};
-  SetEnv("ORT_TELEMETRY_DISABLED", "1");
-  UnsetEnv("ORT_GENAI_TELEMETRY_DISABLED");
-  EXPECT_FALSE(Generators::TelemetryInternal::IsTelemetryDisabledByEnvVar());
 }
 
 TEST(TelemetryEnvironmentTests, CiDetectionSuppresses) {

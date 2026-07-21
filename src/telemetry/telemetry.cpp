@@ -148,7 +148,7 @@ void GenAiTelemetry::Initialize() {
     return;
   }
 
-  // ORT_GENAI_TELEMETRY_DISABLED suppresses non-essential lifecycle events. The SDK still initializes
+  // ORT_TELEMETRY_DISABLED suppresses non-essential lifecycle events. The SDK still initializes
   // outside CI/testing so the one-shot ProcessInfo event can report device counting metadata.
   if (TelemetryInternal::IsTelemetryDisabledByEnvVar()) {
     env_disabled_.store(true);
@@ -310,7 +310,7 @@ void GenAiTelemetry::LogProcessInfo() {
   bool emitted = false;
   bool warn_device_id_fallback = false;
   // require_enabled=false: ProcessInfo emits whenever telemetry is initialized (outside CI/testing),
-  // even when ORT_GENAI_TELEMETRY_DISABLED or SetEnabled(false) has disabled detailed lifecycle events.
+  // even when ORT_TELEMETRY_DISABLED or SetEnabled(false) has disabled detailed lifecycle events.
   RunLocked([&] {
     // Only log once per process, and only mark it logged while telemetry is live.
     bool expected = false;
