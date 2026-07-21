@@ -584,6 +584,307 @@ class TestNGramDecoding:
 
         assert _finish(generator) == expected
 
+    def test_k1_nonzero_rewind_matches_uninterrupted_generation(
+            self, qwen3_model_path):
+        """K=1 resumes the same sequential greedy trajectory after a nonzero rewind."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+        )
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+        )
+        for _ in range(5):
+            generator.generate_next_token()
+
+        generator.rewind_to(len(_REPETITIVE_PROMPT) + 2)
+
+        assert _finish(generator) == expected
+        assert generator.get_speculative_stats()["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 2, 4, 8])
+    @pytest.mark.parametrize("rewind_offset", [0, 1, 3])
+    def test_nonzero_direct_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens, rewind_offset):
+        """Direct nonzero rewind must match explicitly re-appending its boundary token."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + rewind_offset
+        generated_tokens = rewind_offset + 3
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(generated_tokens):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(generated_tokens):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_sequence = _finish(reappended)
+
+        assert direct_sequence == reappended_sequence
+        assert direct.get_speculative_stats()["draft_forward_passes"] == 0
+        assert reappended.get_speculative_stats()["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4])
+    def test_sampling_nonzero_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens):
+        """Sampling preserves its canonical RNG stream across equivalent rewind flows."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 2
+        search_options = {
+            "do_sample": True,
+            "top_k": 20,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 2468,
+        }
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            **search_options,
+        )
+        for _ in range(5):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            **search_options,
+        )
+        for _ in range(5):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_sequence = _finish(reappended)
+
+        assert direct_sequence == reappended_sequence
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4])
+    def test_get_logits_after_nonzero_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens):
+        """Post-rewind logits and subsequent generation match explicit boundary replay."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 1
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(4):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_logits = direct.get_logits().copy()
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(4):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_logits = reappended.get_logits().copy()
+
+        np.testing.assert_array_equal(direct_logits, reappended_logits)
+        assert _finish(direct) == _finish(reappended)
+
+    def test_nonzero_rewind_discards_mid_round_buffer_and_resumes(
+            self, tmp_path):
+        """Rewind invalidates buffered proposal tokens and rebuilds lookup state."""
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "rewind_mid_round",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 10
+        generator = _generator(
+            model_path,
+            prompt,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        generator.generate_next_token()
+        before = generator.get_speculative_stats()
+        assert before["active_rounds"] == 1
+        assert before["tokens_buffered"] > 0
+
+        generator.rewind_to(len(prompt) - 1)
+        after = generator.get_speculative_stats()
+
+        assert after["active_rounds"] == 0
+        assert after["interrupted_rounds"] == before["interrupted_rounds"] + 1
+        assert after["tokens_buffered"] == 0
+        assert after["tokens_discarded"] == (
+            before["tokens_discarded"] + before["tokens_buffered"])
+
+        expected, _ = _generate(
+            model_path,
+            prompt,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        assert _finish(generator) == expected
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    def test_nonzero_rewind_with_shared_kv_buffer_matches_reappend(
+            self, qwen3_model_path):
+        """The shared KV-buffer path satisfies the same nonzero rewind contract."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 2
+        search_options = {"past_present_share_buffer": True}
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **search_options,
+        )
+        for _ in range(5):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **search_options,
+        )
+        for _ in range(5):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+
+        assert direct_sequence == _finish(reappended)
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4])
+    def test_repeated_rewind_append_cycles_are_deterministic(
+            self, qwen3_model_path, max_draft_tokens):
+        """Repeated nonzero rewind/resume and append cycles must be deterministic."""
+        max_length = len(_REPETITIVE_PROMPT) + 32
+        first_append = [785, 6722]
+        second_append = [3838, 374]
+
+        def run():
+            generator = _generator(
+                qwen3_model_path,
+                _REPETITIVE_PROMPT,
+                max_length,
+                ngram_size=3,
+                max_draft_tokens=max_draft_tokens,
+            )
+            for _ in range(5):
+                generator.generate_next_token()
+
+            generator.rewind_to(len(_REPETITIVE_PROMPT) + 2)
+            for _ in range(2):
+                generator.generate_next_token()
+            first_append_start = len(generator.get_sequence(0))
+            generator.append_tokens(
+                np.array([first_append], dtype=np.int32))
+            assert [
+                int(token)
+                for token in generator.get_sequence(0)[first_append_start:]
+            ] == first_append
+
+            for _ in range(3):
+                generator.generate_next_token()
+            generator.rewind_to(len(generator.get_sequence(0)) - 2)
+            for _ in range(2):
+                generator.generate_next_token()
+            second_append_start = len(generator.get_sequence(0))
+            generator.append_tokens(
+                np.array([second_append], dtype=np.int32))
+            assert [
+                int(token)
+                for token in generator.get_sequence(0)[second_append_start:]
+            ] == second_append
+
+            actual = _finish(generator)
+            stats = generator.get_speculative_stats()
+
+            assert stats["rounds"] > 0
+            assert stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(stats)
+            return actual
+
+        assert run() == run()
+
+    def test_repeated_full_rewind_and_reprefill_is_stable(
+            self, qwen3_model_path):
+        """Full reset and reprefill can reuse one n-gram generator without state leakage."""
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        results = [_finish(generator)]
+
+        for _ in range(2):
+            generator.rewind_to(0)
+            generator.append_tokens(
+                np.array([_REPETITIVE_PROMPT], dtype=np.int32))
+            results.append(_finish(generator))
+
+        assert results[1] == results[0]
+        assert results[2] == results[0]
+        assert generator.get_speculative_stats()["draft_forward_passes"] == 0
+
     def test_mid_generation_append_preserves_committed_prefix(
             self, qwen3_model_path):
         max_length = len(_REPETITIVE_PROMPT) + 14
