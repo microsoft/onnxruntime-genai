@@ -42,12 +42,12 @@ class ProcessDrainLock:
                 pass
             fh = open(self._lock_path, "a+b")
             if os.name == "nt":
-                import msvcrt
+                import msvcrt  # noqa: PLC0415
 
                 fh.seek(0)
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             else:
-                import fcntl
+                import fcntl  # noqa: PLC0415
 
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fh = fh
@@ -67,7 +67,7 @@ class ProcessDrainLock:
         self._fh = None
         try:
             if os.name == "nt":
-                import msvcrt
+                import msvcrt  # noqa: PLC0415
 
                 try:
                     fh.seek(0)
@@ -75,7 +75,7 @@ class ProcessDrainLock:
                 except Exception:
                     pass
             else:
-                import fcntl
+                import fcntl  # noqa: PLC0415
 
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)

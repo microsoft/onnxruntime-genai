@@ -69,7 +69,7 @@ class HttpJsonPostTransport(ITransport):
         self, callback: Callable[["PayloadTransmittedCallbackArgs"], None], include_failures: bool = False
     ) -> Callable[[], None]:
         if self.callback_manager is None:
-            from .callback_manager import CallbackManager
+            from .callback_manager import CallbackManager  # noqa: PLC0415
 
             self.callback_manager = CallbackManager()
 
@@ -128,7 +128,7 @@ class HttpJsonPostTransport(ITransport):
     ) -> None:
         if not self.callback_manager:
             return
-        from .callback_manager import PayloadTransmittedCallbackArgs
+        from .callback_manager import PayloadTransmittedCallbackArgs  # noqa: PLC0415
 
         self.callback_manager.notify(
             PayloadTransmittedCallbackArgs(
