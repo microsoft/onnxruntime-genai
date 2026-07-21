@@ -51,6 +51,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
     def setUp(self):
         import tempfile
+        import telemetry.deviceid as deviceid
         from telemetry.telemetry import GenAITelemetry
 
         GenAITelemetry._instance = None
@@ -81,8 +82,20 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         dir_patcher.start()
         self._patchers.append(dir_patcher)
 
+        deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
+        deviceid_platform_patcher = patch("telemetry.deviceid.platform.system", return_value="Linux")
+        deviceid_platform_patcher.start()
+        self._patchers.append(deviceid_platform_patcher)
+        deviceid_dir_patcher = patch(
+            "telemetry.deviceid.get_telemetry_base_dir",
+            return_value=Path(self._tmpdir),
+        )
+        deviceid_dir_patcher.start()
+        self._patchers.append(deviceid_dir_patcher)
+
     def tearDown(self):
         import shutil
+        import telemetry.deviceid as deviceid
         from telemetry.telemetry import GenAITelemetry
 
         instance = GenAITelemetry._instance
@@ -99,6 +112,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         for p in reversed(self._patchers):
             p.stop()
         GenAITelemetry._instance = None
+        deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _join_heartbeat(self):
