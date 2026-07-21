@@ -11,6 +11,7 @@ import os
 import platform
 import tempfile
 import uuid
+from contextlib import suppress
 from enum import Enum
 from pathlib import Path
 
@@ -25,6 +26,12 @@ class DeviceIdStatus(Enum):
 
 
 _device_id_state = {"device_id": None, "status": DeviceIdStatus.NEW}
+
+
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    # Permission tightening is best-effort on filesystems that do not support chmod.
+    with suppress(OSError):
+        path.chmod(mode)
 
 
 def _resolve_home_dir() -> Path:
@@ -75,14 +82,14 @@ class _FileStore:
     def store_id(self, device_id: str) -> None:
         # create the folder location if it does not exist, owner-only (0700) so other users on the
         # machine cannot traverse into it to reach the device id.
-        self._file_path.parent.mkdir(parents=True, exist_ok=True)
-        self._file_path.parent.chmod(0o700)
+        self._file_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _chmod_best_effort(self._file_path.parent, 0o700)
 
         # Owner-only (0600): the device id must not be world-readable by other users on the machine.
         # touch(mode=...) creates it already restricted; chmod also tightens a pre-existing file before
         # writing, so the id is never left at the umask default (commonly world-readable 0644).
         self._file_path.touch(mode=0o600)
-        self._file_path.chmod(0o600)
+        _chmod_best_effort(self._file_path, 0o600)
         self._file_path.write_text(device_id, encoding="utf-8")
 
 
@@ -94,7 +101,7 @@ class _WindowsStore:
 
     @property
     def retrieve_id(self) -> str:
-        import winreg
+        import winreg  # noqa: PLC0415
 
         with winreg.OpenKeyEx(
             winreg.HKEY_CURRENT_USER, self.REGISTRY_PATH, reserved=0, access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY
@@ -103,7 +110,7 @@ class _WindowsStore:
         return device_id[0].strip()
 
     def store_id(self, device_id: str) -> None:
-        import winreg
+        import winreg  # noqa: PLC0415
 
         with winreg.CreateKeyEx(
             winreg.HKEY_CURRENT_USER,
@@ -179,5 +186,5 @@ def get_device_id() -> str:
 def get_encrypted_device_id_and_status() -> tuple[str, DeviceIdStatus]:
     """Get SHA-256 hashed device ID and its status."""
     device_id = _device_id_state["device_id"] if _device_id_state["device_id"] is not None else get_device_id()
-    encrypted = hashlib.sha256(device_id.encode("utf-8")).digest().hex().upper() if device_id else ""
+    encrypted = hashlib.sha256(device_id.encode("utf-8")).hexdigest().upper() if device_id else ""
     return encrypted, _device_id_state["status"]
