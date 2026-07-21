@@ -543,7 +543,8 @@ class GenAITelemetry:
             if self._uploader is not None:
                 # Signal the daemon thread to wind down without joining, so opting
                 # out never blocks the caller. The thread releases the drain lock on
-                # exit; any already-stored events go out on the next run.
+                # exit; an in-flight send may finish, while remaining queued events
+                # stay on disk for the next run.
                 self._uploader.signal_stop()
                 if self._uploader.stop_loop(0):
                     self._uploader.close()
