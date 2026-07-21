@@ -79,6 +79,19 @@ def test_tie_word_embeddings_defaults_to_false_when_unset_or_none():
     assert model_none.tied_unquantized_embeddings is False
 
 
+def test_tie_word_embeddings_true_enables_sharing_when_option_is_unset():
+    # Base builder logic defaults shared_embeddings from config.tie_word_embeddings
+    # when the explicit extra option is not provided.
+    model = _make_model_for_tied_embeddings(
+        tie_word_embeddings=True,
+        onnx_dtype=ir.DataType.INT4,
+        op_types=("MatMul", "Gather"),
+    )
+
+    assert model.tied_quantized_embeddings is True
+    assert model.tied_unquantized_embeddings is False
+
+
 @pytest.mark.parametrize(
     "exclude_embeds, exclude_lm_head, prune_lm_head",
     [

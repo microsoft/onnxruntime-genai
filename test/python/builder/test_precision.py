@@ -166,19 +166,49 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
+def _run_check_extra_options(
+    monkeypatch,
+    extra_options,
+    *,
+    precision="int4",
+    execution_provider="cpu",
+    tie_word_embeddings=True,
+):
+    # Avoid Hugging Face network/config loading and provide only the config fields needed.
+    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings)
+
+    def _fake_get_hf_details(*_args, **_kwargs):
+        return {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        }
+
+    monkeypatch.setattr(builder_module, "get_hf_details", _fake_get_hf_details)
+    builder_module.check_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision=precision,
+        execution_provider=execution_provider,
+        cache_dir="/tmp/fake-cache",
+        extra_options=extra_options,
+    )
+
+
 # ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
 
-def test_int8_with_qdq_is_rejected():
+def test_int8_with_qdq_is_rejected(monkeypatch):
     with pytest.raises(NotImplementedError, match="QDQ"):
-        builder_module.check_extra_options({"use_qdq": "true"}, "int8", "cpu")
+        _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int8")
 
 
-def test_int4_with_qdq_is_allowed():
+def test_int4_with_qdq_is_allowed(monkeypatch):
     # QDQ is only rejected for int8; int4 still supports it.
-    builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int4")
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +240,22 @@ def test_new_name_wins_when_both_provided():
     assert kv_pairs == {"algo_config": "new"}
 
 
-def test_check_extra_options_applies_deprecated_aliases():
+def test_check_extra_options_applies_deprecated_aliases(monkeypatch):
     # Old name flows through check_extra_options and is parsed like the new one.
     kv_pairs = {"int4_is_symmetric": "false", "int4_op_types_to_quantize": "MatMul/Gather"}
-    builder_module.check_extra_options(kv_pairs, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, kv_pairs, precision="int4")
     assert "int4_is_symmetric" not in kv_pairs
     assert kv_pairs["is_symmetric"] is False
     assert kv_pairs["op_types_to_quantize"] == ("MatMul", "Gather")
+
+
+def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=False,
+        )
 
 
