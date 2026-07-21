@@ -1038,6 +1038,49 @@ struct VAD_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
 };
 
+struct Moonshine_Element : JSON::Element {
+  explicit Moonshine_Element(Config::Model::Moonshine& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "frontend_filename") {
+      v_.frontend_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_filename") {
+      v_.encoder_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "adapter_filename") {
+      v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_kv_filename") {
+      v_.cross_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "decoder_kv_filename") {
+      v_.decoder_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer_size") {
+      v_.sample_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv1_buffer_size") {
+      v_.conv1_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv2_buffer_size") {
+      v_.conv2_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "total_lookahead") {
+      v_.total_lookahead = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_frames") {
+      v_.left_context_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_seq_len") {
+      v_.max_seq_len = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tokens_per_second") {
+      v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "seconds_per_memory_frame") {
+      v_.seconds_per_memory_frame = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "max_segment_memory_frames") {
+      v_.max_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "min_segment_memory_frames") {
+      v_.min_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine& v_;
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -1173,6 +1216,8 @@ struct Model_Element : JSON::Element {
       v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "chunk_samples") {
       v_.chunk_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "overlap_samples") {
+      v_.overlap_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "blank_id") {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
@@ -1216,6 +1261,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "moonshine") {
+      return moonshine_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1230,6 +1278,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Moonshine_Element moonshine_{v_.moonshine};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {
@@ -1716,7 +1765,7 @@ fs::path Config::ResolvePath(std::string_view value) const {
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
-  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
+  if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 

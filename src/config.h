@@ -162,6 +162,7 @@ struct Config {
     int pre_encode_cache_size{};
     int sample_rate{};
     int chunk_samples{};
+    int overlap_samples{};
     int blank_id{};
     int max_symbols_per_step{};
 
@@ -313,6 +314,31 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;
+
+    struct Moonshine {
+      std::string frontend_filename;
+      std::string encoder_filename;
+      std::string adapter_filename;
+      std::string cross_kv_filename;
+      std::string decoder_kv_filename;
+
+      int sample_buffer_size{};
+      int conv1_buffer_size{};
+      int conv2_buffer_size{};
+
+      // Encoder sliding-window geometry.
+      int total_lookahead{};
+      int left_context_frames{};
+
+      // Decoder token-emission cap & frame rate.
+      int max_seq_len{};
+      float tokens_per_second{};
+      float seconds_per_memory_frame{};
+
+      // Segmentation limits (hard cap + VAD-silence min duration), in memory frames.
+      int max_segment_memory_frames{};
+      int min_segment_memory_frames{};
+    } moonshine;
 
     struct Decoder {
       std::string filename;

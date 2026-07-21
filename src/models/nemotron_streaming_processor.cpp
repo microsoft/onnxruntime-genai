@@ -143,8 +143,4 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   return processed_signal;
 }
 
-std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
-  return std::make_unique<NemotronStreamingProcessor>(model);
-}
-
 }  // namespace Generators

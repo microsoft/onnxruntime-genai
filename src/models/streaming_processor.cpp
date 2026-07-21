@@ -7,6 +7,8 @@
 
 #include "../generators.h"
 #include "streaming_processor.h"
+#include "nemotron_streaming_processor.h"
+#include "moonshine_streaming_processor.h"
 
 namespace Generators {
 
@@ -33,6 +35,13 @@ void StreamingProcessor::EnableVadFromModel() {
   }
   vad_ = CreateSileroVad(*model_);
   consecutive_silence_chunks_ = 0;
+}
+
+bool StreamingProcessor::IsChunkSilent(const float* chunk_data, size_t chunk_size) {
+  if (!vad_) {
+    return false;
+  }
+  return !vad_->ContainsSpeech(chunk_data, chunk_size);
 }
 
 bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_size) {
@@ -119,6 +128,15 @@ std::string StreamingProcessor::GetOption(const char* key) const {
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }
+}
+
+// Factory / dispatch point: maps a model type to its concrete streaming
+// processor.
+std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
+  if (ModelType::IsStreamingEncDecASR(model.config_->model.type)) {
+    return std::make_unique<MoonshineStreamingProcessor>(model);
+  }
+  return std::make_unique<NemotronStreamingProcessor>(model);
 }
 
 }  // namespace Generators

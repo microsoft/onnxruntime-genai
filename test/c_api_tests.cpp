@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 #include <regex>
+#include <algorithm>
 #include "span.h"
 #include <list>
 
@@ -1685,13 +1686,37 @@ TEST(CAPITests, RewindQwen25CAPI) {
 }
 #endif  // TEST_QWEN_2_5
 
-#ifndef STREAMING_ASR_PATH
-#define STREAMING_ASR_PATH MODEL_PATH "nemotron-speech-streaming"
-#endif
+// Streaming ASR models exercised by the StreamingASR* tests below, each paired
+// with its chunk size (samples per Process() call).
+struct StreamingASRModel {
+  std::string subdir;
+  size_t chunk_samples;
+};
 
-#ifndef STREAMING_ASR_CHUNK_SAMPLES
-constexpr size_t STREAMING_ASR_CHUNK_SAMPLES = 8960;
-#endif
+// Value-parameterized fixture so each StreamingASR test runs once per model.
+// This must be a distinct fixture from the non-parameterized CAPITests tests:
+// gtest requires all tests in a suite to share the same fixture class, so we
+// use a separate suite name here. Instantiated test names look like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming".
+class StreamingASRParamTests : public ::testing::TestWithParam<StreamingASRModel> {
+ protected:
+  std::string ModelPath() const { return std::string(MODEL_PATH) + GetParam().subdir; }
+  size_t ChunkSamples() const { return GetParam().chunk_samples; }
+};
+
+// Helper: a streaming ASR model has VAD enabled by default only when its genai_config.json
+// declares a "vad" section AND the referenced silero_vad.onnx file is present in the model dir.
+static bool ModelHasVad(const std::string& model_path) {
+  const auto vad_path = std::filesystem::path(model_path) / "silero_vad.onnx";
+  if (!std::filesystem::exists(vad_path))
+    return false;
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return false;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  return std::regex_search(config_json, std::regex(R"("vad"\s*:\s*\{)"));
+}
 
 // Helper: if mel is not null, set inputs and run the decode loop
 static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
@@ -1703,11 +1728,21 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
   }
 }
 
-// Test creating a Generator + StreamingProcessor from a nemotron_speech model
-TEST(CAPITests, StreamingASRCreate) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+// Helper: generate a synthetic sine wave of num_samples at the given frequency and sample rate.
+// Uses frequency and sample_rate to produce the minimum length of speech detectable by the model.
+static std::vector<float> GenerateSineWave(size_t num_samples, float frequency, float sample_rate) {
+  std::vector<float> samples(num_samples);
+  for (size_t i = 0; i < num_samples; ++i)
+    samples[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+  return samples;
+}
+
+// Test creating a Generator + StreamingProcessor from a streaming ASR model
+TEST_P(StreamingASRParamTests, StreamingASRCreate) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   ASSERT_NE(processor, nullptr);
   auto params = OgaGeneratorParams::Create(*model);
@@ -1716,15 +1751,16 @@ TEST(CAPITests, StreamingASRCreate) {
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken
-TEST(CAPITests, StreamingASRTranscribeSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRTranscribeSilence) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   auto mel = processor->Process(silence.data(), silence.size());
@@ -1733,15 +1769,16 @@ TEST(CAPITests, StreamingASRTranscribeSilence) {
 }
 
 // Test feeding multiple chunks and decoding via GenerateNextToken
-TEST(CAPITests, StreamingASRMultipleChunks) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRMultipleChunks) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   for (int i = 0; i < 5; ++i) {
@@ -1752,15 +1789,16 @@ TEST(CAPITests, StreamingASRMultipleChunks) {
 }
 
 // Test flush processes remaining buffered audio
-TEST(CAPITests, StreamingASRFlush) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRFlush) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
   processor->Process(silence.data(), silence.size());
 
@@ -1770,22 +1808,25 @@ TEST(CAPITests, StreamingASRFlush) {
 }
 
 // Test transcribing a synthetic sine wave via GenerateNextToken
-TEST(CAPITests, StreamingASRSineWave) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRSineWave) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
-  constexpr size_t chunk_samples = 8960;
+  // Silero VAD does not recognize a synthetic tone as speech, so with VAD enabled the tone would
+  // be dropped as silence. Disable VAD to exercise the audio->tensor->decode pipeline itself
+  // (VAD behavior is covered by the dedicated StreamingASRVad* tests).
+  processor->SetOption("use_vad", "false");
+
+  const size_t chunk_samples = ChunkSamples();
   constexpr float sample_rate = 16000.0f;
   constexpr float frequency = 440.0f;
 
-  std::vector<float> audio(chunk_samples);
-  for (size_t i = 0; i < chunk_samples; ++i) {
-    audio[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
-  }
+  std::vector<float> audio = GenerateSineWave(chunk_samples, frequency, sample_rate);
 
   for (int i = 0; i < 4; ++i) {
     auto mel = processor->Process(audio.data(), audio.size());
@@ -1799,16 +1840,21 @@ TEST(CAPITests, StreamingASRSineWave) {
 }
 
 // Test raw C API for StreamingProcessor + Generator
-TEST(CAPITests, StreamingASRRawCAPI) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+TEST_P(StreamingASRParamTests, StreamingASRRawCAPI) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
   OgaModel* model = nullptr;
-  ASSERT_EQ(OgaCreateModel(STREAMING_ASR_PATH, &model), nullptr);
+  ASSERT_EQ(OgaCreateModel(model_path.c_str(), &model), nullptr);
   ASSERT_NE(model, nullptr);
 
   OgaStreamingProcessor* processor = nullptr;
   ASSERT_EQ(OgaCreateStreamingProcessor(model, &processor), nullptr);
   ASSERT_NE(processor, nullptr);
+
+  // Disable VAD so the synthetic silence flows through the pipeline instead of being dropped
+  // (Silero VAD treats it as non-speech). VAD behavior is covered by the StreamingASRVad* tests.
+  ASSERT_EQ(OgaStreamingProcessorSetOption(processor, "use_vad", "false"), nullptr);
 
   OgaGeneratorParams* params = nullptr;
   ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
@@ -1816,7 +1862,7 @@ TEST(CAPITests, StreamingASRRawCAPI) {
   ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
   ASSERT_NE(generator, nullptr);
 
-  constexpr size_t chunk_samples = 8960;
+  const size_t chunk_samples = ChunkSamples();
   std::vector<float> silence(chunk_samples, 0.0f);
 
   OgaNamedTensors* inputs = nullptr;
@@ -1835,22 +1881,36 @@ TEST(CAPITests, StreamingASRRawCAPI) {
 }
 
 // Test VAD set_option/get_option on StreamingProcessor
-TEST(CAPITests, StreamingASRVadSetGetOption) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+TEST_P(StreamingASRParamTests, StreamingASRVadSetGetOption) {
+  const std::string model_path = ModelPath();
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Streaming ASR model not found at " << model_path;
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
 
-  // Default: VAD disabled
-  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "false");
+  // Checking whether or not the model has the components necessary to run VAD. If not, skip the test.
+  // VAD requires having a "vad" section in the genai_config.json and the silero_vad.onnx file in the model directory.
+  // For VAD-capable models, InitVadFromConfig automatically enables VAD (via EnableVadFromModel())
+  // when the config's vad.filename is non-empty, so use_vad starts out "true".
+  const bool model_has_vad = ModelHasVad(model_path);
 
-  // Set and get threshold
-  processor->SetOption("silence_duration_ms", "1000");
-  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), "1000");
+  if (!model_has_vad) {
+    GTEST_SKIP() << "Streaming ASR model is not set up for VAD, skipping test";
+  }
 
-  // Enable VAD if silero_vad.onnx is available
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
-  if (std::filesystem::exists(vad_path)) {
+  // VAD is enabled by default when possible from InitializeVadFromConfig
+  ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
+
+  // silence_duration_ms round-trips exactly only when it is an integer multiple of the model's
+  // chunk duration (chunk_samples / sample_rate * 1000). Use two chunks' worth: 1000 ms for the
+  // 8000-sample moonshine models (500 ms/chunk) and 1120 ms for the 8960-sample nemotron model
+  // (560 ms/chunk).
+  const char* silence_duration_ms = (GetParam().subdir == "nemotron-speech-streaming") ? "1120" : "1000";
+  processor->SetOption("silence_duration_ms", silence_duration_ms);
+  ASSERT_EQ(std::string(processor->GetOption("silence_duration_ms")), silence_duration_ms);
+
+  // Enable VAD if the model declares a VAD config
+  if (model_has_vad) {
     processor->SetOption("use_vad", "true");
     ASSERT_EQ(std::string(processor->GetOption("use_vad")), "true");
 
@@ -1864,35 +1924,162 @@ TEST(CAPITests, StreamingASRVadSetGetOption) {
   SUCCEED();
 }
 
-// Test consecutive silence logic: VAD should not drop chunks until min_silence_chunks exceeded
-TEST(CAPITests, StreamingASRVadConsecutiveSilence) {
-  if (!std::filesystem::exists(STREAMING_ASR_PATH))
-    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+// Test consecutive silence logic for nemotron: VAD keeps silence chunks for context until the
+// consecutive-silence threshold is reached, then drops. This is nemotron-specific; moonshine
+// uses VAD for utterance segmentation instead (see MoonshineVadSegmentation).
+TEST(StreamingASRTests, VadConsecutiveSilence) {
+  const std::string model_path = std::string(MODEL_PATH) + "nemotron-speech-streaming";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Nemotron streaming model not found at " << model_path;
 
-  auto vad_path = std::filesystem::path(STREAMING_ASR_PATH) / "silero_vad.onnx";
-  if (!std::filesystem::exists(vad_path))
-    GTEST_SKIP() << "silero_vad.onnx not found in model dir";
+  // VAD requires a "vad" section in genai_config.json and the silero_vad.onnx file. Skip if absent.
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Nemotron model is not set up for VAD, skipping test";
 
-  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto model = OgaModel::Create(model_path.c_str());
   auto processor = OgaStreamingProcessor::Create(*model);
   processor->SetOption("use_vad", "true");
-  processor->SetOption("silence_duration_ms", "1000");  // ~2 chunks at 560ms each
+  // silence_duration_ms must be an integer multiple of the chunk duration; 1680 ms / 560 ms = 3
+  // chunks, so the first 2 silence chunks are kept and the 3rd dropped.
+  processor->SetOption("silence_duration_ms", "1680");
 
-  constexpr size_t chunk_samples = STREAMING_ASR_CHUNK_SAMPLES;
+  const size_t chunk_samples = 8960;  // nemotron chunk size
   std::vector<float> silence(chunk_samples, 0.0f);
 
-  // First 2 silence chunks should still be processed (not dropped)
+  // First 2 silence chunks are preserved (within the tolerance), the 3rd is dropped.
   auto mel1 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed (only 1 consecutive silence)
+  ASSERT_NE(mel1, nullptr);  // Chunk 1: processed
 
   auto mel2 = processor->Process(silence.data(), silence.size());
-  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed (only 2 consecutive)
+  ASSERT_NE(mel2, nullptr);  // Chunk 2: processed
 
-  // Third silence chunk should be dropped (> min_silence_chunks)
   auto mel3 = processor->Process(silence.data(), silence.size());
-  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped
+  ASSERT_EQ(mel3, nullptr);  // Chunk 3: dropped (>= threshold of 3)
   SUCCEED();
 }
+
+// Helper: read a numeric field ("key": <number>) from a model's genai_config.json. Returns the
+// fallback if the file can't be read or the key is not found.
+static double ReadConfigNumber(const std::string& model_path, const std::string& key, double fallback) {
+  std::ifstream config_file(std::filesystem::path(model_path) / "genai_config.json");
+  if (!config_file)
+    return fallback;
+  const std::string config_json((std::istreambuf_iterator<char>(config_file)),
+                                std::istreambuf_iterator<char>());
+  std::smatch match;
+  if (std::regex_search(config_json, match, std::regex("\"" + key + R"("\s*:\s*([0-9.eE+-]+))")))
+    return std::stod(match[1].str());
+  return fallback;
+}
+
+// Test moonshine's VAD-driven utterance segmentation under our thin-processor architecture.
+//
+// The older "fat processor" accumulated encoder memory inside Process() and returned nullptr to
+// drop pre-utterance silence, so segmentation was observable at the processor boundary. Our
+// processor is thin: for every full chunk it ALWAYS emits a NamedTensors bundle
+// (audio_chunk + is_silent + is_final) and never drops. The per-chunk VAD verdict rides in the
+// is_silent flag, and ALL segmentation (accumulate / flush past min_segment / reset / drop
+// pre-utterance silence) happens downstream in the State's RunPipeline. This test therefore:
+//   * asserts the thin-processor contract  (a full chunk is never dropped -> Process() != nullptr),
+//   * checks the is_silent verdict that drives segmentation (speech -> 0, silence -> 1), and
+//   * drives the speech -> silence -> speech pattern through the Generator so the State's
+//     segmentation routing actually runs end to end (flush + reset + restart).
+// Silero VAD only fires on real human speech, so "speech" uses a synthetic tone with VAD disabled
+// (forces is_silent=0, routing through the same accumulation path real speech would) while VAD is
+// enabled for the silence that drives the segment boundary.
+TEST(StreamingASRTests, MoonshineVadSegmentation) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+  if (!ModelHasVad(model_path))
+    GTEST_SKIP() << "Moonshine model is not set up for VAD, skipping test";
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Read a scalar int64 flag ("is_silent" / "is_final") emitted alongside the audio chunk.
+  auto read_flag = [](OgaNamedTensors& tensors, const char* name) {
+    return *static_cast<const int64_t*>(tensors.Get(name)->Data());
+  };
+
+  // Read the chunking / segmentation parameters straight from the model config.
+  const size_t chunk_samples = static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate = static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const double seconds_per_memory_frame = ReadConfigNumber(model_path, "seconds_per_memory_frame", 0.02);
+  const int min_segment_memory_frames =
+      static_cast<int>(ReadConfigNumber(model_path, "min_segment_memory_frames", 250));
+
+  constexpr float frequency = 440.0f;
+  std::vector<float> speech = GenerateSineWave(chunk_samples, frequency, sample_rate);
+  std::vector<float> silence(chunk_samples, 0.0f);
+
+  // 1) Initial speech (VAD disabled): the tone routes through the same accumulation path real
+  //    speech would. Every full chunk is emitted (never dropped), tagged non-silent + non-final,
+  //    and the State accumulates it into the in-progress segment.
+  processor->SetOption("use_vad", "false");
+  for (int i = 0; i < 4; ++i) {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr) << "Speech chunk " << i << " must always be emitted (thin processor)";
+    EXPECT_EQ(read_flag(*chunk, "is_silent"), 0) << "VAD-off speech chunk should not be silent";
+    EXPECT_EQ(read_flag(*chunk, "is_final"), 0) << "Streaming chunks are never is_final";
+    DecodeInputs(*generator, chunk.get());
+  }
+
+  // 2) Silence (VAD enabled): the processor still emits EVERY chunk (never nullptr), now tagged
+  //    silent. Downstream, the State encodes mid-segment silence until the accumulated frames pass
+  //    min_segment_memory_frames, then flushes the utterance and resets; after the reset further
+  //    silence is pre-utterance and produces no tokens. On the old fat processor these surfaced as
+  //    Process()==nullptr; here they are is_silent=1 chunks whose segmentation lives in the State.
+  processor->SetOption("use_vad", "true");
+
+  // Each chunk contributes (chunk_samples / sample_rate) / seconds_per_memory_frame memory frames.
+  // Feeding min_segment_memory_frames / frames_per_chunk + 2 chunks accumulates past the threshold
+  // (flush + reset) and then drives at least one post-reset pre-utterance chunk.
+  const int frames_per_chunk =
+      static_cast<int>((static_cast<double>(chunk_samples) / sample_rate) / seconds_per_memory_frame);
+  const int silence_chunks = min_segment_memory_frames / frames_per_chunk + 2;
+  for (int i = 0; i < silence_chunks; ++i) {
+    auto chunk = processor->Process(silence.data(), silence.size());
+    ASSERT_NE(chunk, nullptr) << "Silence chunk " << i << " is still emitted (never dropped here)";
+    EXPECT_EQ(read_flag(*chunk, "is_silent"), 1) << "VAD-on silence chunk should be tagged silent";
+    DecodeInputs(*generator, chunk.get());
+  }
+
+  // 3) New speech after the reset (VAD disabled): the State rebuilds memory and the chunk is
+  //    emitted + tagged non-silent again, confirming the pipeline recovered from the flush/reset.
+  processor->SetOption("use_vad", "false");
+  auto resumed = processor->Process(speech.data(), speech.size());
+  ASSERT_NE(resumed, nullptr) << "New speech after the reset should be emitted";
+  EXPECT_EQ(read_flag(*resumed, "is_silent"), 0) << "Resumed speech should not be silent";
+  DecodeInputs(*generator, resumed.get());
+
+  // Flush drains the tail with is_final=1 so the State releases held-back lookahead and commits
+  // the final segment.
+  auto tail = processor->Flush();
+  ASSERT_NE(tail, nullptr);
+  EXPECT_EQ(read_flag(*tail, "is_final"), 1) << "Flush tail must be is_final";
+  DecodeInputs(*generator, tail.get());
+  SUCCEED();
+}
+
+// Run every StreamingASR* test above once per streaming ASR model. The
+// instantiation prefix "StreamingASR" combined with the StreamingASRParamTests
+// fixture yields test names like
+// "StreamingASR/StreamingASRParamTests.StreamingASRCreate/nemotron_speech_streaming",
+// with the model appended as the parameter suffix.
+INSTANTIATE_TEST_SUITE_P(
+    StreamingASR, StreamingASRParamTests,
+    ::testing::Values(
+        StreamingASRModel{"nemotron-speech-streaming", 8960},
+        StreamingASRModel{"moonshine-streaming-small", 8000},
+        StreamingASRModel{"moonshine-streaming-tiny", 8000}),
+    [](const ::testing::TestParamInfo<StreamingASRModel>& info) {
+      std::string name = info.param.subdir;
+      std::replace(name.begin(), name.end(), '-', '_');
+      return name;
+    });
 
 #ifndef PARAKEET_TDT_PATH
 #define PARAKEET_TDT_PATH MODEL_PATH "parakeet-tdt"
