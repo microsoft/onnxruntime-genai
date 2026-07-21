@@ -71,7 +71,7 @@ def _get_cpu_model() -> str:
                     if line.startswith("model name"):
                         return line.split(":", 1)[1].strip()
         elif platform.system() == "Windows":
-            import winreg
+            import winreg  # noqa: PLC0415
 
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
                 return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
@@ -85,7 +85,7 @@ def _get_total_memory_mb() -> int:
     try:
         system = platform.system()
         if system == "Windows":
-            import ctypes
+            import ctypes  # noqa: PLC0415
 
             class _MemoryStatusEx(ctypes.Structure):
                 _fields_ = [
@@ -227,7 +227,7 @@ def _get_device_model() -> str:
 def _get_ort_version() -> str:
     """Get ONNX Runtime version if installed."""
     try:
-        import onnxruntime
+        import onnxruntime  # noqa: PLC0415
 
         return onnxruntime.__version__
     except ImportError:
@@ -241,7 +241,7 @@ def get_execution_provider_info() -> dict[str, Any]:
         "available_providers": [],
     }
     try:
-        import onnxruntime
+        import onnxruntime  # noqa: PLC0415
 
         info["available_providers"] = onnxruntime.get_available_providers()
     except ImportError:

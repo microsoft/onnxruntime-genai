@@ -62,7 +62,7 @@ def _get_app_version() -> str:
     """
     # 1. Try the package attribute (fastest when native ext is loaded)
     try:
-        import onnxruntime_genai
+        import onnxruntime_genai  # noqa: PLC0415
 
         v = getattr(onnxruntime_genai, "__version__", None)
         if v:
@@ -73,8 +73,8 @@ def _get_app_version() -> str:
     # 2. Resolve the installed distribution that provides the Python module.
     # This covers variant wheels such as onnxruntime-genai-cuda/directml.
     try:
-        from importlib.metadata import packages_distributions
-        from importlib.metadata import version as pkg_version
+        from importlib.metadata import packages_distributions  # noqa: PLC0415
+        from importlib.metadata import version as pkg_version  # noqa: PLC0415
 
         distributions = packages_distributions().get("onnxruntime_genai", [])
         for distribution in distributions:
@@ -89,7 +89,7 @@ def _get_app_version() -> str:
     # 3. Fall back to VERSION_INFO file at repository root
     try:
         # Walk up from this file to find VERSION_INFO
-        import pathlib
+        import pathlib  # noqa: PLC0415
 
         d = pathlib.Path(__file__).resolve().parent
         for _ in range(10):
