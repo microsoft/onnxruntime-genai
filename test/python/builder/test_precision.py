@@ -257,5 +257,3 @@ def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
             precision="int4",
             tie_word_embeddings=False,
         )
-
-
