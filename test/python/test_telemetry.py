@@ -979,6 +979,20 @@ class TestOfflineEventStore(unittest.TestCase):
 
         mock_chmod.assert_not_called()
 
+    def test_closes_connection_when_initialization_fails(self):
+        import telemetry.offline_store as store_module
+
+        connection = MagicMock()
+        connection.execute.side_effect = RuntimeError("pragma failed")
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(store_module.sqlite3, "connect", return_value=connection),
+        ):
+            store = store_module.OfflineEventStore(os.path.join(temp_dir, "failed.db"))
+
+        self.assertFalse(store.is_open)
+        connection.close.assert_called_once()
+
     def test_store_and_fifo_batch(self):
         s = self._new_store()
         for i in range(5):
