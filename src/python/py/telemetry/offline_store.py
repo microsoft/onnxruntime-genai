@@ -25,18 +25,18 @@ SQLite's built-in ``PRAGMA user_version``.
 import os
 import sqlite3
 import threading
+from contextlib import suppress
 from typing import Optional
 
 SCHEMA_VERSION = 1
 
 
 def _chmod_best_effort(path: str, mode: int) -> None:
-    if os.name == "nt":
+    if os.name == "nt" or not path:
         return
-    try:
+    # Permission tightening is best-effort on filesystems that do not support chmod.
+    with suppress(OSError):
         os.chmod(path, mode)
-    except OSError:
-        pass
 
 
 class OfflineEventStore:
@@ -59,15 +59,12 @@ class OfflineEventStore:
 
     def _initialize(self) -> None:
         parent = os.path.dirname(self._db_path)
-        try:
+        # sqlite3.connect below reports whether storage can actually be opened.
+        with suppress(Exception):
             os.makedirs(parent, mode=0o700, exist_ok=True)
             _chmod_best_effort(parent, 0o700)
-        except Exception:
-            pass
         try:
-            conn = sqlite3.connect(
-                self._db_path, timeout=self._busy_timeout_ms / 1000.0, check_same_thread=False
-            )
+            conn = sqlite3.connect(self._db_path, timeout=self._busy_timeout_ms / 1000.0, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
@@ -138,11 +135,10 @@ class OfflineEventStore:
         with self._lock:
             if self._conn is None:
                 return
-            try:
+            # Failed deletes leave rows durable for a later drain attempt.
+            with suppress(Exception):
                 self._conn.executemany("DELETE FROM events WHERE id=?", [(i,) for i in ids])
                 self._conn.commit()
-            except Exception:
-                pass
 
     def count(self) -> int:
         with self._lock:
@@ -156,8 +152,6 @@ class OfflineEventStore:
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
-                try:
+                with suppress(Exception):
                     self._conn.close()
-                except Exception:
-                    pass
                 self._conn = None

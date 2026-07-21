@@ -8,6 +8,7 @@
 import functools
 import inspect
 import time
+from contextlib import suppress
 from types import TracebackType
 from typing import Any, Callable, Optional, TypeVar
 
@@ -20,6 +21,7 @@ from .telemetry import (
 )
 
 _TFunc = TypeVar("_TFunc", bound=Callable[..., Any])
+_ERROR_LOGGED_ATTR = "_ort_genai_telemetry_logged"
 
 
 def _get_telemetry() -> GenAITelemetry:
@@ -36,12 +38,14 @@ def log_action(
     """Log a telemetry action event."""
     telemetry = _get_telemetry()
     attributes = dict(metadata or {})
-    attributes.update({
-        "invoked_from": invoked_from,
-        "action_name": action_name,
-        "duration_ms": duration_ms,
-        "success": success,
-    })
+    attributes.update(
+        {
+            "invoked_from": invoked_from,
+            "action_name": action_name,
+            "duration_ms": duration_ms,
+            "success": success,
+        }
+    )
     telemetry.log(ACTION_EVENT, attributes)
 
 
@@ -53,11 +57,23 @@ def log_error(
     """Log a telemetry error event."""
     telemetry = _get_telemetry()
     attributes = dict(metadata or {})
-    attributes.update({
-        "exception_type": exception_type,
-        "exception_message": _redact_paths(exception_message),
-    })
+    attributes.update(
+        {
+            "exception_type": exception_type,
+            "exception_message": _redact_paths(exception_message),
+        }
+    )
     telemetry.log(ERROR_EVENT, attributes)
+
+
+def _is_exception_logged(exc: BaseException) -> bool:
+    return bool(getattr(exc, _ERROR_LOGGED_ATTR, False))
+
+
+def _mark_exception_logged(exc: BaseException) -> None:
+    # Some exception implementations do not allow custom attributes.
+    with suppress(Exception):
+        setattr(exc, _ERROR_LOGGED_ATTR, True)
 
 
 def _resolve_invoked_from(skip_frames: int = 0) -> str:
@@ -131,12 +147,13 @@ class ActionContext:
             metadata=self.metadata,
         )
 
-        if exc_type is not None and exc_val is not None:
+        if exc_type is not None and exc_val is not None and not _is_exception_logged(exc_val):
             log_error(
                 exception_type=exc_type.__name__,
                 exception_message=_format_exception_message(exc_val, exc_tb),
                 metadata=self.metadata,
             )
+            _mark_exception_logged(exc_val)
 
         return False
 
@@ -182,10 +199,12 @@ def action(func: _TFunc) -> _TFunc:
             return func(*args, **kwargs)
         except Exception as exc:
             success = False
-            log_error(
-                exception_type=type(exc).__name__,
-                exception_message=_format_exception_message(exc, exc.__traceback__),
-            )
+            if not _is_exception_logged(exc):
+                log_error(
+                    exception_type=type(exc).__name__,
+                    exception_message=_format_exception_message(exc, exc.__traceback__),
+                )
+                _mark_exception_logged(exc)
             raise
         finally:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
