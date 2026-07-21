@@ -26,7 +26,6 @@ import os
 import sqlite3
 import threading
 from contextlib import suppress
-from typing import Optional
 
 SCHEMA_VERSION = 1
 
@@ -54,7 +53,7 @@ class OfflineEventStore:
         self._trim_target = max(1, (max_records * 3) // 4)
         self._busy_timeout_ms = busy_timeout_ms
         self._lock = threading.Lock()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         self._initialize()
 
     def _initialize(self) -> None:

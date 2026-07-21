@@ -7,7 +7,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 from .connection_string_parser import ConnectionStringParser
 
@@ -58,13 +57,13 @@ class OneCollectorTransportOptions:
 class OneCollectorExporterOptions:
     """Configuration options for OneCollector exporter."""
 
-    connection_string: Optional[str] = None
-    service_name: Optional[str] = None
+    connection_string: str | None = None
+    service_name: str | None = None
     transport_options: OneCollectorTransportOptions = field(default_factory=OneCollectorTransportOptions)
 
     # Internal fields populated during validation
-    instrumentation_key: Optional[str] = field(default=None, init=False)
-    tenant_token: Optional[str] = field(default=None, init=False)
+    instrumentation_key: str | None = field(default=None, init=False)
+    tenant_token: str | None = field(default=None, init=False)
 
     def validate(self) -> None:
         """Validate the exporter options and populate derived fields.

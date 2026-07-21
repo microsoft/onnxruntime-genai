@@ -18,7 +18,6 @@ without losing events and without an exit-time flush.
 
 import threading
 import time
-from typing import Optional
 
 from .library.options import CompressionType, OneCollectorTransportOptions
 from .library.payload_builder import PayloadBuilder
@@ -62,7 +61,7 @@ class EventUploader:
 
         self._wake = threading.Event()
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     # ----- control -------------------------------------------------------
 

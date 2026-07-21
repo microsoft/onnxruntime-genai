@@ -41,7 +41,7 @@ except Exception:
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_gpu_memory
+    global peak_gpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         result = subprocess.run(
@@ -65,7 +65,7 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_cpu_memory
+    global peak_cpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
@@ -101,9 +101,9 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring
-    global peak_gpu_memory
-    global peak_cpu_memory
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
     # Reset the peak memory variables and the monitoring flag
     stop_monitoring = False
@@ -328,6 +328,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
             peak_memory_cpu_mb=peak_cpu_memory * 1024,
         )
     except Exception:
+        # Benchmark telemetry must never affect benchmark results.
         pass
 
     return metrics
@@ -355,6 +356,7 @@ def main(args):
             total_load_time_ms=model_load_time_ms,
         )
     except Exception:
+        # Model-load telemetry must never affect benchmark setup.
         pass
 
     processor = model.create_multimodal_processor()

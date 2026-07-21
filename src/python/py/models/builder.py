@@ -315,6 +315,7 @@ def _emit_model_build_telemetry(
                             has_custom_ops = True
                     op_types = ",".join(sorted(op_type_set))
             except Exception:
+                # Graph inspection is optional; emit the remaining build metadata.
                 pass
 
         io_dtype_str = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
@@ -344,6 +345,7 @@ def _emit_model_build_telemetry(
             extra_options=_sanitize_extra_options(extra_options),
         )
     except Exception:
+        # Telemetry instrumentation must never affect model conversion.
         pass
 
 

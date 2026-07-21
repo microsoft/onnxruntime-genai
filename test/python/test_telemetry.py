@@ -571,15 +571,15 @@ class TestDeviceId(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_get_encrypted_device_id(self):
-        from telemetry.deviceid import DeviceIdStatus, get_encrypted_device_id_and_status
+        import telemetry.deviceid as deviceid
 
-        device_id, status = get_encrypted_device_id_and_status()
+        device_id, status = deviceid.get_encrypted_device_id_and_status()
         # Should return a non-empty hex string (SHA256 = 64 hex chars)
-        if status != DeviceIdStatus.FAILED:
+        if status != deviceid.DeviceIdStatus.FAILED:
             self.assertEqual(len(device_id), 64)
             # Should be uppercase hex
             self.assertTrue(all(c in "0123456789ABCDEF" for c in device_id))
-        self.assertIn(status, list(DeviceIdStatus))
+        self.assertIn(status, list(deviceid.DeviceIdStatus))
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
@@ -597,10 +597,10 @@ class TestDeviceId(unittest.TestCase):
             self._get_telemetry_base_dir.cache_clear()
 
     def test_device_id_consistent(self):
-        from telemetry.deviceid import get_encrypted_device_id_and_status
+        import telemetry.deviceid as deviceid
 
-        id1, _ = get_encrypted_device_id_and_status()
-        id2, _ = get_encrypted_device_id_and_status()
+        id1, _ = deviceid.get_encrypted_device_id_and_status()
+        id2, _ = deviceid.get_encrypted_device_id_and_status()
         self.assertEqual(id1, id2)
 
     def test_file_store_uses_owner_only_creation_mode(self):
@@ -873,9 +873,8 @@ class TestActionDecorator(_HermeticTelemetryTestCase):
     def test_action_context_manager_exception(self):
         from telemetry.telemetry_extensions import ActionContext
 
-        with self.assertRaises(RuntimeError):
-            with ActionContext("test_operation") as ctx:
-                raise RuntimeError("test error")
+        with self.assertRaises(RuntimeError), ActionContext("test_operation"):
+            raise RuntimeError("test error")
 
 
 class TestSerializationHelper(unittest.TestCase):
@@ -984,10 +983,10 @@ class TestOfflineEventStore(unittest.TestCase):
     def _new_store(self, **kw):
         import tempfile
 
-        from telemetry.offline_store import OfflineEventStore
+        import telemetry.offline_store as store_module
 
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
-        store = OfflineEventStore(db, **kw)
+        store = store_module.OfflineEventStore(db, **kw)
         self.addCleanup(store.close)
         return store
 
@@ -1043,7 +1042,7 @@ class TestOfflineEventStore(unittest.TestCase):
     def test_user_version_stamped(self):
         import sqlite3
 
-        from telemetry.offline_store import SCHEMA_VERSION
+        import telemetry.offline_store as store_module
 
         s = self._new_store()
         conn = sqlite3.connect(s.db_path)
@@ -1051,7 +1050,7 @@ class TestOfflineEventStore(unittest.TestCase):
             v = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(v, SCHEMA_VERSION)
+        self.assertEqual(v, store_module.SCHEMA_VERSION)
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions")
     def test_store_uses_owner_only_permissions(self):
@@ -1097,12 +1096,12 @@ class TestUploaderDrainLogic(unittest.TestCase):
     def _setup(self):
         import tempfile
 
-        from telemetry.offline_store import OfflineEventStore
-        from telemetry.uploader import EventUploader
+        import telemetry.offline_store as store_module
+        import telemetry.uploader as uploader_module
 
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
-        store = OfflineEventStore(db)
-        uploader = EventUploader(store, instrumentation_key="abc-def")
+        store = store_module.OfflineEventStore(db)
+        uploader = uploader_module.EventUploader(store, instrumentation_key="abc-def")
         self.addCleanup(store.close)
         self.addCleanup(uploader.close)
         return store, uploader
@@ -1206,6 +1205,7 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertIsNone(telemetry._heartbeat_thread)
         self.assertIsNone(telemetry._uploader)
         self.assertIsNone(telemetry._store)
+        self.assertFalse(telemetry._initialized)
 
     def test_enable_does_not_replace_live_uploader(self):
         from telemetry.telemetry import GenAITelemetry
