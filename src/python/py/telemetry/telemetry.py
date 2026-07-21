@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
-from .library.event_source import event_source
 from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
 from .library.transport import HttpJsonPostTransport
@@ -208,8 +207,6 @@ class GenAITelemetry:
                 self._envelope_ikey = (
                     f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
                 )
-
-                event_source.disable()
 
                 # Detailed events are recorded only when enabled.
                 self._enabled = not user_opt_out

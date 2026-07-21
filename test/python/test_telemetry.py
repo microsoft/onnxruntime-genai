@@ -244,6 +244,16 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
 
+    def test_initialization_keeps_exporter_diagnostics_configurable(self):
+        from telemetry.library.event_source import event_source
+        from telemetry.telemetry import GenAITelemetry
+
+        event_source.logger.disabled = False
+        GenAITelemetry()
+        self._join_heartbeat()
+
+        self.assertFalse(event_source.logger.disabled)
+
     def test_enable_telemetry_does_not_override_env_opt_out(self):
         from telemetry.telemetry import GenAITelemetry
 
