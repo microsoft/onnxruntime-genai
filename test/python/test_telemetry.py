@@ -39,13 +39,20 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
     _ENV_SIGNALS = (
         "ORT_DISABLE_TELEMETRY",
-        "CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL",
-        "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID",
+        "CI",
+        "TF_BUILD",
+        "GITHUB_ACTIONS",
+        "JENKINS_URL",
+        "TRAVIS",
+        "CIRCLECI",
+        "GITLAB_CI",
+        "BUILD_ID",
     )
 
     def setUp(self):
         import tempfile
         from telemetry.telemetry import GenAITelemetry
+
         GenAITelemetry._instance = None
 
         self._tmpdir = tempfile.mkdtemp()
@@ -70,15 +77,14 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         self.mock_send = send_patcher.start()
         self._patchers.append(send_patcher)
 
-        dir_patcher = patch(
-            "telemetry.telemetry.get_telemetry_base_dir", return_value=self._tmpdir
-        )
+        dir_patcher = patch("telemetry.telemetry.get_telemetry_base_dir", return_value=self._tmpdir)
         dir_patcher.start()
         self._patchers.append(dir_patcher)
 
     def tearDown(self):
         import shutil
         from telemetry.telemetry import GenAITelemetry
+
         instance = GenAITelemetry._instance
         if instance is not None:
             # Quiesce background threads before un-stubbing the network. The
@@ -97,6 +103,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
     def _join_heartbeat(self):
         from telemetry.telemetry import GenAITelemetry
+
         t = GenAITelemetry._instance
         if t is not None and t._heartbeat_thread is not None:
             t._heartbeat_thread.join()
@@ -105,6 +112,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         """Join the heartbeat and drain the uploader so every queued event is
         recorded in ``self.sent_payloads`` deterministically."""
         from telemetry.telemetry import GenAITelemetry
+
         t = GenAITelemetry._instance
         if t is None:
             return None
@@ -122,8 +130,13 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         names = []
         for payload in self.sent_payloads:
             for token in (
-                b"GenAIHeartbeat", b"GenAIModelBuild", b"GenAIBenchmark",
-                b"GenAIModelLoad", b"GenAIInference", b"GenAIAction", b"GenAIError",
+                b"GenAIHeartbeat",
+                b"GenAIModelBuild",
+                b"GenAIBenchmark",
+                b"GenAIModelLoad",
+                b"GenAIInference",
+                b"GenAIAction",
+                b"GenAIError",
             ):
                 if token in payload:
                     names.append(token.decode())
@@ -135,6 +148,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_ci_sends_nothing(self):
         from telemetry.telemetry import GenAITelemetry
+
         os.environ["CI"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
@@ -146,6 +160,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_github_actions_sends_nothing(self):
         from telemetry.telemetry import GenAITelemetry
+
         os.environ["GITHUB_ACTIONS"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
@@ -155,6 +170,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_opt_out_records_heartbeat_only(self):
         from telemetry.telemetry import GenAITelemetry
+
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         # Detailed events are not recorded or drained; the heartbeat is sent directly.
@@ -171,6 +187,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_enabled_records_heartbeat_and_events(self):
         from telemetry.telemetry import GenAITelemetry
+
         t = GenAITelemetry()
         self.assertTrue(t._enabled)
         self.assertTrue(t.accepts_detailed_events)
@@ -183,6 +200,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_disable_enable_api(self):
         from telemetry.telemetry import GenAITelemetry
+
         t = GenAITelemetry()
         self._join_heartbeat()
         self.assertTrue(t._enabled)
@@ -195,6 +213,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
     def test_enable_telemetry_does_not_override_env_opt_out(self):
         from telemetry.telemetry import GenAITelemetry
+
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         t = GenAITelemetry()
         self._join_heartbeat()
@@ -211,10 +230,14 @@ class TestVersionResolution(unittest.TestCase):
     def test_variant_distribution_version_is_resolved(self):
         from telemetry.telemetry import _get_app_version
 
-        with patch.dict(sys.modules, {"onnxruntime_genai": None}), patch(
-            "importlib.metadata.packages_distributions",
-            return_value={"onnxruntime_genai": ["onnxruntime-genai-cuda"]},
-        ), patch("importlib.metadata.version", return_value="0.15.0") as mock_version:
+        with (
+            patch.dict(sys.modules, {"onnxruntime_genai": None}),
+            patch(
+                "importlib.metadata.packages_distributions",
+                return_value={"onnxruntime_genai": ["onnxruntime-genai-cuda"]},
+            ),
+            patch("importlib.metadata.version", return_value="0.15.0") as mock_version,
+        ):
             self.assertEqual(_get_app_version(), "0.15.0")
 
         mock_version.assert_called_once_with("onnxruntime-genai-cuda")
@@ -230,12 +253,32 @@ class TestActionFastPath(unittest.TestCase):
         def work():
             return 42
 
-        with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry), patch(
-            "telemetry.telemetry_extensions._resolve_invoked_from"
-        ) as mock_resolve:
+        with (
+            patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry),
+            patch("telemetry.telemetry_extensions._resolve_invoked_from") as mock_resolve,
+        ):
             self.assertEqual(work(), 42)
 
         mock_resolve.assert_not_called()
+
+    def test_nested_actions_log_error_once(self):
+        from telemetry.telemetry_extensions import action
+
+        telemetry = MagicMock(accepts_detailed_events=True)
+
+        @action
+        @action
+        def fail():
+            raise ValueError("boom")
+
+        with (
+            patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry),
+            patch("telemetry.telemetry_extensions.log_error") as mock_log_error,
+            self.assertRaisesRegex(ValueError, "boom"),
+        ):
+            fail()
+
+        mock_log_error.assert_called_once()
 
 
 class TestPathRedaction(unittest.TestCase):
@@ -243,6 +286,7 @@ class TestPathRedaction(unittest.TestCase):
 
     def test_keeps_filenames_drops_directories_and_usernames(self):
         from telemetry.telemetry import _redact_paths
+
         self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err <path>")
         self.assertEqual(_redact_paths("/var/data/run/output.log"), "<path>")
         # Last segment is a directory/username (no extension) -> fully redacted.
@@ -254,6 +298,7 @@ class TestPathRedaction(unittest.TestCase):
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
+
         try:
             raise RuntimeError(r"open C:\Users\alice\secret\weights.bin failed")
         except RuntimeError as exc:
@@ -288,7 +333,6 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(attributes["exception_message"], "missing <path>")
 
 
-
 class TestDeviceId(unittest.TestCase):
     """Test device ID generation."""
 
@@ -298,9 +342,7 @@ class TestDeviceId(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._get_telemetry_base_dir = deviceid.get_telemetry_base_dir
         self._platform_patcher = patch("telemetry.deviceid.platform.system", return_value="Linux")
-        self._dir_patcher = patch(
-            "telemetry.deviceid.get_telemetry_base_dir", return_value=Path(self._tmpdir.name)
-        )
+        self._dir_patcher = patch("telemetry.deviceid.get_telemetry_base_dir", return_value=Path(self._tmpdir.name))
         self._platform_patcher.start()
         self._dir_patcher.start()
         deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
@@ -315,6 +357,7 @@ class TestDeviceId(unittest.TestCase):
 
     def test_get_encrypted_device_id(self):
         from telemetry.deviceid import get_encrypted_device_id_and_status, DeviceIdStatus
+
         device_id, status = get_encrypted_device_id_and_status()
         # Should return a non-empty hex string (SHA256 = 64 hex chars)
         if status != DeviceIdStatus.FAILED:
@@ -326,8 +369,9 @@ class TestDeviceId(unittest.TestCase):
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
         try:
-            with patch("telemetry.deviceid.platform.system", return_value="Windows"), patch.dict(
-                os.environ, {"LOCALAPPDATA": r"C:\Users\test\AppData\Local"}, clear=False
+            with (
+                patch("telemetry.deviceid.platform.system", return_value="Windows"),
+                patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\test\AppData\Local"}, clear=False),
             ):
                 path = self._get_telemetry_base_dir()
             self.assertEqual(
@@ -339,6 +383,7 @@ class TestDeviceId(unittest.TestCase):
 
     def test_device_id_consistent(self):
         from telemetry.deviceid import get_encrypted_device_id_and_status
+
         id1, _ = get_encrypted_device_id_and_status()
         id2, _ = get_encrypted_device_id_and_status()
         self.assertEqual(id1, id2)
@@ -349,12 +394,18 @@ class TestSystemInfo(unittest.TestCase):
 
     def test_get_system_info(self):
         from telemetry.system_info import get_system_info
+
         info = get_system_info()
 
         # Should have all expected keys
         expected_keys = [
-            "os", "os_version", "os_arch", "processor_count",
-            "python_version", "gpu_name", "total_memory_mb",
+            "os",
+            "os_version",
+            "os_arch",
+            "processor_count",
+            "python_version",
+            "gpu_name",
+            "total_memory_mb",
         ]
         for key in expected_keys:
             self.assertIn(key, info, f"Missing key: {key}")
@@ -387,13 +438,15 @@ class TestSystemInfo(unittest.TestCase):
 
         get_system_info.cache_clear()
         try:
-            with patch("telemetry.system_info.os.cpu_count", return_value=None), patch(
-                "telemetry.system_info._get_cpu_model", return_value=""
-            ), patch("telemetry.system_info._get_total_memory_mb", return_value=0), patch(
-                "telemetry.system_info._get_gpu_info", return_value={}
-            ), patch("telemetry.system_info._get_device_manufacturer", return_value=""), patch(
-                "telemetry.system_info._get_device_model", return_value=""
-            ), patch("telemetry.system_info._get_ort_version", return_value=""):
+            with (
+                patch("telemetry.system_info.os.cpu_count", return_value=None),
+                patch("telemetry.system_info._get_cpu_model", return_value=""),
+                patch("telemetry.system_info._get_total_memory_mb", return_value=0),
+                patch("telemetry.system_info._get_gpu_info", return_value={}),
+                patch("telemetry.system_info._get_device_manufacturer", return_value=""),
+                patch("telemetry.system_info._get_device_model", return_value=""),
+                patch("telemetry.system_info._get_ort_version", return_value=""),
+            ):
                 info = get_system_info()
             self.assertEqual(info["processor_count"], 1)
         finally:
@@ -401,12 +454,14 @@ class TestSystemInfo(unittest.TestCase):
 
     def test_system_info_cached(self):
         from telemetry.system_info import get_system_info
+
         info1 = get_system_info()
         info2 = get_system_info()
         self.assertIs(info1, info2)
 
     def test_execution_provider_info(self):
         from telemetry.system_info import get_execution_provider_info
+
         info = get_execution_provider_info()
         self.assertIn("available_providers", info)
         self.assertIsInstance(info["available_providers"], list)
@@ -417,6 +472,7 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
 
     def _opted_out_telemetry(self):
         from telemetry.telemetry import GenAITelemetry
+
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
         return GenAITelemetry()
 
@@ -547,10 +603,12 @@ class TestSerializationHelper(unittest.TestCase):
 
     def test_serialize_list(self):
         from telemetry.library.serialization import CommonSchemaJsonSerializationHelper as H
+
         self.assertEqual(H.serialize_value([1, "two", 3.0]), [1, "two", 3.0])
 
     def test_serialize_dict(self):
         from telemetry.library.serialization import CommonSchemaJsonSerializationHelper as H
+
         result = H.serialize_value({"key": "value", "num": 42})
         self.assertEqual(result, {"key": "value", "num": 42})
 
@@ -576,6 +634,7 @@ class TestPayloadBuilder(unittest.TestCase):
 
     def test_basic_build(self):
         from telemetry.library.payload_builder import PayloadBuilder
+
         builder = PayloadBuilder(max_size_bytes=-1, max_items=-1)
         builder.add(b'{"event":"test1"}')
         builder.add(b'{"event":"test2"}')
@@ -584,18 +643,21 @@ class TestPayloadBuilder(unittest.TestCase):
 
     def test_max_items_limit(self):
         from telemetry.library.payload_builder import PayloadBuilder
+
         builder = PayloadBuilder(max_size_bytes=-1, max_items=1)
         builder.add(b'{"event":"test1"}')
         self.assertFalse(builder.can_add(b'{"event":"test2"}'))
 
     def test_max_size_limit(self):
         from telemetry.library.payload_builder import PayloadBuilder
+
         builder = PayloadBuilder(max_size_bytes=20, max_items=-1)
         builder.add(b'{"event":"test1"}')
         self.assertFalse(builder.can_add(b'{"event":"test2"}'))
 
     def test_empty_build(self):
         from telemetry.library.payload_builder import PayloadBuilder
+
         builder = PayloadBuilder(max_size_bytes=-1, max_items=-1)
         self.assertEqual(builder.build(), b"")
         self.assertTrue(builder.is_empty)
@@ -606,16 +668,19 @@ class TestConnectionStringParser(unittest.TestCase):
 
     def test_valid_connection_string(self):
         from telemetry.library.connection_string_parser import ConnectionStringParser
+
         parser = ConnectionStringParser("InstrumentationKey=abc-def-ghi")
         self.assertEqual(parser.instrumentation_key, "abc-def-ghi")
 
     def test_empty_connection_string(self):
         from telemetry.library.connection_string_parser import ConnectionStringParser
+
         with self.assertRaises(ValueError):
             ConnectionStringParser("")
 
     def test_missing_key(self):
         from telemetry.library.connection_string_parser import ConnectionStringParser
+
         with self.assertRaises(ValueError):
             ConnectionStringParser("SomeOtherKey=value")
 
@@ -626,10 +691,19 @@ class TestOfflineEventStore(unittest.TestCase):
     def _new_store(self, **kw):
         import tempfile
         from telemetry.offline_store import OfflineEventStore
+
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
         store = OfflineEventStore(db, **kw)
         self.addCleanup(store.close)
         return store
+
+    def test_empty_permission_path_is_ignored(self):
+        import telemetry.offline_store as store_module
+
+        with patch.object(store_module.os, "name", "posix"), patch.object(store_module.os, "chmod") as mock_chmod:
+            store_module._chmod_best_effort("", 0o700)
+
+        mock_chmod.assert_not_called()
 
     def test_store_and_fifo_batch(self):
         s = self._new_store()
@@ -661,6 +735,7 @@ class TestOfflineEventStore(unittest.TestCase):
     def test_user_version_stamped(self):
         import sqlite3
         from telemetry.offline_store import SCHEMA_VERSION
+
         s = self._new_store()
         conn = sqlite3.connect(s.db_path)
         try:
@@ -681,10 +756,12 @@ class TestProcessDrainLock(unittest.TestCase):
 
     def _lock_path(self):
         import tempfile
+
         return os.path.join(tempfile.mkdtemp(), "telemetry.db.lock")
 
     def test_mutual_exclusion(self):
         from telemetry.process_lock import ProcessDrainLock
+
         path = self._lock_path()
         a = ProcessDrainLock(path)
         b = ProcessDrainLock(path)
@@ -696,6 +773,7 @@ class TestProcessDrainLock(unittest.TestCase):
 
     def test_reacquire_is_idempotent(self):
         from telemetry.process_lock import ProcessDrainLock
+
         a = ProcessDrainLock(self._lock_path())
         self.assertTrue(a.acquire())
         self.assertTrue(a.acquire())  # already held
@@ -711,6 +789,7 @@ class TestUploaderDrainLogic(unittest.TestCase):
         import tempfile
         from telemetry.offline_store import OfflineEventStore
         from telemetry.uploader import EventUploader
+
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
         store = OfflineEventStore(db)
         uploader = EventUploader(store, instrumentation_key="abc-def")
@@ -817,9 +896,10 @@ class TestShutdownSafety(unittest.TestCase):
         telemetry._uploader.stop_loop.return_value = False
         old_uploader = telemetry._uploader
 
-        with patch("telemetry.telemetry._is_ci_environment", return_value=False), patch(
-            "telemetry.telemetry.EventUploader"
-        ) as mock_new_uploader:
+        with (
+            patch("telemetry.telemetry._is_ci_environment", return_value=False),
+            patch("telemetry.telemetry.EventUploader") as mock_new_uploader,
+        ):
             telemetry.enable_telemetry()
 
         self.assertIs(telemetry._uploader, old_uploader)
