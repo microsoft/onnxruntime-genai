@@ -430,6 +430,10 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def _normalize_execution_provider_name(execution_provider):
+    return "trt-rtx" if execution_provider == "NvTensorRtRtx" else execution_provider
+
+
 def _sanitize_path_value(value):
     """Reduce a filesystem path to its basename to avoid leaking usernames/local paths.
 
@@ -529,7 +533,7 @@ def _emit_model_build_telemetry(
             context_length=context_length,
             io_dtype=io_dtype_str,
             quant_type=quant_type_str,
-            execution_provider=execution_provider,
+            execution_provider=_normalize_execution_provider_name(execution_provider),
             output_model_size_bytes=output_model_size,
             num_onnx_operators=num_ops,
             operator_types=op_types,
@@ -556,8 +560,14 @@ def _create_model_impl(
     # Update name alias for TRT-RTX
     overall_start = time.perf_counter()
 
-    if execution_provider == "NvTensorRtRtx":
-        execution_provider = "trt-rtx"
+    normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
+    if normalized_execution_provider != execution_provider:
+        execution_provider = normalized_execution_provider
+        extra_options["use_qdq"] = True
+
+    # Normalize any deprecated extra_options names for direct API callers (the CLI
+    # path already handles this in check_extra_options).
+    apply_deprecated_extra_option_aliases(extra_options)
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)

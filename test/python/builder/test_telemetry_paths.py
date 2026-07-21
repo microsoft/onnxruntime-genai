@@ -51,6 +51,11 @@ def test_sanitize_path_value_is_platform_independent(value, expected):
     assert builder_module._sanitize_path_value(value) == expected
 
 
+def test_telemetry_execution_provider_normalizes_trt_rtx():
+    assert builder_module._normalize_execution_provider_name("NvTensorRtRtx") == "trt-rtx"
+    assert builder_module._normalize_execution_provider_name("cuda") == "cuda"
+
+
 def test_telemetry_fallback_restores_source_path(monkeypatch):
     telemetry_stub = types.ModuleType("telemetry")
 
@@ -106,10 +111,11 @@ def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatc
         config=None,
         onnx_model=None,
         precision="fp16",
-        execution_provider="cpu",
+        execution_provider="NvTensorRtRtx",
         output_dir="",
         extra_options={},
         fallback_model_name=r"C:\Users\alice\models\model.onnx",
     )
 
     assert captured["model_name"] == "model.onnx"
+    assert captured["execution_provider"] == "trt-rtx"
