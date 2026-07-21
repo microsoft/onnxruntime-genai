@@ -259,6 +259,8 @@ def _emit_model_build_telemetry(
             from telemetry import GenAITelemetry
 
         telemetry = GenAITelemetry()
+        if not telemetry.accepts_detailed_events:
+            return
 
         model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
         hidden_size = getattr(config, "hidden_size", 0)
