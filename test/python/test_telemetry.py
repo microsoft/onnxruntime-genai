@@ -23,8 +23,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Add the telemetry source to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+_TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+_TELEMETRY_SOURCE_PATH_ADDED = _TELEMETRY_SOURCE_PATH not in sys.path
+if _TELEMETRY_SOURCE_PATH_ADDED:
+    sys.path.insert(0, _TELEMETRY_SOURCE_PATH)
+
+
+def tearDownModule():
+    if _TELEMETRY_SOURCE_PATH_ADDED and _TELEMETRY_SOURCE_PATH in sys.path:
+        sys.path.remove(_TELEMETRY_SOURCE_PATH)
 
 
 class _HermeticTelemetryTestCase(unittest.TestCase):
