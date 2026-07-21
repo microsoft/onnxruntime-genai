@@ -185,7 +185,7 @@ std::string GetCpuModel() {
 
 // Per-user directory shared by the Microsoft AI dev-tools family (ONNX Runtime, Olive) under
 // "Microsoft/DeveloperTools/.onnxruntime". Holds the generated device-id file for desktop POSIX and
-// the 1DS offline cache when available (on Windows the device id itself lives in the registry — see
+// the 1DS offline cache when available (on Windows, the device id itself lives in the registry — see
 // below; Android/iOS use the SDK/platform device id).
 // Returns an empty path when no per-user location is available, so the caller skips persistence
 // rather than writing to a predictable world-writable temp path. Never throws.
