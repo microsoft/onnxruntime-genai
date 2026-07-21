@@ -211,7 +211,7 @@ static Generators::ModelLoadInfo BuildModelLoadInfo(const Generators::Model& mod
 #endif  // ORTGENAI_ENABLE_TELEMETRY
 
 template <typename CreateModelFn>
-static std::shared_ptr<Generators::Model> CreateModelWithTelemetry(CreateModelFn&& create_model) {
+static std::shared_ptr<Generators::Model> CreateModelWithLifecycleTracking(CreateModelFn&& create_model) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   auto& telemetry = Generators::GenAiTelemetry::Instance();
   telemetry.Initialize();
@@ -408,7 +408,7 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = CreateModelWithTelemetry(
+  auto model = CreateModelWithLifecycleTracking(
       [&] { return Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings); });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
@@ -535,7 +535,7 @@ OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(Oga
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto model = CreateModelWithTelemetry([&] {
+  auto model = CreateModelWithLifecycleTracking([&] {
     auto config_copy = std::make_unique<Generators::Config>(*config);
     return Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
   });
