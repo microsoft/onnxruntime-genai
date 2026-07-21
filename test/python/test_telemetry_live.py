@@ -64,6 +64,7 @@ def main():
     transport_mod.HttpJsonPostTransport.send = recording_send
 
     from telemetry.telemetry import GenAITelemetry
+
     GenAITelemetry._instance = None
 
     print("=" * 60)
@@ -90,41 +91,68 @@ def main():
 
         print("[3/8] log_model_build ...")
         telemetry.log_model_build(
-            action="create_model", duration_ms=12345.6, success=True,
-            model_name="microsoft/phi-3-mini-4k-instruct", model_type="phi3",
-            hidden_size=3072, num_layers=32, num_attn_heads=32, num_kv_heads=8,
-            vocab_size=32064, context_length=4096, io_dtype="FLOAT16", quant_type="INT4",
-            execution_provider="cuda", output_model_size_bytes=2_100_000_000,
-            num_onnx_operators=15, operator_types="MatMul,Add,Attention,RotaryEmbedding",
-            has_custom_ops=False, source_format="huggingface", has_adapter=False,
+            action="create_model",
+            duration_ms=12345.6,
+            success=True,
+            model_name="microsoft/phi-3-mini-4k-instruct",
+            model_type="phi3",
+            hidden_size=3072,
+            num_layers=32,
+            num_attn_heads=32,
+            num_kv_heads=8,
+            vocab_size=32064,
+            context_length=4096,
+            io_dtype="FLOAT16",
+            quant_type="INT4",
+            execution_provider="cuda",
+            output_model_size_bytes=2_100_000_000,
+            num_onnx_operators=15,
+            operator_types="MatMul,Add,Attention,RotaryEmbedding",
+            has_custom_ops=False,
+            source_format="huggingface",
+            has_adapter=False,
             extra_options={"int4_block_size": "32"},
         )
 
         print("[4/8] log_model_load ...")
         telemetry.log_model_load(
-            model_name="phi-3-mini-int4-cuda", model_type="phi3",
-            execution_provider="cuda", total_load_time_ms=842.17, num_sessions=2,
+            model_name="phi-3-mini-int4-cuda",
+            model_type="phi3",
+            execution_provider="cuda",
+            total_load_time_ms=842.17,
+            num_sessions=2,
         )
 
         print("[5/8] log_benchmark ...")
         telemetry.log_benchmark(
-            model_name="phi-3-mini-int4-cuda", precision="int4", backend="onnxruntime-genai",
-            device="cuda", batch_size=1, prompt_length=128, tokens_generated=256,
-            token_generation_latency_ms=4.8, token_generation_throughput=208.3,
-            time_to_first_token_ms=20.3, peak_memory_gpu_mb=3200.0,
+            model_name="phi-3-mini-int4-cuda",
+            precision="int4",
+            backend="onnxruntime-genai",
+            device="cuda",
+            batch_size=1,
+            prompt_length=128,
+            tokens_generated=256,
+            token_generation_latency_ms=4.8,
+            token_generation_throughput=208.3,
+            time_to_first_token_ms=20.3,
+            peak_memory_gpu_mb=3200.0,
         )
 
         print("[6/8] log_inference ...")
         telemetry.log_inference(
-            model_name="phi-3-mini-int4-cuda", time_to_first_token_ms=22.5,
-            total_generation_time_ms=1100.0, total_tokens_generated=200, input_token_count=50,
+            model_name="phi-3-mini-int4-cuda",
+            time_to_first_token_ms=22.5,
+            total_generation_time_ms=1100.0,
+            total_tokens_generated=200,
+            input_token_count=50,
         )
 
         print("[7/8] log_error ...")
         telemetry.log_error(
             exception_type="RuntimeError",
             exception_message="model.cpp:42 CUDA out of memory",
-            action="generate_next_token", model_name="phi-3-mini-int4-cuda",
+            action="generate_next_token",
+            model_name="phi-3-mini-int4-cuda",
             execution_provider="cuda",
         )
 
@@ -137,8 +165,13 @@ def main():
         # Re-open the store read-only to confirm it drained (uploader deletes on 2xx).
         from telemetry.deviceid import get_telemetry_base_dir
         from telemetry.offline_store import OfflineEventStore
+
         db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
-        remaining = OfflineEventStore(db_path).count()
+        store = OfflineEventStore(db_path)
+        try:
+            remaining = store.count()
+        finally:
+            store.close()
     finally:
         transport_mod.HttpJsonPostTransport.send = original_send
 
@@ -149,7 +182,10 @@ def main():
     with results_lock:
         for i, r in enumerate(transmission_results):
             ok = "OK " if r["succeeded"] else "ERR"
-            print(f"  {ok} payload {i+1}: status={r['status_code']} items={r['item_count']} size={r['payload_size_bytes']}B")
+            print(
+                f"  {ok} payload {i + 1}: status={r['status_code']} items={r['item_count']}"
+                f" size={r['payload_size_bytes']}B"
+            )
         failures = sum(1 for r in transmission_results if not r["succeeded"])
         sent_items = sum(r["item_count"] for r in transmission_results if r["succeeded"])
         heartbeat_sent = any(r["succeeded"] and r["has_heartbeat"] for r in transmission_results)
