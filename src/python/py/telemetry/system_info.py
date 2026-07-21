@@ -168,6 +168,7 @@ def _get_gpu_info() -> dict[str, Any]:
                         info["gpu_memory_mb"] = int(parts[1]) // (1024 * 1024) if parts[1].isdigit() else 0
                         info["gpu_driver_version"] = parts[2]
                         info["gpu_name"] = parts[3]
+                        info["gpu_count"] = 1
         except Exception:
             pass
 
