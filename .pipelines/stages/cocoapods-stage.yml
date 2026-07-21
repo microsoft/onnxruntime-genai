@@ -60,6 +60,10 @@ stages:
         parameters:
           build_config: ${{ parameters.build_config }}
 
+      - template: jobs/steps/utils/download-apple-ort.yml
+        parameters:
+          ort_version: ${{ parameters.ort_version }}
+
       # --- Feed isolation: pip → Lotus (no pypi.org fallback) -----------------
       - task: PipAuthenticate@1
         displayName: 'Authenticate pip to Lotus feed'
@@ -80,6 +84,7 @@ stages:
               --variant Full \
               --build-settings-file "${{ variables.buildSettingsFile }}" \
               --build-apple-framework-arg=--config=$(cmake_build_type) \
+              --ort-home "$(Build.BinariesDirectory)/ort_home" \
               --ort-version ${{ parameters.ort_version }}
 
       - script: |

@@ -95,6 +95,19 @@ jobs:
     clean: true
 
   - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: windows
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: linux
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: macos
+
+  - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/core-win-step.yml
       parameters:
         arch: ${{ parameters.arch }}

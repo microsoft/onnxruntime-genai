@@ -396,25 +396,6 @@ steps:
     Write-Host "ASSERT OK: archive contains native lib + public headers"
   displayName: 'Assert: CPack archive contents'
 
-# --- Rename archive to embed the computed package version -------------------
-# CPack names the archive with the base VERSION_INFO (e.g. 0.15.0-dev). Replace
-# that with the pipeline-computed genai_version (e.g. 0.15.0-dev20260709123456)
-# so the published C/C++ archive matches the NuGet/package version. For stable
-# builds genai_version == VERSION_INFO, so this is a no-op.
-- powershell: |
-    $ErrorActionPreference = 'Stop'
-    $pkgDir = '$(Build.SourcesDirectory)\$(buildDir)\${{ parameters.build_config }}\package'
-    $verInfo = (Get-Content '$(Build.SourcesDirectory)\VERSION_INFO' -Raw).Trim()
-    $genaiVer = '$(genai_version)'
-    Get-ChildItem -Path $pkgDir -Filter 'onnxruntime-genai-*.zip' | ForEach-Object {
-      $new = $_.Name -replace [regex]::Escape($verInfo), $genaiVer
-      if ($new -ne $_.Name) {
-        Write-Host "Renaming $($_.Name) -> $new"
-        Rename-Item -Path $_.FullName -NewName $new
-      }
-    }
-  displayName: 'Rename archive with computed version'
-
 # --- Publish artifacts -------------------------------------------------------
 - task: 1ES.PublishPipelineArtifact@1
   displayName: 'Publish core CMake package ($(artifactName))'

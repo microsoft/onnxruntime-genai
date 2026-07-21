@@ -113,9 +113,9 @@ steps:
     echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
     mkdir -p ort_home/include ort_home/lib
     # Authenticate with the pipeline build identity. No `set -x` in this step so
-    # the Bearer token is never echoed to the log.
+    # the token is never echoed to the log.
     curl --fail --retry 5 --retry-all-errors -L \
-      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+      -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
       -o ort.zip "$url"
     unzip -o ort.zip -d ort_extracted >/dev/null
     # CUDA headers are under buildTransitive; CPU under build
@@ -227,7 +227,7 @@ steps:
   env:
     # cargo auth for the Lotus registry, forwarded into the container by name.
     # ADO masks System.AccessToken in logs.
-    CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
+    CARGO_REGISTRIES_LOTUS_TOKEN: $(System.AccessToken)
 
 # --- Assert: CMake package installed ----------------------------------------
 - bash: |
@@ -264,28 +264,6 @@ steps:
     done
     echo "ASSERT OK: archive contains native lib + public headers"
   displayName: 'Assert: CPack archive contents'
-  workingDirectory: '$(Build.SourcesDirectory)'
-
-# --- Rename archive to embed the computed package version -------------------
-# CPack names the archive with the base VERSION_INFO (e.g. 0.15.0-dev). Replace
-# that with the pipeline-computed genai_version (e.g. 0.15.0-dev20260709123456)
-# so the published C/C++ archive matches the NuGet/package version. For stable
-# builds genai_version == VERSION_INFO, so this is a no-op.
-- bash: |
-    set -e
-    pkg_dir='build/core/${{ parameters.build_config }}/package'
-    ver_info=$(tr -d '[:space:]' < VERSION_INFO)
-    genai_ver='$(genai_version)'
-    for f in "$pkg_dir"/onnxruntime-genai-*.tar.gz; do
-      [ -e "$f" ] || continue
-      base=$(basename "$f")
-      newbase="${base/$ver_info/$genai_ver}"
-      if [ "$base" != "$newbase" ]; then
-        echo "Renaming $base -> $newbase"
-        mv "$f" "$pkg_dir/$newbase"
-      fi
-    done
-  displayName: 'Rename archive with computed version'
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Publish artifacts -------------------------------------------------------

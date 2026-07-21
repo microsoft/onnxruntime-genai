@@ -189,27 +189,6 @@ steps:
   displayName: 'Assert: CPack archive contents'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-# --- Rename archive to embed the computed package version -------------------
-# CPack names the archive with the base VERSION_INFO (e.g. 0.15.0-dev). Replace
-# that with the pipeline-computed genai_version so the published C/C++ archive
-# matches the NuGet/package version. For stable builds this is a no-op.
-- bash: |
-    set -e
-    pkg_dir="$(buildDir)/${{ parameters.build_config }}/package"
-    ver_info=$(tr -d '[:space:]' < VERSION_INFO)
-    genai_ver='$(genai_version)'
-    for f in "$pkg_dir"/onnxruntime-genai-*.tar.gz; do
-      [ -e "$f" ] || continue
-      base=$(basename "$f")
-      newbase="${base/$ver_info/$genai_ver}"
-      if [ "$base" != "$newbase" ]; then
-        echo "Renaming $base -> $newbase"
-        mv "$f" "$pkg_dir/$newbase"
-      fi
-    done
-  displayName: 'Rename archive with computed version'
-  workingDirectory: '$(Build.SourcesDirectory)'
-
 # --- Publish artifacts -------------------------------------------------------
 - task: 1ES.PublishPipelineArtifact@1
   displayName: 'Publish core CMake package ($(artifactName))'

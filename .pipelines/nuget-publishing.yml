@@ -110,6 +110,7 @@ extends:
     # ---- iOS xcframework (bespoke Apple build; CPU) ------------------------
     - template: stages/ios-xcframework-stage.yml
       parameters:
+        ort_version: ${{ parameters.ort_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- macOS/iOS CocoaPods (bespoke Apple build; CPU) -------------------
