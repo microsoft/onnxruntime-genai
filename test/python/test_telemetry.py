@@ -530,6 +530,8 @@ class TestPathRedaction(unittest.TestCase):
         metadata = {
             "path": r"C:\Users\alice\models\model.onnx",
             r"C:\Users\alice\secret": "value",
+            "pathlike": Path("/home/alice/models/model.onnx"),
+            "pathlike_key": {Path("/home/alice/private/key"): "value"},
             "nested": {
                 "/home/alice/private/key": "value",
                 "paths": ["/home/alice/model.onnx"],
@@ -543,6 +545,8 @@ class TestPathRedaction(unittest.TestCase):
 
         for attributes in (action_attributes, error_attributes):
             self.assertEqual(attributes["path"], "[path]")
+            self.assertEqual(attributes["pathlike"], "[path]")
+            self.assertEqual(attributes["pathlike_key"]["[path]"], "value")
             self.assertEqual(attributes["nested"]["paths"], ["[path]"])
             self.assertEqual(attributes["[path]"], "value")
             self.assertEqual(attributes["nested"]["[path]"], "value")
