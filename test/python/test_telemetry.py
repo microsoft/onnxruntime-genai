@@ -322,6 +322,7 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             "model.onnx",
         )
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
+        self.assertEqual(module.normalize_execution_provider("NvTensorRtRtx"), "trt-rtx")
 
     def test_source_telemetry_loader_restores_sys_path(self):
         import types

@@ -10,6 +10,11 @@ import os
 import posixpath
 
 
+def normalize_execution_provider(value):
+    """Return the canonical telemetry name for an execution provider."""
+    return "trt-rtx" if value == "NvTensorRtRtx" else value
+
+
 def sanitize_model_identifier(value):
     """Preserve model IDs while reducing local paths to a safe basename."""
     if not isinstance(value, str) or not value:
