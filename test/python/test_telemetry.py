@@ -323,6 +323,10 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
         )
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         self.assertEqual(module.normalize_execution_provider("NvTensorRtRtx"), "trt-rtx")
+        path_utils_module = sys.modules[module.sanitize_model_identifier.__module__]
+        with patch.object(path_utils_module.os.path, "exists") as mock_exists:
+            self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
+        mock_exists.assert_not_called()
 
     def test_source_telemetry_loader_restores_sys_path(self):
         import types

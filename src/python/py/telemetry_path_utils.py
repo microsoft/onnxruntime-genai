@@ -24,12 +24,15 @@ def sanitize_model_identifier(value):
     is_windows_path = bool(drive) or ntpath.isabs(value)
     is_posix_path = posixpath.isabs(value)
     is_explicit_relative_path = value.startswith(("./", "../", ".\\", "..\\", "~/", "~\\"))
-    try:
-        exists = os.path.exists(value)
-    except (OSError, ValueError):
-        exists = False
-    if not (is_windows_path or is_posix_path or is_explicit_relative_path or exists):
-        return value
+    is_unprefixed_path = "\\" in value or value.count("/") > 1
+    if not (is_windows_path or is_posix_path or is_explicit_relative_path or is_unprefixed_path):
+        if value.count("/") == 1:
+            return value
+        try:
+            if not os.path.exists(value):
+                return value
+        except (OSError, ValueError):
+            return value
 
     path_module = ntpath if is_windows_path or "\\" in value else posixpath
     basename = path_module.basename(path_module.normpath(value))
