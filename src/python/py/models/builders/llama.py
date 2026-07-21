@@ -11,12 +11,13 @@ class LlamaModel(Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_rope_init(self, config):
-        if "low_freq_factor" in config.rope_scaling:
+        rope_params = self.get_rope_parameters(config)
+        if "low_freq_factor" in rope_params:
             # For models that rescale `inv_freq` using `low_freq_factor` and `high_freq_factor` (e.g. LLaMA-3.1)
-            factor = config.rope_scaling["factor"] if "factor" in config.rope_scaling else 0
-            low_freq_factor = config.rope_scaling["low_freq_factor"] if "low_freq_factor" in config.rope_scaling else 0
+            factor = rope_params["factor"] if "factor" in rope_params else 0
+            low_freq_factor = rope_params["low_freq_factor"] if "low_freq_factor" in rope_params else 0
             high_freq_factor = (
-                config.rope_scaling["high_freq_factor"] if "high_freq_factor" in config.rope_scaling else 0
+                rope_params["high_freq_factor"] if "high_freq_factor" in rope_params else 0
             )
 
             self.rope_attrs["rescale_inv_freq"] = {

@@ -71,14 +71,15 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             self.position_ids_name = None
 
     def make_rope_init(self, config):
-        if "short_factor" in config.rope_scaling:
+        rope_params = self.get_rope_parameters(config)
+        if "short_factor" in rope_params:
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
-            self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
-            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
-            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+            self.rope_attrs["mscale_policy"] = rope_params["type"]
+            short_factor = torch.tensor(rope_params["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(rope_params["long_factor"], dtype=torch.float32)
 
-            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
-            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+            short_mscale = rope_params["short_mscale"] if "short_mscale" in rope_params else 0
+            long_mscale = rope_params["long_mscale"] if "long_mscale" in rope_params else 0
             short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
             long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
 

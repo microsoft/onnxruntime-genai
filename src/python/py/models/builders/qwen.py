@@ -61,8 +61,9 @@ class Qwen25VLTextModel(Model):
 
         # Check rope type since huggingface model supports yarn but that is not recommended as mentioned in model card. Example:
         #    "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
-        if config.rope_scaling and "type" in config.rope_scaling:
-            assert config.rope_scaling["type"] in ["mrope", "default"]
+        rope_params = self.get_rope_parameters(config)
+        if rope_params and "type" in rope_params:
+            assert rope_params["type"] in ["mrope", "default"]
 
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
@@ -979,12 +980,13 @@ class Qwen35TextModel(Model):
                 if not hasattr(config, key) or getattr(config, key) is None:
                     setattr(config, key, getattr(text_config, key))
 
-        # rope_scaling contains the actual rope_theta for Qwen3.5
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            if "rope_theta" in config.rope_scaling:
-                config.rope_theta = config.rope_scaling["rope_theta"]
-            if "partial_rotary_factor" in config.rope_scaling:
-                config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
+        # rope parameters contain the actual rope_theta for Qwen3.5
+        rope_params = self.get_rope_parameters(config)
+        if rope_params is not None:
+            if "rope_theta" in rope_params:
+                config.rope_theta = rope_params["rope_theta"]
+            if "partial_rotary_factor" in rope_params:
+                config.partial_rotary_factor = rope_params["partial_rotary_factor"]
 
         # Parse layer types before super().__init__() because
         # make_int4_algo_config() is called from the base class init
