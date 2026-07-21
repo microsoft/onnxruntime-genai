@@ -294,7 +294,7 @@ def _emit_model_build_telemetry(
         context_length = getattr(config, "max_position_embeddings", 0)
 
         output_model_size = 0
-        if os.path.isdir(output_dir):
+        if success and os.path.isdir(output_dir):
             for filename in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, filename)
                 if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):

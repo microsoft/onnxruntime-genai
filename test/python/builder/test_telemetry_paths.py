@@ -120,3 +120,34 @@ def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatc
 
     assert captured["model_name"] == "[path]"
     assert captured["execution_provider"] == "trt-rtx"
+
+
+def test_failed_build_ignores_existing_output_artifacts(monkeypatch, tmp_path):
+    telemetry_stub = types.ModuleType("telemetry")
+    captured = {}
+
+    class RecordingTelemetry:
+        accepts_detailed_events = True
+
+        def log_model_build(self, **kwargs):
+            captured.update(kwargs)
+
+    (tmp_path / "stale.onnx").write_bytes(b"stale model")
+    telemetry_stub.GenAITelemetry = RecordingTelemetry
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
+    monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
+
+    builder_module._emit_model_build_telemetry(
+        action_name="create_model",
+        duration_ms=1.0,
+        success=False,
+        config=None,
+        onnx_model=None,
+        precision="fp16",
+        execution_provider="cpu",
+        output_dir=str(tmp_path),
+        extra_options={},
+    )
+
+    assert captured["output_model_size_bytes"] == 0
