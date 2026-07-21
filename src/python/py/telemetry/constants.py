@@ -5,7 +5,8 @@
 
 """OneCollector connection string for ONNX Runtime GenAI telemetry.
 
-This is a base64-encoded connection string to prevent accidental exposure.
+Base64 keeps the connection string out of plain-text source searches; it is not
+encryption and does not make the instrumentation key secret.
 GenAI uses its own instrumentation key, separate from Olive and Foundry Local.
 """
 

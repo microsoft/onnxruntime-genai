@@ -426,6 +426,36 @@ class TestDeviceId(unittest.TestCase):
         with patch.object(Path, "chmod", side_effect=OSError):
             deviceid._chmod_best_effort(Path(self._tmpdir.name), 0o700)
 
+    def test_windows_store_uses_least_privilege_access(self):
+        import telemetry.deviceid as deviceid
+
+        winreg = MagicMock(
+            HKEY_CURRENT_USER=object(),
+            KEY_SET_VALUE=0x0002,
+            KEY_CREATE_SUB_KEY=0x0004,
+            KEY_WOW64_64KEY=0x0100,
+            REG_SZ=1,
+        )
+        key_handle = object()
+        winreg.CreateKeyEx.return_value.__enter__.return_value = key_handle
+
+        with patch.dict(sys.modules, {"winreg": winreg}):
+            deviceid._WindowsStore().store_id("test-device-id")
+
+        winreg.CreateKeyEx.assert_called_once_with(
+            winreg.HKEY_CURRENT_USER,
+            deviceid._WindowsStore.REGISTRY_PATH,
+            reserved=0,
+            access=winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY | winreg.KEY_WOW64_64KEY,
+        )
+        winreg.SetValueEx.assert_called_once_with(
+            key_handle,
+            deviceid._WindowsStore.REGISTRY_KEY,
+            0,
+            winreg.REG_SZ,
+            "test-device-id",
+        )
+
 
 class TestSystemInfo(unittest.TestCase):
     """Test system information collection."""
