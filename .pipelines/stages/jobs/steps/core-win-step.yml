@@ -291,10 +291,14 @@ steps:
     if ('${{ parameters.ep }}' -eq 'cuda' -or '${{ parameters.ep }}' -eq 'winml') {
       $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk\v${{ parameters.cuda_version }}"
       $args += '--use_cuda', '--cuda_home', $cudaHome
+      # Trim the SASS (-real) arch set to language-model GPUs and rely on PTX
+      # (-virtual) JIT for the rest, matching llama.cpp's philosophy. Real SASS is
+      # emitted only for Ampere/Ada/Blackwell consumer arches (86/89/120); older
+      # arches fall back to forward-compatible PTX to keep the fatbin small.
       if ('${{ parameters.cuda_version }}' -like '13.*') {
-        $cudaArchs = '75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual'
+        $cudaArchs = '75-virtual;80-virtual;86-real;89-real;90-virtual;100-virtual;120-real;120-virtual'
       } else {
-        $cudaArchs = '60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120'
+        $cudaArchs = '50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;89-real;90-virtual;120-real;120-virtual'
       }
       $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
     }

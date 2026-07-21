@@ -223,6 +223,13 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4996>
   )
 
+  # Compress the embedded device code (fatbin) to reduce onnxruntime-genai-cuda
+  # binary size. -compress-mode=size is only available on CUDA 13.0+.
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xfatbin=-compress-all>)
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13.0")
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-compress-mode=size>)
+  endif()
+
   # nvcc compiles CUDA code with cl.exe, so we need to pass the /Zc:preprocessor option to avoid compilation errors
   if(WIN32 AND MSVC AND MSVC_VERSION GREATER_EQUAL 1925)
     add_compile_options(
@@ -243,7 +250,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   endif()
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
-  target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
+  target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cudart)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES FOLDER "GenAI")
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)

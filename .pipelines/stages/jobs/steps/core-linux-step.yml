@@ -186,10 +186,14 @@ steps:
       -e CARGO_REGISTRIES_LOTUS_AUTH_CREDENTIAL_PROVIDER
     )
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      # Trim the SASS (-real) arch set to language-model GPUs and rely on PTX
+      # (-virtual) JIT for the rest, matching llama.cpp's philosophy. Real SASS is
+      # emitted only for Ampere/Ada/Blackwell consumer arches (86/89/120); older
+      # arches fall back to forward-compatible PTX to keep the fatbin small.
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
-        cuda_archs='75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual'
+        cuda_archs='75-virtual;80-virtual;86-real;89-real;90-virtual;100-virtual;120-real;120-virtual'
       else
-        cuda_archs='60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120'
+        cuda_archs='50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;89-real;90-virtual;120-real;120-virtual'
       fi
       docker_args+=(-e "CUDA_EXTRA_ARGS=--use_cuda --cuda_home /usr/local/cuda --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=${cuda_archs}")
     fi
