@@ -11,7 +11,9 @@ Run the model builder to create the desired ONNX model.
 """
 
 import argparse
+import ntpath
 import os
+import posixpath
 import sys
 import textwrap
 import time
@@ -47,8 +49,8 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
-    Qwen35TextModel,
     Qwen35MoeTextModel,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
@@ -146,7 +148,9 @@ def check_extra_options(kv_pairs, precision, execution_provider):
 
     if precision == "int8" and kv_pairs.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
-        raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
+        raise NotImplementedError(
+            "int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default)."
+        )
 
 
 def parse_extra_options(kv_items, precision, execution_provider):
@@ -185,7 +189,9 @@ def parse_hf_token(hf_token):
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = (
+        precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    )
 
     if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
@@ -222,8 +228,13 @@ def _sanitize_path_value(value):
     """
     if not isinstance(value, str) or not value:
         return value
-    if os.path.isabs(value) or os.path.exists(value):
-        return os.path.basename(os.path.normpath(value))
+    drive, _ = ntpath.splitdrive(value)
+    is_windows_path = bool(drive) or ntpath.isabs(value)
+    is_posix_path = posixpath.isabs(value)
+    is_explicit_relative_path = value.startswith(("./", "../", ".\\", "..\\", "~/", "~\\"))
+    if is_windows_path or is_posix_path or is_explicit_relative_path or os.path.exists(value):
+        path_module = ntpath if is_windows_path or "\\" in value else posixpath
+        return path_module.basename(path_module.normpath(value))
     return value
 
 
@@ -251,12 +262,12 @@ def _emit_model_build_telemetry(
 ) -> None:
     try:
         try:
-            from onnxruntime_genai.telemetry import GenAITelemetry
+            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
         except ImportError:
             telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             if telemetry_root not in sys.path:
                 sys.path.insert(0, telemetry_root)
-            from telemetry import GenAITelemetry
+            from telemetry import GenAITelemetry  # noqa: PLC0415
 
         telemetry = GenAITelemetry()
         if not telemetry.accepts_detailed_events:
@@ -361,7 +372,7 @@ def _create_model_impl(
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -388,10 +399,14 @@ def _create_model_impl(
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -399,8 +414,12 @@ def _create_model_impl(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
@@ -435,32 +454,57 @@ def _create_model_impl(
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
+    elif (
+        config.architectures[0] == "PhiMoEForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        print(
+            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
+        )
+        print(
+            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
+        )
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
@@ -468,7 +512,9 @@ def _create_model_impl(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
@@ -482,7 +528,9 @@ def _create_model_impl(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
