@@ -14,7 +14,7 @@ import platform
 import subprocess
 import sys
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
 
 @lru_cache(maxsize=1)
