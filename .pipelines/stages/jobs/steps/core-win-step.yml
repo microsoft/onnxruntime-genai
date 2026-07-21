@@ -67,21 +67,19 @@ steps:
 
 # --- Feed isolation: cargo → Lotus (crates.io replaced) ---------------------
 # Writes a repo-root .cargo/config.toml so cargo (invoked when building the
-# llguidance crate) resolves every crate from Lotus instead of crates.io. The
-# credential is supplied at build time via the CARGO_REGISTRIES_LOTUS_TOKEN env
-# var — no secret is written to disk.
+# llguidance crate) resolves every crate from Lotus instead of crates.io.
 - powershell: |
     $ErrorActionPreference = 'Stop'
     $cargoDir = Join-Path '$(Build.SourcesDirectory)' '.cargo'
     New-Item -ItemType Directory -Force -Path $cargoDir | Out-Null
     $lines = @(
       '[source.crates-io]',
-      'replace-with = "lotus"',
+      'replace-with = "lotus_auth"',
       '',
-      '[source.lotus]',
+      '[source.lotus_auth]',
       'registry = "$(lotusCargoSparse)"',
       '',
-      '[registries.lotus]',
+      '[registries.lotus_auth]',
       'index = "$(lotusCargoSparse)"',
       '',
       '[registry]',
@@ -91,6 +89,11 @@ steps:
     Write-Host "Wrote $cargoDir\config.toml"
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: CargoAuthenticate@0
+  displayName: 'Authenticate Cargo to Lotus feed'
+  inputs:
+    configFile: '$(Build.SourcesDirectory)\.cargo\config.toml'
 
 # --- LLVM (arm64 only — needed by guidance bindgen) ------------------------
 - powershell: |
@@ -248,7 +251,7 @@ steps:
       Write-Host "AUDIT FAIL: $cargoCfg missing"; $failed = $true
     } else {
       $c = Get-Content $cargoCfg -Raw
-      if ($c -notmatch 'replace-with\s*=\s*"lotus"' -or $c -notmatch '_packaging/Lotus/Cargo/') {
+      if ($c -notmatch 'replace-with\s*=\s*"lotus_auth"' -or $c -notmatch '_packaging/Lotus/Cargo/') {
         Write-Host "AUDIT FAIL: cargo config does not redirect crates.io to Lotus"; $failed = $true
       } else {
         Write-Host "AUDIT OK: cargo resolves from Lotus only"

@@ -64,12 +64,12 @@ steps:
     mkdir -p "$(Build.SourcesDirectory)/.cargo"
     {
       echo '[source.crates-io]'
-      echo 'replace-with = "lotus"'
+      echo 'replace-with = "lotus_auth"'
       echo ''
-      echo '[source.lotus]'
+      echo '[source.lotus_auth]'
       echo 'registry = "$(lotusCargoSparse)"'
       echo ''
-      echo '[registries.lotus]'
+      echo '[registries.lotus_auth]'
       echo 'index = "$(lotusCargoSparse)"'
       echo ''
       echo '[registry]'
@@ -77,6 +77,11 @@ steps:
     } > "$(Build.SourcesDirectory)/.cargo/config.toml"
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: CargoAuthenticate@0
+  displayName: 'Authenticate Cargo to Lotus feed'
+  inputs:
+    configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
 
 # --- Download ORT from Lotus feed (authenticated) ---------------------------
 - bash: |
