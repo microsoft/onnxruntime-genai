@@ -260,7 +260,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
 
 class TestVersionResolution(unittest.TestCase):
-    def test_installed_package_exposes_telemetry(self):
+    def test_installed_package_exposes_telemetry_modules(self):
         import importlib
 
         try:
@@ -269,7 +269,9 @@ class TestVersionResolution(unittest.TestCase):
             self.skipTest("onnxruntime_genai is not installed in this test environment")
 
         telemetry = importlib.import_module("onnxruntime_genai.telemetry")
+        path_utils = importlib.import_module("onnxruntime_genai.telemetry_path_utils")
         self.assertTrue(hasattr(telemetry, "GenAITelemetry"))
+        self.assertTrue(hasattr(path_utils, "sanitize_model_identifier"))
 
     def test_variant_distribution_version_is_resolved(self):
         from telemetry.telemetry import _get_app_version
