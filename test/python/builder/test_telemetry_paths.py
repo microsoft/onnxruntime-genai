@@ -65,6 +65,7 @@ def test_telemetry_fallback_restores_source_path(monkeypatch):
     try:
         before = list(sys.path)
         monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
+        monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
         monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
         builder_module._emit_model_build_telemetry(
             action_name="create_model",
@@ -81,3 +82,34 @@ def test_telemetry_fallback_restores_source_path(monkeypatch):
     finally:
         if source_index is not None:
             sys.path.insert(source_index, source_root)
+
+
+def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatch):
+    telemetry_stub = types.ModuleType("telemetry")
+    captured = {}
+
+    class RecordingTelemetry:
+        accepts_detailed_events = True
+
+        def log_model_build(self, **kwargs):
+            captured.update(kwargs)
+
+    telemetry_stub.GenAITelemetry = RecordingTelemetry
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
+    monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
+
+    builder_module._emit_model_build_telemetry(
+        action_name="create_model",
+        duration_ms=1.0,
+        success=False,
+        config=None,
+        onnx_model=None,
+        precision="fp16",
+        execution_provider="cpu",
+        output_dir="",
+        extra_options={},
+        fallback_model_name=r"C:\Users\alice\models\model.onnx",
+    )
+
+    assert captured["model_name"] == "model.onnx"
