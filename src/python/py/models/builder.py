@@ -234,7 +234,8 @@ def _sanitize_path_value(value):
     is_explicit_relative_path = value.startswith(("./", "../", ".\\", "..\\", "~/", "~\\"))
     if is_windows_path or is_posix_path or is_explicit_relative_path or os.path.exists(value):
         path_module = ntpath if is_windows_path or "\\" in value else posixpath
-        return path_module.basename(path_module.normpath(value))
+        basename = path_module.basename(path_module.normpath(value))
+        return basename if basename not in {"", ".", ".."} else "<path>"
     return value
 
 

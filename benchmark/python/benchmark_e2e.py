@@ -25,6 +25,7 @@ import numpy as np
 import onnxruntime_genai as og
 import psutil
 from metrics import BenchmarkRecord
+from telemetry_utils import sanitize_model_identifier
 from tqdm import tqdm
 
 peak_cpu_memory = 0.0
@@ -249,7 +250,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     try:
         telemetry = _get_telemetry()
         telemetry.log_model_load(
-            model_name=args.model_name,
+            model_name=sanitize_model_identifier(args.model_name),
             execution_provider=args.execution_provider,
             total_load_time_ms=model_load_time_ms,
         )
@@ -325,7 +326,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if override_max_length else {}),
+        **({"max_length": max_length} if override_max_length else {}),
         min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
@@ -497,7 +498,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     try:
         telemetry = _get_telemetry()
         telemetry.log_benchmark(
-            model_name=args.model_name,
+            model_name=sanitize_model_identifier(args.model_name),
             precision=args.precision,
             backend="onnxruntime-genai",
             device=args.execution_provider,
