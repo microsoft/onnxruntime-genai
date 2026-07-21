@@ -76,7 +76,7 @@ class Qwen25VLTextModel(Model):
 
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
-            raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
+            raise ValueError("MRoPE sections not found in text_config rope_parameters/rope_scaling mrope_section")
 
         # The HF logic is `mrope_section * 2`, not `[s * 2 for s in mrope_section]`.
         # This results in [16, 24, 24, 16, 24, 24]
@@ -1026,7 +1026,7 @@ class Qwen35TextModel(Model):
         # mRoPE config
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
-            raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
+            raise ValueError("MRoPE sections not found in text_config rope_parameters/rope_scaling mrope_section")
         if len(self.mrope_sections) != 3:
             raise ValueError(
                 f"Expected 3 MRoPE sections [T, H, W], got {len(self.mrope_sections)}: {self.mrope_sections}"

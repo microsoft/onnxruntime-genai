@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 import onnx_ir as ir
 import torch
+from collections.abc import Mapping
 
 from .base import Model
 from .mistral import MistralModel
@@ -72,6 +73,8 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
     def make_rope_init(self, config):
         rope_params = self.get_rope_parameters(config)
+        if not isinstance(rope_params, Mapping):
+            return
         if "short_factor" in rope_params:
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
             self.rope_attrs["mscale_policy"] = rope_params["type"]

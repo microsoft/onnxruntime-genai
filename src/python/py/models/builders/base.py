@@ -401,10 +401,15 @@ class Model:
         data under `rope_scaling`. Prefer `rope_parameters` and fall back to
         `rope_scaling` so the builder works across transformers versions.
         """
-        return getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            return rope_parameters
+        return getattr(config, "rope_scaling", None)
 
     def make_rope_init(self, config):
         rope_params = self.get_rope_parameters(config)
+        if not isinstance(rope_params, Mapping):
+            return
         if "beta_fast" in rope_params:
             # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
             factor = rope_params["factor"] if "factor" in rope_params else 0

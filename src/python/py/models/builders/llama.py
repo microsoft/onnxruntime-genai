@@ -3,6 +3,8 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+from collections.abc import Mapping
+
 from .base import Model
 
 
@@ -12,6 +14,8 @@ class LlamaModel(Model):
 
     def make_rope_init(self, config):
         rope_params = self.get_rope_parameters(config)
+        if not isinstance(rope_params, Mapping):
+            return
         if "low_freq_factor" in rope_params:
             # For models that rescale `inv_freq` using `low_freq_factor` and `high_freq_factor` (e.g. LLaMA-3.1)
             factor = rope_params["factor"] if "factor" in rope_params else 0
