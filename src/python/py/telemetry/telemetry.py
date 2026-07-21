@@ -23,7 +23,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .constants import CONNECTION_STRING
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.event_source import event_source
 from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
@@ -200,7 +199,9 @@ class GenAITelemetry:
 
             try:
                 self._app_version = _get_app_version()
-                connection_string = base64.b64decode(CONNECTION_STRING).decode()
+                connection_string = base64.b64decode(
+                    "SW5zdHJ1bWVudGF0aW9uS2V5PTlkNWRkYWVjNjFlMjQ1NjdiNzg4YTIwYWVhMzI0NjMxLWQyMTZmODZmLTQ4NzQtNDU5Yi1hMzM1LWIzYTliODBhY2FkNi03MzI3"
+                ).decode()
                 options = OneCollectorExporterOptions(connection_string=connection_string)
                 options.validate()
                 self._instrumentation_key = options.instrumentation_key
