@@ -539,6 +539,7 @@ DeviceIdPublishResult PublishDeviceIdFileNoFollow(const std::filesystem::path& f
   size_t remaining = uuid.size();
   while (remaining > 0) {
     const ssize_t n = write(fd, data, remaining);
+    if (n < 0 && errno == EINTR) continue;
     if (n <= 0) {
       wrote = false;
       break;
