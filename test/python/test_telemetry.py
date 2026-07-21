@@ -58,6 +58,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
     def setUp(self):
         import tempfile
+
         import telemetry.deviceid as deviceid
         from telemetry.telemetry import GenAITelemetry
 
@@ -112,6 +113,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         import telemetry.deviceid as deviceid
         from telemetry.telemetry import GenAITelemetry
 
@@ -285,6 +287,26 @@ class TestVersionResolution(unittest.TestCase):
         mock_version.assert_called_once_with("onnxruntime-genai-cuda")
 
 
+class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
+    def test_sanitizes_paths_without_changing_model_ids(self):
+        import importlib.util
+
+        helper_path = Path(__file__).parents[2] / "benchmark" / "python" / "telemetry_utils.py"
+        spec = importlib.util.spec_from_file_location("benchmark_telemetry_utils", helper_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(
+            module.sanitize_model_identifier(r"C:\Users\alice\models\model.onnx"),
+            "model.onnx",
+        )
+        self.assertEqual(
+            module.sanitize_model_identifier("/home/alice/models/model.onnx"),
+            "model.onnx",
+        )
+        self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
+
+
 class TestActionFastPath(unittest.TestCase):
     def test_disabled_action_skips_stack_inspection(self):
         from telemetry.telemetry_extensions import action
@@ -442,7 +464,7 @@ class TestDeviceId(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_get_encrypted_device_id(self):
-        from telemetry.deviceid import get_encrypted_device_id_and_status, DeviceIdStatus
+        from telemetry.deviceid import DeviceIdStatus, get_encrypted_device_id_and_status
 
         device_id, status = get_encrypted_device_id_and_status()
         # Should return a non-empty hex string (SHA256 = 64 hex chars)
@@ -757,6 +779,7 @@ class TestSerializationHelper(unittest.TestCase):
 
     def test_create_event_envelope(self):
         from datetime import datetime, timezone
+
         from telemetry.library.serialization import CommonSchemaJsonSerializationHelper as H
 
         ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -833,6 +856,7 @@ class TestOfflineEventStore(unittest.TestCase):
 
     def _new_store(self, **kw):
         import tempfile
+
         from telemetry.offline_store import OfflineEventStore
 
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
@@ -877,6 +901,7 @@ class TestOfflineEventStore(unittest.TestCase):
 
     def test_user_version_stamped(self):
         import sqlite3
+
         from telemetry.offline_store import SCHEMA_VERSION
 
         s = self._new_store()
@@ -930,6 +955,7 @@ class TestUploaderDrainLogic(unittest.TestCase):
 
     def _setup(self):
         import tempfile
+
         from telemetry.offline_store import OfflineEventStore
         from telemetry.uploader import EventUploader
 
