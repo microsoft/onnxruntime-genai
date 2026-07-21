@@ -875,6 +875,8 @@ class TestSerializationHelper(unittest.TestCase):
 
         result = H.serialize_value({"key": "value", "num": 42})
         self.assertEqual(result, {"key": "value", "num": 42})
+        self.assertEqual(H.serialize_value({0: "zero", "": "skip"}), {"0": "zero"})
+        self.assertEqual(H.serialize_value({False: "false"}), {"False": "false"})
 
     def test_create_event_envelope(self):
         from datetime import datetime, timezone
