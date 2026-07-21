@@ -251,6 +251,17 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
 
 class TestVersionResolution(unittest.TestCase):
+    def test_installed_package_exposes_telemetry(self):
+        import importlib
+
+        try:
+            import onnxruntime_genai
+        except ImportError:
+            self.skipTest("onnxruntime_genai is not installed in this test environment")
+
+        telemetry = importlib.import_module(f"{onnxruntime_genai.__name__}.telemetry")
+        self.assertTrue(hasattr(telemetry, "GenAITelemetry"))
+
     def test_variant_distribution_version_is_resolved(self):
         from telemetry.telemetry import _get_app_version
 
