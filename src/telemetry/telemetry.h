@@ -49,6 +49,17 @@ struct ModelLoadInfo {
   bool is_in_memory{};
 };
 
+struct GenerateEndInfo {
+  int64_t total_tokens{};
+  int64_t generated_tokens{};
+  int64_t rewind_count{};
+  int64_t rewound_tokens{};
+  double audio_duration_ms{};
+  double time_to_first_token_ms{};
+  double total_time_ms{};
+  double tokens_per_second{};
+};
+
 class GenAiTelemetry {
  public:
   static GenAiTelemetry& Instance();
@@ -94,9 +105,7 @@ class GenAiTelemetry {
   bool LogGenerateStart(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
                         const std::string& input_modality);
   void LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
-                      int64_t total_tokens,
-                      double time_to_first_token_ms, double total_time_ms,
-                      double tokens_per_second);
+                      const GenerateEndInfo& info);
 
   // AdapterActivated: Emitted when a LoRA adapter is activated for a generator.
   // The adapter name is NOT sent (it may be sensitive); only correlation ids, so

@@ -54,7 +54,6 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
   } else {
     throw std::runtime_error("Unexpected PCM tensor rank: " + std::to_string(pcm_dims));
   }
-
   // 2. Full-utterance mel calculation.
   nemo_mel::NemoMelConfig mel_cfg{};
   mel_cfg.num_mels = m.num_mels;
@@ -93,8 +92,11 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
       allocator, std::vector<int64_t>{1, m.num_mels, static_cast<int64_t>(num_frames)});
   std::memcpy(mel_value->GetTensorMutableData<float>(), norm_out.Data(),
               static_cast<size_t>(m.num_mels) * num_frames * sizeof(float));
-  named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
-                         std::make_shared<Tensor>(std::move(mel_value)));
+  const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
+  named_tensors->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel_value)));
+  named_tensors->SetAudioDurationMs(
+      static_cast<double>(num_samples) * 1000.0 / static_cast<double>(m.sample_rate),
+      audio_features_name);
 
   return named_tensors;
 }

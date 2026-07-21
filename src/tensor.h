@@ -57,6 +57,40 @@ struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor>, Exter
   bool is_static_{};
 };
 
-using NamedTensors = std::unordered_map<std::string, std::shared_ptr<Tensor>>;
+struct NamedTensors : std::unordered_map<std::string, std::shared_ptr<Tensor>> {
+  using Base = std::unordered_map<std::string, std::shared_ptr<Tensor>>;
+  using Base::Base;
+
+  void SetAudioDurationMs(double duration_ms, const std::string& source_name) {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+    const auto source = find(source_name);
+    if (duration_ms > 0.0 && source != end()) {
+      audio_duration_ms_ = duration_ms;
+      audio_duration_source_name_ = source_name;
+      audio_duration_source_ = source->second;
+    }
+#else
+    (void)duration_ms;
+    (void)source_name;
+#endif
+  }
+
+  double AudioDurationMs() const noexcept {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+    const auto source = audio_duration_source_.lock();
+    const auto current = find(audio_duration_source_name_);
+    return source && current != end() && current->second == source ? audio_duration_ms_ : 0.0;
+#else
+    return 0.0;
+#endif
+  }
+
+ private:
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  double audio_duration_ms_{};
+  std::string audio_duration_source_name_;
+  std::weak_ptr<Tensor> audio_duration_source_;
+#endif
+};
 
 }  // namespace Generators

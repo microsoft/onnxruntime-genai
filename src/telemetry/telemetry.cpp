@@ -461,19 +461,21 @@ bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id
 }
 
 void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
-                                    int64_t total_tokens,
-                                    double time_to_first_token_ms, double total_time_ms,
-                                    double tokens_per_second) {
+                                    const GenerateEndInfo& info) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     MAT::EventProperties event("OnnxRuntimeGenAI.GenerateEnd");
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
-    event.SetProperty("totalTokens", total_tokens);
-    event.SetProperty("timeToFirstTokenMs", time_to_first_token_ms);
-    event.SetProperty("totalTimeMs", total_time_ms);
-    event.SetProperty("tokensPerSecond", tokens_per_second);
+    event.SetProperty("totalTokens", info.total_tokens);
+    event.SetProperty("generatedTokens", info.generated_tokens);
+    event.SetProperty("rewindCount", info.rewind_count);
+    event.SetProperty("rewoundTokens", info.rewound_tokens);
+    if (info.audio_duration_ms > 0.0) event.SetProperty("audioDurationMs", info.audio_duration_ms);
+    event.SetProperty("timeToFirstTokenMs", info.time_to_first_token_ms);
+    event.SetProperty("totalTimeMs", info.total_time_ms);
+    event.SetProperty("tokensPerSecond", info.tokens_per_second);
 
     impl_->logger->LogEvent(event);
   });

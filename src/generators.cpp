@@ -687,6 +687,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
   }
+  generation_telemetry_.AddAudioDurationMs(named_tensors.AudioDurationMs());
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
@@ -723,6 +724,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
         stream_ << std::endl;
       }
       SetLogits(logits);
+      generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
   }
 
@@ -801,7 +803,7 @@ void Generator::GenerateNextToken() {
     transducer_state_->StepToken();
 
     generation_telemetry_.OnTokenGenerated(
-        static_cast<int64_t>(state_->params_->BatchBeamSize()));
+        static_cast<int64_t>(transducer_state_->GetStepTokens().size()));
     return;
   }
 
@@ -876,14 +878,19 @@ void Generator::GenerateNextToken() {
 void Generator::RewindToLength(size_t new_length) {
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
-  if (new_length > search_->GetSequenceLength())
+  const size_t current_length = search_->GetSequenceLength();
+  if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
-  if (new_length == search_->GetSequenceLength())
+  if (new_length == current_length)
     return;
   size_t batch_size = search_->params_->search.batch_size;
   if (batch_size > 1 && new_length != 0)
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
-  generation_telemetry_.OnRewind();
+  if (search_->params_->search.num_beams > 1)
+    throw std::runtime_error("RewindToLength is not supported with beam search");
+  const int64_t rewound_token_count =
+      static_cast<int64_t>(current_length - new_length) *
+      static_cast<int64_t>(search_->params_->BatchBeamSize());
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
@@ -891,6 +898,7 @@ void Generator::RewindToLength(size_t new_length) {
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
+  generation_telemetry_.OnRewind(rewound_token_count);
 }
 
 DeviceSpan<float> Generator::GetLogits() {

@@ -29,6 +29,8 @@ For Windows, Linux, and macOS, ONNX Runtime GenAI sends a product-salted hash of
 
 ProcessInfo is retained at 100%. Non-essential model-session events, including errors, are deterministically sampled as a complete session so correlated events are always retained or dropped together. The current model-session sampling rate is 100%. Retained events carry the 1DS Common Schema `popSample` percentage; an absent value means 100%. To estimate the original event population, sum `100.0 / popSample` for received events, treating an absent or invalid value as 100%.
 
+Generation events include aggregate prompt/generated token counts, timing, and rewind counts. For Parakeet and streaming audio inputs, they also include aggregate audio duration in milliseconds because exact sample counts are already available during preprocessing. Streaming duration covers audio passed to the model, excluding chunks discarded by voice activity detection and silence padding added during flush. Audio duration is omitted for other audio models rather than decoding input a second time or inferring duration from padded, model-specific feature tensors.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry

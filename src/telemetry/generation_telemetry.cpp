@@ -74,9 +74,15 @@ void GenerationTelemetry::CompleteAppend(size_t input_token_count, int num_beams
   input_modality_ = input_modality;
 }
 
+void GenerationTelemetry::AddAudioDurationMs(double duration_ms) {
+  if (duration_ms > 0.0 && IsEnabled()) audio_duration_ms_ += duration_ms;
+}
+
 void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   const bool track_telemetry = IsEnabled();
   if (track_telemetry && !generation_abandoned_) {
+    if (active_token_count <= 0) return;
+
     const auto now = std::chrono::steady_clock::now();
     if (prompt_tokens_ == 0 && generated_tokens_ == 0) start_time_ = now;
     generated_tokens_ += active_token_count;
@@ -93,8 +99,12 @@ void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   }
 }
 
-void GenerationTelemetry::OnRewind() {
+void GenerationTelemetry::OnRewind(int64_t rewound_token_count) {
   if (append_tracking_suppressed_) return;
+  if (IsEnabled()) {
+    ++rewind_count_;
+    rewound_tokens_ += rewound_token_count;
+  }
   CloseRequestBoundary();
 }
 
@@ -123,9 +133,16 @@ void GenerationTelemetry::Finish() {
     const double tokens_per_second =
         total_time_ms > 0 ? generated_tokens_ * 1000.0 / total_time_ms : 0.0;
 
-    GenAiTelemetry::Instance().LogGenerateEnd(
-        session_id_, generator_id_, prompt_tokens_ + generated_tokens_,
-        time_to_first_token_ms, total_time_ms, tokens_per_second);
+    GenerateEndInfo info{};
+    info.total_tokens = prompt_tokens_ + generated_tokens_;
+    info.generated_tokens = generated_tokens_;
+    info.rewind_count = rewind_count_;
+    info.rewound_tokens = rewound_tokens_;
+    info.audio_duration_ms = audio_duration_ms_;
+    info.time_to_first_token_ms = time_to_first_token_ms;
+    info.total_time_ms = total_time_ms;
+    info.tokens_per_second = tokens_per_second;
+    GenAiTelemetry::Instance().LogGenerateEnd(session_id_, generator_id_, info);
   }
   Reset();
 }
@@ -133,6 +150,9 @@ void GenerationTelemetry::Finish() {
 void GenerationTelemetry::Reset() {
   prompt_tokens_ = 0;
   generated_tokens_ = 0;
+  rewind_count_ = 0;
+  rewound_tokens_ = 0;
+  audio_duration_ms_ = 0.0;
   first_token_logged_ = false;
   generate_start_logged_ = false;
   start_time_ = std::chrono::steady_clock::now();

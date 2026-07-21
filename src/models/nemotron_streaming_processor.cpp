@@ -63,7 +63,11 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
     auto result = std::make_unique<NamedTensors>();
-    result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
+    const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
+    result->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel)));
+    result->SetAudioDurationMs(
+        static_cast<double>(chunk_size) * 1000.0 / static_cast<double>(nemotron_config_.sample_rate),
+        audio_features_name);
     return result;
   }
 
@@ -76,12 +80,18 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   }
 
   const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
+  const size_t buffered_samples = audio_buffer_.size();
   audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
 
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
   auto result = std::make_unique<NamedTensors>();
-  result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
+  const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
+  result->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel)));
+  result->SetAudioDurationMs(
+      static_cast<double>(std::min(buffered_samples, chunk_size)) * 1000.0 /
+          static_cast<double>(nemotron_config_.sample_rate),
+      audio_features_name);
   return result;
 }
 
