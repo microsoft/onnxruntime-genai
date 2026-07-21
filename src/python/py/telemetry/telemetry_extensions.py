@@ -62,7 +62,7 @@ def log_error(
 
 def _resolve_invoked_from(skip_frames: int = 0) -> str:
     """Resolve how GenAI was invoked by examining the call stack."""
-    for frame_info in inspect.stack()[2 + skip_frames :]:
+    for frame_info in inspect.stack(context=0)[2 + skip_frames :]:
         module = inspect.getmodule(frame_info.frame)
         if module is None:
             continue

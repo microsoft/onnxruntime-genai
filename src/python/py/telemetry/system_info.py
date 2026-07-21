@@ -30,7 +30,7 @@ def get_system_info() -> dict[str, Any]:
     info["os_process_arch"] = platform.architecture()[0]
 
     # CPU information
-    info["processor_count"] = os.cpu_count() or 0
+    info["processor_count"] = os.cpu_count() or 1
     info["cpu_model"] = _get_cpu_model()
 
     # Memory
