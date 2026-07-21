@@ -383,6 +383,23 @@ class TestSystemInfo(unittest.TestCase):
         self.assertEqual(info["gpu_memory_mb"], 8192)
         self.assertEqual(info["gpu_count"], 2)
 
+    def test_unknown_cpu_count_defaults_to_one(self):
+        from telemetry.system_info import get_system_info
+
+        get_system_info.cache_clear()
+        try:
+            with patch("telemetry.system_info.os.cpu_count", return_value=None), patch(
+                "telemetry.system_info._get_cpu_model", return_value=""
+            ), patch("telemetry.system_info._get_total_memory_mb", return_value=0), patch(
+                "telemetry.system_info._get_gpu_info", return_value={}
+            ), patch("telemetry.system_info._get_device_manufacturer", return_value=""), patch(
+                "telemetry.system_info._get_device_model", return_value=""
+            ), patch("telemetry.system_info._get_ort_version", return_value=""):
+                info = get_system_info()
+            self.assertEqual(info["processor_count"], 1)
+        finally:
+            get_system_info.cache_clear()
+
     def test_system_info_cached(self):
         from telemetry.system_info import get_system_info
         info1 = get_system_info()
