@@ -52,9 +52,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from transformers import (
-    AutoConfig,
-)
+from transformers import AutoConfig
 
 
 def apply_deprecated_extra_option_aliases(kv_pairs):
@@ -86,11 +84,67 @@ def apply_deprecated_extra_option_aliases(kv_pairs):
         del kv_pairs[old_name]
 
 
-def check_extra_options(kv_pairs, precision, execution_provider):
+def parse_hf_token(hf_token):
+    """
+    Returns the authentication token needed for Hugging Face.
+    Token is obtained either from the user or the environment.
+    """
+    if hf_token.lower() in {"false", "0"}:
+        # Default is `None` for disabling authentication
+        return None
+
+    if hf_token.lower() in {"true", "1"}:
+        # Return token in environment
+        return True
+
+    # Return user-provided token as string
+    return hf_token
+
+
+def get_hf_details(model_name, input_path, cache_dir, extra_options):
+    """
+    Get Hugging Face details based on the provided inputs
+    """
+    # Load model config
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    hf_name = input_path if os.path.isdir(input_path) else model_name
+    hf_token = extra_options.get("hf_token", True)
+    hf_remote = extra_options.get("hf_remote", False)
+
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    if extra_options.get("adapter_path", False):
+        from peft import PeftConfig
+
+        peft_config = PeftConfig.from_pretrained(
+            extra_options["adapter_path"],
+            token=hf_token,
+            trust_remote_code=hf_remote,
+            **extra_kwargs,
+        )
+        config.update(peft_config.__dict__)
+
+    # Store Hugging Face details in dict
+    hf_details = {
+        "extra_kwargs": extra_kwargs,
+        "hf_name": hf_name,
+        "hf_config": config,
+    }
+    return hf_details
+
+
+def check_extra_options(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    extra_options,
+):
     """
     Check key-value pairs and set values correctly
     """
-    apply_deprecated_extra_option_aliases(kv_pairs)
+    apply_deprecated_extra_option_aliases(extra_options)
 
     bools = [
         "is_symmetric",
@@ -109,78 +163,102 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         "prune_lm_head",
     ]
     for key in bools:
-        if key in kv_pairs:
-            if kv_pairs[key] in {"false", "False", "0"}:
-                kv_pairs[key] = False
-            elif kv_pairs[key] in {"true", "True", "1"}:
-                kv_pairs[key] = True
+        if key in extra_options:
+            if extra_options[key] in {"false", "False", "0"}:
+                extra_options[key] = False
+            elif extra_options[key] in {"true", "True", "1"}:
+                extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
-    if "hf_token" in kv_pairs:
-        kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
+    if "hf_token" in extra_options:
+        extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
 
-    if "op_types_to_quantize" in kv_pairs:
+    if extra_options.get("op_types_to_quantize", False):
         op_types_to_quantize = ()
-        for op_type in kv_pairs["op_types_to_quantize"].split("/"):
+        for op_type in extra_options["op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type,)
-        kv_pairs["op_types_to_quantize"] = op_types_to_quantize
+        extra_options["op_types_to_quantize"] = op_types_to_quantize
 
-    if "nodes_to_exclude" in kv_pairs:
-        kv_pairs["nodes_to_exclude"] = kv_pairs["nodes_to_exclude"].split(",")
+    if extra_options.get("nodes_to_exclude", False):
+        extra_options["nodes_to_exclude"] = extra_options["nodes_to_exclude"].split(",")
 
-    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
+    if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError(
             "Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once."
         )
 
-    if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
-        print(
-            "WARNING: enable_webgpu_graph is only supported with WebGPU execution provider. Disabling enable_webgpu_graph."
-        )
-        kv_pairs["enable_webgpu_graph"] = False
+    if execution_provider == "NvTensorRtRtx":
+        extra_options["use_qdq"] = True
 
-    if precision == "int8" and kv_pairs.get("use_qdq", False):
+    if extra_options.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
+        print(
+            "WARNING: enable_webgpu_graph is only supported with the WebGPU EP. Disabling enable_webgpu_graph."
+        )
+        extra_options["enable_webgpu_graph"] = False
+
+    if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
+    # Get Hugging Face details and temporarily set in extra options for use in `create_model`
+    hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
+    config = hf_details["hf_config"]
+    extra_options["hf_details"] = hf_details
 
-def parse_extra_options(kv_items, precision, execution_provider):
+    # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
+    # embedding and the LM head. That is only valid when the model actually ties them. For an
+    # untied model (config.tie_word_embeddings is False) the token embedding and LM head are
+    # distinct weights, so tying them would make the embedding read from the wrong matrix and
+    # silently export a broken model (e.g. gpt-oss-20b generating gibberish). Reject the
+    # combination up front instead of producing a corrupt model.
+    if extra_options.get("shared_embeddings", False) and getattr(config, "tie_word_embeddings", None) is False:
+        raise ValueError(
+            "shared_embeddings=true requires a model that ties its input and output embeddings, "
+            "but this model's config has tie_word_embeddings=false (the token embedding and LM head "
+            "are separate weights). Sharing them would corrupt the exported model. Remove "
+            "shared_embeddings=true from --extra_options for this model."
+        )
+
+
+def parse_extra_options(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    extra_options,
+):
     """
     Parse key-value pairs that are separated by '='
     """
     kv_pairs = {}
 
-    if kv_items:
-        for kv_str in kv_items:
+    if extra_options:
+        for kv_str in extra_options:
             kv = kv_str.split("=")
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs, precision, execution_provider)
+    check_extra_options(
+        model_name,
+        input_path,
+        output_dir,
+        precision,
+        execution_provider,
+        cache_dir,
+        kv_pairs
+    )
     return kv_pairs
 
 
-def parse_hf_token(hf_token):
-    """
-    Returns the authentication token needed for Hugging Face.
-    Token is obtained either from the user or the environment.
-    """
-    if hf_token.lower() in {"false", "0"}:
-        # Default is `None` for disabling authentication
-        return None
-
-    if hf_token.lower() in {"true", "1"}:
-        # Return token in environment
-        return True
-
-    # Return user-provided token as string
-    return hf_token
-
-
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
+    """
+    Set the input/output precision of the ONNX model based on the provided precision and execution provider.
+    """
     cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
     bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
@@ -198,6 +276,9 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
 
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
+    """
+    Set the ONNX model's internal precision based on the provided precision and extra options.
+    """
     if precision == "int4":
         return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
 
@@ -222,44 +303,27 @@ def create_model(
     cache_dir,
     **extra_options,
 ):
+    # Update name alias for TRT-RTX
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
-        extra_options["use_qdq"] = True
-
-    # Normalize any deprecated extra_options names for direct API callers (the CLI
-    # path already handles this in check_extra_options).
-    apply_deprecated_extra_option_aliases(extra_options)
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Load model config
-    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
-    hf_name = input_path if os.path.isdir(input_path) else model_name
-    hf_token = extra_options.get("hf_token", True)
-    # Default to False so we never execute arbitrary code shipped inside a
-    # Hugging Face repository unless the user has explicitly opted in. This
-    # matches the safe default that `transformers` itself uses for
-    # `trust_remote_code`.
-    hf_remote = extra_options.get("hf_remote", False)
-
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
-    if "adapter_path" in extra_options:
-        from peft import PeftConfig
-
-        peft_config = PeftConfig.from_pretrained(
-            extra_options["adapter_path"],
-            token=hf_token,
-            trust_remote_code=hf_remote,
-            **extra_kwargs,
-        )
-        config.update(peft_config.__dict__)
+    # Load Hugging Face details
+    try:
+        hf_details = extra_options.pop("hf_details")
+    except KeyError:
+        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+    extra_kwargs = hf_details.pop("extra_kwargs")
+    hf_name = hf_details.pop("hf_name")
+    config = hf_details.pop("hf_config")
 
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
-    config_only = "config_only" in extra_options
+    config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
     if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
@@ -543,14 +607,22 @@ def get_args():
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU, INT8 CPU, INT8 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, FP16 TRT-RTX, BF16 CUDA, BF16 TRT-RTX, INT8 CPU, INT8 CUDA, INT8 WebGPU, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
     )
     return args
 
 
 if __name__ == "__main__":
     args = get_args()
-    extra_options = parse_extra_options(args.extra_options, args.precision, args.execution_provider)
+    extra_options = parse_extra_options(
+        args.model_name,
+        args.input,
+        args.output,
+        args.precision,
+        args.execution_provider,
+        args.cache_dir,
+        args.extra_options,
+    )
     create_model(
         args.model_name,
         args.input,
