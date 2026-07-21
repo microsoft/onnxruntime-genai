@@ -509,7 +509,11 @@ class TestPathRedaction(unittest.TestCase):
         telemetry = MagicMock()
         metadata = {
             "path": r"C:\Users\alice\models\model.onnx",
-            "nested": {"paths": ["/home/alice/model.onnx"]},
+            r"C:\Users\alice\secret": "value",
+            "nested": {
+                "/home/alice/private/key": "value",
+                "paths": ["/home/alice/model.onnx"],
+            },
         }
         with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry):
             log_action("test", "work", 1.0, True, metadata)
@@ -520,6 +524,8 @@ class TestPathRedaction(unittest.TestCase):
         for attributes in (action_attributes, error_attributes):
             self.assertEqual(attributes["path"], "[path]")
             self.assertEqual(attributes["nested"]["paths"], ["[path]"])
+            self.assertEqual(attributes["[path]"], "value")
+            self.assertEqual(attributes["nested"]["[path]"], "value")
 
 
 class TestDeviceId(unittest.TestCase):
