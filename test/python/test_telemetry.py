@@ -778,6 +778,28 @@ class TestShutdownSafety(unittest.TestCase):
 
         telemetry._store.close.assert_not_called()
 
+    def test_shutdown_uses_one_overall_budget(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._heartbeat_thread = MagicMock()
+        telemetry._heartbeat_thread.is_alive.return_value = False
+        telemetry._uploader = MagicMock()
+        telemetry._uploader.stop_loop.return_value = True
+        telemetry._store = MagicMock()
+        heartbeat = telemetry._heartbeat_thread
+        uploader = telemetry._uploader
+
+        with patch("telemetry.telemetry.time.monotonic", side_effect=[100.0, 101.0, 102.0, 103.0]):
+            telemetry.shutdown(5.0)
+
+        heartbeat.join.assert_called_once_with(4.0)
+        uploader.stop_loop.assert_called_once_with(3.0)
+        uploader.flush.assert_called_once_with(2.0)
+        self.assertIsNone(telemetry._heartbeat_thread)
+        self.assertIsNone(telemetry._uploader)
+        self.assertIsNone(telemetry._store)
+
     def test_enable_does_not_replace_live_uploader(self):
         from telemetry.telemetry import GenAITelemetry
 

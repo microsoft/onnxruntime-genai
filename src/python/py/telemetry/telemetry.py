@@ -17,6 +17,7 @@ import base64
 import os
 import re
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -588,15 +589,19 @@ class GenAITelemetry:
                 self._enabled = False
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
-        """Best-effort flush of pending events, then stop the uploader.
+        """Best-effort shutdown within one overall time budget.
 
         Durability does not depend on this: any events not delivered remain in
-        the on-disk store and are uploaded on the next run. Process exit is never
-        blocked because the uploader runs on a daemon thread.
+        the on-disk store and are uploaded on the next run.
         """
+        deadline = time.monotonic() + max(0.0, flush_seconds)
+
+        def remaining_seconds() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         heartbeat_stopped = True
         if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
-            self._heartbeat_thread.join(max(0.0, flush_seconds))
+            self._heartbeat_thread.join(remaining_seconds())
             heartbeat_stopped = not self._heartbeat_thread.is_alive()
             if heartbeat_stopped:
                 self._heartbeat_thread = None
@@ -610,10 +615,10 @@ class GenAITelemetry:
                 # daemon thread (it releases on wind-down / at process exit);
                 # force-releasing here would let another drainer re-send the
                 # batch the thread is still processing.
-                uploader_stopped = self._uploader.stop_loop(max(0.0, flush_seconds))
+                uploader_stopped = self._uploader.stop_loop(remaining_seconds())
                 if uploader_stopped:
                     try:
-                        self._uploader.flush(flush_seconds)
+                        self._uploader.flush(remaining_seconds())
                     finally:
                         self._uploader.close()
                         self._uploader = None
