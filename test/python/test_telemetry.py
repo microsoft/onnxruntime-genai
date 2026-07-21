@@ -308,7 +308,7 @@ class TestActionFastPath(unittest.TestCase):
 class TestPathRedaction(unittest.TestCase):
     """Test absolute-path redaction in error telemetry."""
 
-    def test_keeps_filenames_drops_directories_and_usernames(self):
+    def test_redacts_paths_and_usernames(self):
         from telemetry.telemetry import _redact_paths
 
         self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err <path>")
