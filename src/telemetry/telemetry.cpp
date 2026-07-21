@@ -442,7 +442,7 @@ void GenAiTelemetry::LogGeneratorCreate(uint32_t session_id, uint32_t generator_
 }
 
 bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id,
-                                      int prompt_tokens, const std::string& input_modality) {
+                                      int64_t prompt_tokens, const std::string& input_modality) {
   bool emitted = false;
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
@@ -450,7 +450,7 @@ bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
-    event.SetProperty("promptTokens", static_cast<int64_t>(prompt_tokens));
+    event.SetProperty("promptTokens", prompt_tokens);
     event.SetProperty("inputModality", input_modality);
 
     impl_->logger->LogEvent(event);
@@ -461,7 +461,7 @@ bool GenAiTelemetry::LogGenerateStart(uint32_t session_id, uint32_t generator_id
 }
 
 void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
-                                    int total_tokens,
+                                    int64_t total_tokens,
                                     double time_to_first_token_ms, double total_time_ms,
                                     double tokens_per_second) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
@@ -470,7 +470,7 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
-    event.SetProperty("totalTokens", static_cast<int64_t>(total_tokens));
+    event.SetProperty("totalTokens", total_tokens);
     event.SetProperty("timeToFirstTokenMs", time_to_first_token_ms);
     event.SetProperty("totalTimeMs", total_time_ms);
     event.SetProperty("tokensPerSecond", tokens_per_second);

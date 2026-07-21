@@ -69,11 +69,12 @@ void GenerationTelemetry::CompleteAppend(size_t input_token_count, int num_beams
   append_tracking_ = false;
 
   if (prompt_tokens_ == 0 && !first_token_logged_) start_time_ = append_start_time_;
-  prompt_tokens_ += static_cast<int>(input_token_count) * num_beams;
+  prompt_tokens_ +=
+      static_cast<int64_t>(input_token_count) * static_cast<int64_t>(num_beams);
   input_modality_ = input_modality;
 }
 
-void GenerationTelemetry::OnTokenGenerated(int active_token_count) {
+void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   const bool track_telemetry = IsEnabled();
   if (track_telemetry && !generation_abandoned_) {
     const auto now = std::chrono::steady_clock::now();

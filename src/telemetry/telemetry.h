@@ -91,10 +91,10 @@ class GenAiTelemetry {
   // input_modality is the modality actually used for this request (grouped):
   // text / vision / audio / multimodal.
   // Returns true only when the event was accepted by the live logger.
-  bool LogGenerateStart(uint32_t session_id, uint32_t generator_id, int prompt_tokens,
+  bool LogGenerateStart(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
                         const std::string& input_modality);
   void LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
-                      int total_tokens,
+                      int64_t total_tokens,
                       double time_to_first_token_ms, double total_time_ms,
                       double tokens_per_second);
 

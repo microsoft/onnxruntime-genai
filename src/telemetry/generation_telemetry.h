@@ -40,7 +40,7 @@ class GenerationTelemetry {
   void LogAdapterActivated();
   bool BeginAppend();
   void CompleteAppend(size_t input_token_count, int num_beams, std::string_view input_modality);
-  void OnTokenGenerated(int active_token_count);
+  void OnTokenGenerated(int64_t active_token_count);
   void OnRewind();
   AppendTrackingSuppression SuppressAppendTracking();
 
@@ -52,8 +52,8 @@ class GenerationTelemetry {
 
   uint32_t session_id_;
   uint32_t generator_id_;
-  int prompt_tokens_{0};
-  int generated_tokens_{0};
+  int64_t prompt_tokens_{0};
+  int64_t generated_tokens_{0};
   bool first_token_logged_{false};
   bool generate_start_logged_{false};
   bool generation_abandoned_{false};
@@ -76,7 +76,7 @@ class GenerationTelemetry {
   void LogAdapterActivated() {}
   bool BeginAppend() { return false; }
   void CompleteAppend(size_t, int, std::string_view) {}
-  void OnTokenGenerated(int) {}
+  void OnTokenGenerated(int64_t) {}
   void OnRewind() {}
   AppendTrackingSuppression SuppressAppendTracking() { return {}; }
 #endif

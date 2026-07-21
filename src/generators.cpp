@@ -801,7 +801,8 @@ void Generator::GenerateNextToken() {
     extra_inputs_.clear();
     transducer_state_->StepToken();
 
-    generation_telemetry_.OnTokenGenerated(state_->params_->BatchBeamSize());
+    generation_telemetry_.OnTokenGenerated(
+        static_cast<int64_t>(state_->params_->BatchBeamSize()));
     return;
   }
 
@@ -852,7 +853,8 @@ void Generator::GenerateNextToken() {
 
   last_action_ = Action::generated;
 
-  generation_telemetry_.OnTokenGenerated(search_->params_->BatchBeamSize());
+  generation_telemetry_.OnTokenGenerated(
+      static_cast<int64_t>(search_->params_->BatchBeamSize()));
 
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:

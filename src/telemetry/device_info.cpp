@@ -23,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -450,6 +451,72 @@ enum class DeviceIdPublishResult {
   Failed,
 };
 
+enum class DeviceIdReadResult {
+  Missing,
+  Valid,
+  Invalid,
+  Failed,
+};
+
+struct DeviceIdFileRead {
+  DeviceIdReadResult result;
+  std::string uuid;
+};
+
+void TrimAsciiWhitespace(std::string& value) {
+  value.erase(std::find_if_not(value.rbegin(), value.rend(),
+                               [](unsigned char c) { return std::isspace(c); })
+                  .base(),
+              value.end());
+  value.erase(value.begin(), std::find_if_not(value.begin(), value.end(),
+                                              [](unsigned char c) { return std::isspace(c); }));
+}
+
+DeviceIdFileRead ReadDeviceIdFileNoFollow(const std::filesystem::path& file) {
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+
+  const std::string file_path = file.string();
+  const int fd = open(file_path.c_str(), flags);
+  if (fd < 0) {
+    return {errno == ENOENT ? DeviceIdReadResult::Missing : DeviceIdReadResult::Failed, {}};
+  }
+
+  struct stat file_info{};
+  if (fstat(fd, &file_info) != 0 || !S_ISREG(file_info.st_mode)) {
+    close(fd);
+    return {DeviceIdReadResult::Failed, {}};
+  }
+
+  std::array<char, 65> buffer{};
+  size_t total = 0;
+  bool read_ok = true;
+  while (total < buffer.size()) {
+    const ssize_t count = read(fd, buffer.data() + total, buffer.size() - total);
+    if (count > 0) {
+      total += static_cast<size_t>(count);
+    } else if (count == 0) {
+      break;
+    } else if (errno != EINTR) {
+      read_ok = false;
+      break;
+    }
+  }
+  if (close(fd) != 0) read_ok = false;
+  if (!read_ok) return {DeviceIdReadResult::Failed, {}};
+  if (total == buffer.size()) return {DeviceIdReadResult::Invalid, {}};
+
+  std::string uuid(buffer.data(), total);
+  TrimAsciiWhitespace(uuid);
+  return {IsValidUuid(uuid) ? DeviceIdReadResult::Valid : DeviceIdReadResult::Invalid,
+          std::move(uuid)};
+}
+
 DeviceIdPublishResult PublishDeviceIdFileNoFollow(const std::filesystem::path& file,
                                                   const std::string& uuid,
                                                   bool replace_existing) {
@@ -531,42 +598,20 @@ std::string GetOrCreatePersistentDeviceId(DeviceIdStatus& status) {
   }
   const std::filesystem::path file = dir / "deviceid";
 
-  ec.clear();
-  if (std::filesystem::is_symlink(file, ec)) {
+  const DeviceIdFileRead existing = ReadDeviceIdFileNoFollow(file);
+  if (existing.result == DeviceIdReadResult::Valid) {
+    status = DeviceIdStatus::Existing;
+    return existing.uuid;
+  }
+  if (existing.result == DeviceIdReadResult::Failed) {
     status = DeviceIdStatus::Failed;
     return GenerateUuidV4();
   }
 
-  bool file_existed = false;
-  {
-    std::ifstream in(file);
-    if (in.is_open()) {
-      file_existed = true;
-      const auto size = std::filesystem::file_size(file, ec);
-      if (!ec && size <= 64) {
-        std::string uuid(static_cast<size_t>(size), '\0');
-        in.read(uuid.data(), static_cast<std::streamsize>(uuid.size()));
-        uuid.erase(std::find_if_not(uuid.rbegin(), uuid.rend(),
-                                    [](unsigned char c) { return std::isspace(c); })
-                       .base(),
-                   uuid.end());
-        uuid.erase(uuid.begin(), std::find_if_not(uuid.begin(), uuid.end(),
-                                                  [](unsigned char c) { return std::isspace(c); }));
-        if (IsValidUuid(uuid)) {
-          status = DeviceIdStatus::Existing;
-          return uuid;
-        }
-      }
-    }
-  }
+  const bool file_existed = existing.result == DeviceIdReadResult::Invalid;
 
   std::string uuid = GenerateUuidV4();
   if (!CreateDirectoryTreeOwnerOnly(dir)) {
-    status = DeviceIdStatus::Failed;
-    return uuid;
-  }
-  ec.clear();
-  if (std::filesystem::is_symlink(file, ec)) {
     status = DeviceIdStatus::Failed;
     return uuid;
   }
@@ -574,24 +619,10 @@ std::string GetOrCreatePersistentDeviceId(DeviceIdStatus& status) {
   if (publish_result == DeviceIdPublishResult::AlreadyExists) {
     // Another process published a complete first-run id first. Read back the winner so all
     // concurrent processes report the same value.
-    ec.clear();
-    std::ifstream winner;
-    if (!std::filesystem::is_symlink(file, ec)) {
-      winner.open(file);
-    }
-    std::string winner_uuid;
-    if (winner.is_open() && std::getline(winner, winner_uuid)) {
-      winner_uuid.erase(std::find_if_not(winner_uuid.rbegin(), winner_uuid.rend(),
-                                         [](unsigned char c) { return std::isspace(c); })
-                            .base(),
-                        winner_uuid.end());
-      winner_uuid.erase(winner_uuid.begin(),
-                        std::find_if_not(winner_uuid.begin(), winner_uuid.end(),
-                                         [](unsigned char c) { return std::isspace(c); }));
-      if (IsValidUuid(winner_uuid)) {
-        status = DeviceIdStatus::Existing;
-        return winner_uuid;
-      }
+    const DeviceIdFileRead winner = ReadDeviceIdFileNoFollow(file);
+    if (winner.result == DeviceIdReadResult::Valid) {
+      status = DeviceIdStatus::Existing;
+      return winner.uuid;
     }
     status = DeviceIdStatus::Failed;
     return uuid;
