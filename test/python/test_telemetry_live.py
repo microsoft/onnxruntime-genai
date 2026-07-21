@@ -15,7 +15,7 @@ Every outgoing HTTP send is recorded by wrapping the transport, so uploader
 batches are observed. This makes actual HTTP requests; it is NOT a unit test.
 
 Usage:
-    python test/python/test_telemetry_live.py
+    ORT_GENAI_RUN_LIVE_TELEMETRY_TEST=1 python test/python/test_telemetry_live.py
 """
 
 import os
@@ -27,6 +27,10 @@ results_lock = threading.Lock()
 
 
 def main():
+    if os.environ.get("ORT_GENAI_RUN_LIVE_TELEMETRY_TEST") != "1":
+        print("Set ORT_GENAI_RUN_LIVE_TELEMETRY_TEST=1 to run this live network test.")
+        return 2
+
     telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
     if telemetry_root not in sys.path:
         sys.path.insert(0, telemetry_root)
