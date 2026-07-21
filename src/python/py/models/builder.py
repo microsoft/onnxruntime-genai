@@ -261,6 +261,7 @@ def _emit_model_build_telemetry(
     output_dir: str,
     extra_options: dict[str, Any],
     source_format: str = "huggingface",
+    fallback_model_name: str = "",
 ) -> None:
     try:
         try:
@@ -319,7 +320,7 @@ def _emit_model_build_telemetry(
             action=action_name,
             duration_ms=duration_ms,
             success=success,
-            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or ""),
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or fallback_model_name),
             model_type=str(model_type),
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -586,6 +587,7 @@ def _create_model_impl(
             output_dir=output_dir,
             extra_options=extra_options,
             source_format=source_format,
+            fallback_model_name=model_name,
         )
 
 
@@ -625,6 +627,7 @@ def create_model(
                 output_dir="",
                 extra_options=extra_options,
                 source_format="gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface",
+                fallback_model_name=input_path or model_name,
             )
         raise
 
