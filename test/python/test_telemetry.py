@@ -342,6 +342,17 @@ class TestPathRedaction(unittest.TestCase):
 
         self.assertEqual(message, 'File "external.py", line 7, in run')
 
+    def test_format_exception_message_keeps_internal_basename_and_context(self):
+        from telemetry.telemetry import _format_exception_message
+
+        with patch(
+            "telemetry.telemetry.traceback.format_exception",
+            return_value=['  File "/home/user/onnxruntime_genai/telemetry/telemetry.py", line 9, in run\n'],
+        ):
+            message = _format_exception_message(RuntimeError("boom"))
+
+        self.assertEqual(message, 'File "telemetry.py", line 9, in run')
+
     def test_public_log_error_redacts_paths(self):
         from telemetry.telemetry_extensions import log_error
 
