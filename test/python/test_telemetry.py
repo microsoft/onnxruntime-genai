@@ -290,13 +290,18 @@ class TestVersionResolution(unittest.TestCase):
 
 
 class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
-    def test_sanitizes_paths_without_changing_model_ids(self):
+    @staticmethod
+    def _load_helper():
         import importlib.util
 
         helper_path = Path(__file__).parents[2] / "benchmark" / "python" / "telemetry_utils.py"
         spec = importlib.util.spec_from_file_location("benchmark_telemetry_utils", helper_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
+
+    def test_sanitizes_paths_without_changing_model_ids(self):
+        module = self._load_helper()
 
         self.assertEqual(
             module.sanitize_model_identifier(r"C:\Users\alice\models\model.onnx"),
@@ -307,6 +312,29 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             "model.onnx",
         )
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
+
+    def test_source_telemetry_loader_restores_sys_path(self):
+        import types
+
+        module = self._load_helper()
+        telemetry_stub = types.ModuleType("telemetry")
+
+        class StubTelemetry:
+            pass
+
+        telemetry_stub.GenAITelemetry = StubTelemetry
+        source_root = str(Path(__file__).parents[2] / "src" / "python" / "py")
+        source_index = sys.path.index(source_root) if source_root in sys.path else None
+        if source_index is not None:
+            sys.path.pop(source_index)
+        try:
+            before = list(sys.path)
+            with patch.dict(sys.modules, {"onnxruntime_genai": None, "telemetry": telemetry_stub}):
+                self.assertIsInstance(module.get_telemetry(), StubTelemetry)
+            self.assertEqual(sys.path, before)
+        finally:
+            if source_index is not None:
+                sys.path.insert(source_index, source_root)
 
 
 class TestActionFastPath(unittest.TestCase):

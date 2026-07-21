@@ -267,9 +267,14 @@ def _emit_model_build_telemetry(
             from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
         except ImportError:
             telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            if telemetry_root not in sys.path:
+            path_added = telemetry_root not in sys.path
+            if path_added:
                 sys.path.insert(0, telemetry_root)
-            from telemetry import GenAITelemetry  # noqa: PLC0415
+            try:
+                from telemetry import GenAITelemetry  # noqa: PLC0415
+            finally:
+                if path_added and telemetry_root in sys.path:
+                    sys.path.remove(telemetry_root)
 
         telemetry = GenAITelemetry()
         if not telemetry.accepts_detailed_events:
