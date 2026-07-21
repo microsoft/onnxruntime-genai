@@ -315,11 +315,11 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
 
         self.assertEqual(
             module.sanitize_model_identifier(r"C:\Users\alice\models\model.onnx"),
-            "model.onnx",
+            "[path]",
         )
         self.assertEqual(
             module.sanitize_model_identifier("/home/alice/models/model.onnx"),
-            "model.onnx",
+            "[path]",
         )
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         self.assertEqual(module.normalize_execution_provider("NvTensorRtRtx"), "trt-rtx")
@@ -436,14 +436,25 @@ class TestPathRedaction(unittest.TestCase):
     def test_redacts_paths_and_usernames(self):
         from telemetry.telemetry import _redact_paths
 
-        self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err <path>")
-        self.assertEqual(_redact_paths("/var/data/run/output.log"), "<path>")
+        self.assertEqual(_redact_paths(r"err C:\Users\alice\model.onnx"), "err [path]")
+        self.assertEqual(_redact_paths("/var/data/run/output.log"), "[path]")
         # Last segment is a directory/username (no extension) -> fully redacted.
-        self.assertEqual(_redact_paths("at /home/bob"), "at <path>")
+        self.assertEqual(_redact_paths("at /home/bob"), "at [path]")
         # UNC paths are redacted too.
-        self.assertEqual(_redact_paths(r"unc \\server\share\secret"), "unc <path>")
-        self.assertEqual(_redact_paths(r"err C:\Users\Alice Smith\models\phi.onnx"), "err <path>")
-        self.assertEqual(_redact_paths("err /home/Alice Smith/models/phi.onnx"), "err <path>")
+        self.assertEqual(_redact_paths(r"unc \\server\share\secret"), "unc [path]")
+        self.assertEqual(_redact_paths(r"err C:\Users\Alice Smith\models\phi.onnx"), "err [path]")
+        self.assertEqual(_redact_paths("err /home/Alice Smith/models/phi.onnx"), "err [path]")
+
+    def test_redaction_matches_ort_relative_path_and_length_contract(self):
+        from telemetry.telemetry import _redact_paths
+
+        self.assertEqual(_redact_paths("a/b/c"), "[path]")
+        self.assertEqual(_redact_paths(r"Load Users\bob\model.onnx failed"), "Load [path]")
+        self.assertEqual(_redact_paths("models/foo.onnx"), "models/foo.onnx")
+        self.assertEqual(_redact_paths("ratio 3/4 and and/or"), "ratio 3/4 and and/or")
+        self.assertEqual(_redact_paths("before /home/alice/model.onnx\nafter"), "before [path]")
+        self.assertEqual(len(_redact_paths("x" * 300).encode("utf-8")), 256)
+        self.assertEqual(_redact_paths("x" * 255 + "€"), "x" * 255)
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
@@ -454,7 +465,7 @@ class TestPathRedaction(unittest.TestCase):
             message = _format_exception_message(exc, exc.__traceback__)
         # The username must not survive in the source line or the message.
         self.assertNotIn("alice", message)
-        self.assertIn("<path>", message)
+        self.assertIn("[path]", message)
 
     def test_format_exception_message_keeps_external_basename(self):
         from telemetry.telemetry import _format_exception_message
@@ -465,7 +476,7 @@ class TestPathRedaction(unittest.TestCase):
         ):
             message = _format_exception_message(RuntimeError("boom"))
 
-        self.assertEqual(message, 'File "external.py", line 7, in run')
+        self.assertEqual(message, 'File "[path]", line 7, in run')
 
     def test_format_exception_message_keeps_internal_basename_and_context(self):
         from telemetry.telemetry import _format_exception_message
@@ -476,7 +487,7 @@ class TestPathRedaction(unittest.TestCase):
         ):
             message = _format_exception_message(RuntimeError("boom"))
 
-        self.assertEqual(message, 'File "telemetry.py", line 9, in run')
+        self.assertEqual(message, 'File "[path]", line 9, in run')
 
     def test_public_log_error_redacts_paths(self):
         from telemetry.telemetry_extensions import log_error
@@ -490,7 +501,7 @@ class TestPathRedaction(unittest.TestCase):
             )
 
         attributes = telemetry.log.call_args.args[1]
-        self.assertEqual(attributes["exception_message"], "missing <path>")
+        self.assertEqual(attributes["exception_message"], "missing [path]")
 
 
 class TestDeviceId(unittest.TestCase):
