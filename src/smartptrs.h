@@ -100,6 +100,7 @@ enum struct DeviceType {
   OpenVINO,
   NvTensorRtRtx,
   RyzenAI,
+  AMDGPU,
   MAX
 };
 
@@ -109,6 +110,12 @@ struct DeviceInterface {
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
+
+  // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the backend and
+  // machine support it (MIGraphX HipPinned, DML CUSTOM/L0). Null default -> callers keep the
+  // current device-memory path. Set via InitHostAccessible after the EP allocator is created.
+  virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
+  virtual void InitHostAccessible(Ort::Allocator& /*allocator*/) {}
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }

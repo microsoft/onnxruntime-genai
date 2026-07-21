@@ -23,6 +23,7 @@
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
 #include "ryzenai/interface.h"
+#include "amdgpu/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -335,6 +336,9 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
+    case DeviceType::AMDGPU:
+      slot = GetAMDGPUInterface();  // static singleton owned by amdgpu/interface.cpp
+      break;
     case DeviceType::CPU:
     default:
       owned_interfaces_.push_back(CreateCpuInterface());
@@ -363,6 +367,8 @@ std::string to_string(DeviceType device_type) {
       return "NvTensorRtRtx";
     case DeviceType::RyzenAI:
       return "RyzenAI";
+    case DeviceType::AMDGPU:
+      return "AMDGPU";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -774,6 +780,7 @@ void Generator::GenerateNextToken() {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
+
     ComputeLogits(next_tokens);
   }
   if (guidance_logits_processor_) {

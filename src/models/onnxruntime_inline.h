@@ -256,6 +256,15 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, Or
   return std::unique_ptr<OrtMemoryInfo>{p};
 }
 
+inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::CreateV2(const char* name, OrtMemoryInfoDeviceType device_type,
+                                                             uint32_t vendor_id, int32_t device_id,
+                                                             OrtDeviceMemoryType mem_type, OrtAllocatorType allocator_type) {
+  OrtMemoryInfo* p;
+  Ort::ThrowOnError(Ort::api->CreateMemoryInfo_V2(name, device_type, vendor_id, device_id, mem_type,
+                                                  /*alignment=*/0, allocator_type, &p));
+  return std::unique_ptr<OrtMemoryInfo>{p};
+}
+
 inline std::unique_ptr<OrtSyncStream> OrtSyncStream::Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options) {
   OrtSyncStream* p_stream = nullptr;
   Ort::ThrowOnError(Ort::api->CreateSyncStreamForEpDevice(ep_device, stream_options, &p_stream));
@@ -431,6 +440,12 @@ inline OrtEnv& OrtEnv::DisableTelemetryEvents() {
 inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg) {
   Ort::ThrowOnError(Ort::api->CreateAndRegisterAllocator(this, &mem_info, &arena_cfg));
   return *this;
+}
+
+inline Ort::Allocator* OrtEnv::GetSharedAllocator(const OrtMemoryInfo& mem_info) const {
+  OrtAllocator* p = nullptr;
+  Ort::ThrowOnError(Ort::api->GetSharedAllocator(const_cast<OrtEnv*>(this), &mem_info, &p));
+  return static_cast<Ort::Allocator*>(p);  // env-owned; may be nullptr if no match
 }
 
 inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,

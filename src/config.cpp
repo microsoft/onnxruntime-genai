@@ -44,6 +44,10 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "RyzenAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
+  } else if (lower_name == "amdgpu" ||
+             lower_name == "amdgpuexecutionprovider") {
+    // Accept canonical and catalog forms, all route to AMDGPU.
+    return "AMDGPU";
   }
   return name;  // Return name unchanged
 }
@@ -1518,6 +1522,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
             }
           }
         }
+        return true;
+      } else if (provider_options->name == "AMDGPU") {
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {

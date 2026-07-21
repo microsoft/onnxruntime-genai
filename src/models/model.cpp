@@ -32,6 +32,7 @@
 #include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
+#include "../amdgpu/interface.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
@@ -434,7 +435,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -467,7 +468,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  // AMDGPU device memory-type name is "Hip" (the MIGraphX backend registers
+  // CreateMemoryInfo_V2("Hip", GPU, ...); a V1 CreateMemoryInfo("Hip") memory-info matches it
+  // by device attributes). This mirrors the original B003 GPU-KV path (commit 64d1b3a5).
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "Hip"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')

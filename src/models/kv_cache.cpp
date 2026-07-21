@@ -432,7 +432,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
-      if (Device().GetType() != DeviceType::WEBGPU) {
+      // WebGPU has no Zero() implementation; AMDGPU skips it for the same reason (Stage A
+      // DeviceInterface throws on Zero — KV is fresh per-Generator so zeroing is optional).
+      if (Device().GetType() != DeviceType::WEBGPU &&
+          Device().GetType() != DeviceType::AMDGPU) {
         ByteWrapTensor(Device(), *presents_.back()).Zero();
       }
     }
