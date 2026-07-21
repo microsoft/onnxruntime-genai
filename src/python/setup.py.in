@@ -1,11 +1,11 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 from setuptools.dist import Distribution
 import sys
 import os
 from os import path
 
-if sys.version_info < (3, 0):
-    sys.exit('Sorry, Python < 3.0 is not supported')
+if sys.version_info < (3, 10):
+    sys.exit('Sorry, Python < 3.10 is not supported')
 
 class BinaryDistribution(Distribution):
     """Distribution which always forces a binary package with platform name"""
@@ -68,6 +68,7 @@ setup(
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
     install_requires=_get_install_requires(),
+    python_requires=">=3.10",
     distclass=BinaryDistribution,
     author="Microsoft Corporation",
     author_email="onnxruntime-genai@microsoft.com",
