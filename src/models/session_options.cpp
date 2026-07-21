@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <mutex>
+#include <set>
 #include <unordered_map>
 
 #include "../cuda/session_options.h"
@@ -133,6 +135,20 @@ void AppendExecutionProviderV1(OrtSessionOptions& session_options,
   }
   session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(),
                                           values.data(), keys.size());
+}
+
+void EnsureExecutionProviderLibraryRegistered(const std::string& registration_name,
+                                              const fs::path& library_path) {
+  static std::mutex mutex;
+  static std::set<std::string> registered_names;
+
+  std::lock_guard<std::mutex> lock(mutex);
+  if (registered_names.count(registration_name)) {
+    return;  // Already registered for this process; registration is global to the OrtEnv.
+  }
+
+  Ort::RegisterExecutionProviderLibrary(&GetOrtEnv(), registration_name.c_str(), library_path.c_str());
+  registered_names.insert(registration_name);
 }
 
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,

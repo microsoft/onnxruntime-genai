@@ -458,6 +458,22 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
+  // For the CUDA plugin EP, forward the user's "cuda" provider options to the init
+  // session so the allocator is created by the same plugin EP (and on the same device)
+  // as the model sessions.
+  if (type == DeviceType::CUDA && user_provider_options) {
+    // Forward all plugin options EXCEPT 'enable_cuda_graph'. The init session runs a
+    // trivial constant-only graph with zero compute nodes; enabling CUDA graph capture
+    // on it would fail ORT's graph-capture node-assignment check (no nodes assigned to
+    // the plugin EP). Graph capture is only meaningful for the model sessions.
+    for (const auto& opt : user_provider_options->options) {
+      if (opt.first == "enable_cuda_graph") {
+        continue;
+      }
+      init_session_provider_options.options.emplace_back(opt);
+    }
+  }
+
   provider_options_list.emplace_back(std::move(init_session_provider_options));
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
