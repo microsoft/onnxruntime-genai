@@ -87,10 +87,9 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
             # POST real device data from a unit test. The heartbeat is bounded by
             # system_info's per-probe subprocess timeouts (and cached after the
             # first call), so this never hangs the suite.
-            if instance._uploader is not None:
-                instance._uploader.stop_loop(5)
             if instance._heartbeat_thread is not None:
                 instance._heartbeat_thread.join()
+            instance.shutdown(5)
         for p in reversed(self._patchers):
             p.stop()
         GenAITelemetry._instance = None
@@ -628,7 +627,9 @@ class TestOfflineEventStore(unittest.TestCase):
         import tempfile
         from telemetry.offline_store import OfflineEventStore
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
-        return OfflineEventStore(db, **kw)
+        store = OfflineEventStore(db, **kw)
+        self.addCleanup(store.close)
+        return store
 
     def test_store_and_fifo_batch(self):
         s = self._new_store()
@@ -661,8 +662,11 @@ class TestOfflineEventStore(unittest.TestCase):
         import sqlite3
         from telemetry.offline_store import SCHEMA_VERSION
         s = self._new_store()
-        with sqlite3.connect(s.db_path) as conn:
+        conn = sqlite3.connect(s.db_path)
+        try:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
         self.assertEqual(v, SCHEMA_VERSION)
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions")
@@ -710,6 +714,8 @@ class TestUploaderDrainLogic(unittest.TestCase):
         db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
         store = OfflineEventStore(db)
         uploader = EventUploader(store, instrumentation_key="abc-def")
+        self.addCleanup(store.close)
+        self.addCleanup(uploader.close)
         return store, uploader
 
     def test_success_deletes(self):
