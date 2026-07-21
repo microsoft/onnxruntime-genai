@@ -34,6 +34,7 @@
 #include "config.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
@@ -114,6 +115,7 @@ struct Generator : LeakChecked<Generator> {
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
+  void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
@@ -129,29 +131,16 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
-#if defined(ORTGENAI_ENABLE_TELEMETRY)
-  // Telemetry tracking
-  uint32_t telemetry_generator_id_{0};
-  int telemetry_prompt_tokens_{0};
-  int telemetry_generated_tokens_{0};
-  std::chrono::steady_clock::time_point telemetry_start_time_;
-  std::chrono::steady_clock::time_point telemetry_first_token_time_;
-  std::chrono::steady_clock::time_point telemetry_last_token_time_;
-  bool telemetry_first_token_logged_{false};
-  bool telemetry_generate_start_logged_{false};
-  bool telemetry_generation_abandoned_{false};
-  std::string telemetry_input_modality_{"text"};
-  bool telemetry_suppress_append_tracking_{false};
-#endif
-
  private:
+#if defined(_MSC_VER)
+  [[msvc::no_unique_address]]
+#else
+  [[no_unique_address]]
+#endif
+  GenerationTelemetry generation_telemetry_;
+  void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
-#if defined(ORTGENAI_ENABLE_TELEMETRY)
-  bool ShouldTrackTelemetry() const;
-  void LogTelemetryGenerateEnd();
-  void ResetTelemetryGeneration();
-#endif
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength
