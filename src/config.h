@@ -611,6 +611,10 @@ struct Config {
 
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string targets_length;
+
+        // Token type ids (0=text, 1=image). Required by OpenVINO-partitioned Gemma3 decoders, whose
+        // graph consumes them for image-token attention. Bound only when the decoder graph declares it.
+        std::string token_type_ids{Defaults::TokenTypeIdsName};
       } inputs;
 
       struct Outputs {

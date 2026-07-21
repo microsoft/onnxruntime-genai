@@ -185,11 +185,20 @@ struct DecoderState : State {
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices, size_t new_length);
 
+  // Binds/updates the decoder's optional token_type_ids input (OpenVINO-partitioned Gemma3). Values are
+  // 0 for text and 1 for image placeholder tokens; MultiModalPipelineState supplies the prompt markers.
+  void AddTokenTypeIds();
+  void UpdateTokenTypeIds(size_t new_length);
+  void SetPromptTokenTypeIds(std::span<const int32_t> token_type_ids);
+
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
+  std::unique_ptr<OrtValue> token_type_ids_;            // Optional model input (OpenVINO-partitioned Gemma3)
+  size_t token_type_ids_index_{~0U};                    // Slot in state_.inputs_ for token_type_ids
+  std::vector<int32_t> prompt_token_type_ids_;          // Cached prompt markers, applied on the prompt step
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
