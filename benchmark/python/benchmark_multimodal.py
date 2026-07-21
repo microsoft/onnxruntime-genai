@@ -322,7 +322,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     try:
         telemetry = _get_telemetry()
         telemetry.log_benchmark(
-            model_name=os.path.basename(args.input_folder),
+            model_name=os.path.basename(os.path.normpath(args.input_folder)),
             backend="onnxruntime-genai",
             device="default",
             prompt_length=prompt_length,
@@ -361,7 +361,7 @@ def main(args):
     try:
         telemetry = _get_telemetry()
         telemetry.log_model_load(
-            model_name=os.path.basename(model_path),
+            model_name=os.path.basename(os.path.normpath(model_path)),
             execution_provider="default",
             total_load_time_ms=model_load_time_ms,
         )
