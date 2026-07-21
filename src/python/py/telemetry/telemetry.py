@@ -69,6 +69,7 @@ def _get_app_version() -> str:
     # 1. Try the package attribute (fastest when native ext is loaded)
     try:
         import onnxruntime_genai
+
         v = getattr(onnxruntime_genai, "__version__", None)
         if v:
             return v
@@ -78,7 +79,8 @@ def _get_app_version() -> str:
     # 2. Resolve the installed distribution that provides the Python module.
     # This covers variant wheels such as onnxruntime-genai-cuda/directml.
     try:
-        from importlib.metadata import packages_distributions, version as pkg_version
+        from importlib.metadata import packages_distributions
+        from importlib.metadata import version as pkg_version
 
         distributions = packages_distributions().get("onnxruntime_genai", [])
         for distribution in distributions:
@@ -94,6 +96,7 @@ def _get_app_version() -> str:
     try:
         # Walk up from this file to find VERSION_INFO
         import pathlib
+
         d = pathlib.Path(__file__).resolve().parent
         for _ in range(10):
             candidate = d / "VERSION_INFO"
@@ -135,13 +138,13 @@ def _format_exception_message(ex: BaseException, tb=None) -> str:
             if line_trunc.startswith('File "') and "onnxruntime_genai" in line_trunc:
                 path_end = line_trunc.find('"', len('File "'))
                 path = line_trunc[len('File "') : path_end]
-                safe_path = path[path.find("onnxruntime_genai") :].replace("\\", "/")
-                line_trunc = f'File "{safe_path}"{line_trunc[path_end + 1:]}'
+                basename = path.replace("\\", "/").rsplit("/", 1)[-1]
+                line_trunc = f'File "{basename}"{line_trunc[path_end + 1 :]}'
             elif line_trunc.startswith('File "'):
                 path_end = line_trunc.find('"', len('File "'))
                 path = line_trunc[len('File "') : path_end]
                 basename = path.replace("\\", "/").rsplit("/", 1)[-1]
-                line_trunc = f'File "{basename}"{line_trunc[path_end + 1:]}'
+                line_trunc = f'File "{basename}"{line_trunc[path_end + 1 :]}'
             # Redact any absolute path that remains (source lines, message, and
             # the tail of File lines).
             line_trunc = _redact_paths(line_trunc)
@@ -232,9 +235,7 @@ class GenAITelemetry:
                     self._store = None
                     self._enabled = False
                     return
-                self._uploader = EventUploader(
-                    self._store, instrumentation_key=self._instrumentation_key
-                )
+                self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
 
                 # The heartbeat collects system info via blocking subprocesses;
@@ -582,9 +583,7 @@ class GenAITelemetry:
                     self._store = None
                     return
             try:
-                self._uploader = EventUploader(
-                    self._store, instrumentation_key=self._instrumentation_key
-                )
+                self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
                 self._enabled = True
             except Exception:
