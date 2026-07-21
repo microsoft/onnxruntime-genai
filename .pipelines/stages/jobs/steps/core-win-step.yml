@@ -85,7 +85,11 @@ steps:
       '[registry]',
       'global-credential-providers = ["cargo:token"]'
     )
-    Set-Content -Path (Join-Path $cargoDir 'config.toml') -Value $lines -Encoding utf8
+    [System.IO.File]::WriteAllLines(
+      (Join-Path $cargoDir 'config.toml'),
+      $lines,
+      [System.Text.UTF8Encoding]::new($false)
+    )
     Write-Host "Wrote $cargoDir\config.toml"
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
