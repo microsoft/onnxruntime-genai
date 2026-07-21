@@ -45,8 +45,10 @@ def _find_path_anchor(value: str):
             segments = 0
             cursor = index
             while cursor < len(value) and value[cursor] == "/":
-                while cursor < len(value) and value[cursor] == "/":
-                    cursor += 1
+                separator_end = cursor + 1
+                while separator_end < len(value) and value[separator_end] == "/":
+                    separator_end += 1
+                cursor = separator_end
                 segment_start = cursor
                 while cursor < len(value) and value[cursor] not in "/\r\n \t":
                     cursor += 1
