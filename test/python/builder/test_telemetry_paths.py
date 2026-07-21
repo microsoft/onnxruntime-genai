@@ -49,3 +49,35 @@ builder_module = _load_builder_entrypoint_module()
 )
 def test_sanitize_path_value_is_platform_independent(value, expected):
     assert builder_module._sanitize_path_value(value) == expected
+
+
+def test_telemetry_fallback_restores_source_path(monkeypatch):
+    telemetry_stub = types.ModuleType("telemetry")
+
+    class DisabledTelemetry:
+        accepts_detailed_events = False
+
+    telemetry_stub.GenAITelemetry = DisabledTelemetry
+    source_root = str(MODELS_DIR.parent)
+    source_index = sys.path.index(source_root) if source_root in sys.path else None
+    if source_index is not None:
+        sys.path.pop(source_index)
+    try:
+        before = list(sys.path)
+        monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
+        monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
+        builder_module._emit_model_build_telemetry(
+            action_name="create_model",
+            duration_ms=1.0,
+            success=False,
+            config=None,
+            onnx_model=None,
+            precision="fp16",
+            execution_provider="cpu",
+            output_dir="",
+            extra_options={},
+        )
+        assert sys.path == before
+    finally:
+        if source_index is not None:
+            sys.path.insert(source_index, source_root)

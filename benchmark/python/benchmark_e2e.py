@@ -18,7 +18,6 @@ import importlib.metadata
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 
@@ -27,6 +26,7 @@ import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
+from telemetry_utils import get_telemetry as _get_telemetry
 from telemetry_utils import sanitize_model_identifier
 from tqdm import tqdm
 
@@ -40,18 +40,6 @@ try:
     IS_NVIDIA_SYSTEM = True
 except Exception:
     IS_NVIDIA_SYSTEM = False
-
-
-def _get_telemetry():
-    try:
-        from onnxruntime_genai.telemetry import GenAITelemetry
-    except ImportError:
-        telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
-        if telemetry_root not in sys.path:
-            sys.path.insert(0, telemetry_root)
-        from telemetry import GenAITelemetry
-
-    return GenAITelemetry()
 
 
 # Monitor the GPU memory usage
