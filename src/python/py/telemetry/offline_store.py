@@ -63,6 +63,7 @@ class OfflineEventStore:
         with suppress(Exception):
             os.makedirs(parent, mode=0o700, exist_ok=True)
             _chmod_best_effort(parent, 0o700)
+        conn = None
         try:
             conn = sqlite3.connect(self._db_path, timeout=self._busy_timeout_ms / 1000.0, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -77,6 +78,9 @@ class OfflineEventStore:
             self._conn = conn
             self._harden_permissions()
         except Exception:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
             self._conn = None
 
     def _harden_permissions(self) -> None:
