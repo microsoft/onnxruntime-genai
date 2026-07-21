@@ -188,6 +188,9 @@ steps:
       $stage = "$(Build.ArtifactStagingDirectory)\wheel"
       New-Item -ItemType Directory -Force -Path $stage | Out-Null
       Copy-Item $whl.FullName $stage -Force
+      # The degraded path above leaves $LASTEXITCODE=1 from the expected pip
+      # failure; exit 0 explicitly since every real failure already exited 1.
+      exit 0
     displayName: 'Assert: Python ${{ pyVer }} wheel produced'
 
 # --- Publish all wheels ------------------------------------------------------

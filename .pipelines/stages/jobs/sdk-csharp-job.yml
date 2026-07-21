@@ -160,22 +160,29 @@ jobs:
     displayName: 'Authenticate NuGet to Lotus feed'
 
   - powershell: |
+      $ErrorActionPreference = 'Stop'
       dotnet --info
-      dotnet workload install android
-      dotnet workload install ios
-      dotnet workload install maccatalyst
-      dotnet workload install macos
+      # Feed isolation: install the mobile workload packs from the Lotus feed
+      # (which upstreams nuget.org). --skip-manifest-update uses the manifests
+      # baked into the SDK so no public SDK feed is contacted.
+      dotnet workload install android ios maccatalyst macos `
+        --skip-manifest-update `
+        --source "$(lotusNuGetFeed)"
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet workload install failed"; exit $LASTEXITCODE }
     displayName: 'Install .NET mobile workloads'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
   - powershell: |
+      $ErrorActionPreference = 'Stop'
       # Explicit restore against the Lotus-only nuget.config, then build without
       # an implicit restore so no public feed is ever contacted.
       dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
         --configfile "$(Build.Repository.LocalPath)\src\csharp\nuget.config" `
         -p:IncludeMobileTargets=true
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet restore failed"; exit $LASTEXITCODE }
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `
         -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet build failed"; exit $LASTEXITCODE }
     displayName: 'Build C# managed assembly'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
