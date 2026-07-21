@@ -625,9 +625,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
-  const bool track_telemetry = generation_telemetry_.BeginAppend();
   std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
-  if (track_telemetry) {
+  if (generation_telemetry_.BeginAppend()) {
     bool used_vision = false, used_audio = false;
     for (const auto& extra : extra_inputs_) {
       std::string name = extra.name;
