@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "speculative_sampling.h"
+#include "speculative_decoding_strategy.h"
 
 #include <array>
 #include <cmath>
@@ -13,6 +13,24 @@
 #include <gtest/gtest.h>
 
 namespace Generators::test {
+
+TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
+  // These intentionally inconsistent buffers prove that mode, not storage shape, selects behavior.
+  // Runtime proposal validation rejects such inconsistencies before verification.
+  SpeculativeDecodingStrategy::Proposal greedy{
+      SpeculativeDecodingStrategy::ProposalMode::kGreedyMatch};
+  greedy.probs.resize(1);
+  EXPECT_FALSE(greedy.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal sampling{
+      SpeculativeDecodingStrategy::ProposalMode::kDraftSampling};
+  EXPECT_TRUE(sampling.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal deterministic{
+      SpeculativeDecodingStrategy::ProposalMode::kDeterministic};
+  deterministic.probs.resize(1);
+  EXPECT_FALSE(deterministic.UsesDraftProbabilities());
+}
 
 // ComputeAcceptProb
 
@@ -148,6 +166,173 @@ TEST(SpeculativeSamplingTest, SamplingDistFromProbsMatchesLogits) {
   auto a = SamplingDistributionFromProbs(probs, /*top_k=*/3, /*top_p=*/0.0f, /*temperature=*/1.3f);
   auto b = SampledDense(logits, /*top_k=*/3, /*top_p=*/0.0f, /*temperature=*/1.3f);
   for (size_t i = 0; i < a.size(); ++i) EXPECT_NEAR(a[i], b[i], 1e-5f);
+}
+
+// TargetTokenSelection
+
+TEST(SpeculativeSamplingTest, TargetGreedySelectionAppliesMinLengthBeforeArgmax) {
+  std::array<float, 4> logits{1.0f, 2.0f, 8.0f, 3.0f};
+  std::array<int32_t, 1> eos_ids{2};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/1.0f, /*min_length=*/5, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/4, {}, /*greedy=*/true, /*top_k=*/0, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+
+  EXPECT_EQ(selection.greedy_token, 3);
+  EXPECT_TRUE(selection.indices.empty());
+  EXPECT_TRUE(selection.probs.empty());
+}
+
+TEST(SpeculativeSamplingTest, TargetSamplingAppliesRepetitionPenaltyBeforeTopK) {
+  std::array<float, 4> logits{6.0f, 5.0f, 4.0f, 1.0f};
+  std::array<int32_t, 1> prefix{0};
+  std::array<int32_t, 1> eos_ids{3};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/2.0f, /*min_length=*/0, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/1, prefix, /*greedy=*/false, /*top_k=*/2, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+
+  ASSERT_EQ(selection.indices.size(), 2u);
+  ASSERT_EQ(selection.probs.size(), 2u);
+  EXPECT_EQ(selection.indices[0], 1);
+  EXPECT_EQ(selection.indices[1], 2);
+  EXPECT_FLOAT_EQ(GetTargetTokenProbability(selection, 0), 0.0f);
+  EXPECT_GT(GetTargetTokenProbability(selection, 1),
+            GetTargetTokenProbability(selection, 2));
+}
+
+TEST(SpeculativeSamplingTest, TargetSamplingSelectionDensifiesSparseCategorical) {
+  std::array<float, 4> logits{1.0f, 4.0f, 3.0f, 2.0f};
+  std::array<int32_t, 1> eos_ids{3};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/1.0f, /*min_length=*/0, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+  std::vector<float> dense;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/0, {}, /*greedy=*/false, /*top_k=*/2, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+  DensifyTargetTokenSelection(selection, static_cast<int>(logits.size()), dense);
+
+  EXPECT_FLOAT_EQ(dense[0], 0.0f);
+  EXPECT_GT(dense[1], dense[2]);
+  EXPECT_FLOAT_EQ(dense[3], 0.0f);
+  EXPECT_NEAR(std::accumulate(dense.begin(), dense.end(), 0.0f), 1.0f, 1e-6f);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalAcceptsMatchingSampleAndDrawsBonus) {
+  TargetTokenSelection first;
+  first.indices = {7};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 9);
+  EXPECT_TRUE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalCapturesRngStateAfterEachQueuedToken) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 2};
+  std::mt19937 actual_rng{42};
+  std::mt19937 expected_rng{42};
+  std::vector<std::mt19937> states_after_draw;
+
+  const auto result = VerifyDeterministicProposal(
+      proposal, first, subsequent, actual_rng, &states_after_draw);
+
+  ASSERT_TRUE(result.used_bonus);
+  ASSERT_EQ(states_after_draw.size(), 3u);
+  SampleTargetToken(first, expected_rng);
+  EXPECT_EQ(states_after_draw[0], expected_rng);
+  SampleTargetToken(subsequent[0], expected_rng);
+  EXPECT_EQ(states_after_draw[1], expected_rng);
+  SampleTargetToken(subsequent[1], expected_rng);
+  EXPECT_EQ(states_after_draw[2], expected_rng);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalMismatchCommitsSampledTarget) {
+  TargetTokenSelection first;
+  first.indices = {5};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 0);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 5);
+  EXPECT_FALSE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalStopsDrawingAfterFirstMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1, 2};
+  first.probs = {0.4f, 0.6f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {3, 4};
+  subsequent[0].probs = {0.3f, 0.7f};
+  subsequent[1].indices = {5, 6};
+  subsequent[1].probs = {0.2f, 0.8f};
+  std::array<int32_t, 2> proposal{99, 4};
+  std::mt19937 actual_rng{1234};
+  std::mt19937 expected_rng{1234};
+  SampleTargetToken(first, expected_rng);
+
+  const auto result =
+      VerifyDeterministicProposal(proposal, first, subsequent, actual_rng);
+
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_FALSE(result.used_bonus);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalDoesNotDrawBonusAfterLaterMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 9};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 2);
+  EXPECT_EQ(result.final_token, 2);
+  EXPECT_FALSE(result.used_bonus);
 }
 
 // ---------------------------------------------------------------------------

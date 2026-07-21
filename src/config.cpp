@@ -1339,6 +1339,13 @@ struct Speculative_Element : JSON::Element {
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
             std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
+    } else if (name == "ngram_size") {
+      const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+        throw std::runtime_error(
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            ". Got: " + std::to_string(ngram_size) + ".");
+      v_.ngram_size = ngram_size;
     } else {
       throw JSON::unknown_value_error{};
     }

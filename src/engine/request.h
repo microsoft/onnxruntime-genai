@@ -151,6 +151,7 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
   std::shared_ptr<GeneratorParams> params_;
+  std::mt19937 rng_;
   std::unique_ptr<Search> search_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};

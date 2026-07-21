@@ -7,6 +7,10 @@ namespace Generators {
 
 struct Generator;
 
+// Shared single-token path used by standard decoding and speculative strategies when no proposal
+// is available. Sampling borrows the Generator-owned RNG.
+void RunStandardDecodingStep(Generator& g);
+
 // StandardDecodingStrategy
 // The classic single-token GenerateNextToken body (greedy / top-k / top-p).
 // Commits exactly one token per Step.

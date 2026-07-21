@@ -49,11 +49,14 @@ static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
   return *spec_state;
 }
 
-BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{RequireSpeculativeState(g)} {}
+BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g)
+    : SpeculativeDecodingStrategy{RequireSpeculativeState(g).target_state(),
+                                  RequireSpeculativeState(g).spec_model().target_model()},
+      spec_state_{RequireSpeculativeState(g)} {}
 
 // Propose K draft tokens.
-// Greedy: argmax, probs empty.
-// Sampling: token i drawn from draft's truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
+// Greedy uses kGreedyMatch. Sampling uses kDraftSampling and draws token i from the draft's
+// truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
 // draft_pending_logits_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
 // Each draft row is put through the same min-length / repetition penalties the target rows get
 // (BaseSpeculativeStrategy shares the helpers in sampling_distribution.h), so the draft approximates the
@@ -95,10 +98,9 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     draft_grammar = g.guidance_logits_processor_->Clone();
     guidance_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
   }
-  Proposal proposal;
+  Proposal proposal{greedy ? ProposalMode::kGreedyMatch : ProposalMode::kDraftSampling};
   proposal.tokens.resize(K);
   if (!greedy)
-    // greedy-match leaves probs empty
     proposal.probs.resize(K);
 
   SampledCategorical sampled;
@@ -129,7 +131,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         auto masked = guidance_buf.CopyDeviceToCpu();
         SelectProposalToken({masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
                             search.top_k, search.top_p, search.temperature, vocab_size,
-                            sampled, rng_, proposal);
+                            sampled, g.rng_, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
           int32_t c = chosen;
@@ -154,7 +156,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
   SelectProposalToken(penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix),
                       0, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
-                      sampled, rng_, proposal);
+                      sampled, g.rng_, proposal);
   for (int i = 1; i < K; i++) {
     if (penalty_processor.IsActive())
       prefix.push_back(proposal.tokens[i - 1]);
@@ -166,7 +168,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     SelectProposalToken(
         penalty_processor.Apply({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
         i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
-        sampled, rng_, proposal);
+        sampled, g.rng_, proposal);
   }
 
   return proposal;
@@ -212,6 +214,48 @@ void BaseSpeculativeStrategy::Advance(Generator& g,
   auto cpu_draft = draft_lgt.CopyDeviceToCpu();
   // Reuse the pending-logits buffer instead of allocating a fresh vocab-sized vector each round.
   spec_state_.assign_draft_pending_logits(cpu_draft.data(), static_cast<size_t>(vocab_size));
+}
+
+void BaseSpeculativeStrategy::ReconcileProposer(Generator& g,
+                                                int floor,
+                                                std::span<const int32_t> committed,
+                                                int committed_length,
+                                                bool record_stats) {
+  const int vocab_size = g.search_->params_->config.model.vocab_size;
+  spec_state_.draft_state().RewindTo(static_cast<size_t>(floor));
+
+  const int replay_count = committed_length - floor;
+  auto replay = g.search_->params_->p_device->Allocate<int32_t>(static_cast<size_t>(replay_count));
+  std::copy_n(committed.data() + floor, replay_count, replay.CpuSpan().data());
+  replay.CopyCpuToDevice();
+  auto draft_logits = spec_state_.draft_state().Run(committed_length, replay, {});
+  if (record_stats)
+    draft_runs_++;
+  auto draft_cpu = draft_logits.CopyDeviceToCpu();
+  spec_state_.assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
+}
+
+void BaseSpeculativeStrategy::FinalizeGuidanceProposer(
+    Generator& g,
+    int seed_length,
+    int proposal_length,
+    std::span<const int32_t> committed) {
+  const int vocab_size = g.search_->params_->config.model.vocab_size;
+  const int draft_kv_len = seed_length + proposal_length - 1;
+  if (seed_length < draft_kv_len)
+    spec_state_.draft_state().RewindTo(static_cast<size_t>(seed_length));
+
+  auto single = g.search_->params_->p_device->Allocate<int32_t>(1);
+  DeviceSpan<float> draft_logits;
+  for (size_t p = 0; p < committed.size(); p++) {
+    single.CpuSpan()[0] = committed[p];
+    single.CopyCpuToDevice();
+    draft_logits =
+        spec_state_.draft_state().Run(seed_length + static_cast<int>(p) + 1, single, {});
+    draft_runs_++;
+  }
+  auto draft_cpu = draft_logits.CopyDeviceToCpu();
+  spec_state_.assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
 }
 
 }  // namespace Generators

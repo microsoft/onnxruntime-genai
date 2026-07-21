@@ -22,7 +22,9 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 }  // namespace
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {}
+    : params_{params},
+      rng_{CreateRandomGenerator(params->search.random_seed)},
+      search_{CreateSearch(*params)} {}
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
@@ -131,12 +133,13 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       throw std::runtime_error("top_k must be 0 or greater");
 
     if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
-      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature);
+      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
+                              rng_);
     } else if (search_params.top_k > 1) {
-      search_->SampleTopK(search_params.top_k, search_params.temperature);
+      search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
     } else {
       assert(search_params.top_k == 0);
-      search_->SampleTopP(search_params.top_p, search_params.temperature);
+      search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
     }
   }
 

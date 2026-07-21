@@ -6,6 +6,7 @@
 #include <deque>
 #include <optional>
 #include <random>
+#include <span>
 #include <vector>
 #include "decoding_strategy.h"
 #include "smartptrs.h"
@@ -14,18 +15,32 @@
 namespace Generators {
 
 struct Generator;
+struct Model;
+struct State;
 struct SpeculativeStats;
 
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
 // model verifies them in one pass, matching tokens are accepted, and the target is re-anchored
 // for the next round. Subclasses implement Propose (produce K tokens) and Advance (update the
-// draft's state); all shared logic (RNG, target rewind, stats, vocab check) lives here.
+// draft's state); shared verification borrows the Generator-owned RNG.
 struct SpeculativeDecodingStrategy : DecodingStrategy {
-  // Draft model's output. If probs is empty, accept a token when it equals the target's argmax
-  // (greedy). Otherwise probs[i] is the draft's probability distribution for token i, and the
-  // token is accepted with probability min(1, p_target/p_draft).
+  enum class ProposalMode {
+    kUnset,
+    kGreedyMatch,
+    kDraftSampling,
+    kDeterministic,
+  };
+
+  // Proposer output. The mode defines how verification interprets the tokens; probability storage
+  // is data for draft-model sampling, not an implicit behavior signal.
   struct Proposal {
+    Proposal() = default;
+    explicit Proposal(ProposalMode proposal_mode) : mode{proposal_mode} {}
+
+    bool UsesDraftProbabilities() const { return mode == ProposalMode::kDraftSampling; }
+
+    ProposalMode mode{ProposalMode::kUnset};
     std::vector<int32_t> tokens;
     std::vector<std::vector<float>> probs;
   };
@@ -41,6 +56,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void PrepareForSetLogits(Generator& g) final;
 
  protected:
+  SpeculativeDecodingStrategy(State& target_state, const Model& target_model);
+
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
   // read from the canonical config (g.search_->params_->search) and g.IsGreedySampling().
   virtual Proposal Propose(Generator& g, int K, int seed_length) = 0;
@@ -53,6 +70,24 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
                        int n_direct,
                        int32_t final_token,
                        int seed_length) = 0;
+
+  // Keep proposer-specific state synchronized after the target cache is rewound and replayed.
+  virtual void ReconcileProposer(Generator& g,
+                                 int floor,
+                                 std::span<const int32_t> committed,
+                                 int committed_length,
+                                 bool record_stats) = 0;
+
+  // Guidance may commit correction/forced tokens that differ from the original proposal.
+  virtual void FinalizeGuidanceProposer(Generator& g,
+                                        int seed_length,
+                                        int proposal_length,
+                                        std::span<const int32_t> committed) = 0;
+
+  virtual void ResetProposer() = 0;
+
+  State& target_state_;
+  const Model& target_model_;
 
   // Stats accumulators.
   std::size_t rounds_{};
@@ -76,10 +111,6 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Runtime vocab-size sanity check.
   bool vocab_check_done_{false};
-
-  // Shared RNG for draft sampling + accept/correction/bonus draws.
-  std::mt19937 rng_;
-  bool rng_seeded_{false};
 
   // Grammar-forced tokens carried from a prior guidance round, read by Propose so it can place them
   // first in the verify batch (the grammar is already advanced past them).
@@ -116,6 +147,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Committed but not emitted tokens for the round.
   std::deque<int32_t> pending_;
+  std::deque<std::mt19937> pending_rng_states_;
   bool round_active_{};
   bool active_round_discarded_{};
 
