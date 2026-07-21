@@ -35,6 +35,7 @@
 #include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
+#include "../amdgpu/interface.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
@@ -459,7 +460,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
