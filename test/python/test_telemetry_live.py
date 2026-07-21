@@ -73,8 +73,6 @@ def main():
     print("=" * 60)
     print()
 
-    pending_before = 0
-    remaining = -1
     try:
         print("[1/8] Initializing telemetry singleton...")
         telemetry = GenAITelemetry()
