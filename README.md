@@ -192,13 +192,6 @@ To format all files:
 lintrunner -a --all-files
 ```
 
-## Telemetry
-
-ONNX Runtime GenAI collects anonymous usage telemetry by default to help improve
-the library. To opt out, set `ORT_DISABLE_TELEMETRY=1`. See
-[docs/Telemetry.md](docs/Telemetry.md) for what is collected and how opt-out
-behaves.
-
 ## Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
