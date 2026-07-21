@@ -68,7 +68,7 @@ except ImportError:
     try:
         from telemetry_path_utils import normalize_execution_provider, sanitize_model_identifier
     finally:
-        if path_added:
+        if path_added and telemetry_root in sys.path:
             sys.path.remove(telemetry_root)
 
 
