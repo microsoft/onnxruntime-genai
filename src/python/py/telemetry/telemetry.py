@@ -212,6 +212,7 @@ class GenAITelemetry:
                 if not self._store.is_open:
                     self._store = None
                     self._enabled = False
+                    self._initialized = False
                     return
                 self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
@@ -229,6 +230,7 @@ class GenAITelemetry:
                 self._store = None
                 self._uploader = None
                 self._enabled = False
+                self._initialized = False
 
     def _emit(self, event_name: str, attributes: Optional[dict[str, Any]] = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""

@@ -268,6 +268,25 @@ class TestOptOut(_HermeticTelemetryTestCase):
         t.enable_telemetry()
         self.assertFalse(t._enabled)
 
+    def test_closed_store_allows_initialization_retry(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        closed_store = MagicMock(is_open=False)
+        open_store = MagicMock(is_open=True)
+        with (
+            patch("telemetry.telemetry.OfflineEventStore", side_effect=[closed_store, open_store]),
+            patch("telemetry.telemetry.EventUploader") as mock_uploader,
+        ):
+            first = GenAITelemetry()
+            self.assertFalse(first._initialized)
+
+            second = GenAITelemetry()
+
+        self.assertIs(second, first)
+        self.assertTrue(second._initialized)
+        self.assertTrue(second._enabled)
+        mock_uploader.assert_called_once_with(open_store, instrumentation_key=second._instrumentation_key)
+
 
 class TestVersionResolution(unittest.TestCase):
     def test_installed_package_exposes_telemetry_modules(self):
