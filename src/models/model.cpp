@@ -503,6 +503,24 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
+
+  // Host-accessible allocator for decode inputs (AMDGPU only). Request it via GetSharedAllocator;
+  // if unavailable, creation returns null and callers fall back to the default device inputs path.
+  if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
+    try {
+      // device_id is hardcoded 0, so this is correct for single-GPU only. On multi-GPU the
+      // device_id differs and GetSharedAllocator returns null (falls back, perf loss not error).
+      // TODO(multi-gpu): query EpDevice::MemoryInfo(HOST_ACCESSIBLE) instead of reconstructing.
+      auto host_info = OrtMemoryInfo::CreateV2("pinned", OrtMemoryInfoDeviceType_GPU,
+                                               /*vendor_id=*/0x1002, /*device_id=*/0,
+                                               OrtDeviceMemoryType_HOST_ACCESSIBLE, OrtDeviceAllocator);
+      allocator.host_accessible_allocator_ = GetOrtEnv().GetSharedAllocator(*host_info);
+    } catch (const Ort::Exception&) {
+      allocator.host_accessible_allocator_ = nullptr;
+    }
+    if (allocator.host_accessible_allocator_)
+      device.InitHostAccessible(*allocator.host_accessible_allocator_);
+  }
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -595,6 +613,15 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // Host-accessible decode inputs (AMDGPU): route the small decode inputs through a
+  // host-accessible interface so the CPU updates them in place with no per-step roundtrip.
+  // KV cache and scoring stay on the default interface. Falls back if no allocator.
+  if (p_device_->GetType() == DeviceType::AMDGPU &&
+      p_device_->GetHostAccessibleAllocator() != nullptr) {
+    if (auto* pinned = GetAMDGPUPinnedInputsInterface())
+      p_device_inputs_ = pinned;
+  }
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.

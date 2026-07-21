@@ -172,6 +172,9 @@ struct OrtGlobals {
     // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
     std::unique_ptr<Ort::Allocator> allocator_;
+    // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).
+    // Null if unavailable, in which case inputs stay on the default device allocator.
+    Ort::Allocator* host_accessible_allocator_{};
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
