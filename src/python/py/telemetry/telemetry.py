@@ -275,6 +275,11 @@ class GenAITelemetry:
         except Exception:
             pass
 
+    @property
+    def accepts_detailed_events(self) -> bool:
+        """Whether detailed events can currently be persisted."""
+        return bool(self._enabled and self._store is not None and self._store.is_open)
+
     def _build_heartbeat_attributes(self) -> dict[str, Any]:
         """Collect device-id + system info for the heartbeat event."""
         device_id, id_status = get_encrypted_device_id_and_status()

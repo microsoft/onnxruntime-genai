@@ -112,7 +112,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         if t._heartbeat_thread is not None:
             t._heartbeat_thread.join()
         if t._uploader is not None:
-            t._uploader.stop_loop()
+            self.assertTrue(t._uploader.stop_loop())
             for _ in range(20):
                 if t._store is None or t._store.count() == 0:
                     break
@@ -139,6 +139,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         os.environ["CI"] = "true"
         t = GenAITelemetry()
         self.assertFalse(t._enabled)
+        self.assertFalse(t.accepts_detailed_events)
         # CI creates no store/uploader and no heartbeat — nothing is recorded.
         self.assertIsNone(t._store)
         self.assertIsNone(t._heartbeat_thread)
@@ -173,6 +174,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         from telemetry.telemetry import GenAITelemetry
         t = GenAITelemetry()
         self.assertTrue(t._enabled)
+        self.assertTrue(t.accepts_detailed_events)
         self.assertIsNotNone(t._store)
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
         self._deliver()
@@ -217,6 +219,24 @@ class TestVersionResolution(unittest.TestCase):
             self.assertEqual(_get_app_version(), "0.15.0")
 
         mock_version.assert_called_once_with("onnxruntime-genai-cuda")
+
+
+class TestActionFastPath(unittest.TestCase):
+    def test_disabled_action_skips_stack_inspection(self):
+        from telemetry.telemetry_extensions import action
+
+        telemetry = MagicMock(accepts_detailed_events=False)
+
+        @action
+        def work():
+            return 42
+
+        with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry), patch(
+            "telemetry.telemetry_extensions._resolve_invoked_from"
+        ) as mock_resolve:
+            self.assertEqual(work(), 42)
+
+        mock_resolve.assert_not_called()
 
 
 class TestPathRedaction(unittest.TestCase):
@@ -742,7 +762,7 @@ class TestShutdownSafety(unittest.TestCase):
         telemetry._store.close.assert_not_called()
 
     def test_enable_does_not_replace_live_uploader(self):
-        from telemetry.telemetry import EventUploader, GenAITelemetry
+        from telemetry.telemetry import GenAITelemetry
 
         telemetry = object.__new__(GenAITelemetry)
         telemetry._instrumentation_key = "abc-def"
@@ -752,8 +772,8 @@ class TestShutdownSafety(unittest.TestCase):
         telemetry._uploader.stop_loop.return_value = False
         old_uploader = telemetry._uploader
 
-        with patch("telemetry.telemetry._is_ci_environment", return_value=False), patch.object(
-            EventUploader, "__new__"
+        with patch("telemetry.telemetry._is_ci_environment", return_value=False), patch(
+            "telemetry.telemetry.EventUploader"
         ) as mock_new_uploader:
             telemetry.enable_telemetry()
 
