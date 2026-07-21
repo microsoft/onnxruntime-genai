@@ -19,7 +19,11 @@ def sanitize_model_identifier(value):
     is_windows_path = bool(drive) or ntpath.isabs(value)
     is_posix_path = posixpath.isabs(value)
     is_explicit_relative_path = value.startswith(("./", "../", ".\\", "..\\", "~/", "~\\"))
-    if not (is_windows_path or is_posix_path or is_explicit_relative_path or os.path.exists(value)):
+    try:
+        exists = os.path.exists(value)
+    except (OSError, ValueError):
+        exists = False
+    if not (is_windows_path or is_posix_path or is_explicit_relative_path or exists):
         return value
 
     path_module = ntpath if is_windows_path or "\\" in value else posixpath

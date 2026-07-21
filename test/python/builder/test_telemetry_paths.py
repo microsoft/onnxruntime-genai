@@ -44,6 +44,7 @@ builder_module = _load_builder_entrypoint_module()
         (r"..\private\model.onnx", "model.onnx"),
         ("../private/model.onnx", "model.onnx"),
         ("/", "<path>"),
+        ("invalid\0identifier", "invalid\0identifier"),
         ("microsoft/phi-3-mini", "microsoft/phi-3-mini"),
     ],
 )
