@@ -44,6 +44,14 @@ ERROR_EVENT = "GenAIError"
 
 # CI environment variables that auto-disable telemetry
 _CI_ENV_VARS = {"CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL", "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID"}
+_PATH_PATTERN = re.compile(
+    r"(?:[A-Za-z]:[\\/])"
+    r"|(?:\\\\)"
+    r"|(?:~[\\/])"
+    r"|(?:(?<![:/])/(?:[^/\r\n]+/))"
+    r"|(?:(?<![\\/\w])(?:[A-Za-z0-9_.-]+\\)[^\\/\r\n]+\\)",
+    re.IGNORECASE,
+)
 
 
 def _is_ci_environment() -> bool:
@@ -100,19 +108,11 @@ def _get_app_version() -> str:
 
 def _redact_paths(text: str) -> str:
     """Redact path-bearing tails without leaking space-containing user names."""
-    pattern = re.compile(
-        r"(?:[A-Za-z]:[\\/])"
-        r"|(?:\\\\)"
-        r"|(?:~[\\/])"
-        r"|(?:(?<![:/])/(?:[^/\r\n]+/))"
-        r"|(?:(?<![\\/\w])(?:[A-Za-z0-9_.-]+\\)[^\\/\r\n]+\\)",
-        re.IGNORECASE,
-    )
     redacted = []
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
         ending = line[len(body) :]
-        match = pattern.search(body)
+        match = _PATH_PATTERN.search(body)
         redacted.append(body[: match.start()] + "<path>" + ending if match else line)
     return "".join(redacted)
 
@@ -546,6 +546,9 @@ class GenAITelemetry:
                 # out never blocks the caller. The thread releases the drain lock on
                 # exit; any already-stored events go out on the next run.
                 self._uploader.signal_stop()
+                if self._uploader.stop_loop(0):
+                    self._uploader.close()
+                    self._uploader = None
 
     def enable_telemetry(self) -> None:
         """Enable telemetry (creates/restarts the uploader if needed).
