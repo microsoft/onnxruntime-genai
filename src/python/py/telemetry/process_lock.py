@@ -17,7 +17,6 @@ process exits, so a crashed holder never blocks other processes permanently.
 """
 
 import os
-from typing import Optional
 
 
 class ProcessDrainLock:
