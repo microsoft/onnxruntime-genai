@@ -117,6 +117,8 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::DML; }
 
+  bool SupportsPhi3RopeRewind(const Config& /*config*/) const override { return false; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
