@@ -1151,6 +1151,18 @@ class TestUploaderDrainLogic(unittest.TestCase):
         uploader.flush(0.01)
         self.assertFalse(uploader._drain_lock.held)
 
+    def test_flush_does_not_touch_lock_while_thread_is_alive(self):
+        _, uploader = self._setup()
+        uploader._thread = MagicMock()
+        uploader._thread.is_alive.return_value = True
+        uploader._drain_lock.acquire = MagicMock()
+        uploader._drain_lock.release = MagicMock()
+
+        uploader.flush(0.01)
+
+        uploader._drain_lock.acquire.assert_not_called()
+        uploader._drain_lock.release.assert_not_called()
+
     def test_stop_keeps_lock_when_thread_does_not_stop(self):
         _, uploader = self._setup()
         uploader.stop_loop = MagicMock(return_value=False)
