@@ -22,14 +22,15 @@ import os
 import sys
 import threading
 
-# Add the telemetry source to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
-
 transmission_results = []
 results_lock = threading.Lock()
 
 
 def main():
+    telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+    if telemetry_root not in sys.path:
+        sys.path.insert(0, telemetry_root)
+
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
