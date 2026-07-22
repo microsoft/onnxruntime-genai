@@ -176,6 +176,19 @@ void GenAiTelemetry::Initialize() {
   // Telemetry must never affect host control flow: any SDK failure here is
   // swallowed and simply leaves telemetry uninitialized (a later call retries).
   // enabled_ is not cleared on failure paths, so a successful retry still emits.
+  std::unique_ptr<Impl> pending_impl;
+  const auto release_pending = [&pending_impl]() noexcept {
+    if (pending_impl && pending_impl->log_manager) {
+      try {
+        MAT::LogManagerProvider::Release(pending_impl->config);
+      } catch (...) {
+      }
+      pending_impl->log_manager = nullptr;
+      pending_impl->logger = nullptr;
+    }
+    pending_impl.reset();
+  };
+
   try {
     // Ingestion token: an official build's override from the generated header
     // (ORTGENAI_TELEMETRY_TENANT_TOKEN) if present, otherwise the encoded in-repo default.
@@ -186,10 +199,10 @@ void GenAiTelemetry::Initialize() {
 #endif
     if (ikey.empty()) return;  // no token -> cannot send; stay uninitialized
 
-    impl_ = std::make_unique<Impl>();
+    pending_impl = std::make_unique<Impl>();
 
-    // Configuration is owned by impl_ so it outlives the log manager (the SDK holds a reference to it).
-    auto& config = impl_->config;
+    // Configuration is owned by the pending Impl so it outlives the log manager (the SDK holds a reference to it).
+    auto& config = pending_impl->config;
     config[MAT::CFG_STR_COLLECTOR_URL] = "https://mobile.events.data.microsoft.com/OneCollector/1.0";
     config[MAT::CFG_STR_PRIMARY_TOKEN] = ikey;
     config[MAT::CFG_INT_TRACE_LEVEL_MASK] = 0;
@@ -214,35 +227,40 @@ void GenAiTelemetry::Initialize() {
     // LOGMANAGER_INSTANCE singleton for library use). wantController=true makes this
     // instance the host (name == host), so Flush/FlushAndTeardown act on it.
     MAT::status_t status = MAT::STATUS_SUCCESS;
-    impl_->log_manager =
+    pending_impl->log_manager =
         MAT::LogManagerProvider::CreateLogManager("OnnxRuntimeGenAI", true, config, status);
-    if (status != MAT::STATUS_SUCCESS || impl_->log_manager == nullptr) {
-      impl_.reset();
+    if (status != MAT::STATUS_SUCCESS || pending_impl->log_manager == nullptr) {
+      release_pending();
       return;
     }
-    impl_->logger = impl_->log_manager->GetLogger(ikey);
-    impl_->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
+    pending_impl->logger = pending_impl->log_manager->GetLogger(ikey);
+    if (pending_impl->logger == nullptr) {
+      release_pending();
+      return;
+    }
+    pending_impl->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
 
     // Process-wide AppSessionGuid stamped on every event as logger context (not a
     // per-event property). An explicit, SDK-independent correlator that answers
     // "which events came from the same process run?" and makes the lightweight
     // per-event sessionId / generatorId counters globally unique.
     if (app_session_guid_.empty()) app_session_guid_ = GenerateGuidV4();
-    impl_->logger->SetContext("AppSessionGuid", app_session_guid_);
-    impl_->logger->SetContext("LibraryName", "ONNXRuntimeGenAI");
-    impl_->logger->SetContext("LibraryVersion", ORTGENAI_VERSION);
+    pending_impl->logger->SetContext("AppSessionGuid", app_session_guid_);
+    pending_impl->logger->SetContext("LibraryName", "ONNXRuntimeGenAI");
+    pending_impl->logger->SetContext("LibraryVersion", ORTGENAI_VERSION);
 
     const auto& device = GetDeviceInfo();
     // Desktop builds override the 1DS SDK's device id with a privacy-preserving generated-id hash.
     // Android/iOS leave this empty so the SDK uses its platform device id.
     if (!device.device_id.empty()) {
-      impl_->logger->GetSemanticContext()->SetDeviceId(device.device_id);
+      pending_impl->logger->GetSemanticContext()->SetDeviceId(device.device_id);
     }
 
+    impl_ = std::move(pending_impl);
     initialized_.store(true);
   } catch (...) {
     // Never propagate a telemetry-init failure to the host.
-    impl_.reset();
+    release_pending();
   }
 #endif
 }
