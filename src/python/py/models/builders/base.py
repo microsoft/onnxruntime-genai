@@ -588,7 +588,7 @@ class Model:
     def make_tied_embeddings_init(self, config):
         # Determine if tied embeddings is even possible on the graph
         shared_embeddings = (
-            self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
+            self.extra_options.get("shared_embeddings", False)
             and not self.exclude_embeds
             and not self.exclude_lm_head
         )
@@ -598,7 +598,7 @@ class Model:
         # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
         matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
-            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+            matmul_is_quantized
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
