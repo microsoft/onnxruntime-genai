@@ -62,19 +62,16 @@ def _get_app_version() -> str:
     3. VERSION_INFO file at the repo root
     """
     # 1. Try the package attribute (fastest when native ext is loaded)
-    try:
+    with suppress(Exception):
         import onnxruntime_genai  # noqa: PLC0415
 
         v = getattr(onnxruntime_genai, "__version__", None)
         if v:
             return v
-    except Exception:
-        # Installed-package metadata and the source-tree version file are tried below.
-        pass
 
     # 2. Resolve the installed distribution that provides the Python module.
     # This covers variant wheels such as onnxruntime-genai-cuda/directml.
-    try:
+    with suppress(Exception):
         from importlib.metadata import packages_distributions  # noqa: PLC0415
         from importlib.metadata import version as pkg_version  # noqa: PLC0415
 
@@ -85,12 +82,9 @@ def _get_app_version() -> str:
             except Exception:
                 continue
         return pkg_version("onnxruntime-genai")
-    except Exception:
-        # Source-tree version discovery remains available when package metadata is unavailable.
-        pass
 
     # 3. Fall back to VERSION_INFO file at repository root
-    try:
+    with suppress(Exception):
         # Walk up from this file to find VERSION_INFO
         import pathlib  # noqa: PLC0415
 
@@ -100,9 +94,6 @@ def _get_app_version() -> str:
             if candidate.is_file():
                 return candidate.read_text(encoding="utf-8").strip()
             d = d.parent
-    except Exception:
-        # Version discovery is best-effort and reports "unknown" below.
-        pass
 
     return "unknown"
 
@@ -259,8 +250,7 @@ class GenAITelemetry:
             if self._uploader is not None:
                 self._uploader.request_drain()
         except Exception:
-            # Telemetry persistence must never affect the host operation.
-            pass
+            return
 
     @property
     def accepts_detailed_events(self) -> bool:
@@ -324,14 +314,12 @@ class GenAITelemetry:
                 )
                 transport.send(payload, timeout_sec=2.0, item_count=1)
         except Exception:
-            # Heartbeat collection and delivery are best-effort.
-            pass
+            return
 
     def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
         if not self._enabled or self._store is None:
             return
-        # Generic telemetry must never affect the host operation.
         with suppress(Exception):
             self._emit(event_name, attributes)
 
@@ -389,8 +377,7 @@ class GenAITelemetry:
                 attributes["extra_options"] = extra_options
             self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
-            # Model-build telemetry must never affect model conversion.
-            pass
+            return
 
     def log_benchmark(
         self,
@@ -443,8 +430,7 @@ class GenAITelemetry:
             }
             self._emit(BENCHMARK_EVENT, attributes)
         except Exception:
-            # Benchmark telemetry must never affect benchmark execution.
-            pass
+            return
 
     def log_model_load(
         self,
@@ -469,8 +455,7 @@ class GenAITelemetry:
             }
             self._emit(MODEL_LOAD_EVENT, attributes)
         except Exception:
-            # Model-load telemetry must never affect model loading.
-            pass
+            return
 
     def log_inference(
         self,
@@ -501,8 +486,7 @@ class GenAITelemetry:
             }
             self._emit(INFERENCE_EVENT, attributes)
         except Exception:
-            # Inference telemetry must never affect generation.
-            pass
+            return
 
     def log_error(
         self,
@@ -525,8 +509,7 @@ class GenAITelemetry:
             }
             self._emit(ERROR_EVENT, attributes)
         except Exception:
-            # Error telemetry must never mask the host error.
-            pass
+            return
 
     def disable_telemetry(self) -> None:
         """Disable detailed telemetry and stop the uploader (non-blocking)."""
