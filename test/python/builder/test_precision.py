@@ -275,3 +275,46 @@ def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
             precision="int4",
             tie_word_embeddings=False,
         )
+
+
+def test_shared_embeddings_with_tied_weights_is_accepted(monkeypatch):
+    # Should not raise when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {"shared_embeddings": "true"},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_tied_when_config_ties_embeddings(monkeypatch):
+    # When shared_embeddings is not specified, it defaults to tie_word_embeddings value
+    # Should not raise because shared_embeddings will default to True when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_false_when_config_doesnt_tie_embeddings(monkeypatch):
+    # When shared_embeddings is not specified and tie_word_embeddings=False,
+    # shared_embeddings will default to False
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=False,
+    )
+
+
+def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
+    # When tie_word_embeddings is None, it should default to False
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=None,
+        )
