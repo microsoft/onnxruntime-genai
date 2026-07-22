@@ -31,12 +31,6 @@ struct Logits {
 
   std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
 
-  // Device interface for the logits output + last-token/fp32 scratch. Normally p_device_inputs_, but
-  // logits is GPU-written / CPU-read (opposite of the pinned decode inputs). For AMDGPU the inputs use
-  // a host-accessible allocator whose heap is NOT CPU-read-coherent (DML CUSTOM/L0/WRITE_COMBINE), so
-  // logits go on the CPU interface instead; only the 3 decode inputs use the pinned allocator.
-  DeviceInterface* p_logits_{};
-
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal
   DeviceSpan<float> logits_;
