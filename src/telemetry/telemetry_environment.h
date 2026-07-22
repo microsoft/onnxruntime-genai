@@ -36,17 +36,22 @@ inline constexpr std::array<const char*, 13> kCiEnvironmentVariableNames = {
 
 inline std::string GetTelemetryEnv(const char* name) {
 #ifdef _WIN32
-  const DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
-  if (required_size == 0) {
-    return {};
+  DWORD required_size = ::GetEnvironmentVariableA(name, nullptr, 0);
+  while (required_size != 0) {
+    std::string value(required_size, '\0');
+    const DWORD written = ::GetEnvironmentVariableA(name, value.data(), required_size);
+    if (written == 0) {
+      return {};
+    }
+    if (written < required_size) {
+      value.resize(written);
+      return value;
+    }
+
+    // The value grew between calls. Windows returns its new required size, including the null.
+    required_size = written;
   }
-  std::string value(required_size, '\0');
-  const DWORD written = ::GetEnvironmentVariableA(name, value.data(), required_size);
-  if (written == 0 || written >= required_size) {
-    return {};
-  }
-  value.resize(written);
-  return value;
+  return {};
 #else
   const char* value = std::getenv(name);
   return value != nullptr ? std::string(value) : std::string();
