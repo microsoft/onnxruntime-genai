@@ -28,13 +28,9 @@ from .library.options import CompressionType, OneCollectorExporterOptions, OneCo
 from .library.serialization import CommonSchemaJsonSerializationHelper
 from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
+from .path_utils import scrub_string_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
-
-try:
-    from ..telemetry_path_utils import scrub_string_for_telemetry
-except ImportError:
-    from telemetry_path_utils import scrub_string_for_telemetry
 
 # Event names
 HEARTBEAT_EVENT = "GenAIHeartbeat"
