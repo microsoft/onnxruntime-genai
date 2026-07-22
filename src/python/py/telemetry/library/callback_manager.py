@@ -5,6 +5,8 @@
 
 """Callback manager for payload transmission events."""
 
+from __future__ import annotations
+
 import threading
 from collections.abc import Callable
 from contextlib import suppress

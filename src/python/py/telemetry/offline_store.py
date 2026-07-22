@@ -22,6 +22,8 @@ multiplexing, and the ``settings`` table. The schema version is tracked with
 SQLite's built-in ``PRAGMA user_version``.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import threading

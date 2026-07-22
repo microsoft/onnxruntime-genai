@@ -5,6 +5,8 @@
 
 """Connection string parser for OneCollector exporter."""
 
+from __future__ import annotations
+
 
 class ConnectionStringParser:
     """Parses OneCollector connection strings to extract configuration."""

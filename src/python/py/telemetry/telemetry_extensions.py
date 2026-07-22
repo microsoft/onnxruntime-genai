@@ -5,6 +5,8 @@
 
 """Telemetry decorators and context managers for GenAI instrumentation."""
 
+from __future__ import annotations
+
 import functools
 import inspect
 import time
@@ -141,7 +143,7 @@ class ActionContext:
     def add_metadata(self, key: str, value: Any) -> None:
         self.metadata[key] = value
 
-    def __enter__(self) -> "ActionContext":
+    def __enter__(self):
         self._start_time = time.perf_counter()
         return self
 

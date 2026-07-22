@@ -16,6 +16,8 @@ Durability is provided by the on-disk store, so the process can exit at any time
 without losing events and without an exit-time flush.
 """
 
+from __future__ import annotations
+
 import threading
 import time
 
