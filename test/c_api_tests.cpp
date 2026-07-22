@@ -1969,19 +1969,19 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
   EXPECT_FALSE(transcription.empty());
 }
 
-// Test that bot/eot/bor/eor return -1 for models without these tokens configured
-TEST(CAPITests, TagId_Unknown) {
-  // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → -1
+// Test that bot/eot/bor/eor throw for models without these tokens configured
+TEST(CAPITests, TokenId_Unsupported) {
+  // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → throws
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  EXPECT_EQ(tokenizer->GetBotTokenId(), -1);
-  EXPECT_EQ(tokenizer->GetEotTokenId(), -1);
-  EXPECT_EQ(tokenizer->GetBorTokenId(), -1);
-  EXPECT_EQ(tokenizer->GetEorTokenId(), -1);
+  EXPECT_THROW(tokenizer->GetBotTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetEotTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetBorTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetEorTokenId(), std::runtime_error);
 }
 
-TEST(CAPITests, TagId_FromConfig) {
+TEST(CAPITests, TokenId_FromConfig) {
   // Create a temporary model directory with bot/eot/bor/eor token IDs in model section
   auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
   std::filesystem::remove_all(temp_dir);  // Clean up any leftover from a previous failed run

@@ -149,11 +149,10 @@ struct Config {
     // Follows the bos/eos/pad naming convention:
     //   bot = beginning of tool (call), eot = end of tool (call)
     //   bor = beginning of reasoning,   eor = end of reasoning
-    // -1 means the model does not define this token.
-    int bot_token_id{-1};
-    int eot_token_id{-1};
-    int bor_token_id{-1};
-    int eor_token_id{-1};
+    std::optional<int> bot_token_id;
+    std::optional<int> eot_token_id;
+    std::optional<int> bor_token_id;
+    std::optional<int> eor_token_id;
 
     int vocab_size{};
     int context_length{};

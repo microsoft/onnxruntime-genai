@@ -19,6 +19,7 @@
 #include "../tracing.h"
 #include "model.h"
 #include "model_package.h"
+#include "tokenizer_tag_utils.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -308,31 +309,6 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-// Fallback: if the given token ID is unset (-1), attempt to resolve it by looking up
-// a well-known token string for the model type in the tokenizer vocabulary.
-// This provides backward compatibility for Foundry Local when consuming older model
-// packages that predate the bot/eot/bor/eor config fields.
-// Keyed by model.type string from genai_config.json.
-static void ResolveFallbackTagId(int32_t& id, const std::string& model_type,
-                                 const std::string& tag_name, const Tokenizer& tokenizer) {
-  if (id >= 0) return;
-
-  static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
-      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
-      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
-      {"phi3", {{"tool_call_start", "<|tool_call|>"}, {"tool_call_end", "<|/tool_call|>"}}},
-      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
-  };
-
-  auto type_it = fallback_map.find(model_type);
-  if (type_it == fallback_map.end()) return;
-  auto tag_it = type_it->second.find(tag_name);
-  if (tag_it == type_it->second.end()) return;
-
-  int32_t resolved = tokenizer.TokenToTokenId(tag_it->second.c_str());
-  if (resolved >= 0) id = resolved;
-}
-
 Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
                                        eos_token_id_{config.model.eos_token_id},
                                        pad_token_id_{config.model.pad_token_id},
@@ -349,12 +325,30 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
-  if (bot_token_id_ < 0 || eot_token_id_ < 0 || bor_token_id_ < 0 || eor_token_id_ < 0) {
-    ResolveFallbackTagId(bot_token_id_, config.model.type, "tool_call_start", *this);
-    ResolveFallbackTagId(eot_token_id_, config.model.type, "tool_call_end", *this);
-    ResolveFallbackTagId(bor_token_id_, config.model.type, "reasoning_start", *this);
-    ResolveFallbackTagId(eor_token_id_, config.model.type, "reasoning_end", *this);
-  }
+  if (!bot_token_id_) bot_token_id_ = ResolveFallbackTokenId(config.model.type, "tool_call_start", *this);
+  if (!eot_token_id_) eot_token_id_ = ResolveFallbackTokenId(config.model.type, "tool_call_end", *this);
+  if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, "reasoning_start", *this);
+  if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, "reasoning_end", *this);
+}
+
+int32_t Tokenizer::GetBotTokenId() const {
+  if (!bot_token_id_) throw std::runtime_error("bot_token_id is not defined for this model");
+  return *bot_token_id_;
+}
+
+int32_t Tokenizer::GetEotTokenId() const {
+  if (!eot_token_id_) throw std::runtime_error("eot_token_id is not defined for this model");
+  return *eot_token_id_;
+}
+
+int32_t Tokenizer::GetBorTokenId() const {
+  if (!bor_token_id_) throw std::runtime_error("bor_token_id is not defined for this model");
+  return *bor_token_id_;
+}
+
+int32_t Tokenizer::GetEorTokenId() const {
+  if (!eor_token_id_) throw std::runtime_error("eor_token_id is not defined for this model");
+  return *eor_token_id_;
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
