@@ -9,6 +9,8 @@ Posts Common Schema JSON to the OneCollector endpoint using ``urllib`` so the
 telemetry pipeline has no third-party dependency.
 """
 
+from __future__ import annotations
+
 import gzip
 import urllib.error
 import urllib.request
@@ -17,7 +19,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import suppress
 from io import BytesIO
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .event_source import event_source
 from .options import CompressionType
@@ -35,7 +37,7 @@ class ITransport(ABC):
 
     @abstractmethod
     def register_payload_transmitted_callback(
-        self, callback: Callable[["PayloadTransmittedCallbackArgs"], None], include_failures: bool = False
+        self, callback: Callable[[PayloadTransmittedCallbackArgs], None], include_failures: bool = False
     ) -> Callable[[], None]:
         """Register a callback for payload transmission events."""
 
@@ -48,7 +50,7 @@ class HttpJsonPostTransport(ITransport):
         endpoint: str,
         ikey: str,
         compression: CompressionType,
-        callback_manager: Optional["CallbackManager"] = None,
+        callback_manager: CallbackManager | None = None,
         sdk_version: str = "py-genai-1.0.0",
     ):
         self.endpoint = endpoint
@@ -68,7 +70,7 @@ class HttpJsonPostTransport(ITransport):
             self.headers["Content-Encoding"] = compression.value
 
     def register_payload_transmitted_callback(
-        self, callback: Callable[["PayloadTransmittedCallbackArgs"], None], include_failures: bool = False
+        self, callback: Callable[[PayloadTransmittedCallbackArgs], None], include_failures: bool = False
     ) -> Callable[[], None]:
         if self.callback_manager is None:
             from .callback_manager import CallbackManager  # noqa: PLC0415
@@ -101,7 +103,7 @@ class HttpJsonPostTransport(ITransport):
             return False, None
 
     @staticmethod
-    def _do_request(request: "urllib.request.Request", timeout_sec: float) -> tuple[bool, int | None]:
+    def _do_request(request: urllib.request.Request, timeout_sec: float) -> tuple[bool, int | None]:
         """Perform the request, retrying once on a transient connection error."""
         for attempt in range(2):
             try:

@@ -21,8 +21,9 @@ import stat
 import sys
 import tempfile
 import unittest
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 _TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 _TELEMETRY_SOURCE_PATH_ADDED = _TELEMETRY_SOURCE_PATH not in sys.path
@@ -335,14 +336,16 @@ class TestVersionResolution(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"onnxruntime_genai": None}),
             patch(
-                "importlib.metadata.packages_distributions",
-                return_value={"onnxruntime_genai": ["onnxruntime-genai-cuda"]},
-            ),
-            patch("importlib.metadata.version", return_value="0.15.0") as mock_version,
+                "telemetry.telemetry.distribution_version",
+                side_effect=[PackageNotFoundError, "0.15.0"],
+            ) as mock_version,
         ):
             self.assertEqual(_get_app_version(), "0.15.0")
 
-        mock_version.assert_called_once_with("onnxruntime-genai-cuda")
+        self.assertEqual(
+            mock_version.call_args_list,
+            [call("onnxruntime-genai"), call("onnxruntime-genai-cuda")],
+        )
 
 
 class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
@@ -565,9 +568,9 @@ class TestPathRedaction(unittest.TestCase):
             lambda: telemetry.log_error("RuntimeError", "boom", model_name=model_path),
         )
 
-        for call in calls:
+        for invoke in calls:
             telemetry._emit.reset_mock()
-            call()
+            invoke()
             self.assertEqual(telemetry._emit.call_args.args[1]["model_name"], "[path]")
 
     def test_core_model_build_recursively_scrubs_extra_options(self):

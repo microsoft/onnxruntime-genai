@@ -13,6 +13,8 @@ Provides high-level telemetry for:
 - Error/crash reporting
 """
 
+from __future__ import annotations
+
 import base64
 import os
 import threading
@@ -21,7 +23,10 @@ import traceback
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, Optional
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
+from pathlib import Path
+from typing import Any
 
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
@@ -43,6 +48,13 @@ ERROR_EVENT = "GenAIError"
 
 # CI environment variables that auto-disable telemetry
 _CI_ENV_VARS = {"CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL", "TRAVIS", "CIRCLECI", "GITLAB_CI", "BUILD_ID"}
+_DISTRIBUTION_NAMES = (
+    "onnxruntime-genai",
+    "onnxruntime-genai-cuda",
+    "onnxruntime-genai-directml",
+    "onnxruntime-genai-trt-rtx",
+    "onnxruntime-genai-winml",
+)
 
 
 def _is_ci_environment() -> bool:
@@ -65,26 +77,14 @@ def _get_app_version() -> str:
         if v:
             return v
 
-    # 2. Resolve the installed distribution that provides the Python module.
-    # This covers variant wheels such as onnxruntime-genai-cuda/directml.
-    with suppress(Exception):
-        from importlib.metadata import packages_distributions  # noqa: PLC0415
-        from importlib.metadata import version as pkg_version  # noqa: PLC0415
-
-        distributions = packages_distributions().get("onnxruntime_genai", [])
-        for distribution in distributions:
-            try:
-                return pkg_version(distribution)
-            except Exception:
-                continue
-        return pkg_version("onnxruntime-genai")
+    # 2. Resolve an installed base or provider-specific distribution.
+    for distribution in _DISTRIBUTION_NAMES:
+        with suppress(PackageNotFoundError):
+            return distribution_version(distribution)
 
     # 3. Fall back to VERSION_INFO file at repository root
     with suppress(Exception):
-        # Walk up from this file to find VERSION_INFO
-        import pathlib  # noqa: PLC0415
-
-        d = pathlib.Path(__file__).resolve().parent
+        d = Path(__file__).resolve().parent
         for _ in range(10):
             candidate = d / "VERSION_INFO"
             if candidate.is_file():
@@ -128,7 +128,7 @@ class GenAITelemetry:
     Auto-disabled in CI environments. Opt-out via ORT_DISABLE_TELEMETRY=1.
     """
 
-    _instance: Optional["GenAITelemetry"] = None
+    _instance: GenAITelemetry | None = None
     _lock = threading.RLock()
 
     def __new__(cls):
