@@ -14,24 +14,31 @@
 # 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
 import argparse
+import importlib.metadata
 import json
 import os
 import subprocess
 import threading
 import time
+from contextlib import suppress
 
 import numpy as np
 import onnxruntime_genai as og
+import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
 from telemetry_utils import get_telemetry as _get_telemetry
 from telemetry_utils import normalize_execution_provider, sanitize_model_identifier
 from tqdm import tqdm
 
-peak_cpu_memory = 0.0
-peak_gpu_memory = 0.0
-peak_memory_lock = threading.Lock()
-stop_monitoring = False
+
+class _MemoryMonitor:
+    def __init__(self):
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.peak_cpu_memory = 0.0
+        self.peak_gpu_memory = 0.0
+
 
 try:
     subprocess.run(["nvidia-smi"], check=True)
@@ -41,10 +48,8 @@ except Exception:
 
 
 # Monitor the GPU memory usage
-def monitor_gpu_memory():
-    global peak_gpu_memory  # noqa: PLW0603
-
-    while not stop_monitoring:
+def monitor_gpu_memory(memory_monitor):
+    while not memory_monitor.stop.is_set():
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             check=False,
@@ -57,21 +62,19 @@ def monitor_gpu_memory():
         if len(memory_usage) >= 1:
             gpu_memory = [float(line) for line in memory_usage]
             current_peak = round(max(gpu_memory) / 1024, 2)
-            with peak_memory_lock:
-                peak_gpu_memory = max(current_peak, peak_gpu_memory)
+            with memory_monitor.lock:
+                memory_monitor.peak_gpu_memory = max(current_peak, memory_monitor.peak_gpu_memory)
         else:
             print("No GPU Memory Info Found")
         time.sleep(0.1)
 
 
 # Monitor the CPU memory usage
-def monitor_cpu_memory():
-    global peak_cpu_memory  # noqa: PLW0603
-
-    while not stop_monitoring:
+def monitor_cpu_memory(memory_monitor):
+    while not memory_monitor.stop.is_set():
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
-        with peak_memory_lock:
-            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
+        with memory_monitor.lock:
+            memory_monitor.peak_cpu_memory = max(memory_monitor.peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
 
@@ -85,8 +88,6 @@ def get_prompt_by_length(prompt_length):
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
-    import importlib.metadata  # noqa: PLC0415
-
     installed_packages_list = sorted(
         [
             f"{dist.metadata['Name']}=={dist.version}"
@@ -104,8 +105,6 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 
 def save_results(args, results, filename, print_memory_usage=False):
-    import pandas as pd  # noqa: PLC0415
-
     columns = [
         "Batch Size",
         "Prompt Length",
@@ -181,36 +180,30 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring  # noqa: PLW0603
-    global peak_gpu_memory  # noqa: PLW0603
-    global peak_cpu_memory  # noqa: PLW0603
-
-    # Reset the peak memory variables and the monitoring flag
-    stop_monitoring = False
-    peak_gpu_memory = 0.0
-    peak_cpu_memory = 0.0
+    memory_monitor = _MemoryMonitor()
 
     if IS_NVIDIA_SYSTEM:
-        monitor_thread = threading.Thread(target=monitor_gpu_memory)
+        monitor_thread = threading.Thread(target=monitor_gpu_memory, args=(memory_monitor,))
     else:
-        monitor_thread = threading.Thread(target=monitor_cpu_memory)
+        monitor_thread = threading.Thread(target=monitor_cpu_memory, args=(memory_monitor,))
 
     monitor_thread.start()
-
-    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
-
-    stop_monitoring = True
-    monitor_thread.join()
+    try:
+        metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length, memory_monitor)
+    finally:
+        memory_monitor.stop.set()
+        monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
-        metrics.append(peak_gpu_memory)
+        metrics.append(memory_monitor.peak_gpu_memory)
     else:
-        metrics.append(peak_cpu_memory)
+        metrics.append(memory_monitor.peak_cpu_memory)
 
     return metrics
 
 
-def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
+def run_benchmark(args, batch_size, prompt_length, generation_length, max_length, memory_monitor=None):
+    memory_monitor = memory_monitor or _MemoryMonitor()
     # Get user arguments
     num_repetitions = args.repetitions
     temperature = 1.0
@@ -235,16 +228,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         print(f"Model loaded in {model_load_time_ms:.1f} ms")
 
     # Emit model load telemetry
-    try:
+    with suppress(Exception):
         telemetry = _get_telemetry()
         telemetry.log_model_load(
             model_name=sanitize_model_identifier(args.model_name),
             execution_provider=normalize_execution_provider(args.execution_provider),
             total_load_time_ms=model_load_time_ms,
         )
-    except Exception:
-        # Model-load telemetry must never affect benchmark setup.
-        pass
 
     tokenizer = og.Tokenizer(model)
 
@@ -462,9 +452,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
-            print(f"Peak GPU Memory Usage: {peak_gpu_memory} GiB ")
+            print(f"Peak GPU Memory Usage: {memory_monitor.peak_gpu_memory} GiB ")
         else:
-            print(f"Peak CPU Memory Usage: {peak_cpu_memory} GiB ")
+            print(f"Peak CPU Memory Usage: {memory_monitor.peak_cpu_memory} GiB ")
 
     metrics = [
         batch_size,
@@ -484,7 +474,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     ]
 
     # Emit telemetry for this benchmark run
-    try:
+    with suppress(Exception):
         telemetry = _get_telemetry()
         telemetry.log_benchmark(
             model_name=sanitize_model_identifier(args.model_name),
@@ -505,12 +495,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             wall_clock_time_ms=avg_wall_clock_time * 1000,
             wall_clock_throughput=avg_wall_clock_thrpt,
             time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
-            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
-            peak_memory_cpu_mb=peak_cpu_memory * 1024,
+            peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
         )
-    except Exception:
-        # Benchmark telemetry must never affect benchmark results.
-        pass
 
     return metrics
 

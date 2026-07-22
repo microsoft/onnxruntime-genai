@@ -15,6 +15,7 @@ import os
 import sys
 import textwrap
 import time
+from contextlib import suppress
 from typing import Any
 
 import onnx_ir as ir
@@ -304,7 +305,7 @@ def _emit_model_build_telemetry(
         op_types = ""
         has_custom_ops = False
         if hasattr(onnx_model, "model") and onnx_model.model is not None:
-            try:
+            with suppress(Exception):
                 graph = onnx_model.model.graph
                 if graph is not None:
                     op_type_set = set()
@@ -314,9 +315,6 @@ def _emit_model_build_telemetry(
                         if node.domain and not node.domain.startswith("ai.onnx"):
                             has_custom_ops = True
                     op_types = ",".join(sorted(op_type_set))
-            except Exception:
-                # Graph inspection is optional; emit the remaining build metadata.
-                pass
 
         io_dtype_str = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
         quant_type_str = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
@@ -345,8 +343,7 @@ def _emit_model_build_telemetry(
             extra_options=_sanitize_extra_options(extra_options),
         )
     except Exception:
-        # Telemetry instrumentation must never affect model conversion.
-        pass
+        return
 
 
 @torch.no_grad

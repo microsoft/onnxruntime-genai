@@ -67,7 +67,6 @@ class CallbackManager:
 
         def unregister():
             """Unregister this callback."""
-            # The callback may already have been removed by another unregister call.
             with self._lock, suppress(ValueError):
                 self._callbacks.remove(entry)
 

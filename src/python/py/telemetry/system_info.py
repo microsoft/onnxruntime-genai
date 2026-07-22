@@ -13,8 +13,9 @@ import os
 import platform
 import subprocess
 import sys
+from contextlib import suppress
 from functools import lru_cache
-from typing import Any
+from typing import Any, ClassVar
 
 
 @lru_cache(maxsize=1)
@@ -76,8 +77,7 @@ def _get_cpu_model() -> str:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
                 return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
     except Exception:
-        # Fall back to Python's portable processor description below.
-        pass
+        return platform.processor() or ""
     return platform.processor() or ""
 
 
@@ -89,8 +89,7 @@ def _get_total_memory_mb() -> int:
             import ctypes  # noqa: PLC0415
 
             class _MemoryStatusEx(ctypes.Structure):
-                # ctypes requires this mutable class-level field descriptor.
-                _fields_ = [  # noqa: RUF012
+                _fields_: ClassVar[list[tuple[str, Any]]] = [
                     ("dwLength", ctypes.c_ulong),
                     ("dwMemoryLoad", ctypes.c_ulong),
                     ("ullTotalPhys", ctypes.c_ulonglong),
@@ -118,8 +117,7 @@ def _get_total_memory_mb() -> int:
             if result.returncode == 0:
                 return int(result.stdout.strip()) // (1024 * 1024)
     except Exception:
-        # Unknown memory is represented as zero below.
-        pass
+        return 0
     return 0
 
 
@@ -132,7 +130,7 @@ def _get_gpu_info() -> dict[str, Any]:
         "gpu_count": 0,
     }
 
-    try:
+    with suppress(Exception):
         result = subprocess.run(
             [
                 "nvidia-smi",
@@ -152,13 +150,9 @@ def _get_gpu_info() -> dict[str, Any]:
                 info["gpu_driver_version"] = parts[1]
                 info["gpu_memory_mb"] = int(float(parts[2]))
                 info["gpu_count"] = len(lines)
-    except Exception:
-        # A Windows WMI probe is attempted below when NVIDIA discovery is unavailable.
-        pass
-
     # Try DirectML / Windows WMI if nvidia-smi failed
     if not info["gpu_name"] and platform.system() == "Windows":
-        try:
+        with suppress(Exception):
             result = subprocess.run(
                 ["wmic", "path", "win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:csv"],
                 check=False,
@@ -176,10 +170,6 @@ def _get_gpu_info() -> dict[str, Any]:
                         info["gpu_driver_version"] = parts[2]
                         info["gpu_name"] = parts[3]
                         info["gpu_count"] = len(data_lines)
-        except Exception:
-            # GPU metadata is optional; return the fields discovered so far.
-            pass
-
     return info
 
 
@@ -204,8 +194,7 @@ def _get_device_manufacturer() -> str:
                     if line.startswith("Manufacturer="):
                         return line.split("=", 1)[1].strip()
     except Exception:
-        # Device manufacturer metadata is optional.
-        pass
+        return ""
     return ""
 
 
@@ -234,8 +223,7 @@ def _get_device_model() -> str:
                     if line.startswith("Model="):
                         return line.split("=", 1)[1].strip()
     except Exception:
-        # Device model metadata is optional.
-        pass
+        return ""
     return ""
 
 
@@ -246,9 +234,7 @@ def _get_ort_version() -> str:
 
         return onnxruntime.__version__
     except ImportError:
-        # ONNX Runtime is optional for source-only telemetry consumers.
-        pass
-    return ""
+        return ""
 
 
 def get_execution_provider_info() -> dict[str, Any]:
@@ -261,6 +247,5 @@ def get_execution_provider_info() -> dict[str, Any]:
 
         info["available_providers"] = onnxruntime.get_available_providers()
     except ImportError:
-        # No providers are reported when ONNX Runtime is not installed.
-        pass
+        return info
     return info

@@ -37,10 +37,9 @@ class ProcessDrainLock:
             return True
         fh = None
         try:
-            # Opening the lock file below determines whether locking is available.
             with suppress(Exception):
                 os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
-            # The handle must remain open while the advisory lock is held.
+            # The handle owns the advisory lock and must remain open until release().
             fh = open(self._lock_path, "a+b")  # noqa: SIM115
             if os.name == "nt":
                 import msvcrt  # noqa: PLC0415
@@ -55,7 +54,6 @@ class ProcessDrainLock:
             return True
         except Exception:
             if fh is not None:
-                # Best-effort cleanup after a failed lock acquisition.
                 with suppress(Exception):
                     fh.close()
             return False
@@ -69,17 +67,14 @@ class ProcessDrainLock:
             if os.name == "nt":
                 import msvcrt  # noqa: PLC0415
 
-                # The OS releases the lock when the handle closes below.
                 with suppress(Exception):
                     fh.seek(0)
                     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl  # noqa: PLC0415
 
-                # The OS releases the lock when the handle closes below.
                 with suppress(Exception):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
-            # Lock cleanup must never fail telemetry callers.
             with suppress(Exception):
                 fh.close()

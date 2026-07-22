@@ -22,6 +22,7 @@ Usage:
 import os
 import sys
 import threading
+from contextlib import suppress
 
 transmission_results = []
 results_lock = threading.Lock()
@@ -36,12 +37,9 @@ def main():
     if telemetry_root not in sys.path:
         sys.path.insert(0, telemetry_root)
 
-    try:
+    with suppress(Exception):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        # Some redirected streams do not support reconfigure; their existing encoding is usable.
-        pass
 
     os.environ.pop("ORT_DISABLE_TELEMETRY", None)
     os.environ.pop("CI", None)

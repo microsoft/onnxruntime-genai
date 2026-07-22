@@ -111,7 +111,6 @@ class HttpJsonPostTransport(ITransport):
                     return (200 <= status < 300, status)
             except urllib.error.HTTPError as http_err:
                 # Server responded with a non-2xx status (4xx/5xx): not retried here.
-                # The HTTP status remains authoritative if the optional body cannot be consumed.
                 with suppress(Exception):
                     http_err.read()
                 return (False, http_err.code)
