@@ -542,8 +542,7 @@ class Model:
     def make_lm_head_init(self, config):
         pass
 
-    @staticmethod
-    def onnx_dtype_to_precision(onnx_dtype):
+    def onnx_dtype_to_precision(self, onnx_dtype):
         """Map the resolved ONNX weight dtype to a `QuantConfig` precision string.
 
         Only used to seed the QuantConfig's `weights.type` / `io_dtype`; the builder's numeric
@@ -581,6 +580,10 @@ class Model:
             self.quant_attrs["use_g_idx"] = (
                 config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
             )
+
+        # Positive FP4 e2m1 representable magnitudes (codes 0-7); negatives use codes 8-15.
+        self._FP4_E2M1_POS_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+        self._FP4_E2M1_MAX = 6.0
 
     def make_tied_embeddings_init(self, config):
         # Determine if tied embeddings is even possible on the graph
@@ -3532,10 +3535,6 @@ class Model:
         value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
-
-    # Positive FP4 e2m1 representable magnitudes (codes 0-7); negatives use codes 8-15.
-    _FP4_E2M1_POS_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-    _FP4_E2M1_MAX = 6.0
 
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).
