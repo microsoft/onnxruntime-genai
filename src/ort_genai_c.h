@@ -96,8 +96,17 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
  * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
  *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
  *
- * \note Must be the last GenAI call in the process. Any OgaModel / OgaGenerator / OgaTokenizer / etc. handles owned
- *       by the caller must be released first.
+ * \note Lifetime contract: no OgaModel / OgaGenerator / OgaTokenizer / OgaTensor / OgaEngine / OgaRequest, or any
+ *       object that holds device memory, may outlive OgaShutdown(). The caller MUST destroy every such object before
+ *       calling OgaShutdown(). Calling OgaShutdown() with such objects still alive is undefined behavior (typically a
+ *       crash when the buffer is freed through a now-invalid allocator).
+ *
+ * \note Re-initialization: OgaShutdown() is a full teardown -- it destroys GenAI's ONNX Runtime environment and unloads
+ *       GenAI's add-on libraries. GenAI may be used again after OgaShutdown(); the next GenAI call re-initializes with a
+ *       fresh environment.
+ *
+ * \note If a host registered execution provider libraries directly on its own OrtEnv reference, it should unregister
+ *       them (on that reference) and release the reference after OgaShutdown(), once all GenAI usage is finished.
  */
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 

@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #pragma once
 
@@ -180,6 +181,12 @@ struct LFM2Cache : KeyValueCache {
   std::vector<std::string> kv_input_name_strings_, kv_output_name_strings_;
   size_t kv_input_index_{~0U}, kv_output_index_{~0U};
   bool kv_is_first_update_{true};
+  // When true, attention KV uses one fixed-size buffer for past and present (same OrtValue
+  // bound to both). Enabled the same way as DefaultKeyValueCache: via
+  // IsPastPresentShareBufferEnabled (genai search options) and/or a fixed kv seq_len
+  // detected in the model graph by DetectAndConfigureFixedKvShape. Sequence capacity is
+  // the detected fixed dim when present, else search.max_length.
+  bool kv_share_buffer_{false};
 
   // Conv state cache (only for conv layers)
   int conv_layer_count_{};
