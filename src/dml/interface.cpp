@@ -137,13 +137,6 @@ struct InterfaceImpl : DeviceInterface {
     return *ort_allocator_;
   }
 
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    return OrtMemoryInfo::Create("DML",
-                                 OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
-                                 OrtMemType::OrtMemTypeDefault);
-  }
-
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }
@@ -213,6 +206,13 @@ struct InterfaceImpl : DeviceInterface {
 #endif
 
   void Synchronize() override {}
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("DML",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
 };
 
 }  // namespace Dml

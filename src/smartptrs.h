@@ -108,7 +108,6 @@ struct DeviceInterface {
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
-  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
@@ -150,6 +149,8 @@ struct DeviceInterface {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

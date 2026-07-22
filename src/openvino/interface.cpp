@@ -25,10 +25,6 @@ struct InterfaceImpl : DeviceInterface {
     return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
   }
 
-  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    throw std::runtime_error("GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
-  }
-
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return GetDeviceInterface(DeviceType::CPU)->AllocateBase(size);
   }
@@ -41,6 +37,10 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do
+
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    throw std::runtime_error("GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
+  }
 };
 
 }  // namespace OpenVINO
