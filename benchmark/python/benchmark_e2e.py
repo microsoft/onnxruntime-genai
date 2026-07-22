@@ -422,11 +422,15 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Calculate prompt processing metrics
     avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
     avg_prompt_latency_ms = avg_prompt_latency_s * 1000
-    std_prompt_latency_ms = float(np.std(prompt_times)) * 1000
     avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
     avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
-    print(f"Average Time to First Token: {avg_prompt_latency_ms} ms")
-    print(f"Time to First Token StdDev: {std_prompt_latency_ms} ms")
+
+    # Time to first token = prompt prefill + first-token sampling
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    avg_ttft_ms = float(np.mean(ttft_times)) * 1000
+    std_ttft_ms = float(np.std(ttft_times)) * 1000
+    print(f"Average Time to First Token: {avg_ttft_ms} ms")
+    print(f"Time to First Token StdDev: {std_ttft_ms} ms")
     print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
     print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
@@ -465,8 +469,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         avg_tokenization_latency_ms,
         avg_per_token_prompt_thrpt,
         avg_per_token_prompt_latency_ms,
-        avg_prompt_latency_ms,
-        std_prompt_latency_ms,
+        avg_ttft_ms,
+        std_ttft_ms,
         avg_token_gen_thrpt,
         avg_token_gen_latency_ms,
         avg_sampling_thrpt,
@@ -513,7 +517,7 @@ def main(args):
             raise ValueError(
                 "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "
                 "Install it with: pip install onnxruntime-ep-webgpu"
-            )
+            ) from exc
 
         provider_registration_name = webgpu_ep.get_ep_name()
         provider_library_path = webgpu_ep.get_library_path()
