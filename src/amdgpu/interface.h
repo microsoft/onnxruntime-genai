@@ -9,6 +9,10 @@ namespace Generators {
 
 DeviceInterface* GetAMDGPUInterface();
 
+// Device this interface's allocators bind to. Resolved from the selected EP device before the
+// allocator is created; defaults to 0.
+void SetAMDGPUDeviceId(int device_id);
+
 // Inputs-only interface backed by the host-accessible allocator. Decode inputs allocated
 // here are CPU-writable and GPU-readable, so per-step updates happen in place with no
 // roundtrip. KV and scoring keep the default interface. Null if no host-accessible allocator.

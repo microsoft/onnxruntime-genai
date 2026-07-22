@@ -492,6 +492,17 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
+  // AMDGPU: use the selected device's id rather than a hardcoded 0. Single-GPU resolves to 0.
+  if (type == DeviceType::AMDGPU) {
+    auto ep_devices = FindRegisteredEpDevices("AMDGPUExecutionProvider");
+    if (user_provider_options)
+      ep_devices = ApplyDeviceFiltering(*user_provider_options, ep_devices);
+    if (!ep_devices.empty()) {
+      if (const OrtMemoryInfo* mi = Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &allocator.device_id_));
+    }
+    SetAMDGPUDeviceId(allocator.device_id_);
+  }
   try {
     auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
@@ -508,13 +519,16 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // if unavailable, creation returns null and callers fall back to the default device inputs path.
   if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
     try {
-      // Query the AMDGPU EP's advertised HOST_ACCESSIBLE memory-info instead of reconstructing it with
-      // hardcoded vendor/device ids, so it carries the real ids for this machine (multi-GPU safe). If
-      // none is advertised, leave it unset -> callers fall back to the default device inputs path.
+      // Use the host-accessible memory-info on the same device as the compute allocator.
       const OrtMemoryInfo* host_info = nullptr;
       for (const OrtEpDevice* ep_device : FindRegisteredEpDevices("AMDGPUExecutionProvider")) {
-        if (const OrtMemoryInfo* mi =
-                Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE)) {
+        const OrtMemoryInfo* mi =
+            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        if (!mi)
+          continue;
+        int host_device_id = 0;
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        if (host_device_id == allocator.device_id_) {
           host_info = mi;
           break;
         }

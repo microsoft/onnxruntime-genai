@@ -194,6 +194,14 @@ struct InterfaceImpl : DeviceInterface {
     return *ort_allocator_;
   }
 
+  // The MIGraphX backend registers its device memory-info under "Hip", keyed on the device id.
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Hip", OrtAllocatorType::OrtDeviceAllocator,
+                                 device_id_, OrtMemType::OrtMemTypeDefault);
+  }
+
+  void SetDeviceId(int device_id) { device_id_ = device_id; }
+
   void InitHostAccessible(Ort::Allocator& allocator) override {
     ort_pinned_allocator_ = &allocator;
   }
@@ -227,6 +235,7 @@ struct InterfaceImpl : DeviceInterface {
   const OrtMemoryInfo* ort_memory_info_{};
   // Host-accessible allocator, set by InitHostAccessible when one is available.
   Ort::Allocator* ort_pinned_allocator_{};
+  int device_id_{};
 };
 
 // Inputs-only interface: allocations come from the host-accessible allocator, everything else
@@ -238,6 +247,7 @@ struct PinnedInputsImpl : DeviceInterface {
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override { base_.InitOrt(api, allocator); }
   Ort::Allocator& GetAllocator() override { return *base_.PinnedAllocator(); }
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());
@@ -280,6 +290,10 @@ DeviceInterface* GetAMDGPUInterface() {
   if (!g_amdgpu_device)
     g_amdgpu_device = std::make_unique<AMDGPU::InterfaceImpl>();
   return g_amdgpu_device.get();
+}
+
+void SetAMDGPUDeviceId(int device_id) {
+  static_cast<AMDGPU::InterfaceImpl*>(GetAMDGPUInterface())->SetDeviceId(device_id);
 }
 
 DeviceInterface* GetAMDGPUPinnedInputsInterface() {
