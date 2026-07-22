@@ -218,10 +218,8 @@ class GenAITelemetry:
                 )
                 self._heartbeat_thread.start()
             except Exception:
-                self._store = None
-                self._uploader = None
                 self._enabled = False
-                self._initialized = False
+                self.shutdown(1.0)
 
     def _emit(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
@@ -573,7 +571,8 @@ class GenAITelemetry:
 
         heartbeat_stopped = True
         if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
-            self._heartbeat_thread.join(remaining_seconds())
+            if self._heartbeat_thread.ident is not None:
+                self._heartbeat_thread.join(remaining_seconds())
             heartbeat_stopped = not self._heartbeat_thread.is_alive()
             if heartbeat_stopped:
                 self._heartbeat_thread = None

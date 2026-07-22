@@ -288,6 +288,32 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(second._enabled)
         mock_uploader.assert_called_once_with(open_store, instrumentation_key=second._instrumentation_key)
 
+    def test_initialization_failure_closes_partial_resources(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        store = MagicMock(is_open=True)
+        uploader = MagicMock()
+        uploader.stop_loop.return_value = True
+        heartbeat = MagicMock(ident=None)
+        heartbeat.is_alive.return_value = False
+        heartbeat.start.side_effect = RuntimeError("thread start failed")
+        with (
+            patch("telemetry.telemetry.OfflineEventStore", return_value=store),
+            patch("telemetry.telemetry.EventUploader", return_value=uploader),
+            patch("telemetry.telemetry.threading.Thread", return_value=heartbeat),
+        ):
+            telemetry = GenAITelemetry()
+
+        uploader.stop_loop.assert_called_once()
+        uploader.flush.assert_called_once()
+        uploader.close.assert_called_once()
+        store.close.assert_called_once()
+        self.assertIsNone(telemetry._heartbeat_thread)
+        self.assertIsNone(telemetry._uploader)
+        self.assertIsNone(telemetry._store)
+        self.assertFalse(telemetry._enabled)
+        self.assertFalse(telemetry._initialized)
+
 
 class TestVersionResolution(unittest.TestCase):
     def test_installed_package_exposes_telemetry_modules(self):
