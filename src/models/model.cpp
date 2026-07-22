@@ -508,13 +508,19 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // if unavailable, creation returns null and callers fall back to the default device inputs path.
   if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
     try {
-      // device_id is hardcoded 0, so this is correct for single-GPU only. On multi-GPU the
-      // device_id differs and GetSharedAllocator returns null (falls back, perf loss not error).
-      // TODO(multi-gpu): query EpDevice::MemoryInfo(HOST_ACCESSIBLE) instead of reconstructing.
-      auto host_info = OrtMemoryInfo::CreateV2("pinned", OrtMemoryInfoDeviceType_GPU,
-                                               /*vendor_id=*/0x1002, /*device_id=*/0,
-                                               OrtDeviceMemoryType_HOST_ACCESSIBLE, OrtDeviceAllocator);
-      allocator.host_accessible_allocator_ = GetOrtEnv().GetSharedAllocator(*host_info);
+      // Query the AMDGPU EP's advertised HOST_ACCESSIBLE memory-info instead of reconstructing it with
+      // hardcoded vendor/device ids, so it carries the real ids for this machine (multi-GPU safe). If
+      // none is advertised, leave it unset -> callers fall back to the default device inputs path.
+      const OrtMemoryInfo* host_info = nullptr;
+      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices("AMDGPUExecutionProvider")) {
+        if (const OrtMemoryInfo* mi =
+                Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE)) {
+          host_info = mi;
+          break;
+        }
+      }
+      if (host_info)
+        allocator.host_accessible_allocator_ = GetOrtEnv().GetSharedAllocator(*host_info);
     } catch (const Ort::Exception&) {
       allocator.host_accessible_allocator_ = nullptr;
     }
