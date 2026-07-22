@@ -268,6 +268,7 @@ def check_extra_options(
                 "shared_embeddings=true from --extra_options for this model."
             )
 
+        extra_options["shared_embeddings"] = True
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
