@@ -487,6 +487,14 @@ def main(args):
                 "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
             )
 
+        if args.execution_provider == "webgpu":
+            raise ValueError(
+                "Cannot use --ep_library_path with --execution_provider=webgpu. "
+                "WebGPU EP is a plugin package and should be installed via "
+                "'pip install onnxruntime-ep-webgpu', then selected with '-e webgpu' "
+                "without --ep_library_path."
+            )
+
         if args.verbose:
             print(f"Registering execution provider library: {args.ep_library_path}")
 
