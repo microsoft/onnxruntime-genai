@@ -467,18 +467,25 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  // AMDGPU device memory-type name is "Hip" (the MIGraphX backend registers
-  // CreateMemoryInfo_V2("Hip", GPU, ...); a V1 CreateMemoryInfo("Hip") memory-info matches it
-  // by device attributes). This mirrors the original B003 GPU-KV path (commit 64d1b3a5).
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'. AMDGPU is "Hip".
   static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "Hip"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
+  // AMDGPU: use the selected device's id rather than a hardcoded 0. Single-GPU resolves to 0.
+  if (type == DeviceType::AMDGPU) {
+    auto ep_devices = FindRegisteredEpDevices("AMDGPUExecutionProvider");
+    if (user_provider_options)
+      ep_devices = ApplyDeviceFiltering(*user_provider_options, ep_devices);
+    if (!ep_devices.empty()) {
+      if (const OrtMemoryInfo* mi = Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &allocator.device_id_));
+    }
+  }
   try {
     auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+                                             allocator.device_id_, OrtMemType::OrtMemTypeDefault);
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
     // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
@@ -508,13 +515,16 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // if unavailable, creation returns null and callers fall back to the default device inputs path.
   if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
     try {
-      // Query the AMDGPU EP's advertised HOST_ACCESSIBLE memory-info instead of reconstructing it with
-      // hardcoded vendor/device ids, so it carries the real ids for this machine (multi-GPU safe). If
-      // none is advertised, leave it unset -> callers fall back to the default device inputs path.
+      // Use the host-accessible memory-info on the same device as the compute allocator.
       const OrtMemoryInfo* host_info = nullptr;
       for (const OrtEpDevice* ep_device : FindRegisteredEpDevices("AMDGPUExecutionProvider")) {
-        if (const OrtMemoryInfo* mi =
-                Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE)) {
+        const OrtMemoryInfo* mi =
+            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        if (!mi)
+          continue;
+        int host_device_id = 0;
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        if (host_device_id == allocator.device_id_) {
           host_info = mi;
           break;
         }

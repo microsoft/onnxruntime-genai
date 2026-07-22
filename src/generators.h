@@ -175,6 +175,7 @@ struct OrtGlobals {
     // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).
     // Null if unavailable, in which case inputs stay on the default device allocator.
     Ort::Allocator* host_accessible_allocator_{};
+    int device_id_{};  // Device this allocator is bound to (0 unless a specific device was selected).
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
