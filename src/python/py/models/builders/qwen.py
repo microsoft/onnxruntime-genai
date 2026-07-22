@@ -987,7 +987,7 @@ class Qwen35TextModel(Model):
                 config.partial_rotary_factor = config.rope_scaling["partial_rotary_factor"]
 
         # Parse layer types before super().__init__() because
-        # make_int4_algo_config() is called from the base class init
+        # make_quant_init() (via make_matmul_mixed_precision) is called from the base class init
         # and needs self.layer_types to identify linear attention layers.
         # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
         text_config = getattr(config, "text_config", config)
