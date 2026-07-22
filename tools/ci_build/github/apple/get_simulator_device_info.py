@@ -35,7 +35,13 @@ class Version:
         return False
 
     def __hash__(self) -> int:
-        return hash(self._components)
+        # Keep hash consistent with __eq__, which treats trailing zeros as insignificant
+        # (e.g. Version("1") == Version("1.0")).
+        components = self._components
+        last = len(components)
+        while last > 0 and components[last - 1] == 0:
+            last -= 1
+        return hash(components[:last])
 
 
 def get_simulator_device_info(
