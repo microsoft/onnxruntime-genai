@@ -623,6 +623,9 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
       p_device_inputs_ = pinned;
   }
 
+  // Logits are CPU-read; AMDGPU host-accessible inputs aren't CPU-read-coherent, so route to CPU.
+  p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
+
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.
   if (p_device_->GetType() == DeviceType::CUDA ||
