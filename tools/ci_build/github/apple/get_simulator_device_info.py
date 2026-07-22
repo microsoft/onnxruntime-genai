@@ -34,6 +34,9 @@ class Version:
                 return self_component < other_component
         return False
 
+    def __hash__(self) -> int:
+        return hash(self._components)
+
 
 def get_simulator_device_info(
     requested_runtime_platform: str = "iOS",
