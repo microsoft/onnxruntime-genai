@@ -4,6 +4,7 @@
 // Portions of this file consist of AI generated content.
 #pragma once
 #include "provider_options.h"
+#include "filesystem.h"
 
 #include <functional>
 
