@@ -418,7 +418,7 @@ class NemotronParseModel:
         self.cache_dir = cache_dir
         self.extra_options = extra_options
         self.hf_token = extra_options.get("hf_token", True)
-        self.hf_remote = extra_options.get("hf_remote", True)
+        self.hf_remote = extra_options.get("hf_remote", False)
         self.model_name_or_path = None
         self.model_type = "nemotron_parse"
 
