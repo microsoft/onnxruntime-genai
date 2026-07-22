@@ -523,6 +523,27 @@ class TestPathRedaction(unittest.TestCase):
         attributes = telemetry.log.call_args.args[1]
         self.assertEqual(attributes["exception_message"], "missing [path]")
 
+    def test_core_event_methods_redact_model_names(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = object()
+        telemetry._emit = MagicMock()
+        model_path = r"C:\Users\Alice Smith\models\phi.onnx"
+        calls = (
+            lambda: telemetry.log_model_build("build", 1.0, True, model_name=model_path),
+            lambda: telemetry.log_benchmark(model_name=model_path),
+            lambda: telemetry.log_model_load(model_name=model_path),
+            lambda: telemetry.log_inference(model_name=model_path),
+            lambda: telemetry.log_error("RuntimeError", "boom", model_name=model_path),
+        )
+
+        for call in calls:
+            telemetry._emit.reset_mock()
+            call()
+            self.assertEqual(telemetry._emit.call_args.args[1]["model_name"], "[path]")
+
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error
 

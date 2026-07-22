@@ -355,7 +355,7 @@ class GenAITelemetry:
                 "action": action,
                 "duration_ms": duration_ms,
                 "success": success,
-                "model_name": model_name,
+                "model_name": _redact_paths(model_name),
                 "model_type": model_type,
                 "hidden_size": hidden_size,
                 "num_layers": num_layers,
@@ -407,7 +407,7 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": model_name,
+                "model_name": _redact_paths(model_name),
                 "precision": precision,
                 "backend": backend,
                 "device": device,
@@ -446,7 +446,7 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": model_name,
+                "model_name": _redact_paths(model_name),
                 "model_type": model_type,
                 "execution_provider": execution_provider,
                 "total_load_time_ms": total_load_time_ms,
@@ -474,7 +474,7 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": model_name,
+                "model_name": _redact_paths(model_name),
                 "model_type": model_type,
                 "execution_provider": execution_provider,
                 "time_to_first_token_ms": time_to_first_token_ms,
@@ -504,7 +504,7 @@ class GenAITelemetry:
                 "exception_type": exception_type,
                 "exception_message": _redact_paths(exception_message),
                 "action": action,
-                "model_name": model_name,
+                "model_name": _redact_paths(model_name),
                 "execution_provider": execution_provider,
             }
             self._emit(ERROR_EVENT, attributes)
