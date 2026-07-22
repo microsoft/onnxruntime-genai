@@ -1188,6 +1188,18 @@ class TestUploaderDrainLogic(unittest.TestCase):
         self.assertEqual((delivered, left), (1, 0))
         self.assertEqual(store.count(), 0)
 
+    def test_request_drain_only_wakes_lock_holder(self):
+        _, uploader = self._setup()
+        uploader._wake = MagicMock()
+        uploader._drain_lock = MagicMock(held=False)
+
+        uploader.request_drain()
+        uploader._wake.set.assert_not_called()
+
+        uploader._drain_lock.held = True
+        uploader.request_drain()
+        uploader._wake.set.assert_called_once()
+
     def test_poison_4xx_dropped(self):
         store, uploader = self._setup()
         store.store(b'{"bad":1}')
