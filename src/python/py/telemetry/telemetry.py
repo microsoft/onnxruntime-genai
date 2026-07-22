@@ -28,7 +28,7 @@ from .library.options import CompressionType, OneCollectorExporterOptions, OneCo
 from .library.serialization import CommonSchemaJsonSerializationHelper
 from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
-from .path_utils import scrub_string_for_telemetry
+from .path_utils import scrub_string_for_telemetry, scrub_value_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
 
@@ -368,7 +368,7 @@ class GenAITelemetry:
                 "has_adapter": has_adapter,
             }
             if extra_options:
-                attributes["extra_options"] = extra_options
+                attributes["extra_options"] = scrub_value_for_telemetry(extra_options)
             self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
             return

@@ -74,6 +74,24 @@ def scrub_string_for_telemetry(value: str) -> str:
     return _truncate_utf8(scrubbed)
 
 
+def scrub_value_for_telemetry(value):
+    """Recursively scrub strings and path-like values before serialization."""
+    if isinstance(value, (str, os.PathLike)):
+        return scrub_string_for_telemetry(os.fsdecode(value))
+    if isinstance(value, dict):
+        return {
+            scrub_string_for_telemetry(os.fsdecode(key))
+            if isinstance(key, (str, os.PathLike))
+            else key: scrub_value_for_telemetry(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [scrub_value_for_telemetry(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(scrub_value_for_telemetry(child) for child in value)
+    return value
+
+
 def normalize_execution_provider(value):
     """Return the canonical telemetry name for an execution provider."""
     return "trt-rtx" if value == "NvTensorRtRtx" else value

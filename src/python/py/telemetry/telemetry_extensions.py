@@ -7,13 +7,13 @@
 
 import functools
 import inspect
-import os
 import time
 from collections.abc import Callable
 from contextlib import suppress
 from types import TracebackType
 from typing import Any, TypeVar
 
+from .path_utils import scrub_value_for_telemetry
 from .telemetry import (
     ACTION_EVENT,
     ERROR_EVENT,
@@ -30,25 +30,8 @@ def _get_telemetry() -> GenAITelemetry:
     return GenAITelemetry()
 
 
-def _scrub_metadata_value(value):
-    if isinstance(value, (str, os.PathLike)):
-        return _redact_paths(os.fsdecode(value))
-    if isinstance(value, dict):
-        return {
-            _redact_paths(os.fsdecode(key)) if isinstance(key, (str, os.PathLike)) else key: _scrub_metadata_value(
-                child
-            )
-            for key, child in value.items()
-        }
-    if isinstance(value, list):
-        return [_scrub_metadata_value(child) for child in value]
-    if isinstance(value, tuple):
-        return tuple(_scrub_metadata_value(child) for child in value)
-    return value
-
-
 def _scrub_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    return _scrub_metadata_value(metadata or {})
+    return scrub_value_for_telemetry(metadata or {})
 
 
 def log_action(

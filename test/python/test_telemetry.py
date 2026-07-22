@@ -570,6 +570,29 @@ class TestPathRedaction(unittest.TestCase):
             call()
             self.assertEqual(telemetry._emit.call_args.args[1]["model_name"], "[path]")
 
+    def test_core_model_build_recursively_scrubs_extra_options(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = object()
+        telemetry._emit = MagicMock()
+        telemetry.log_model_build(
+            "build",
+            1.0,
+            True,
+            extra_options={
+                "adapter_path": Path("/home/alice/private/adapter"),
+                Path("/home/alice/private/key"): {"paths": [r"C:\Users\Alice Smith\model.onnx"]},
+                "batch_size": 4,
+            },
+        )
+
+        extra_options = telemetry._emit.call_args.args[1]["extra_options"]
+        self.assertEqual(extra_options["adapter_path"], "[path]")
+        self.assertEqual(extra_options["[path]"]["paths"], ["[path]"])
+        self.assertEqual(extra_options["batch_size"], 4)
+
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error
 
