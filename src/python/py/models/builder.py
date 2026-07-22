@@ -255,7 +255,12 @@ def check_extra_options(
     # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
     # embedding and the LM head. This is only valid when the model actually ties them.
     hf_tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-    if extra_options.get("shared_embeddings", hf_tie_word_embeddings):
+
+    # Resolve shared_embeddings: use explicit value if provided, otherwise default to whether model ties embeddings
+    if "shared_embeddings" not in extra_options:
+        extra_options["shared_embeddings"] = hf_tie_word_embeddings
+
+    if extra_options["shared_embeddings"]:
         # For an untied model (config.tie_word_embeddings is False) the token embedding and LM head are
         # distinct weights, so tying them would make the embedding read from the wrong matrix and
         # silently export a broken model (e.g. gpt-oss-20b generating gibberish). Reject the
@@ -268,7 +273,6 @@ def check_extra_options(
                 "shared_embeddings=true from --extra_options for this model."
             )
 
-        extra_options["shared_embeddings"] = True
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
