@@ -40,13 +40,16 @@ class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
+        # Transformers v5 standardizes RoPE settings under `rope_parameters`; older
+        # versions used `rope_scaling` (kept as a backward-compatible alias in v5).
+        # Read whichever the installed transformers version provides.
+        rope_params = self.get_rope_parameters(config)
         self.original_context_length = (
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
-            else config.rope_scaling["original_max_position_embeddings"]
-            if hasattr(config, "rope_scaling")
-            and isinstance(config.rope_scaling, Mapping)
-            and "original_max_position_embeddings" in config.rope_scaling
+            else rope_params["original_max_position_embeddings"]
+            if isinstance(rope_params, Mapping)
+            and "original_max_position_embeddings" in rope_params
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -232,10 +235,8 @@ class Model:
             if hasattr(config, "rope_theta")
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
-            else config.rope_scaling["rope_theta"]
-            if hasattr(config, "rope_scaling")
-            and isinstance(config.rope_scaling, Mapping)
-            and "rope_theta" in config.rope_scaling
+            else rope_params["rope_theta"]
+            if isinstance(rope_params, Mapping) and "rope_theta" in rope_params
             else 10000
         )
         self.rope_attrs = {
@@ -252,7 +253,7 @@ class Model:
             "mscale": 1,                                     # Magnitude scaling factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
             "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
         }
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+        if rope_params is not None:
             self.make_rope_init(config)
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
@@ -424,18 +425,34 @@ class Model:
         if self.exclude_lm_head:
             del self.output_names["logits"]
 
-    def make_rope_init(self, config):
-        if "beta_fast" in config.rope_scaling:
-            # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
-            factor = config.rope_scaling["factor"] if "factor" in config.rope_scaling else 0
-            beta_slow = config.rope_scaling["beta_slow"] if "beta_slow" in config.rope_scaling else 0
-            beta_fast = config.rope_scaling["beta_fast"] if "beta_fast" in config.rope_scaling else 0
+    def get_rope_parameters(self, config):
+        """Return the RoPE parameters mapping from the model config.
 
-            self.rope_attrs["mscale_policy"] = config.rope_scaling["rope_type"]
+        Transformers v5 standardizes RoPE settings under `rope_parameters`.
+        Older versions (and the v5 backward-compatible alias) expose the same
+        data under `rope_scaling`. Prefer `rope_parameters` and fall back to
+        `rope_scaling` so the builder works across transformers versions.
+        """
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            return rope_parameters
+        return getattr(config, "rope_scaling", None)
+
+    def make_rope_init(self, config):
+        rope_params = self.get_rope_parameters(config)
+        if not isinstance(rope_params, Mapping):
+            return
+        if "beta_fast" in rope_params:
+            # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
+            factor = rope_params["factor"] if "factor" in rope_params else 0
+            beta_slow = rope_params["beta_slow"] if "beta_slow" in rope_params else 0
+            beta_fast = rope_params["beta_fast"] if "beta_fast" in rope_params else 0
+
+            self.rope_attrs["mscale_policy"] = rope_params["rope_type"]
             self.rope_attrs["mscale"] = self.make_mscale(
-                config.rope_scaling["factor"],
-                config_mscale=config.rope_scaling.get("mscale", 0),
-                config_mscale_all_dim=config.rope_scaling.get("mscale_all_dim", 0),
+                rope_params["factor"],
+                config_mscale=rope_params.get("mscale", 0),
+                config_mscale_all_dim=rope_params.get("mscale_all_dim", 0),
             )
             self.rope_attrs["rescale_inv_freq"] = {
                 "factor": factor,
@@ -444,27 +461,27 @@ class Model:
             }
 
         elif (
-            config.rope_scaling.get("rope_type", config.rope_scaling.get("type")) == "linear"
-            and "factor" in config.rope_scaling
+            rope_params.get("rope_type", rope_params.get("type")) == "linear"
+            and "factor" in rope_params
         ):
             # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
             # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.
-            factor = float(config.rope_scaling["factor"])
+            factor = float(rope_params["factor"])
             if factor <= 0:
                 raise ValueError(f"rope_scaling.factor must be positive for linear RoPE scaling, got {factor}")
             self.rope_attrs["rescale_factors"] = factor
 
-        elif "mrope_section" in config.rope_scaling:
+        elif "mrope_section" in rope_params:
             # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
             self.rope_attrs["mrope"] = {
-                "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
+                "sections": rope_params["mrope_section"],  # Sections for MRoPE
             }
 
-            # Some models (e.g. Qwen3-VL) store rope_theta inside rope_scaling
+            # Some models (e.g. Qwen3-VL) store rope_theta inside the rope parameters
             # instead of as a top-level config attribute. Override the default theta
-            # if rope_scaling provides one.
-            if "rope_theta" in config.rope_scaling:
-                self.rope_attrs["theta"] = config.rope_scaling["rope_theta"]
+            # if the rope parameters provide one.
+            if "rope_theta" in rope_params:
+                self.rope_attrs["theta"] = rope_params["rope_theta"]
 
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
