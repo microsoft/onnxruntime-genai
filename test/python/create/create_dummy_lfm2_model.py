@@ -9,7 +9,10 @@ to project input_ids embeddings to logits, and passes through KV cache
 and conv state. This allows end-to-end generation testing.
 """
 
+# ruff: noqa: UP031
+
 import os
+
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
@@ -26,48 +29,72 @@ def main():
     # --- Inputs ---
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "sequence_length"])
     position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch_size", "sequence_length"])
-    attention_mask = helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"])
+    attention_mask = helper.make_tensor_value_info(
+        "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
+    )
 
     # KV cache inputs (attention layers 1, 3)
     past_kv_inputs = []
     for layer_idx in [1, 3]:
-        past_kv_inputs.append(helper.make_tensor_value_info(
-            "past_key_values.%d.key" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", num_heads, "past_sequence_length", head_size]))
-        past_kv_inputs.append(helper.make_tensor_value_info(
-            "past_key_values.%d.value" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", num_heads, "past_sequence_length", head_size]))
+        past_kv_inputs.append(
+            helper.make_tensor_value_info(
+                "past_key_values.%d.key" % layer_idx,
+                TensorProto.FLOAT,
+                ["batch_size", num_heads, "past_sequence_length", head_size],
+            )
+        )
+        past_kv_inputs.append(
+            helper.make_tensor_value_info(
+                "past_key_values.%d.value" % layer_idx,
+                TensorProto.FLOAT,
+                ["batch_size", num_heads, "past_sequence_length", head_size],
+            )
+        )
 
     # Conv state inputs (conv layers 0, 2)
     conv_inputs = []
     for layer_idx in [0, 2]:
-        conv_inputs.append(helper.make_tensor_value_info(
-            "past_conv.%d" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", hidden_size, conv_cache_size]))
+        conv_inputs.append(
+            helper.make_tensor_value_info(
+                "past_conv.%d" % layer_idx, TensorProto.FLOAT, ["batch_size", hidden_size, conv_cache_size]
+            )
+        )
 
-    all_inputs = [input_ids, position_ids, attention_mask] + past_kv_inputs + conv_inputs
+    all_inputs = [input_ids, position_ids, attention_mask, *past_kv_inputs, *conv_inputs]
 
     # --- Outputs ---
-    logits_output = helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch_size", "sequence_length", vocab_size])
+    logits_output = helper.make_tensor_value_info(
+        "logits", TensorProto.FLOAT, ["batch_size", "sequence_length", vocab_size]
+    )
 
     # KV cache outputs (attention layers 1, 3)
     present_kv_outputs = []
     for layer_idx in [1, 3]:
-        present_kv_outputs.append(helper.make_tensor_value_info(
-            "present.%d.key" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", num_heads, "total_sequence_length", head_size]))
-        present_kv_outputs.append(helper.make_tensor_value_info(
-            "present.%d.value" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", num_heads, "total_sequence_length", head_size]))
+        present_kv_outputs.append(
+            helper.make_tensor_value_info(
+                "present.%d.key" % layer_idx,
+                TensorProto.FLOAT,
+                ["batch_size", num_heads, "total_sequence_length", head_size],
+            )
+        )
+        present_kv_outputs.append(
+            helper.make_tensor_value_info(
+                "present.%d.value" % layer_idx,
+                TensorProto.FLOAT,
+                ["batch_size", num_heads, "total_sequence_length", head_size],
+            )
+        )
 
     # Conv state outputs (conv layers 0, 2)
     conv_outputs = []
     for layer_idx in [0, 2]:
-        conv_outputs.append(helper.make_tensor_value_info(
-            "present_conv.%d" % layer_idx, TensorProto.FLOAT,
-            ["batch_size", hidden_size, conv_cache_size]))
+        conv_outputs.append(
+            helper.make_tensor_value_info(
+                "present_conv.%d" % layer_idx, TensorProto.FLOAT, ["batch_size", hidden_size, conv_cache_size]
+            )
+        )
 
-    all_outputs = [logits_output] + present_kv_outputs + conv_outputs
+    all_outputs = [logits_output, *present_kv_outputs, *conv_outputs]
 
     # --- Graph nodes ---
     nodes = []
@@ -99,26 +126,29 @@ def main():
             # Reshape embeddings [B, S, H] -> [B, S, num_heads, head_size]
             reshape_4d_name = "reshape_4d_%d_%s" % (layer_idx, kv_type)
             shape_4d = numpy_helper.from_array(
-                np.array([0, 0, num_heads, head_size], dtype=np.int64),
-                name="shape_4d_%d_%s" % (layer_idx, kv_type))
+                np.array([0, 0, num_heads, head_size], dtype=np.int64), name="shape_4d_%d_%s" % (layer_idx, kv_type)
+            )
             initializers.append(shape_4d)
-            nodes.append(helper.make_node("Reshape", inputs=["embeddings", shape_4d.name],
-                                          outputs=[reshape_4d_name], allowzero=0))
+            nodes.append(
+                helper.make_node(
+                    "Reshape", inputs=["embeddings", shape_4d.name], outputs=[reshape_4d_name], allowzero=0
+                )
+            )
 
             # Transpose [B, S, heads, head_size] -> [B, heads, S, head_size]
             transpose_name = "transpose_%d_%s" % (layer_idx, kv_type)
-            nodes.append(helper.make_node("Transpose", inputs=[reshape_4d_name],
-                                          outputs=[transpose_name], perm=[0, 2, 1, 3]))
+            nodes.append(
+                helper.make_node("Transpose", inputs=[reshape_4d_name], outputs=[transpose_name], perm=[0, 2, 1, 3])
+            )
 
             # Concat past and new along sequence dimension (axis=2)
-            nodes.append(helper.make_node("Concat", inputs=[past_name, transpose_name],
-                                          outputs=[present_name], axis=2))
+            nodes.append(helper.make_node("Concat", inputs=[past_name, transpose_name], outputs=[present_name], axis=2))
 
     # Conv state: just pass through (identity)
     for layer_idx in [0, 2]:
-        nodes.append(helper.make_node("Identity",
-                                      inputs=["past_conv.%d" % layer_idx],
-                                      outputs=["present_conv.%d" % layer_idx]))
+        nodes.append(
+            helper.make_node("Identity", inputs=["past_conv.%d" % layer_idx], outputs=["present_conv.%d" % layer_idx])
+        )
 
     # --- Build model ---
     graph = helper.make_graph(
@@ -141,7 +171,7 @@ def main():
 
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decoder.onnx")
     onnx.save_model(model, output_path)
-    print("Created %s" % output_path)
+    print(f"Created {output_path}")
 
 
 if __name__ == "__main__":
