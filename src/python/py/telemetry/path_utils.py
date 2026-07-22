@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-"""Platform-neutral privacy helpers for telemetry identifiers."""
+"""Privacy helpers for telemetry identifiers."""
 
 import ntpath
 import os

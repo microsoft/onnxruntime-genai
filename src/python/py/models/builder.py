@@ -60,14 +60,14 @@ from transformers import (
 )
 
 try:
-    from onnxruntime_genai.telemetry_path_utils import normalize_execution_provider, sanitize_model_identifier
+    from onnxruntime_genai.telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
 except ImportError:
     telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     path_added = telemetry_root not in sys.path
     if path_added:
         sys.path.insert(0, telemetry_root)
     try:
-        from telemetry_path_utils import normalize_execution_provider, sanitize_model_identifier
+        from telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
     finally:
         if path_added and telemetry_root in sys.path:
             sys.path.remove(telemetry_root)
