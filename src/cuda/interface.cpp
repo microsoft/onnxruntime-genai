@@ -7,7 +7,9 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"
+#include <charconv>
 #include <cstdarg>
+#include <system_error>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -186,6 +188,27 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
+
+  bool SupportsPhi3RopeRewind(const Config& config) const override {
+    for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
+      if (provider_options.name != "NvTensorRtRtx")
+        continue;
+
+      for (const auto& [name, value] : provider_options.options) {
+        if (name != "multi_rotary_cache_concat_offset")
+          continue;
+
+        int offset{};
+        const auto* const value_begin = value.data();
+        const auto* const value_end = value_begin + value.size();
+        const auto [parse_end, error_code] = std::from_chars(value_begin, value_end, offset);
+        return error_code == std::errc{} && parse_end == value_end && offset > 0 &&
+               offset <= config.model.context_length;
+      }
+    }
+
+    return false;
+  }
 };
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
