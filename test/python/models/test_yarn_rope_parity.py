@@ -273,7 +273,7 @@ def _make_builder_cos_sin_rope_field(
         mock_kwargs["rope_theta"] = config_dict["rope_theta"]
     mock_config = types.SimpleNamespace(**mock_kwargs)
 
-    rope_params = Model.get_rope_parameters(mock_config)
+    rope_params = model.get_rope_parameters(mock_config)
 
     # original_context_length resolution (mirrors Model.__init__)
     if isinstance(rope_params, Mapping) and "original_max_position_embeddings" in rope_params:
@@ -688,30 +688,34 @@ class TestYarnRopeCacheParity:
     # -----------------------------------------------------------------------
     def test_get_rope_parameters_prefers_rope_parameters(self):
         """get_rope_parameters returns rope_parameters when present (transformers v5)."""
+        model = object.__new__(Model)
         config = types.SimpleNamespace(
             rope_parameters={"rope_type": "yarn", "factor": 32.0},
             rope_scaling={"rope_type": "linear", "factor": 8.0},
         )
-        assert Model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
+        assert model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
 
     def test_get_rope_parameters_empty_rope_parameters_not_overridden(self):
         """A present-but-empty rope_parameters ({}) must not fall back to rope_scaling."""
+        model = object.__new__(Model)
         config = types.SimpleNamespace(
             rope_parameters={},
             rope_scaling={"rope_type": "yarn", "factor": 32.0},
         )
-        assert Model.get_rope_parameters(config) == {}
+        assert model.get_rope_parameters(config) == {}
 
     def test_get_rope_parameters_falls_back_to_rope_scaling(self):
         """When rope_parameters is absent, fall back to rope_scaling (older transformers)."""
+        model = object.__new__(Model)
         config = types.SimpleNamespace(rope_scaling={"rope_type": "yarn", "factor": 32.0})
         assert not hasattr(config, "rope_parameters")
-        assert Model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
+        assert model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
 
     def test_get_rope_parameters_none_when_absent(self):
         """When neither field is present, get_rope_parameters returns None."""
+        model = object.__new__(Model)
         config = types.SimpleNamespace(max_position_embeddings=131072)
-        assert Model.get_rope_parameters(config) is None
+        assert model.get_rope_parameters(config) is None
 
     def test_make_rope_init_no_op_without_rope_params(self):
         """make_rope_init must not raise when no rope parameters are present."""
@@ -732,7 +736,8 @@ class TestYarnRopeCacheParity:
             rope_parameters=GPTOSS_20B_CONFIG["rope_scaling"],
         )
         assert not hasattr(mock, "rope_scaling")
-        assert Model.get_rope_parameters(mock) == GPTOSS_20B_CONFIG["rope_scaling"]
+        model = object.__new__(Model)
+        assert model.get_rope_parameters(mock) == GPTOSS_20B_CONFIG["rope_scaling"]
 
         hf_cos, hf_sin = _make_hf_reference_cos_sin(GPTOSS_20B_CONFIG, CACHE_LENGTH)
         params_cos, params_sin = _make_builder_cos_sin_rope_field(
@@ -773,11 +778,12 @@ class TestYarnRopeCacheParity:
 
     def test_rope_parameters_only_resolves_original_context_length(self):
         """original_context_length must come from rope_parameters when rope_scaling is absent."""
+        model = object.__new__(Model)
         mock = types.SimpleNamespace(
             max_position_embeddings=GPTOSS_20B_CONFIG["max_position_embeddings"],
             rope_parameters=GPTOSS_20B_CONFIG["rope_scaling"],
         )
-        rope_params = Model.get_rope_parameters(mock)
+        rope_params = model.get_rope_parameters(mock)
         assert isinstance(rope_params, Mapping)
         assert rope_params["original_max_position_embeddings"] == 4096
         # Guard against the regression where the extended length (131072) leaks in.

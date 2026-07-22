@@ -392,8 +392,7 @@ class Model:
         if self.exclude_lm_head:
             del self.output_names["logits"]
 
-    @staticmethod
-    def get_rope_parameters(config):
+    def get_rope_parameters(self, config):
         """Return the RoPE parameters mapping from the model config.
 
         Transformers v5 standardizes RoPE settings under `rope_parameters`.
