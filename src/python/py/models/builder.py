@@ -628,7 +628,7 @@ def get_args():
                 image_height / image_width = Fixed image size used by Nemotron Parse ONNX export.
                     Default is 768x768. The exported encoder graph is specialized to this resolution.
                 prefill_sequence_length = Fixed decoder prefill sequence length used by cached decoder export.
-                    Default is model-specific.
+                    Default is 8.
                 export_components = Comma-separated Nemotron Parse components to export: encoder,decoder.
                     Default is encoder,decoder.
                 decoder_cache_mode = Nemotron Parse decoder KV cache export mode. Currently only tensor_scatter is supported.

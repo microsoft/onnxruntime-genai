@@ -5,9 +5,8 @@ import json
 import sys
 import tempfile
 import types
-import unittest
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock
 
 import onnx
 from onnx import TensorProto, helper
@@ -131,7 +130,7 @@ def _make_tensor_scatter_builder():
     )
 
 
-class NemotronParseTensorScatterTests(unittest.TestCase):
+class NemotronParseTensorScatterTests(TestCase):
     def test_prefill_returns_only_last_token_logits(self):
         class Decoder(nemotron_parse.torch.nn.Module):
             def forward(
@@ -215,6 +214,7 @@ class NemotronParseTensorScatterTests(unittest.TestCase):
 
         self.assertEqual(model.decoder_cache_mode, "tensor_scatter")
         self.assertEqual(model.prefill_sequence_length, 8)
+        self.assertIs(model.hf_remote, False)
 
     def test_nemotron_parse_rejects_unsupported_cache_mode(self):
         with self.assertRaisesRegex(ValueError, "supported modes: tensor_scatter"):
@@ -379,4 +379,4 @@ class NemotronParseTensorScatterTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
