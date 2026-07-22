@@ -1,3 +1,13 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
+"""Unit tests for `--precision int8` support in the model builder.
+
+int8 precision maps `onnx_dtype` to INT8/UINT8 (mirroring int4 -> INT4/UINT4), builds a
+float graph, and quantizes the dense weights to 8-bit `MatMulNBits` at save time via
+`to_nbits`. These tests exercise the precision plumbing standalone (no model download).
+"""
+
 from __future__ import annotations
 
 import importlib.util
@@ -28,13 +38,14 @@ def _load_base_module():
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
-    # (`set_onnx_dtype` / `set_io_dtype`) without pulling in every model builder.
+    # (`set_onnx_dtype` / `set_io_dtype` / `check_extra_options`) without pulling in every
+    # model builder.
     builders_stub = types.ModuleType("builders")
 
-    def __getattr__(name):  # PEP 562: satisfies `from builders import <ModelClass>`
+    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
         return type(name, (), {})
 
-    builders_stub.__getattr__ = __getattr__
+    builders_stub.__getattr__ = _stub_getattr
     sys.modules["builders"] = builders_stub
 
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
@@ -84,7 +95,7 @@ def test_int4_onnx_dtype_is_still_int4(is_symmetric, expected):
     ],
 )
 def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
-    # int8 must not assume FP32 I/O: GPU/WebGPU use FP16, only CPU uses FP32.
+    # int8 must not assume FP32 I/O everywhere: GPU/WebGPU use FP16, only CPU uses FP32.
     assert builder_module.set_io_dtype("int8", execution_provider, {}) == expected
 
 
@@ -127,6 +138,10 @@ def test_make_packed_matmul_int8_falls_back_to_float_when_not_quantized(monkeypa
 def _make_quant_model(bits):
     model = Model.__new__(Model)
     model.model = object()
+    model.ep = "cpu"  # keep the CUDA prepack post-pass a no-op
+    model.matmulnbits_weights_prepacked = 0
+    model.quantization_algo = "default"
+    model.int4_customized_weight_config = {}
     model.quant_attrs = {
         "bits": bits,
         "qdq_block_size": 32,
@@ -182,40 +197,41 @@ def test_int4_with_qdq_is_allowed():
 
 
 # ---------------------------------------------------------------------------
-# Deprecated `int4_*` extra_option names still work as soft-deprecated aliases.
+# Deprecated int4_* extra_option names still map to the generalized names.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "old_name, new_name",
-    [
-        ("int4_accuracy_level", "accuracy_level"),
-        ("int4_block_size", "block_size"),
-        ("int4_is_symmetric", "is_symmetric"),
-        ("int4_op_types_to_quantize", "op_types_to_quantize"),
-        ("int4_nodes_to_exclude", "nodes_to_exclude"),
-        ("int4_algo_config", "algo_config"),
-    ],
-)
-def test_deprecated_alias_is_renamed_to_new_name(old_name, new_name):
-    kv_pairs = {old_name: "value"}
-    builder_module.apply_deprecated_extra_option_aliases(kv_pairs)
-    assert old_name not in kv_pairs
-    assert kv_pairs[new_name] == "value"
+def test_deprecated_int4_aliases_are_renamed():
+    kv = {
+        "int4_accuracy_level": "2",
+        "int4_block_size": "64",
+        "int4_is_symmetric": "false",
+        "int4_op_types_to_quantize": "MatMul/Gather",
+        "int4_nodes_to_exclude": "/lm_head/MatMul",
+        "int4_algo_config": "k_quant",
+    }
+    builder_module.apply_deprecated_extra_option_aliases(kv)
+    assert kv == {
+        "accuracy_level": "2",
+        "block_size": "64",
+        "is_symmetric": "false",
+        "op_types_to_quantize": "MatMul/Gather",
+        "nodes_to_exclude": "/lm_head/MatMul",
+        "algo_config": "k_quant",
+    }
 
 
-def test_new_name_wins_when_both_provided():
-    kv_pairs = {"int4_algo_config": "old", "algo_config": "new"}
-    builder_module.apply_deprecated_extra_option_aliases(kv_pairs)
-    assert kv_pairs == {"algo_config": "new"}
+def test_deprecated_alias_does_not_override_new_name():
+    # If both the old and new names are provided, the new name wins and the old key is dropped.
+    kv = {"int4_algo_config": "rtn", "algo_config": "k_quant"}
+    builder_module.apply_deprecated_extra_option_aliases(kv)
+    assert kv == {"algo_config": "k_quant"}
 
 
-def test_check_extra_options_applies_deprecated_aliases():
-    # Old name flows through check_extra_options and is parsed like the new one.
-    kv_pairs = {"int4_is_symmetric": "false", "int4_op_types_to_quantize": "MatMul/Gather"}
-    builder_module.check_extra_options(kv_pairs, "int4", "cpu")
-    assert "int4_is_symmetric" not in kv_pairs
-    assert kv_pairs["is_symmetric"] is False
-    assert kv_pairs["op_types_to_quantize"] == ("MatMul", "Gather")
-
-
+def test_check_extra_options_accepts_deprecated_int4_names():
+    # End-to-end through check_extra_options: deprecated names are normalized in-place.
+    kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
+    builder_module.check_extra_options(kv, "int4", "cpu")
+    assert kv["algo_config"] == "k_quant"
+    assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
+    assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv

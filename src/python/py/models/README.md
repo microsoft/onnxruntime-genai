@@ -26,16 +26,21 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
+    - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
     - [Quantization Options](#quantization-options)
       - [Accuracy Level](#accuracy-level)
       - [MatMul Block Size](#matmul-block-size)
       - [QMoE Block Size](#qmoe-block-size)
+      - [QMoE Weights Prepacked](#qmoe-weights-prepacked)
+      - [MatMulNBits Weights Prepacked](#matmulnbits-weights-prepacked)
       - [Is Symmetric](#is-symmetric)
       - [Op Types To Quantize](#op-types-to-quantize)
       - [Nodes To Exclude](#nodes-to-exclude)
       - [Algo Config](#algo-config)
+      - [Int8 Bit Placement](#int8-bit-placement)
       - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
       - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
+      - [Use FP4 Quantization in QMoE](#use-fp4-quantization-in-qmoe)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
     - [LoRA Models](#lora-models)
@@ -269,7 +274,7 @@ Note that this is the same as outputting embeddings since the last hidden states
 
 #### Enable Shared Embeddings
 
-This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`. 
+This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`.
 
 ##### Example 1: INT4 weights + INT4 embeddings (for RTN and K-Quant)
 
@@ -347,9 +352,26 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 ```
 
+#### Disable QK Norm GQA Fusion in CUDA or WebGPU
+
+QK Norm GQA fusion is enabled by default for CUDA and WebGPU when GroupQueryAttention is used and rotary embedding can be fused into the attention op. In this mode, Q/K norm weights are passed directly into GroupQueryAttention instead of emitting explicit Q/K normalization nodes.
+
+This scenario is for when you want to disable that fusion and keep explicit Q/K normalization nodes in the graph.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=false
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e webgpu -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=false
+```
+
 #### Quantization Options
 
-These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights.
+These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights (and quantizes MoE experts to 8-bit to match).
+
+> **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are still accepted as deprecated aliases and will be removed in a future release.
+
 
 ##### Accuracy Level
 
@@ -378,6 +400,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 ##### QMoE Block Size
 
 This scenario is for when you want to set the block size for QMoE expert weights.
+Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. CUDA block-wise QMoE supports only `32`, `64`, or `128`; the default is `32` except for TRT-RTX, which defaults to `128`.
 
 ```bash
 # From wheel:
@@ -385,6 +408,30 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options qmoe_block_size=128
+```
+
+##### QMoE Weights Prepacked
+
+This scenario is for when you want to control the CUDA QMoE expert weight layout. The default value is `-1`, which lets the builder choose the layout automatically. Use `0` to export raw weights and let CUDA prepack them at runtime, or `1` to export CUTLASS-prepacked weights.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+```
+
+##### MatMulNBits Weights Prepacked
+
+This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP, and an offline-prepacked model must be run with `ORT_FPA_INTB_GEMM` enabling the relevant nbits.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 ```
 
 ##### Is Symmetric
@@ -425,7 +472,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 
 ##### Algo Config
 
-This scenario is for when you want to select the quantization algorithm mode.
+This scenario is for when you want to select the base quantization algorithm mode.
 
 ```bash
 # From wheel:
@@ -435,7 +482,29 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default
 ```
 
-Supported values are: `default`, `rtn`, `rtn_last`, `k_quant`, `k_quant_mixed`, `k_quant_last`, `k_quant_linear`.
+Supported base values are: `default`, `rtn`, `k_quant`.
+
+The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus a `matmul_mixed_precision`.
+
+##### Mixed Precision
+
+This scenario is for when you want to quantize selected MatMul groups with a different quant type than the int4 body, independently from the base quantization algorithm.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default matmul_mixed_precision=last_matmul:int8
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=k_quant matmul_mixed_precision=last_matmul:int8,mixed_layers:int8
+```
+
+`matmul_mixed_precision` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
+
+- `last_matmul`: The last MatMul, such as `/lm_head/MatMul` (the single largest, output-sensitive weight).
+- `mixed_layers`: The most quantization-sensitive layers, using the mixed strategy from llama.cpp.
+- `linear_attn`: Linear-attention projections and their MLPs, for hybrid attention models.
+
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `matmul_mixed_precision` is orthogonal to `algo_config` and can be combined with any base method.
 
 ##### Use QDQ Pattern for Quantization
 
@@ -451,16 +520,30 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This option is not supported with `-p int8` because 8-bit `MatMulNBits` is QOperator-only.
 
-##### Use 8 Bits Quantization in QMoE
+##### Choose the MoE Quantization Type in QMoE
 
-This scenario is for when you want to use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values are `int4` (default), `int8`, and `mxfp4`:
+
+- `int4`: 4-bit integer QMoE weights (`expert_weight_bits=4`, `quant_type="int"`).
+- `int8`: 8-bit integer QMoE weights (`expert_weight_bits=8`, `quant_type="int"`).
+- `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` with symmetric INT4 quantization, and is only supported on the CUDA EP.
+
+This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
 
 ```bash
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+# From wheel (8-bit integer QMoE):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
 
-# From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+# From source (8-bit integer QMoE):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
+```
+
+```bash
+# From wheel (MXFP4 QMoE on CUDA):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+
+# From source (MXFP4 QMoE on CUDA):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 ```
 
 #### FP32 I/O for WebGPU EP
