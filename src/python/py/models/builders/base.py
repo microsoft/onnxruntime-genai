@@ -591,7 +591,6 @@ class Model:
             self.extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
             and not self.exclude_embeds
             and not self.exclude_lm_head
-            and not self.prune_lm_head
         )
 
         # Determine if embeddings and lm_head will be quantized or not.
