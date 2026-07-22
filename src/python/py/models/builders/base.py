@@ -62,7 +62,7 @@ class Model:
         self.num_attn_heads = config.num_attention_heads
         self.head_size = (
             config.head_dim
-            if hasattr(config, "head_dim") and config.head_dim is not None
+            if getattr(config, "head_dim", None) is not None
             else config.hidden_size // config.num_attention_heads
         )
         self.num_layers = (
@@ -75,7 +75,7 @@ class Model:
         self.vocab_size = config.vocab_size
         self.activation = (
             config.hidden_activation
-            if hasattr(config, "hidden_activation") and config.hidden_activation is not None
+            if getattr(config, "hidden_activation", None) is not None
             else config.hidden_act
         )
 
@@ -252,11 +252,11 @@ class Model:
             "mscale": 1,                                     # Magnitude scaling factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
             "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
         }
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+        if getattr(config, "rope_scaling", None) is not None:
             self.make_rope_init(config)
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
-        attn_softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") and config.attn_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
+        attn_softcap = config.attn_logit_softcapping if getattr(config, "attn_logit_softcapping", None) is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
         self.attention_attrs = {
             # Attributes for MHA, GQA, etc:
             "q_path": "",                                    # Q path to attention
@@ -337,7 +337,7 @@ class Model:
         }
 
         # LM head-specific variables
-        lm_head_softcap = config.final_logit_softcapping if hasattr(config, "final_logit_softcapping") and config.final_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
+        lm_head_softcap = config.final_logit_softcapping if getattr(config, "final_logit_softcapping", None) is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
         self.lm_head_attrs = {
             "scale": 1,                                      # Scale value to multiply output of LM head by
             "mask": None,                                    # LM head mask for tokens in the vocabulary
@@ -717,11 +717,11 @@ class Model:
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
 
-        bos_token_id = config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1
+        bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
         eos_token_id = config.eos_token_id
         pad_token_id = (
             config.pad_token_id
-            if hasattr(config, "pad_token_id") and config.pad_token_id is not None
+            if getattr(config, "pad_token_id", None) is not None
             else config.eos_token_id[0]
             if isinstance(config.eos_token_id, list)
             else config.eos_token_id
@@ -762,8 +762,8 @@ class Model:
                 "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k is not None else 50,
-                "top_p": config.top_p if hasattr(config, "top_p") and config.top_p is not None else 1.0,
+                "top_k": config.top_k if getattr(config, "top_k", None) is not None else 50,
+                "top_p": config.top_p if getattr(config, "top_p", None) is not None else 1.0,
             },
         }
 
@@ -1480,7 +1480,7 @@ class Model:
             self.make_initializer(qzeros, zeros)
             inputs.append(zeros)
 
-        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
+        if getattr(matmul, "g_idx", None) is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
             self.make_initializer(matmul.g_idx, g_idx, to=ir.DataType.INT32)
             inputs.append(g_idx)
@@ -1527,7 +1527,7 @@ class Model:
 
         dequantize_inputs = [qweight, scales]
 
-        if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
+        if getattr(quantized_op, "qzeros", None) is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             self.make_initializer(
                 ir.PackedTensor(quantized_op.qzeros, self.onnx_dtype, shape=scales_target_shape),
