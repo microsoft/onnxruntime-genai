@@ -165,6 +165,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"AMDGPU", AMDGPUExecutionProvider::AppendExecutionProvider},
       {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},
@@ -172,7 +173,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       {"OpenVINO", OpenVINOExecutionProvider::AppendExecutionProvider},
       {"RyzenAI", RyzenAIExecutionProvider::AppendExecutionProvider},
       {"QNN", QNNExecutionProvider::AppendExecutionProvider},
-      {"AMDGPU", AMDGPUExecutionProvider::AppendExecutionProvider},
       {"VitisAI", VitisAIExecutionProvider::AppendExecutionProvider},
       {"WebGPU", WebGPUExecutionProvider::AppendExecutionProvider},
   };
