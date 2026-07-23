@@ -90,6 +90,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return *ort_allocator_;
   }
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Cuda",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }
@@ -177,13 +184,6 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     cudaMemGetInfo(&free_bytes, &total_bytes);
-  }
-
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    return OrtMemoryInfo::Create("Cuda",
-                                 OrtAllocatorType::OrtDeviceAllocator,
-                                 0,
-                                 OrtMemType::OrtMemTypeDefault);
   }
 };
 
