@@ -217,9 +217,12 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     # Graph capture is a generic model option and maps to EP-specific builder flags.
     if enable_graph_capture and device == "cuda":
         extra_options += ["enable_cuda_graph=true"]
-    if enable_graph_capture and device == "dml" and ("qwen" not in model_name.lower() or "qwen" not in input_path.lower()):
-        # Disable DML graph capture for Qwen-2.5 specifically
-        extra_options += ["enable_dml_graph=true"]
+    if enable_graph_capture and device == "dml":
+        if "qwen" in model_name.lower() or "qwen" in input_path.lower():
+            # Disable DML graph capture for Qwen-2.5 specifically
+            extra_options += ["enable_dml_graph=false"]
+        else:
+            extra_options += ["enable_dml_graph=true"]
     if enable_graph_capture and device == "webgpu":
         extra_options += ["enable_webgpu_graph=true"]
     if len(extra_options) > 1:
