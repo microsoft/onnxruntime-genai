@@ -37,6 +37,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          bool /*disable_graph_capture*/) {
   SetStaticPaddingConfig(session_options, config);
 
+  // Umbrella-level hint: the model architecture drives the EP's backend routing.
+  session_options.AddConfigEntry("ep.amdgpuexecutionprovider.model_arch", config.model.type.c_str());
+
   AppendExecutionProviderV2(session_options, provider_options,
                             DeviceType::AMDGPU, "AMDGPUExecutionProvider");
 
