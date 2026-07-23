@@ -75,15 +75,15 @@ class ScopedEnvVar {
 };
 
 void ExpectOptOutEnv(const char* value, bool expected) {
-  ScopedEnvVar opt_out_guard{"ORT_TELEMETRY_DISABLED"};
+  ScopedEnvVar opt_out_guard{"ORT_DISABLE_TELEMETRY"};
 
   if (value != nullptr) {
-    SetEnv("ORT_TELEMETRY_DISABLED", value);
+    SetEnv("ORT_DISABLE_TELEMETRY", value);
   } else {
-    UnsetEnv("ORT_TELEMETRY_DISABLED");
+    UnsetEnv("ORT_DISABLE_TELEMETRY");
   }
 
-  EXPECT_EQ(Generators::TelemetryInternal::IsTelemetryDisabledByEnvVar(), expected);
+  EXPECT_EQ(Generators::TelemetryInternal::IsTelemetryDisabledByEnvironment(), expected);
 }
 
 }  // namespace

@@ -102,10 +102,10 @@ inline bool IsRunningUnitTests() {
   return IsCiValueTruthy(GetTelemetryEnv("ORT_RUNNING_UNIT_TESTS"));
 }
 
-// ORT_TELEMETRY_DISABLED disables non-essential GenAI telemetry while still allowing
-// ProcessInfo outside CI/unit tests.
-inline bool IsTelemetryDisabledByEnvVar() {
-  return IsEnvTruthy(GetTelemetryEnv("ORT_TELEMETRY_DISABLED"));
+// ORT_DISABLE_TELEMETRY is a process-lifetime full opt-out. The telemetry provider latches it
+// before initialization so no uploader, event, or persistent device identifier is created.
+inline bool IsTelemetryDisabledByEnvironment() {
+  return IsEnvTruthy(GetTelemetryEnv("ORT_DISABLE_TELEMETRY"));
 }
 
 }  // namespace Generators::TelemetryInternal

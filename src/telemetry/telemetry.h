@@ -9,7 +9,7 @@
 //
 // Telemetry controls (in priority order):
 //   1. Compile-time:  ENABLE_TELEMETRY=OFF (telemetry SDK not linked; API calls are no-ops)
-//   2. Environment:   ORT_TELEMETRY_DISABLED=1 (disables non-essential events)
+//   2. Environment:   ORT_DISABLE_TELEMETRY=1 (irreversibly disables telemetry for this process)
 //   3. Runtime API:   OgaSetTelemetryEnabled(false) (disables non-essential events dynamically)
 
 #pragma once
@@ -128,7 +128,8 @@ class GenAiTelemetry {
   // and -- when require_enabled is true -- enabled); otherwise returns an empty lock. Initialize and
   // Shutdown take the same mutex exclusively, so the logger cannot be torn down during LogEvent while
   // independent logging threads may proceed concurrently, matching ORT and 1DS ILogger's concurrent
-  // ActiveLoggerCall synchronization. ProcessInfo passes require_enabled=false.
+  // ActiveLoggerCall synchronization. ProcessInfo passes require_enabled=false so runtime API
+  // suppression can leave the one-shot event enabled; full process suppression creates no logger.
   std::shared_lock<std::shared_mutex> LockForLogging(bool require_enabled = true);
 
   // Runs fn under LockForLogging(require_enabled) with a catch-all guard, so telemetry emission
@@ -150,7 +151,7 @@ class GenAiTelemetry {
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::atomic<bool> enabled_{true};
-  std::atomic<bool> env_disabled_{false};
+  std::atomic<bool> telemetry_disabled_{false};
   std::atomic<bool> initialized_{false};
   std::atomic<bool> process_info_logged_{false};
 #if defined(__ANDROID__)

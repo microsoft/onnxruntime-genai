@@ -140,19 +140,15 @@ void GenAiTelemetry::Initialize() {
   std::unique_lock<std::shared_mutex> lock(mutex_);
   if (initialized_.load()) return;
 
-  // In a CI / build-pipeline environment, or inside onnxruntime-genai's own unit-test binaries,
-  // collect nothing: do not initialize the SDK or write any identifier, so not even ProcessInfo is
-  // emitted.
-  if (TelemetryInternal::IsRunningInCI() || TelemetryInternal::IsRunningUnitTests()) {
+  // Full suppression is process-wide and irreversible: never create the uploader, emit an event, or
+  // persist a device id. Latching also covers later GenAI reinitialization after an environment change.
+  if (telemetry_disabled_.load() ||
+      TelemetryInternal::IsRunningInCI() ||
+      TelemetryInternal::IsRunningUnitTests() ||
+      TelemetryInternal::IsTelemetryDisabledByEnvironment()) {
+    telemetry_disabled_.store(true);
     enabled_.store(false);
     return;
-  }
-
-  // ORT_TELEMETRY_DISABLED suppresses non-essential lifecycle events. The SDK still initializes
-  // outside CI/testing so the one-shot ProcessInfo event can report device counting metadata.
-  if (TelemetryInternal::IsTelemetryDisabledByEnvVar()) {
-    env_disabled_.store(true);
-    enabled_.store(false);
   }
 
 #if defined(__ANDROID__)
@@ -306,7 +302,9 @@ bool GenAiTelemetry::IsEnabled() const {
 }
 
 void GenAiTelemetry::SetEnabled(bool enabled) {
-  enabled_.store(enabled && !env_disabled_.load());
+  if (!telemetry_disabled_.load()) {
+    enabled_.store(enabled);
+  }
 }
 
 uint32_t GenAiTelemetry::AllocateSessionId() {
@@ -327,8 +325,8 @@ void GenAiTelemetry::LogProcessInfo() {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   bool emitted = false;
   bool warn_device_id_fallback = false;
-  // require_enabled=false: ProcessInfo emits whenever telemetry is initialized (outside CI/testing),
-  // even when ORT_TELEMETRY_DISABLED or SetEnabled(false) has disabled detailed lifecycle events.
+  // Runtime API suppression leaves the uploader live, so ProcessInfo still fires. Full process
+  // suppression never initializes a logger and returns here.
   RunLocked([&] {
     // Only log once per process, and only mark it logged while telemetry is live.
     bool expected = false;
