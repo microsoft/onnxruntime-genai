@@ -250,6 +250,10 @@ struct PyGenerator {
     generator_->SetInputs(named_tensors);
   }
 
+  void AppendInputs(OgaNamedTensors& named_tensors) {
+    generator_->AppendInputs(named_tensors);
+  }
+
   void AppendTokens(OgaTensor& tokens) {
     generator_->AppendTokens(ToSpan<int32_t>(tokens));
   }
@@ -494,6 +498,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)
+      .def("append_inputs", &PyGenerator::AppendInputs)
       .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))

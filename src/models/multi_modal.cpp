@@ -638,6 +638,19 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
   }
 }
 
+void EmbeddingState::ResetImageInputs(const int64_t num_images, const int64_t num_image_tokens) {
+  num_image_tokens_ = num_image_tokens;
+  if (!image_features_) {
+    image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
+                                                           model_.config_->model.embedding.inputs.image_features,
+                                                           num_images, num_image_tokens_);
+    image_features_->Add();
+    return;
+  }
+
+  image_features_->Reset(num_images, num_image_tokens_);
+}
+
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
   if (model_.vision_session_) image_features_->Update(is_prompt);
@@ -778,6 +791,55 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
 }
 
+void MultiModalPipelineState::SetExtraInputsForAppend(const std::vector<ExtraInput>& extra_inputs, int64_t current_length) {
+  if (model_.config_->model.type != "qwen3_5" && model_.config_->model.type != "qwen3_5_moe") {
+    throw std::runtime_error("AppendInputs with images is currently only supported for qwen3_5 and qwen3_5_moe.");
+  }
+  if (params_->search.batch_size != 1 || params_->search.num_beams != 1) {
+    throw std::runtime_error("AppendInputs with images currently supports only batch_size=1 and num_beams=1.");
+  }
+
+  num_image_tokens_ = GetNumImageTokens(extra_inputs);
+  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+
+  if (num_audio_tokens_ > 0) {
+    throw std::runtime_error("AppendInputs with audio is not supported.");
+  }
+
+  if (num_image_tokens_ <= 0) {
+    pending_multimodal_append_ = false;
+    return;
+  }
+
+  if (!model_.vision_session_) {
+    throw std::runtime_error("AppendInputs received image inputs but the model has no vision session.");
+  }
+
+  vision_state_ = CreateVisionState(model_, *params_);
+  vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
+  embedding_state_->ResetImageInputs(num_images_, num_image_tokens_);
+
+  if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
+    std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
+
+    for (const auto& input : extra_inputs) {
+      if (input.name == Config::Defaults::ImageGridThwName) {
+        img_grid = input.tensor;
+      } else if (input.name == "video_grid_thw") {
+        vid_grid = input.tensor;
+      } else if (input.name == "second_per_grid_ts") {
+        sec_grid = input.tensor;
+      }
+    }
+
+    qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
+    qwen_pos_inputs->PrepareMultimodalAppend(current_length);
+  }
+
+  pending_multimodal_append_ = true;
+}
+
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
@@ -789,10 +851,12 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
 
-  embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
+  const bool run_multimodal_prefill = is_prompt_ || pending_multimodal_append_;
+
+  embedding_state_->UpdateInputsOutputs(next_tokens, run_multimodal_prefill);
   decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 
-  if (is_prompt_) {
+  if (run_multimodal_prefill) {
     if (num_image_tokens_ > 0 && vision_state_) {
       vision_state_->Run(current_length, next_tokens, next_indices);
     }
@@ -824,6 +888,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
+    pending_multimodal_append_ = false;
     if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
     if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
