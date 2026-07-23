@@ -694,10 +694,7 @@ def get_args():
     parser.add_argument(
         "--disable_telemetry",
         action="store_true",
-        help=(
-            "Disable detailed anonymous usage telemetry; a device-id heartbeat remains enabled outside CI/CD "
-            "(equivalent to setting ORT_DISABLE_TELEMETRY=1)."
-        ),
+        help="Disable all telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
@@ -801,8 +798,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    # Honor --disable_telemetry before create_model constructs the telemetry
-    # singleton, so a disabled run records no detailed events.
+    # Honor --disable_telemetry before create_model constructs the telemetry singleton.
     if args.disable_telemetry:
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     extra_options = parse_extra_options(args.extra_options, args.precision, args.execution_provider)
