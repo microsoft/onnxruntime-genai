@@ -1,8 +1,7 @@
 #include "sequences.h"
-#include <mutex>
 #include <random>
+#include <stdexcept>
 #include "beam_search_scorer.h"
-#include "logging.h"
 #pragma once
 
 namespace Generators {
@@ -30,21 +29,12 @@ struct Search : LeakChecked<Search> {
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
-  // Bans tokens that would complete an already-seen n-gram of size ngram_size.
-  // Backends that don't implement it (e.g. CUDA) fall back to this default, which
-  // warns once if the option is set so the request is not silently ignored. Defined
-  // inline (like the other Search defaults) so it links into the standalone CUDA
-  // shared library, which does not compile search.cpp.
+  // This is inline because the standalone CUDA shared library does not compile search.cpp.
   virtual void ApplyNoRepeatNgram(int ngram_size) {
     if (ngram_size <= 0)
       return;
 
-    static std::once_flag warn_once;
-    std::call_once(warn_once, [] {
-      Log("warning",
-          "no_repeat_ngram_size is only implemented for CPU search and is ignored "
-          "on this backend.");
-    });
+    throw std::runtime_error("no_repeat_ngram_size is only supported for CPU search");
   }
 
   // Set user input tokens
