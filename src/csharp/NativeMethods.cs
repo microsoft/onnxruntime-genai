@@ -342,6 +342,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern void OgaShutdown();
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaSetTelemetryEnabled(bool enabled);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateMultiModalProcessor(IntPtr /* const OgaModel* */ model,
                                                                                   out IntPtr /* OgaMultiModalProcessor** */ processor);
 

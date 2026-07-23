@@ -91,6 +91,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         private static int _epLibrariesRegistered = 0;
 
+        [Fact(DisplayName = "TestTelemetryControl")]
+        public void TestTelemetryControl()
+        {
+            Utils.DisableTelemetryEvents();
+            Utils.EnableTelemetryEvents();
+        }
+
         // Execution providers that can be loaded as plugin libraries at test time, mapped to the
         // platform-independent stem of their library file. The full file name is built as
         // "<prefix><stem><suffix>", e.g. on Windows "webgpu" -> "onnxruntime_providers_webgpu.dll".

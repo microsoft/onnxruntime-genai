@@ -428,6 +428,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 + (void)shutdown;
 
+/**
+ * Enable or disable non-essential ONNX Runtime GenAI telemetry events.
+ *
+ * @param enabled Whether telemetry events are enabled.
+ */
++ (void)setTelemetryEnabled:(BOOL)enabled;
+
 @end
 
 @interface OGATensor : NSObject

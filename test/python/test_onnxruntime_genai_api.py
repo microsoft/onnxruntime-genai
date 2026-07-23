@@ -60,6 +60,11 @@ def test_config(test_data_path):
     config.append_provider("slide rule")
 
 
+def test_telemetry_control():
+    og.disable_telemetry_events()
+    og.enable_telemetry_events()
+
+
 def test_log_callback(test_data_path):
     callback_invoked = False
 

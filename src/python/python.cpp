@@ -688,6 +688,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
+  m.def("enable_telemetry_events", []() { OgaSetTelemetryEnabled(true); }, "Enable non-essential ONNX Runtime GenAI telemetry events.");
+  m.def("disable_telemetry_events", []() { OgaSetTelemetryEnabled(false); }, "Disable non-essential ONNX Runtime GenAI telemetry events.");
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
