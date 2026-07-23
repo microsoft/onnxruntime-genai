@@ -343,7 +343,7 @@ struct OgaTokenizer : OgaAbstract {
   }
 
   // Tool-calling and reasoning token IDs (bot/eot/bor/eor).
-  // Returns -1 if the model does not define the token.
+  // Throws if the model does not define the token.
   int32_t GetBotTokenId() const {
     int32_t token_id;
     OgaCheckResult(OgaTokenizerGetBotTokenId(this, &token_id));

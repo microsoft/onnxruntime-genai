@@ -729,7 +729,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * \brief Return the BOT (beginning of tool call) token id, or -1 if the model does not define one.
+ * \brief Return the BOT (beginning of tool call) token id. Returns an error if the model does not define one.
  * \param[in] tokenizer The tokenizer to read from
  * \param[out] token_id The BOT token id
  * \return OgaResult containing the error message if the call fails.
@@ -737,7 +737,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * \brief Return the EOT (end of tool call) token id, or -1 if the model does not define one.
+ * \brief Return the EOT (end of tool call) token id. Returns an error if the model does not define one.
  * \param[in] tokenizer The tokenizer to read from
  * \param[out] token_id The EOT token id
  * \return OgaResult containing the error message if the call fails.
@@ -745,7 +745,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * \brief Return the BOR (beginning of reasoning) token id, or -1 if the model does not define one.
+ * \brief Return the BOR (beginning of reasoning) token id. Returns an error if the model does not define one.
  * \param[in] tokenizer The tokenizer to read from
  * \param[out] token_id The BOR token id
  * \return OgaResult containing the error message if the call fails.
@@ -753,7 +753,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer*
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * \brief Return the EOR (end of reasoning) token id, or -1 if the model does not define one.
+ * \brief Return the EOR (end of reasoning) token id. Returns an error if the model does not define one.
  * \param[in] tokenizer The tokenizer to read from
  * \param[out] token_id The EOR token id
  * \return OgaResult containing the error message if the call fails.

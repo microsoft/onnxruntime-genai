@@ -168,22 +168,22 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (int32_t)getPadTokenId:(NSError**)error;
 
 /**
- * Return the BOT (beginning of tool call) token ID, or -1 if not defined.
+ * Return the BOT (beginning of tool call) token ID. Returns an error if not defined.
  */
 - (int32_t)getBotTokenId:(NSError**)error;
 
 /**
- * Return the EOT (end of tool call) token ID, or -1 if not defined.
+ * Return the EOT (end of tool call) token ID. Returns an error if not defined.
  */
 - (int32_t)getEotTokenId:(NSError**)error;
 
 /**
- * Return the BOR (beginning of reasoning) token ID, or -1 if not defined.
+ * Return the BOR (beginning of reasoning) token ID. Returns an error if not defined.
  */
 - (int32_t)getBorTokenId:(NSError**)error;
 
 /**
- * Return the EOR (end of reasoning) token ID, or -1 if not defined.
+ * Return the EOR (end of reasoning) token ID. Returns an error if not defined.
  */
 - (int32_t)getEorTokenId:(NSError**)error;
 
