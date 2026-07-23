@@ -2,12 +2,10 @@
 # Licensed under the MIT License.
 
 import argparse
-import json
 import time
 
 import onnxruntime_genai as og
-from common import (get_config, get_ep_args, get_generator_params_args, get_search_options,
-                    register_ep, set_logger)
+from common import get_config, get_ep_args, get_generator_params_args, get_search_options, register_ep, set_logger
 
 
 def main(args):
@@ -30,7 +28,7 @@ def main(args):
         else:
             text = input("Input: ")
             prompts = [text]
-    setattr(args, "batch_size", len(prompts))
+    args.batch_size = len(prompts)
     search_config = {"batch_size": args.batch_size, "chunk_size": args.chunk_size, "num_beams": args.num_beams}
     config = get_config(
         args.model_path, args.execution_provider, args.ep_path, ep_options={}, search_options=search_config
@@ -90,13 +88,51 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for ORT GenAI")
-    parser.add_argument("-m", "--model_path", type=str, required=True, help="ONNX model folder path (must contain genai_config.json and model.onnx)")
-    parser.add_argument("-v", "--verbose", action="store_true", default=False, help="Print verbose output and timing information. Defaults to false")
-    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
-    parser.add_argument("-pr", "--prompts", nargs="*", required=False, help="Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts")
-    parser.add_argument("-ct", "--chat_template", type=str, default="", help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.")
-    parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
+    parser = argparse.ArgumentParser(
+        argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for ORT GenAI"
+    )
+    parser.add_argument(
+        "-m",
+        "--model_path",
+        type=str,
+        required=True,
+        help="ONNX model folder path (must contain genai_config.json and model.onnx)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print verbose output and timing information. Defaults to false",
+    )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Dump input and output tensors with debug mode. Defaults to false",
+    )
+    parser.add_argument(
+        "-pr",
+        "--prompts",
+        nargs="*",
+        required=False,
+        help="Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts",
+    )
+    parser.add_argument(
+        "-ct",
+        "--chat_template",
+        type=str,
+        default="",
+        help="Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.",
+    )
+    parser.add_argument(
+        "--non_interactive",
+        action=argparse.BooleanOptionalAction,
+        required=False,
+        default=False,
+        help="Non-interactive mode, mainly for CI usage",
+    )
 
     get_ep_args(parser)
     get_generator_params_args(parser)

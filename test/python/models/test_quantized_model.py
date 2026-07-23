@@ -229,18 +229,12 @@ def test_normalize_vlm_weight_name_keeps_non_vision_keys():
 
 def test_normalize_vlm_weight_name_strips_language_model_prefix():
     """'model.language_model.*' must be rewritten to 'model.*'."""
-    assert (
-        normalize_vlm_weight_name("model.language_model.embed_tokens.weight")
-        == "model.embed_tokens.weight"
-    )
+    assert normalize_vlm_weight_name("model.language_model.embed_tokens.weight") == "model.embed_tokens.weight"
     assert (
         normalize_vlm_weight_name("model.language_model.layers.0.self_attn.q_proj.weight")
         == "model.layers.0.self_attn.q_proj.weight"
     )
-    assert (
-        normalize_vlm_weight_name("model.language_model.norm.weight")
-        == "model.norm.weight"
-    )
+    assert normalize_vlm_weight_name("model.language_model.norm.weight") == "model.norm.weight"
 
 
 def test_normalize_vlm_weight_name_quark_scale_renamed():

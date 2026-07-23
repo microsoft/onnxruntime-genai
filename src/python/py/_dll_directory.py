@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import ctypes
+import glob
+import importlib.util
 import os
 import sys
 
@@ -25,15 +28,11 @@ def add_onnxruntime_dependency(package_id: str):
     so that they can be found by the dynamic linker.
     """
     if _is_windows():
-        import ctypes
-
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         ort_handle = kernel32.GetModuleHandleW("onnxruntime.dll")
         # Only manually load the dlls if onnxruntime.dll is not already loaded.
         # This allows WinML to use its packed dlls.
         if not ort_handle:
-            import importlib.util
-
             ort_package = importlib.util.find_spec("onnxruntime")
             if not ort_package:
                 raise ImportError("Could not find the onnxruntime package.")
@@ -56,10 +55,6 @@ def add_onnxruntime_dependency(package_id: str):
                 _ = ctypes.CDLL(ort_path)
 
     elif _is_linux() or _is_macos():
-        import ctypes
-        import glob
-        import importlib.util
-
         ort_package = importlib.util.find_spec("onnxruntime")
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")

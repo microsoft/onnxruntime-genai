@@ -1,14 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+import importlib
+import importlib.util
 import logging
 import os
 import subprocess
 import sys
-
-import importlib
-import importlib.util
-
 
 # Execution providers shipped as separate plug-in libraries that must be registered with
 # ONNX Runtime before use. Maps the GenAI provider name to the Python package that exposes
@@ -66,7 +64,7 @@ def register_plugin_ep(provider_name: str, log: logging.Logger | None = None) ->
         if log:
             log.info("Registered plug-in EP '%s' from package '%s'.", provider_name, package_name)
         return True
-    except Exception as exc:  # noqa: BLE001 - registration is best-effort for optional EPs
+    except Exception as exc:
         if log:
             log.warning("Failed to register plug-in EP '%s': %s", provider_name, exc)
         return False
@@ -101,9 +99,11 @@ def run_subprocess(
     capture: bool = False,
     dll_path: str | bytes | os.PathLike | None = None,
     shell: bool = False,
-    env: dict[str, str] = {},
+    env: dict[str, str] | None = None,
     log: logging.Logger | None = None,
 ):
+    if env is None:
+        env = {}
     if log:
         log.info(f"Running subprocess in '{cwd or os.getcwd()}'\n{args}")
     user_env = os.environ.copy()
@@ -129,7 +129,7 @@ def run_subprocess(
     )
 
     if log:
-        log.debug("Subprocess completed. Return code=" + str(completed_process.returncode))
+        log.debug("Subprocess completed. Return code=%s", completed_process.returncode)
     return completed_process
 
 
@@ -259,8 +259,7 @@ def download_models(download_path, precision, device, log):
             output_path = os.path.join(download_path, model_name, precision, device)
             log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
             if not os.path.exists(output_path):
-                download_model(None, input_path, output_path, precision, device, one_layer,
-                               graph_capture)
+                download_model(None, input_path, output_path, precision, device, one_layer, graph_capture)
                 output_paths.append(output_path)
         except Exception as e:
             log.warning(f"Error: {e}. Skipping CI model.")
@@ -271,8 +270,7 @@ def download_models(download_path, precision, device, log):
         if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
             continue
         try:
-            from huggingface_hub import model_info
-
+            model_info = importlib.import_module("huggingface_hub").model_info
             model_info(hf_name)
         except ImportError:
             log.warning("huggingface_hub is not installed. Skipping downloading hugging face models.")
@@ -285,8 +283,7 @@ def download_models(download_path, precision, device, log):
         log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
 
         if not os.path.exists(output_path):
-            download_model(hf_name, "", output_path, precision, device, one_layer,
-                           graph_capture)
+            download_model(hf_name, "", output_path, precision, device, one_layer, graph_capture)
             output_paths.append(output_path)
 
     log.info(f"Successfully downloaded {len(output_paths)} models")
