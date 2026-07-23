@@ -151,8 +151,7 @@ def get_model_paths():
         # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
         "phi-4-mini": ("microsoft/Phi-4-mini-instruct", True, False),
-        "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False, False),
-        "qwen-2.5-0.5b-graph": ("Qwen/Qwen2.5-0.5B-Instruct", False, True),
+        "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False, True),
         "lfm2.5-350m": ("LiquidAI/LFM2.5-350M", False, False),
         "lfm2.5-1.2b": ("LiquidAI/LFM2.5-1.2B-Instruct", False, False),
     }
