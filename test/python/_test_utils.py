@@ -230,19 +230,6 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     run_subprocess(command).check_returncode()
 
 
-# Devices that support graph capture. Models with enable_graph_capture=True
-# are only built for these devices.
-#
-# CUDA is intentionally excluded: the Windows CUDA CI consistently fails to
-# download this new model from Hugging Face. Will re-add "cuda" once the
-# CI download issue is resolved.
-#
-# Note: nvtensorrtrtx is included here for model generation but does not have
-# dedicated CI coverage yet — tests using NvTensorRtRtx models are guarded with
-# GTEST_SKIP when the model artifacts are not present.
-_GRAPH_CAPTURE_DEVICES = {"webgpu", "dml", "nvtensorrtrtx"}
-
-
 def download_models(download_path, precision, device, log):
     log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
 
@@ -253,8 +240,6 @@ def download_models(download_path, precision, device, log):
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer, graph_capture) in ci_paths.items():
-        if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
-            continue
         try:
             output_path = os.path.join(download_path, model_name, precision, device)
             log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
@@ -267,8 +252,6 @@ def download_models(download_path, precision, device, log):
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, (hf_name, one_layer, graph_capture) in hf_paths.items():
-        if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
-            continue
         try:
             model_info = importlib.import_module("huggingface_hub").model_info
             model_info(hf_name)
