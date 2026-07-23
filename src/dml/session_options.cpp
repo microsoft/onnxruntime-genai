@@ -11,7 +11,7 @@ namespace Generators::DMLExecutionProvider {
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
-                                         const Config& /*config*/,
+                                         const Config& config,
                                          bool disable_graph_capture) {
 #if USE_DML
   if (!GetDmlInterface()) {
