@@ -154,6 +154,7 @@ def check_extra_options(
         "exclude_lm_head",
         "include_hidden_states",
         "enable_cuda_graph",
+        "enable_dml_graph",
         "enable_webgpu_graph",
         "use_8bits_moe",
         "use_qdq",
@@ -236,12 +237,6 @@ def check_extra_options(
 
     if execution_provider == "NvTensorRtRtx":
         extra_options["use_qdq"] = True
-
-    if extra_options.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
-        print(
-            "WARNING: enable_webgpu_graph is only supported with the WebGPU EP. Disabling enable_webgpu_graph."
-        )
-        extra_options["enable_webgpu_graph"] = False
 
     if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
@@ -670,6 +665,9 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                enable_dml_graph = Enable DML graph capture during inference. Default is true.
+                    If enabled, the model structure will be optimized for DML graph execution.
+                    DML EP uses graph capture by default for best performance.
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.

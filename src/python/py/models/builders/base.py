@@ -117,18 +117,17 @@ class Model:
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",
             },
-            "dml": {},
+            "dml": {
+                "enable_graph_capture": "1" if extra_options.get("enable_dml_graph", True) else "0"
+            },
             "webgpu": {
                 "enableGraphCapture": "1" if extra_options.get("enable_webgpu_graph", False) else "0",
                 "validationMode": "disabled" if extra_options.get("enable_webgpu_graph", False) else "basic",
             },
-            "trt-rtx": {"enable_cuda_graph": "1"},
+            "trt-rtx": {
+                "enable_cuda_graph": "1"
+            },
         }
-        self.graph_capture = (
-            extra_options.get("enable_cuda_graph", False) or
-            extra_options.get("enable_webgpu_graph", False) or
-            self.ep in {"dml", "trt-rtx"}
-        )
         # Initialize EP-specific expansions
         self.make_ep_expansions_init()
 
