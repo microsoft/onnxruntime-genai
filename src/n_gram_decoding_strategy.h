@@ -37,8 +37,6 @@ inline void ValidateNGramDecodingCapabilities(
   if (capabilities.num_return_sequences != 1)
     throw std::runtime_error(
         "N-gram decoding requires num_return_sequences=1 in this release.");
-  if (capabilities.uses_guidance)
-    throw std::runtime_error("N-gram decoding does not support guidance in this release.");
   if (!capabilities.is_plain_decoder_only_text)
     throw std::runtime_error(
         "N-gram decoding requires a plain decoder-only text model in this release.");

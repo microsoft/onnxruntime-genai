@@ -3,7 +3,6 @@
 #include "base_speculative_strategy.h"
 
 #include <algorithm>
-#include <deque>
 #include <stdexcept>
 #include <vector>
 
@@ -112,7 +111,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     // predicts a grammar-masked token; committing it may force a span of fast-forward tokens, which
     // we inject straight into the proposal (counted in K) so the target verifies them in the same
     // batched pass. Anything past K carries to the next round. 
-    std::deque<int32_t> ff_queue(GuidanceFFCarry().begin(), GuidanceFFCarry().end());
+    auto ff_queue = CreateGuidanceFFQueue();
     // logits for position 0
     std::vector<float> pending(spec_state_.draft_pending_logits().begin(),
                                spec_state_.draft_pending_logits().end());
@@ -134,9 +133,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
                             sampled, g.rng_, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
-          int32_t c = chosen;
-          draft_grammar->CommitTokens({&c, 1});
-          for (int32_t f : draft_grammar->GetFFTokens(0)) ff_queue.push_back(f);
+          CommitGuidanceProposalToken(*draft_grammar, chosen, ff_queue);
         }
       }
       if (penalty_processor.IsActive()) prefix.push_back(proposal.tokens[i]);

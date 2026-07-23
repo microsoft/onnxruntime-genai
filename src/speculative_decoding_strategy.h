@@ -18,6 +18,7 @@ struct Generator;
 struct Model;
 struct State;
 struct SpeculativeStats;
+struct ConstrainedLogitsProcessor;
 
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
@@ -112,9 +113,12 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Runtime vocab-size sanity check.
   bool vocab_check_done_{false};
 
-  // Grammar-forced tokens carried from a prior guidance round, read by Propose so it can place them
-  // first in the verify batch (the grammar is already advanced past them).
-  const std::deque<int32_t>& GuidanceFFCarry() const { return ff_carry_; }
+  // Proposal-side fast-forward composition shared by draft-model and n-gram proposers.
+  std::deque<int32_t> CreateGuidanceFFQueue() const;
+  static void CommitGuidanceProposalToken(
+      ConstrainedLogitsProcessor& grammar,
+      int32_t token,
+      std::deque<int32_t>& ff_queue);
 
  private:
   // Each Step emits one token. RunRound does a whole round's compute up front and buffers the
