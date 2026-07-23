@@ -111,6 +111,8 @@ def save_results(args, results, filename, print_memory_usage=False):
         "Tokenization Latency (ms)",
         "Prompt Processing Throughput (tps)",
         "Prompt Processing Latency (ms)",
+        "Time to First Token (ms)",
+        "Time to First Token StdDev (ms)",
         "Token Generation Throughput (tps)",
         "Token Generation Latency (ms)",
         "Sampling Throughput (tps)",
@@ -153,6 +155,8 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
         record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
+        record.metrics.customized["time_to_first_token_ms"] = row["Time to First Token (ms)"]
+        record.metrics.customized["time_to_first_token_stddev_ms"] = row["Time to First Token StdDev (ms)"]
         record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
         record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
@@ -418,6 +422,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     avg_prompt_latency_ms = avg_prompt_latency_s * 1000
     avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
     avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
+
+    # Time to first token = prompt prefill + first-token sampling
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    avg_ttft_ms = float(np.mean(ttft_times)) * 1000
+    std_ttft_ms = float(np.std(ttft_times)) * 1000
+    print(f"Average Time to First Token: {avg_ttft_ms} ms")
+    print(f"Time to First Token StdDev: {std_ttft_ms} ms")
     print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
     print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
@@ -456,6 +467,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         avg_tokenization_latency_ms,
         avg_per_token_prompt_thrpt,
         avg_per_token_prompt_latency_ms,
+        avg_ttft_ms,
+        std_ttft_ms,
         avg_token_gen_thrpt,
         avg_token_gen_latency_ms,
         avg_sampling_thrpt,
@@ -476,6 +489,14 @@ def main(args):
                 "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
             )
 
+        if args.execution_provider == "webgpu":
+            raise ValueError(
+                "Cannot use --ep_library_path with --execution_provider=webgpu. "
+                "WebGPU EP is a plugin package and should be installed via "
+                "'pip install onnxruntime-ep-webgpu', then selected with '-e webgpu' "
+                "without --ep_library_path."
+            )
+
         if args.verbose:
             print(f"Registering execution provider library: {args.ep_library_path}")
 
@@ -494,6 +515,19 @@ def main(args):
         og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
         if args.verbose:
             print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
+    elif args.execution_provider == "webgpu":
+        print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
+        try:
+            import onnxruntime_ep_webgpu as webgpu_ep
+        except ImportError as exc:
+            raise ValueError(
+                "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "
+                "Install it with: pip install onnxruntime-ep-webgpu"
+            ) from exc
+
+        provider_registration_name = webgpu_ep.get_ep_name()
+        provider_library_path = webgpu_ep.get_library_path()
+        og.register_execution_provider_library(provider_registration_name, provider_library_path)
 
     all_csv_metrics = []
 
@@ -591,7 +625,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="follow_config",
-        choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
+        choices=["cpu", "cuda", "webgpu", "dml", "NvTensorRtRtx", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(
