@@ -28,4 +28,4 @@ Telemetry can be disabled in any of these ways:
 
 - **Don't build it in.** Telemetry is only compiled when configuring with `--use_telemetry` (`-DENABLE_TELEMETRY=ON`). To produce a binary that collects no data, run the `build.bat` and `build.sh` scripts without `--use_telemetry`.
 - **At runtime, via environment variable.** Set `ORT_TELEMETRY_DISABLED=1` before the library initializes to disable non-essential telemetry. The variable also accepts `true` / `yes` / `on` / `y`, case-insensitive. ONNX Runtime GenAI may still send a minimal initialization event.
-- **At runtime, via the API.** Call `OgaSetTelemetryEnabled(false)` in the C API, or `Oga::SetTelemetryEnabled(false)` in the C++ wrapper to disable non-essential telemetry. ONNX Runtime GenAI may still send a minimal initialization event.
+- **At runtime, via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) expose calls to turn non-essential telemetry on/off. ONNX Runtime GenAI may still send a minimal initialization event.
