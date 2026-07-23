@@ -17,18 +17,15 @@ import os
 import re
 from pathlib import Path
 
-import pytest
-
 import onnxruntime_genai as og
-
+import pytest
 
 # Reference transcriptions for the bundled audio clips. Leave the values empty
 # to skip the WER assertion (the test will still run end-to-end and confirm
 # the model produces non-empty output).
 REFERENCE_TRANSCRIPTIONS = {
     "jfk.flac": (
-        "And so my fellow Americans ask not what your country can do for you "
-        "ask what you can do for your country"
+        "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
     ),
     "tedlium_long_120s.flac": (
         "I'm going to talk today about energy and climate. And that might seem a bit "

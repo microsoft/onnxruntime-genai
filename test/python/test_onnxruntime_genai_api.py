@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import os
+import re
 import shutil
 import sysconfig
 import tempfile
@@ -113,7 +116,7 @@ def test_log_filename(test_data_path):
     og.set_log_callback(None)
 
 
-def test_NamedTensors():
+def test_named_tensors():
     named_tensors = og.NamedTensors()
     named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
     named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
@@ -161,7 +164,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
 
     assert int(search_params.get_search_options()["max_length"]) == 10
-    assert search_params.get_search_options()["early_stopping"] == True
+    assert search_params.get_search_options()["early_stopping"]
     assert int(generator.token_count()) == 4
 
     while not generator.is_done():
@@ -332,7 +335,7 @@ def test_phi3_chat_template(device, phi3_for):
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to apply chat template: {e}"
+        raise AssertionError(f"Error while trying to apply chat template: {e}") from e
 
 
 # Test Chat Template Unsupported Model with Template String Override
@@ -355,7 +358,7 @@ def test_phi2_chat_template(device, phi2_for):
     try:
         tokenizer.apply_chat_template(template_str=template_string, messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to override chat template: {e}"
+        raise AssertionError(f"Error while trying to override chat template: {e}") from e
 
 
 @pytest.mark.skipif(
@@ -408,7 +411,7 @@ def test_batching(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -437,7 +440,7 @@ def test_e2e(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -470,7 +473,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -999,9 +1002,8 @@ def test_streaming_asr_create(nemotron_speech_model_path):
 
 def _load_streaming_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
-    import json
     config_path = os.path.join(model_path, "genai_config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
     return config["model"]["sample_rate"], config["model"]["chunk_samples"]
 
@@ -1144,7 +1146,6 @@ def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
 
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
-    import re
 
     def normalize(text):
         text = re.sub(r"[^\w\s]", "", text.lower())
@@ -1169,7 +1170,7 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
 def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
     """Test that transcription of a known audio file has acceptable WER."""
     try:
-        import soundfile as sf
+        sf = importlib.import_module("soundfile")
     except ImportError:
         pytest.skip("soundfile not installed")
         return
@@ -1185,9 +1186,10 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     if sr != sample_rate:
         try:
-            import scipy.signal
+            scipy_signal = importlib.import_module("scipy.signal")
+
             num_samples = int(len(audio) * sample_rate / sr)
-            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+            audio = scipy_signal.resample(audio, num_samples).astype(np.float32)
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
@@ -1215,8 +1217,4 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     )
 
     wer = _word_error_rate(reference, transcript)
-    assert wer < 0.15, (
-        f"WER too high: {wer:.1%}\n"
-        f"  Reference:  {reference}\n"
-        f"  Hypothesis: {transcript.lower()}"
-    )
+    assert wer < 0.15, f"WER too high: {wer:.1%}\n  Reference:  {reference}\n  Hypothesis: {transcript.lower()}"
