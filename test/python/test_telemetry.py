@@ -203,22 +203,22 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIsNone(t._heartbeat_thread)
         self.assertFalse(self.mock_send.called)
 
-    def test_opt_out_records_heartbeat_only(self):
+    def test_opt_out_sends_nothing(self):
         from telemetry.telemetry import GenAITelemetry
 
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
-        t = GenAITelemetry()
-        # Detailed events are not recorded or drained; the heartbeat is sent directly.
+        with patch("telemetry.telemetry.get_encrypted_device_id_and_status") as mock_device_id:
+            t = GenAITelemetry()
+        # Full process-lifetime opt-out: no resources and no network sends.
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
         self.assertIsNone(t._uploader)
-        self.assertIsNotNone(t._heartbeat_thread)
+        self.assertIsNone(t._heartbeat_thread)
         # A detailed-event method must be a no-op and must not raise.
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
         self._deliver()
-        # The heartbeat went out; no detailed event did.
-        self.assertIn("GenAIHeartbeat", self._sent_event_names())
-        self.assertNotIn("GenAIModelBuild", self._sent_event_names())
+        mock_device_id.assert_not_called()
+        self.assertEqual(self.sent_payloads, [])
 
     def test_enabled_records_heartbeat_and_events(self):
         from telemetry.telemetry import GenAITelemetry
@@ -259,16 +259,20 @@ class TestOptOut(_HermeticTelemetryTestCase):
     def test_enable_telemetry_does_not_override_env_opt_out(self):
         from telemetry.telemetry import GenAITelemetry
 
-        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+        os.environ["ORT_DISABLE_TELEMETRY"] = "true"
         t = GenAITelemetry()
-        self._join_heartbeat()
-        # Opt-out sends the heartbeat directly and never opens the detailed-event store.
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
-        # The environment opt-out is the master switch: a programmatic enable
-        # must not silently resume detailed telemetry.
+        t.shutdown()
+        os.environ.pop("ORT_DISABLE_TELEMETRY")
+
+        # Full suppression remains latched after env removal and reinitialization.
+        self.assertIs(GenAITelemetry(), t)
         t.enable_telemetry()
         self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
+        self.assertIsNone(t._heartbeat_thread)
+        self.assertEqual(self.sent_payloads, [])
 
     def test_closed_store_allows_initialization_retry(self):
         from telemetry.telemetry import GenAITelemetry

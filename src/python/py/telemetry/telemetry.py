@@ -29,9 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
-from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
+from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
-from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .path_utils import scrub_string_for_telemetry, scrub_value_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
@@ -59,6 +58,10 @@ _DISTRIBUTION_NAMES = (
 
 def _is_ci_environment() -> bool:
     return any(os.environ.get(var) for var in _CI_ENV_VARS)
+
+
+def _is_telemetry_disabled_by_environment() -> bool:
+    return os.environ.get("ORT_DISABLE_TELEMETRY", "").strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def _get_app_version() -> str:
@@ -125,7 +128,7 @@ class GenAITelemetry:
     """Singleton telemetry manager for ONNX Runtime GenAI.
 
     Thread-safe singleton that sends telemetry to Microsoft OneCollector.
-    Auto-disabled in CI environments. Opt-out via ORT_DISABLE_TELEMETRY=1.
+    CI and ORT_DISABLE_TELEMETRY suppression are latched for the process lifetime.
     """
 
     _instance: GenAITelemetry | None = None
@@ -137,6 +140,7 @@ class GenAITelemetry:
                 if cls._instance is None:
                     instance = super().__new__(cls)
                     instance._initialized = False
+                    instance._telemetry_disabled = False
                     cls._instance = instance
         return cls._instance
 
@@ -152,20 +156,17 @@ class GenAITelemetry:
             self._instrumentation_key = ""
             self._envelope_ikey = ""
             self._app_version = "unknown"
-            self._app_instance_id = uuid.uuid4().hex
             self._app_name = "onnxruntime-genai"
             self._heartbeat_thread: threading.Thread | None = None
 
-            # CI / automated-testing: record and send nothing at all — not even
-            # the device-id heartbeat — so pipelines don't pollute usage data.
-            if _is_ci_environment():
+            # Full suppression is process-wide and irreversible, including later
+            # initialization attempts after shutdown or environment changes.
+            if self._telemetry_disabled or _is_ci_environment() or _is_telemetry_disabled_by_environment():
+                self._telemetry_disabled = True
                 self._enabled = False
                 return
 
-            # User opt-out (ORT_DISABLE_TELEMETRY=1): detailed events are not
-            # recorded, but a direct best-effort heartbeat still supports device
-            # counting without draining prior detailed events.
-            user_opt_out = os.environ.get("ORT_DISABLE_TELEMETRY") == "1"
+            self._app_instance_id = uuid.uuid4().hex
 
             try:
                 self._app_version = _get_app_version()
@@ -178,22 +179,6 @@ class GenAITelemetry:
                 self._envelope_ikey = (
                     f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
                 )
-
-                # Detailed events are recorded only when enabled.
-                self._enabled = not user_opt_out
-
-                # Opt-out sends only a direct best-effort heartbeat. Do not open
-                # the durable queue, which may contain detailed events from a
-                # prior enabled run.
-                if user_opt_out:
-                    self._heartbeat_thread = threading.Thread(
-                        target=self._send_heartbeat,
-                        args=(False,),
-                        name="genai-telemetry-heartbeat",
-                        daemon=True,
-                    )
-                    self._heartbeat_thread.start()
-                    return
 
                 # Durable on-disk queue + uploader. Events survive process exit,
                 # so there is no exit-time flush. The uploader retries until
@@ -212,7 +197,6 @@ class GenAITelemetry:
                 # build and enqueue it off the host thread.
                 self._heartbeat_thread = threading.Thread(
                     target=self._send_heartbeat,
-                    args=(True,),
                     name="genai-telemetry-heartbeat",
                     daemon=True,
                 )
@@ -278,9 +262,9 @@ class GenAITelemetry:
             "available_providers": ",".join(ep_info.get("available_providers", [])),
         }
 
-    def _send_heartbeat(self, durable: bool = True) -> None:
-        """Send the heartbeat durably when enabled and directly on opt-out."""
-        if durable and self._store is None:
+    def _send_heartbeat(self) -> None:
+        """Persist the enabled-run device-id heartbeat."""
+        if self._store is None:
             return
         try:
             data = {
@@ -296,17 +280,9 @@ class GenAITelemetry:
                 data=data,
             )
             payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
-            if durable:
-                self._store.store(payload)
-                if self._uploader is not None:
-                    self._uploader.request_drain()
-            else:
-                transport = HttpJsonPostTransport(
-                    endpoint=OneCollectorTransportOptions.DEFAULT_ENDPOINT,
-                    ikey=self._instrumentation_key,
-                    compression=CompressionType.DEFLATE,
-                )
-                transport.send(payload, timeout_sec=2.0, item_count=1)
+            self._store.store(payload)
+            if self._uploader is not None:
+                self._uploader.request_drain()
         except Exception:
             return
 
@@ -522,15 +498,10 @@ class GenAITelemetry:
     def enable_telemetry(self) -> None:
         """Enable telemetry (creates/restarts the uploader if needed).
 
-        Has no effect when telemetry was hard-disabled for CI/testing, in which
-        case no instrumentation key was ever resolved.
+        Has no effect when telemetry was fully suppressed before initialization.
         """
         with self._lock:
-            if not self._instrumentation_key:
-                return
-            # The environment opt-out / CI is the user's master switch: a
-            # programmatic enable must not override ORT_DISABLE_TELEMETRY.
-            if os.environ.get("ORT_DISABLE_TELEMETRY") == "1" or _is_ci_environment():
+            if self._telemetry_disabled or not self._instrumentation_key:
                 return
             if self._uploader is not None:
                 old_uploader = self._uploader
@@ -609,7 +580,7 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable detailed GenAI telemetry at runtime without emitting an opt-out heartbeat."""
+    """Disable detailed GenAI telemetry at runtime."""
     _get_telemetry().disable_telemetry()
 
 
