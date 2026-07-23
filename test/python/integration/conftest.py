@@ -45,6 +45,4 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture
 def model_path(device, model, pytestconfig):
-    return resolver.get_path_for(
-        model, device, model_root=pytestconfig.getoption("--model-root")
-    )
+    return resolver.get_path_for(model, device, model_root=pytestconfig.getoption("--model-root"))

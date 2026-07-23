@@ -14,6 +14,7 @@
 # 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
 import argparse
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -22,6 +23,7 @@ import time
 
 import numpy as np
 import onnxruntime_genai as og
+import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
 from tqdm import tqdm
@@ -40,7 +42,7 @@ except Exception:
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_gpu_memory
+    global peak_gpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         result = subprocess.run(
@@ -64,7 +66,7 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_cpu_memory
+    global peak_cpu_memory  # noqa: PLW0603
 
     while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
@@ -83,8 +85,6 @@ def get_prompt_by_length(prompt_length):
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
-    import importlib.metadata
-
     installed_packages_list = sorted(
         [
             f"{dist.metadata['Name']}=={dist.version}"
@@ -102,8 +102,6 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 
 def save_results(args, results, filename, print_memory_usage=False):
-    import pandas as pd
-
     columns = [
         "Batch Size",
         "Prompt Length",
@@ -179,9 +177,9 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring
-    global peak_gpu_memory
-    global peak_cpu_memory
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
     # Reset the peak memory variables and the monitoring flag
     stop_monitoring = False
@@ -247,7 +245,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
                 "Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'"
             )
     else:
-        if model_type.startswith("phi2") or model_type.startswith("phi3"):
+        if model_type.startswith(("phi2", "phi3")):
             args.chat_template = "<|user|>\n{input} <|end|>\n<|assistant|>"
         elif model_type.startswith("phi4"):
             args.chat_template = "<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>"
@@ -298,7 +296,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         top_k=args.top_k,
         top_p=args.top_p,
         temperature=temperature,
-        **({ "max_length": max_length } if override_max_length else {}),
+        **({"max_length": max_length} if override_max_length else {}),
         min_length=max_length if override_max_length else prompt_length + generation_length,
         batch_size=batch_size,
     )
@@ -500,11 +498,11 @@ def main(args):
     all_csv_metrics = []
 
     for batch_size in args.batch_sizes:
-        for l, prompt_length in enumerate(args.prompt_lengths):
-            for g, gen_length in enumerate(args.generation_lengths):
+        for prompt_idx, prompt_length in enumerate(args.prompt_lengths):
+            for gen_idx, gen_length in enumerate(args.generation_lengths):
                 if args.max_lengths:
-                    m = l * len(args.generation_lengths) + g
-                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
+                    max_idx = prompt_idx * len(args.generation_lengths) + gen_idx
+                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[max_idx]
                 else:
                     max_length = prompt_length + gen_length
                 print(
