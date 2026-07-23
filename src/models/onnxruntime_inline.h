@@ -257,8 +257,8 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, Or
 }
 
 inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::CreateV2(const char* name, OrtMemoryInfoDeviceType device_type,
-                                                             uint32_t vendor_id, int32_t device_id,
-                                                             OrtDeviceMemoryType mem_type, OrtAllocatorType allocator_type) {
+                                                              uint32_t vendor_id, int32_t device_id,
+                                                              OrtDeviceMemoryType mem_type, OrtAllocatorType allocator_type) {
   OrtMemoryInfo* p;
   Ort::ThrowOnError(Ort::api->CreateMemoryInfo_V2(name, device_type, vendor_id, device_id, mem_type,
                                                   /*alignment=*/0, allocator_type, &p));

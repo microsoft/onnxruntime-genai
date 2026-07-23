@@ -164,8 +164,8 @@ struct PinnedMemory final : DeviceBuffer {
   }
 
   const char* GetType() const override { return pinned_device_label; }
-  void AllocateCpu() override {}       // p_cpu_ already valid (== p_device_)
-  void CopyDeviceToCpu() override {}   // same memory: nothing to copy
+  void AllocateCpu() override {}      // p_cpu_ already valid (== p_device_)
+  void CopyDeviceToCpu() override {}  // same memory: nothing to copy
   void CopyCpuToDevice() override {}
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
@@ -264,8 +264,7 @@ struct PinnedInputsImpl : DeviceInterface {
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length,
                            int total_length, int max_length, bool update_only,
                            ONNXTensorElementDataType type) override {
-    return GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(next_mask_data, mask_data, batch_beam_size, new_kv_length,
-                                                  total_length, max_length, update_only, type);
+    return GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(next_mask_data, mask_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, type);
   }
 
   InterfaceImpl& base_;
