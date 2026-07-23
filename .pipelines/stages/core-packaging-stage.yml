@@ -20,6 +20,7 @@ parameters:
   type: string
 
 # CUDA SDK version (default 13.1; override to 12.8 via pipeline parameter).
+# Windows ARM64 CUDA-enabled core jobs force CUDA 13.1 because 12.8 does not build.
 - name: cuda_version
   type: string
   default: '13.1'

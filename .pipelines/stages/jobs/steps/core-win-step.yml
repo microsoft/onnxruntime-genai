@@ -161,8 +161,10 @@ steps:
   condition: and(in('${{ parameters.ep }}', 'cuda', 'winml'), eq('${{ parameters.arch }}', 'arm64'))
   workingDirectory: '$(Build.SourcesDirectory)'
 
+# Windows ARM64 does not successfully build with CUDA 12.8, so always use the
+# ARM64 CUDA 13.1 SDK even when the packaging pipeline selects CUDA 12.8.
 - task: AzureCLI@2
-  displayName: 'Download CUDA ${{ parameters.cuda_version }} SDK (arm64)'
+  displayName: 'Download CUDA 13.1 SDK (arm64)'
   condition: and(in('${{ parameters.ep }}', 'cuda', 'winml'), eq('${{ parameters.arch }}', 'arm64'))
   inputs:
     azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
@@ -170,7 +172,7 @@ steps:
     scriptLocation: inlineScript
     inlineScript: |
       set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
-      azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v${{ parameters.cuda_version }}" "cuda_sdk"
+      azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v13.1" "cuda_sdk"
 
 # --- ORT download from Lotus feed (authenticated; not for WinML) ------------
 # WinML does not consume an ORT package here — cmake/ortlib.cmake (USE_WINML)
@@ -289,13 +291,18 @@ steps:
     if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
     # CUDA is enabled for both the CUDA EP and WinML (WinML = CUDA + DML + WinML).
     if ('${{ parameters.ep }}' -eq 'cuda' -or '${{ parameters.ep }}' -eq 'winml') {
-      $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk\v${{ parameters.cuda_version }}"
+      if ('${{ parameters.arch }}' -eq 'arm64') {
+        $cudaVersion = '13.1'
+      } else {
+        $cudaVersion = '${{ parameters.cuda_version }}'
+      }
+      $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk\v$cudaVersion"
       $args += '--use_cuda', '--cuda_home', $cudaHome
       # Trim the SASS (-real) arch set to language-model GPUs and rely on PTX
       # (-virtual) JIT for the rest, matching llama.cpp's philosophy. Real SASS is
       # emitted only for Ampere/Ada/Blackwell consumer arches (86/89/120); older
       # arches fall back to forward-compatible PTX to keep the fatbin small.
-      if ('${{ parameters.cuda_version }}' -like '13.*') {
+      if ($cudaVersion -like '13.*') {
         $cudaArchs = '75-virtual;80-virtual;86-real;89-real;90-virtual;100-virtual;120-real;120-virtual'
       } else {
         $cudaArchs = '50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;89-real;90-virtual;120-real;120-virtual'

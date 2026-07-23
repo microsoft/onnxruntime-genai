@@ -8,7 +8,8 @@
 # is ESRP-signed where the platform supports it.
 #
 # The matrix is fixed per EP (goal 8); the pipeline inputs only select the EP(s),
-# the build-time ORT versions, and the CUDA toolkit version:
+# the build-time ORT versions, and the CUDA toolkit version (Windows ARM64 CUDA
+# builds always use CUDA 13.1 because CUDA 12.8 does not build there):
 #   CPU  : win-x64, win-arm64, macos-arm64, linux-x64, linux-arm64, android, ios
 #   CUDA : win-x64, win-arm64, linux-x64
 # =============================================================================
