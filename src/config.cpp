@@ -1346,6 +1346,13 @@ struct Speculative_Element : JSON::Element {
             "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
             ". Got: " + std::to_string(ngram_size) + ".");
       v_.ngram_size = ngram_size;
+    } else if (name == "ngram_chained_lookup_bool") {
+      const int ngram_chained_lookup_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (ngram_chained_lookup_bool != 0 && ngram_chained_lookup_bool != 1)
+        throw std::runtime_error(
+            "speculative.ngram_chained_lookup_bool must be 0 or 1. Got: " +
+            std::to_string(ngram_chained_lookup_bool) + ".");
+      v_.ngram_chained_lookup_bool = ngram_chained_lookup_bool;
     } else if (name == "adaptive_k_bool") {
       const int adaptive_k_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (adaptive_k_bool != 0 && adaptive_k_bool != 1)

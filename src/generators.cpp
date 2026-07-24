@@ -370,6 +370,8 @@ double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
     return static_cast<double>(speculative.max_draft_tokens);
   if (name == "ngram_size")
     return static_cast<double>(speculative.ngram_size);
+  if (name == "ngram_chained_lookup_bool")
+    return static_cast<double>(speculative.ngram_chained_lookup_bool);
   if (name == "adaptive_k_bool")
     return static_cast<double>(speculative.adaptive_k_bool);
   if (name == "adaptive_k_min")
@@ -402,6 +404,11 @@ std::mt19937 CreateRandomGenerator(int random_seed) {
 Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
       rng_{CreateRandomGenerator(params.search.random_seed)} {
+  if (params.speculative.ngram_chained_lookup_bool != 0 &&
+      params.speculative.ngram_size == 0)
+    throw std::runtime_error(
+        "speculative.ngram_chained_lookup_bool requires speculative.ngram_size to enable "
+        "n-gram decoding.");
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);
 

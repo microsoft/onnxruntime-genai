@@ -78,6 +78,7 @@ struct NGramDecodingStrategy final : SpeculativeDecodingStrategy {
   void Sync(Generator& g);
 
   NGramLookup lookup_;
+  bool chained_lookup_;
 };
 
 }  // namespace Generators

@@ -66,7 +66,9 @@ void ValidateNGramDecoding(const Model& model, const GeneratorParams& params) {
 
 NGramDecodingStrategy::NGramDecodingStrategy(Generator& g)
     : SpeculativeDecodingStrategy{*g.state_, *g.model_},
-      lookup_{ValidateAndGetNGramSize(g)} {}
+      lookup_{ValidateAndGetNGramSize(g)},
+      chained_lookup_{
+          g.search_->params_->speculative.ngram_chained_lookup_bool != 0} {}
 
 void NGramDecodingStrategy::Sync(Generator& g) {
   auto committed = g.search_->GetSequence(0);
@@ -89,7 +91,7 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
   Sync(g);
   Proposal proposal{ProposalMode::kDeterministic};
   if (!g.guidance_logits_processor_) {
-    proposal.tokens = lookup_.Propose(static_cast<size_t>(K));
+    proposal.tokens = lookup_.Propose(static_cast<size_t>(K), chained_lookup_);
     return proposal;
   }
 
@@ -105,7 +107,7 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
     return proposal;
   }
 
-  auto candidates = lookup_.Propose(static_cast<size_t>(K));
+  auto candidates = lookup_.Propose(static_cast<size_t>(K), chained_lookup_);
   const int vocab_size = params.config.model.vocab_size;
   auto grammar = g.guidance_logits_processor_->Clone();
   auto mask_buffer = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));

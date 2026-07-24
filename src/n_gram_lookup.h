@@ -30,14 +30,34 @@ class NGramLookup {
     Append(committed);
   }
 
-  std::vector<int32_t> Propose(size_t max_tokens) const {
+  std::vector<int32_t> Propose(size_t max_tokens, bool chained_lookup = false) const {
     if (max_tokens == 0 || history_.size() < key_length_)
       return {};
 
-    const auto key = MakeKey(history_.size() - key_length_);
-    const auto occurrence = occurrences_.find(key);
+    auto context = MakeKey(history_.size() - key_length_);
+    const auto occurrence = occurrences_.find(context);
     if (occurrence == occurrences_.end())
       return {};
+
+    if (chained_lookup) {
+      std::vector<int32_t> proposal;
+      proposal.reserve(max_tokens);
+      auto chained_occurrence = occurrence;
+      while (proposal.size() < max_tokens) {
+        if (chained_occurrence == occurrences_.end())
+          break;
+
+        const int32_t token = history_[chained_occurrence->second + key_length_];
+        proposal.push_back(token);
+        if (proposal.size() == max_tokens)
+          break;
+        // Advance only the local synthetic context; committed history and its index stay immutable.
+        std::rotate(context.begin(), context.begin() + 1, context.end());
+        context.back() = token;
+        chained_occurrence = occurrences_.find(context);
+      }
+      return proposal;
+    }
 
     const size_t continuation = occurrence->second + key_length_;
     const size_t count = std::min(max_tokens, history_.size() - continuation);
