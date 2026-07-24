@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <random>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,6 +45,35 @@ class Timing {
  private:
   std::vector<Duration>& measurements_;
   const Clock::time_point start_;
+};
+
+class ScopedProfilingRuntimeOption {
+ public:
+  ScopedProfilingRuntimeOption(OgaGenerator* generator, bool enabled, const char* value)
+      : generator_{generator}, enabled_{enabled} {
+    if (enabled_) {
+      generator_->SetRuntimeOption("enable_profiling", value);
+    }
+  }
+
+  ScopedProfilingRuntimeOption(const ScopedProfilingRuntimeOption&) = delete;
+  ScopedProfilingRuntimeOption& operator=(const ScopedProfilingRuntimeOption&) = delete;
+
+  ~ScopedProfilingRuntimeOption() {
+    if (!enabled_) {
+      return;
+    }
+
+    // Best effort reset to avoid leaving profiling enabled after an exception.
+    try {
+      generator_->SetRuntimeOption("enable_profiling", "0");
+    } catch (...) {
+    }
+  }
+
+ private:
+  OgaGenerator* generator_;
+  bool enabled_;
 };
 
 struct Statistics {
@@ -266,6 +297,28 @@ void RunBenchmark(const benchmark::Options& opts) {
   sampling_times.reserve(opts.num_iterations * opts.num_tokens_to_generate);
 
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
+
+#ifdef _WIN32
+  // Peak GPU memory usage sampled while a generator (and its KV cache) is still alive.
+  benchmark::utils::GpuMemoryInfo gpu_mem = {};
+#endif
+
+  // Select the "middle" iteration index (0-based) for optional ORT profiling.
+  //   n=1 -> 0, n=2 -> 1, n=3 -> 1, n=4 -> 2, ...
+  const size_t profile_iter_index = opts.num_iterations / 2;
+  const bool any_profiling = opts.profile_prefill || opts.profile_generation;
+  // ORT writes "<prefix>_<timestamp>.json", so these are the full prefixes.
+  constexpr const char* prefill_profile_prefix = "prefill_profile";
+  constexpr const char* generation_profile_prefix = "generation_profile";
+  if (opts.verbose && any_profiling) {
+    std::cout << "Profiling will run on iteration index " << profile_iter_index
+              << " (1-based: " << profile_iter_index + 1 << " of " << opts.num_iterations << ")\n";
+    if (opts.profile_prefill)
+      std::cout << "  Prefill profile prefix:    " << prefill_profile_prefix << "\n";
+    if (opts.profile_generation)
+      std::cout << "  Generation profile prefix: " << generation_profile_prefix << "\n";
+  }
+
   for (size_t i = 0; i < opts.num_iterations; ++i) {
     std::unique_ptr<OgaGenerator> new_gen;
     if (opts.reuse_generator) {
@@ -275,16 +328,23 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
     auto* gen = opts.reuse_generator ? generator.get() : new_gen.get();
 
+    const bool profile_this_iter = (i == profile_iter_index);
+    const bool profile_prefill_now = profile_this_iter && opts.profile_prefill;
+    const bool profile_generation_now = profile_this_iter && opts.profile_generation;
+
     {
       Timing e2e_gen_timing{e2e_gen_times};
 
       {
         Timing prompt_processing_timing{prompt_processing_times};
+        ScopedProfilingRuntimeOption prefill_profile_guard{gen, profile_prefill_now, prefill_profile_prefix};
         gen->AppendTokenSequences(*prompt_sequences);
       }
 
       const size_t target_token_count = gen->TokenCount() + opts.num_tokens_to_generate;
       bool generator_done = false;
+
+      ScopedProfilingRuntimeOption generation_profile_guard{gen, profile_generation_now, generation_profile_prefix};
 
       {
         Timing sampling_timing{sampling_times};
@@ -301,6 +361,17 @@ void RunBenchmark(const benchmark::Options& opts) {
         }
       }
     }
+
+#ifdef _WIN32
+    // Capture GPU memory while the generator (and its KV cache) is still alive. When
+    // --reuse_generator is not set, new_gen is destroyed at the end of each iteration,
+    // so sampling here (and keeping the peak) reflects actual KV cache usage.
+    {
+      const auto iter_mem = benchmark::utils::GetGpuMemoryUsage();
+      gpu_mem.dedicated = std::max(gpu_mem.dedicated, iter_mem.dedicated);
+      gpu_mem.shared = std::max(gpu_mem.shared, iter_mem.shared);
+    }
+#endif
   }
 
   // Release the generator before printing results
@@ -323,7 +394,25 @@ void RunBenchmark(const benchmark::Options& opts) {
     WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
     WriteE2EStats("E2E generation (entire generation loop)", e2e_gen_stats);
 
-    std::cout << "Peak working set size (bytes): " << benchmark::utils::GetPeakWorkingSetSizeInBytes() << "\n";
+    auto human_bytes = [](uint64_t bytes) -> std::string {
+      std::ostringstream oss;
+      oss << std::fixed << std::setprecision(2);
+      if (bytes >= (1ULL << 40))
+        oss << (double)bytes / (1ULL << 40) << " TB";
+      else if (bytes >= (1ULL << 30))
+        oss << (double)bytes / (1ULL << 30) << " GB";
+      else
+        oss << (double)bytes / (1ULL << 20) << " MB";
+      return oss.str();
+    };
+
+    auto peak_ws = benchmark::utils::GetPeakWorkingSetSizeInBytes();
+    std::cout << "Peak working set size: " << peak_ws << " bytes (" << human_bytes(peak_ws) << ")\n";
+#ifdef _WIN32
+    std::cout << "Dedicated GPU memory usage: " << gpu_mem.dedicated << " bytes (" << human_bytes(gpu_mem.dedicated) << ")\n";
+    std::cout << "Shared GPU memory usage: " << gpu_mem.shared << " bytes (" << human_bytes(gpu_mem.shared) << ")\n";
+    std::cout << "Total GPU memory usage: " << gpu_mem.Total() << " bytes (" << human_bytes(gpu_mem.Total()) << ")\n";
+#endif
   }
 }
 

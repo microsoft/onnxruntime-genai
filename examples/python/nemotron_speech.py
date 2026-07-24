@@ -2,10 +2,12 @@
 # Licensed under the MIT License.
 
 import argparse
+import importlib
 import json
 import os
 import sys
 import time
+
 import numpy as np
 import onnxruntime_genai as og
 from common import get_config
@@ -15,89 +17,89 @@ from common import get_config
 # NVIDIA-Nemotron-3.5-ASR-Streaming-Multilingual-0.6b (per model card).
 # IDs follow the canonical prompt_dictionary in model_config.yaml.
 LANG_TO_ID = {
-    "en":     (0,   "English (default / US)"),
-    "en-US":  (0,   "English (United States)"),
-    "en-GB":  (1,   "English (United Kingdom)"),
-    "es-ES":  (2,   "Spanish (Spain)"),
-    "es":     (3,   "Spanish (default / Latin America)"),
-    "es-US":  (3,   "Spanish (US Latin American)"),
-    "zh-CN":  (4,   "Chinese (Mandarin, Simplified)"),
-    "hi":     (6,   "Hindi"),
-    "hi-IN":  (6,   "Hindi (India)"),
-    "ar":     (7,   "Arabic"),
-    "ar-AR":  (7,   "Arabic"),
-    "fr":     (8,   "French (default / France)"),
-    "fr-FR":  (8,   "French (France)"),
-    "de":     (9,   "German"),
-    "de-DE":  (9,   "German (Germany)"),
-    "ja":     (10,  "Japanese"),
-    "ja-JP":  (10,  "Japanese"),
-    "ru":     (11,  "Russian"),
-    "ru-RU":  (11,  "Russian"),
-    "pt-BR":  (12,  "Portuguese (Brazil)"),
-    "pt":     (13,  "Portuguese (default / Portugal)"),
-    "pt-PT":  (13,  "Portuguese (Portugal)"),
-    "ko":     (14,  "Korean"),
-    "ko-KR":  (14,  "Korean (South Korea)"),
-    "it":     (15,  "Italian"),
-    "it-IT":  (15,  "Italian"),
-    "nl":     (16,  "Dutch"),
-    "nl-NL":  (16,  "Dutch (Netherlands)"),
-    "pl":     (17,  "Polish"),
-    "pl-PL":  (17,  "Polish"),
-    "tr":     (18,  "Turkish"),
-    "tr-TR":  (18,  "Turkish"),
-    "uk":     (19,  "Ukrainian"),
-    "uk-UA":  (19,  "Ukrainian"),
-    "ro":     (20,  "Romanian"),
-    "ro-RO":  (20,  "Romanian"),
-    "el":     (21,  "Greek"),
-    "el-GR":  (21,  "Greek"),
-    "cs":     (22,  "Czech"),
-    "cs-CZ":  (22,  "Czech"),
-    "hu":     (23,  "Hungarian"),
-    "hu-HU":  (23,  "Hungarian"),
-    "sv":     (24,  "Swedish"),
-    "sv-SE":  (24,  "Swedish"),
-    "da":     (25,  "Danish"),
-    "da-DK":  (25,  "Danish"),
-    "fi":     (26,  "Finnish"),
-    "fi-FI":  (26,  "Finnish"),
-    "sk":     (28,  "Slovak"),
-    "sk-SK":  (28,  "Slovak"),
-    "hr":     (29,  "Croatian"),
-    "hr-HR":  (29,  "Croatian"),
-    "bg":     (30,  "Bulgarian"),
-    "bg-BG":  (30,  "Bulgarian"),
-    "lt":     (31,  "Lithuanian"),
-    "lt-LT":  (31,  "Lithuanian"),
-    "th":     (32,  "Thai"),
-    "th-TH":  (32,  "Thai"),
-    "vi":     (33,  "Vietnamese"),
-    "vi-VN":  (33,  "Vietnamese"),
-    "et":     (60,  "Estonian"),
-    "et-EE":  (60,  "Estonian"),
-    "lv":     (61,  "Latvian"),
-    "lv-LV":  (61,  "Latvian"),
-    "sl":     (62,  "Slovenian"),
-    "sl-SI":  (62,  "Slovenian"),
-    "he":     (64,  "Hebrew"),
-    "he-IL":  (64,  "Hebrew (Israel)"),
-    "fr-CA":  (100, "French (Canada)"),
-    "auto":   (101, "Auto-detect"),
-    "mt":     (102, "Maltese"),
-    "mt-MT":  (102, "Maltese"),
-    "nb":     (103, "Norwegian Bokmål"),
-    "nb-NO":  (103, "Norwegian Bokmål"),
-    "nn":     (104, "Norwegian Nynorsk"),
-    "nn-NO":  (104, "Norwegian Nynorsk"),
+    "en": (0, "English (default / US)"),
+    "en-US": (0, "English (United States)"),
+    "en-GB": (1, "English (United Kingdom)"),
+    "es-ES": (2, "Spanish (Spain)"),
+    "es": (3, "Spanish (default / Latin America)"),
+    "es-US": (3, "Spanish (US Latin American)"),
+    "zh-CN": (4, "Chinese (Mandarin, Simplified)"),
+    "hi": (6, "Hindi"),
+    "hi-IN": (6, "Hindi (India)"),
+    "ar": (7, "Arabic"),
+    "ar-AR": (7, "Arabic"),
+    "fr": (8, "French (default / France)"),
+    "fr-FR": (8, "French (France)"),
+    "de": (9, "German"),
+    "de-DE": (9, "German (Germany)"),
+    "ja": (10, "Japanese"),
+    "ja-JP": (10, "Japanese"),
+    "ru": (11, "Russian"),
+    "ru-RU": (11, "Russian"),
+    "pt-BR": (12, "Portuguese (Brazil)"),
+    "pt": (13, "Portuguese (default / Portugal)"),
+    "pt-PT": (13, "Portuguese (Portugal)"),
+    "ko": (14, "Korean"),
+    "ko-KR": (14, "Korean (South Korea)"),
+    "it": (15, "Italian"),
+    "it-IT": (15, "Italian"),
+    "nl": (16, "Dutch"),
+    "nl-NL": (16, "Dutch (Netherlands)"),
+    "pl": (17, "Polish"),
+    "pl-PL": (17, "Polish"),
+    "tr": (18, "Turkish"),
+    "tr-TR": (18, "Turkish"),
+    "uk": (19, "Ukrainian"),
+    "uk-UA": (19, "Ukrainian"),
+    "ro": (20, "Romanian"),
+    "ro-RO": (20, "Romanian"),
+    "el": (21, "Greek"),
+    "el-GR": (21, "Greek"),
+    "cs": (22, "Czech"),
+    "cs-CZ": (22, "Czech"),
+    "hu": (23, "Hungarian"),
+    "hu-HU": (23, "Hungarian"),
+    "sv": (24, "Swedish"),
+    "sv-SE": (24, "Swedish"),
+    "da": (25, "Danish"),
+    "da-DK": (25, "Danish"),
+    "fi": (26, "Finnish"),
+    "fi-FI": (26, "Finnish"),
+    "sk": (28, "Slovak"),
+    "sk-SK": (28, "Slovak"),
+    "hr": (29, "Croatian"),
+    "hr-HR": (29, "Croatian"),
+    "bg": (30, "Bulgarian"),
+    "bg-BG": (30, "Bulgarian"),
+    "lt": (31, "Lithuanian"),
+    "lt-LT": (31, "Lithuanian"),
+    "th": (32, "Thai"),
+    "th-TH": (32, "Thai"),
+    "vi": (33, "Vietnamese"),
+    "vi-VN": (33, "Vietnamese"),
+    "et": (60, "Estonian"),
+    "et-EE": (60, "Estonian"),
+    "lv": (61, "Latvian"),
+    "lv-LV": (61, "Latvian"),
+    "sl": (62, "Slovenian"),
+    "sl-SI": (62, "Slovenian"),
+    "he": (64, "Hebrew"),
+    "he-IL": (64, "Hebrew (Israel)"),
+    "fr-CA": (100, "French (Canada)"),
+    "auto": (101, "Auto-detect"),
+    "mt": (102, "Maltese"),
+    "mt-MT": (102, "Maltese"),
+    "nb": (103, "Norwegian Bokmål"),
+    "nb-NO": (103, "Norwegian Bokmål"),
+    "nn": (104, "Norwegian Nynorsk"),
+    "nn-NO": (104, "Norwegian Nynorsk"),
 }
 
 
 def load_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
     config_path = os.path.join(model_path, "genai_config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
     sample_rate = config["model"]["sample_rate"]
     chunk_samples = config["model"]["chunk_samples"]
@@ -105,14 +107,16 @@ def load_config(model_path):
 
 
 def load_audio(audio_path, sample_rate):
-    import soundfile as sf
+    sf = importlib.import_module("soundfile")
+
     audio, sr = sf.read(audio_path, dtype="float32")
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
     if sr != sample_rate:
-        import scipy.signal
+        scipy_signal = importlib.import_module("scipy.signal")
+
         num_samples = int(len(audio) * sample_rate / sr)
-        audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+        audio = scipy_signal.resample(audio, num_samples).astype(np.float32)
     return audio
 
 
@@ -176,7 +180,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     chunks_skipped = 0
 
     for i in range(0, len(audio), chunk_samples):
-        chunk = audio[i:i + chunk_samples].astype(np.float32)
+        chunk = audio[i : i + chunk_samples].astype(np.float32)
         chunks_total += 1
         inputs = processor.process(chunk)
         if inputs is not None:
@@ -197,29 +201,44 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
     print(f"\n{'=' * 60}")
     print(f"  {full_transcript.strip()}")
     print(f"{'=' * 60}")
-    print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration/total_wall:.2f}x")
+    print(f"  Audio: {duration:.2f}s | Wall: {total_wall:.2f}s | RTF: {duration / total_wall:.2f}x")
     if vad_enabled:
         pct_saved = chunks_skipped / max(chunks_total, 1) * 100
-        print(f"  VAD Metrics: {chunks_total} total chunks, {chunks_processed} processed, "
-              f"{chunks_skipped} skipped ({pct_saved:.1f}% compute saved)")
+        print(
+            f"  VAD Metrics: {chunks_total} total chunks, {chunks_processed} processed, "
+            f"{chunks_skipped} skipped ({pct_saved:.1f}% compute saved)"
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--audio_file", type=str, required=True)
-    parser.add_argument("--use_vad", type=str, choices=["true", "false"], default=None,
-                        help="Override VAD setting from genai_config.json (true/false).")
-    lang_help = "Language / locale code for the multilingual encoder. " \
-                "Overrides model.default_lang_id from genai_config.json. " \
-                "Use a bare ISO 639-1 code (e.g. 'de', 'fr', 'pt') for the default locale, " \
-                "or a BCP-47 locale tag for region-specific variants. " \
-                "Pass 'auto' to let the model detect the language. Supported codes:\n" \
-                + "\n".join(f"  {code:<7} {name}" for code, (_, name) in sorted(LANG_TO_ID.items()))
+    parser.add_argument(
+        "--use_vad",
+        type=str,
+        choices=["true", "false"],
+        default=None,
+        help="Override VAD setting from genai_config.json (true/false).",
+    )
+    lang_help = (
+        "Language / locale code for the multilingual encoder. "
+        "Overrides model.default_lang_id from genai_config.json. "
+        "Use a bare ISO 639-1 code (e.g. 'de', 'fr', 'pt') for the default locale, "
+        "or a BCP-47 locale tag for region-specific variants. "
+        "Pass 'auto' to let the model detect the language. Supported codes:\n"
+        + "\n".join(f"  {code:<7} {name}" for code, (_, name) in sorted(LANG_TO_ID.items()))
+    )
     parser.add_argument("--language", "-l", type=str, default=None, help=lang_help)
-    parser.add_argument("-e", "--execution_provider", type=str, required=False, default="follow_config",
-                        choices=["cpu", "cuda", "dml", "follow_config"],
-                        help="Execution provider to run with. Defaults to follow_config.")
+    parser.add_argument(
+        "-e",
+        "--execution_provider",
+        type=str,
+        required=False,
+        default="follow_config",
+        choices=["cpu", "cuda", "dml", "follow_config"],
+        help="Execution provider to run with. Defaults to follow_config.",
+    )
     args = parser.parse_args()
     if not os.path.exists(args.audio_file):
         print(f"Error: {args.audio_file} not found")
@@ -227,8 +246,9 @@ def main():
     use_vad_override = None
     if args.use_vad is not None:
         use_vad_override = args.use_vad == "true"
-    simulate_microphone(args.model_path, args.audio_file, args.execution_provider,
-                        use_vad=use_vad_override, language=args.language)
+    simulate_microphone(
+        args.model_path, args.audio_file, args.execution_provider, use_vad=use_vad_override, language=args.language
+    )
 
 
 if __name__ == "__main__":

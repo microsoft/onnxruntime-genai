@@ -9,13 +9,14 @@ import os
 import platform
 import shlex
 import shutil
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
-import util  # ./tools/python/util noqa: E402
+import util  # noqa: E402
 
 log = util.get_logger("build.py")
 
@@ -161,9 +162,7 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
-    parser.add_argument(
-        "--use_winml", action="store_true", help="Whether to use WinML. Default is to not use WinML."
-    )
+    parser.add_argument("--use_winml", action="store_true", help="Whether to use WinML. Default is to not use WinML.")
     parser.add_argument(
         "--winml_sdk_version",
         type=str,
@@ -465,7 +464,7 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path | None = 
     )
 
     if ort_lib_dir:
-        ort_lib_path = f"/p:OrtLibDir={str(ort_lib_dir)}"
+        ort_lib_path = f"/p:OrtLibDir={ort_lib_dir!s}"
         props = [configuration, platform, native_lib_path, ort_lib_path]
     else:
         props = [configuration, platform, native_lib_path]
@@ -509,7 +508,6 @@ def _run_android_tests(args: argparse.Namespace):
         # the test app loads and runs a test model using the GenAI Java bindings
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
-        import subprocess
 
         exception = None
         try:
@@ -961,13 +959,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     build_dir.mkdir()
 
-    samples_to_build = [
-        "-DMODEL_QA=ON",
-        "-DMODEL_CHAT=ON",
-        "-DMODEL_MM=ON",
-        "-DWHISPER=ON",
-        "-DNEMOTRON_SPEECH=ON"
-    ]
+    samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DNEMOTRON_SPEECH=ON"]
 
     ort_include_dir = REPO_ROOT / "ort" / "include"
     ort_lib_dir = REPO_ROOT / "ort" / "lib"
@@ -977,24 +969,20 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
         oga_lib_dir = oga_lib_dir / args.config
 
-    cmake_command = (
-        [
-            str(args.cmake_path),
-            "-S",
-            str(examples_dir),
-            "-B",
-            str(build_dir),
-            "-G",
-            args.cmake_generator,
-        ]
-        + samples_to_build
-        + [
-            "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
-            "-DORT_LIB_DIR=" + str(ort_lib_dir),
-            "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
-            "-DOGA_LIB_DIR=" + str(oga_lib_dir),
-        ]
-    )
+    cmake_command = [
+        str(args.cmake_path),
+        "-S",
+        str(examples_dir),
+        "-B",
+        str(build_dir),
+        "-G",
+        args.cmake_generator,
+        *samples_to_build,
+        "-DORT_INCLUDE_DIR=" + str(ort_include_dir),
+        "-DORT_LIB_DIR=" + str(ort_lib_dir),
+        "-DOGA_INCLUDE_DIR=" + str(oga_include_dir),
+        "-DOGA_LIB_DIR=" + str(oga_lib_dir),
+    ]
 
     cmake_command += _get_vs_platform_args(args)
 

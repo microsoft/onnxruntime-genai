@@ -1,3 +1,29 @@
+# Configuration for lintrunner https://github.com/suo/lintrunner
+# You can install the dependencies and initialize with
+#
+# ```sh
+# pip install -r requirements-lintrunner.txt
+# lintrunner init
+# ```
+#
+# This will install lintrunner on your system and download all the necessary
+# dependencies to run linters locally.
+#
+# To format local changes:
+#
+# ```bash
+# lintrunner -a
+# ```
+#
+# To format all files:
+#
+# ```bash
+# lintrunner -a --all-files
+# ```
+#
+# To update an existing linting rule or create a new one, modify this file or create a
+# new adapter following examples in https://github.com/justinchuby/lintrunner-adapters.
+
 merge_base_with = 'origin/main'
 
 [[linter]]
