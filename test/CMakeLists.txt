@@ -12,6 +12,10 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
+# reinit_tests.cpp is a standalone executable (it calls OgaShutdown() to exercise re-initialization
+# and has its own main()), so keep it out of the unit_tests sources.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
+
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
   file(GLOB cuda_kernel_test_srcs CONFIGURE_DEPENDS
@@ -68,3 +72,34 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
+
+# Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
+# OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,
+# registered plugin EPs). Keeping them out of unit_tests avoids any coupling to test order. This
+# binary links the genai OBJECT library (not the shared DLL) so it can call internal genai symbols
+# (e.g. GetDeviceInterface) directly for white-box coverage; unit_tests deliberately stays on the
+# public API via the shared library.
+add_executable(reinit_tests "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
+target_include_directories(reinit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+# onnxruntime-genai-obj provides genai's objects and its PUBLIC usage requirements (ORT + extensions
+# include dirs; extensions / ORT / Threads link libs), so those are inherited here.
+target_link_libraries(reinit_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+# The shared library stages the ORT runtime (onnxruntime.dll) and the CUDA add-on next to itself;
+# depend on it so those are present in reinit_tests' output directory at run time.
+add_dependencies(reinit_tests onnxruntime-genai)
+set_target_properties(reinit_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(reinit_tests PRIVATE "-fvisibility=hidden")
+endif()
+
+add_test(NAME ReInitTests COMMAND reinit_tests)

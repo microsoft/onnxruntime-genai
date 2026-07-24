@@ -72,8 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         if diff:
             problems.append(
                 f"Suite '{suite_name}' is out of sync: "
-                f"models.py '{suite_name}' vs pipeline '{yaml_key}':\n"
-                + "\n".join(diff)
+                f"models.py '{suite_name}' vs pipeline '{yaml_key}':\n" + "\n".join(diff)
             )
 
     if problems:

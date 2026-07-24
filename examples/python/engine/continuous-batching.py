@@ -70,7 +70,7 @@ class RequestPool:
             self.engine.add_request(request.request)
 
     def fill(self):
-        for i, prompt in enumerate(self.prompts[int(len(self.prompts) * self.load_factor) :]):
+        for _i, prompt in enumerate(self.prompts[int(len(self.prompts) * self.load_factor) :]):
             request = ClientRequest(prompt, self.model, self.tokenizer, self)
             with self.lock:
                 self.requests.append(request)

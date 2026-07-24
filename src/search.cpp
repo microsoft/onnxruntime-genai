@@ -2,7 +2,6 @@
 #include "softmax.h"
 #include "search.h"
 #include "beam_search_scorer.h"
-#include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
 #include <limits>
@@ -11,7 +10,7 @@ namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      cpu_device_{*GetCpuInterface()} {
+      cpu_device_{*GetDeviceInterface(DeviceType::CPU)} {
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_ = cpu_device_.Allocate<int32_t>(batch_beam_size);
@@ -117,7 +116,12 @@ void BeamSearch_Cpu::SelectTop() {
   // Use partial_sort to find only the top 2*num_beams elements per batch,
   // instead of heapifying the entire vocab*beams array via priority_queue.
   const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
-  assert(total_elements >= top_k);
+  // Defense-in-depth: a plain assert() is compiled out under NDEBUG (release
+  // builds), so enforce the invariant that partial_sort relies on at runtime.
+  // This is normally guaranteed by the vocab_size >= 2 validation for beam
+  // search in Generator::Generator.
+  if (total_elements < top_k)
+    throw std::runtime_error("Beam search requires num_beams * vocab_size (" + std::to_string(total_elements) + ") to be at least 2 * num_beams (" + std::to_string(top_k) + "); vocab_size is too small");
 
   // Reuse class member to avoid re-allocating on every call (size is constant).
   select_top_idx_.resize(total_elements);
@@ -576,6 +580,45 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
     for (const auto& word_id : sequence) {
       if (word_id >= 0 && word_id < params_->config.model.vocab_size)
         repetition_penalty_visited_[word_id] = false;
+    }
+  }
+}
+
+void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
+  if (ngram_size <= 0)
+    return;
+
+  const int sequence_length = sequences_.GetSequenceLength();
+  // Need at least one complete n-gram in history before anything can be banned.
+  if (sequence_length < ngram_size)
+    return;
+
+  const int prefix_length = ngram_size - 1;
+  const int batch_beam_size = params_->BatchBeamSize();
+  for (int i = 0; i < batch_beam_size; i++) {
+    std::span<float> const beam_token_scores = GetScores(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
+
+    // The prefix we are about to extend: the trailing (ngram_size - 1) tokens.
+    std::span<const int32_t> const target_prefix = sequence.subspan(sequence_length - prefix_length, prefix_length);
+
+    // Scan every historical n-gram. Its first (ngram_size - 1) tokens form a prefix
+    // and its last token is what followed. If the prefix matches the trailing prefix,
+    // ban that following token so the same n-gram cannot repeat.
+    const int last_start = sequence_length - ngram_size;
+    for (int start = 0; start <= last_start; start++) {
+      bool matches = true;
+      for (int j = 0; j < prefix_length; j++) {
+        if (sequence[start + j] != target_prefix[j]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        const int32_t banned_token = sequence[start + prefix_length];
+        if (banned_token >= 0 && banned_token < params_->config.model.vocab_size)
+          beam_token_scores[banned_token] = std::numeric_limits<float>::lowest();
+      }
     }
   }
 }

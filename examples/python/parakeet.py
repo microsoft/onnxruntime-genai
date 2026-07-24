@@ -10,6 +10,7 @@ Generator loop.
 """
 
 import argparse
+import importlib
 import os
 import time
 import wave
@@ -28,7 +29,8 @@ def _audio_duration_seconds(path: str) -> float:
         # Not a valid/parsable WAV stream; fall back to soundfile below.
         pass
     try:
-        import soundfile as sf  # type: ignore
+        sf = importlib.import_module("soundfile")  # type: ignore
+
         info = sf.info(path)
         return float(info.frames) / float(info.samplerate)
     except Exception:
