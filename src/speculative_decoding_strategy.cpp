@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iterator>
 #include <random>
 
@@ -79,7 +80,11 @@ std::vector<int32_t> CommitGuidanceToken(ConstrainedLogitsProcessor& guidance_pr
 
 SpeculativeDecodingStrategy::SpeculativeDecodingStrategy(State& target_state,
                                                          const Model& target_model)
-    : target_state_{target_state}, target_model_{target_model} {}
+    : target_state_{target_state},
+      target_model_{target_model},
+      adaptive_k_{target_state.params_->speculative.max_draft_tokens,
+                  target_state.params_->speculative.adaptive_k_min,
+                  target_state.params_->speculative.adaptive_k_bool != 0} {}
 
 std::deque<int32_t> SpeculativeDecodingStrategy::CreateGuidanceFFQueue() const {
   return {ff_carry_.begin(), ff_carry_.end()};
@@ -133,6 +138,7 @@ void SpeculativeDecodingStrategy::Reset() {
   round_dirty_ = false;
   guidance_round_ = false;
   ff_carry_.clear();
+  adaptive_k_.Reset();
   ResetProposer();
 }
 
@@ -238,7 +244,9 @@ void SpeculativeDecodingStrategy::ClearPendingExternalLogits() {
 }
 
 void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted, size_t queued,
-                                             bool formula_supported) {
+                                             bool formula_supported,
+                                             bool filled_proposal_budget,
+                                             float propose_ms, float target_ms) {
   if (round_active_)
     throw std::runtime_error("Speculative decoding started a round before the previous round was settled.");
   if (queued == 0)
@@ -251,6 +259,13 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   tokens_queued_ += queued;
   round_active_ = true;
   active_round_discarded_ = false;
+  active_round_k_ = K;
+  active_round_evaluated_ = evaluated;
+  active_round_accepted_ = accepted;
+  active_round_emitted_ = 0;
+  active_round_filled_proposal_budget_ = filled_proposal_budget;
+  active_round_propose_ms_ = propose_ms;
+  active_round_target_ms_ = target_ms;
 
   if (formula_supported) {
     formula_rounds_++;
@@ -264,12 +279,24 @@ void SpeculativeDecodingStrategy::FinishRound() {
   if (!pending_.empty())
     throw std::runtime_error("Speculative decoding settled a round while output tokens were still buffered.");
 
-  if (active_round_discarded_)
+  if (active_round_discarded_) {
     interrupted_rounds_++;
-  else
+  } else {
     completed_rounds_++;
+    adaptive_k_.RecordCompletedRound(
+        active_round_k_, active_round_evaluated_, active_round_accepted_,
+        active_round_emitted_, active_round_filled_proposal_budget_,
+        active_round_propose_ms_, active_round_target_ms_);
+  }
   round_active_ = false;
   active_round_discarded_ = false;
+  active_round_k_ = 0;
+  active_round_evaluated_ = 0;
+  active_round_accepted_ = 0;
+  active_round_emitted_ = 0;
+  active_round_filled_proposal_budget_ = false;
+  active_round_propose_ms_ = 0.0f;
+  active_round_target_ms_ = 0.0f;
 }
 
 void SpeculativeDecodingStrategy::DiscardPendingTokens() {
@@ -332,11 +359,13 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   const int max_length = params.search.max_length;
   ClearPendingExternalLogits();
 
-  int K = params.speculative.max_draft_tokens;
-  if (K < 1 || K > 16)
+  const int max_k = params.speculative.max_draft_tokens;
+  if (max_k < 1 || max_k > 16)
     throw std::runtime_error(
         "Speculative decoding: max_draft_tokens (K) must be in [1, 16]. Got K=" +
-        std::to_string(K) + ".");
+        std::to_string(max_k) + ".");
+  int K = adaptive_k_.GetK();
+  const int proposal_budget = K;
 
   const int remaining = max_length - seed_length;
   if (remaining <= 0)
@@ -363,6 +392,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     throw std::runtime_error(
         "Speculative draft returned " + std::to_string(proposal.tokens.size()) +
         " tokens, exceeding K=" + std::to_string(K) + ".");
+  const bool filled_proposal_budget =
+      K == proposal_budget && static_cast<int>(proposal.tokens.size()) == K;
   K = static_cast<int>(proposal.tokens.size());
   const bool target_uses_greedy = g.IsGreedySampling();
   ValidateProposal(proposal, target_uses_greedy, K);
@@ -384,7 +415,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   // Guidance - run a dedicated grammar-masked round instead of the batched path below (still uses
   // the draft proposal from above). Handles greedy and sampling.
   if (g.guidance_logits_processor_) {
-    RunGuidanceRound(g, proposal, seed_length, K, ms_f(t_propose_end - t_propose_start).count());
+    RunGuidanceRound(g, proposal, seed_length, K, filled_proposal_budget,
+                     ms_f(t_propose_end - t_propose_start).count());
     return;
   }
 
@@ -647,8 +679,12 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   // Verify moved the inner caches past the committed sequence; FinalizeRound/PrepareForAppend re-sync.
   round_dirty_ = true;
 
-  BeginRound(K, n_evaluated, n_direct, pending_.size(), true);
-  total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
+  const float propose_ms = ms_f(t_propose_end - t_propose_start).count();
+  const float initial_round_ms = ms_f(clock::now() - t_propose_start).count();
+  BeginRound(K, n_evaluated, n_direct, pending_.size(), true,
+             filled_proposal_budget, propose_ms,
+             std::max(0.0f, initial_round_ms - propose_ms));
+  total_propose_ms_ += propose_ms;
   total_target_ms_ += verify_ms;
 }
 
@@ -656,6 +692,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 // emitted, run the deferred re-anchor (FinalizeRound) so the model's state matches exactly what
 // was streamed to the user.
 void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
+  using clock = std::chrono::steady_clock;
+  using ms_f = std::chrono::duration<float, std::milli>;
+
   const int max_length = g.search_->params_->search.max_length;
 
   // If we can't emit (done / at max_length), drop the rest of the round and skip the re-anchor.
@@ -675,6 +714,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   }
   if (EmitToken(g, tok)) {
     tokens_emitted_++;
+    active_round_emitted_++;
   } else {
     tokens_discarded_++;
     active_round_discarded_ = true;
@@ -706,9 +746,11 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   // Last token of the round just went out: re-anchor now. (Deferring it to here means an EOS
   // partway through the round skips the re-anchor and its wasted target pass.)
   if (pending_.empty() && reanchor_pending_) {
-    FinishRound();
     ClearPendingExternalLogits();
+    const auto finalize_start = clock::now();
     FinalizeRound(g);
+    active_round_target_ms_ += ms_f(clock::now() - finalize_start).count();
+    FinishRound();
   }
 }
 
@@ -773,7 +815,8 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
     // One single-token target run, which is exactly the baseline cost per token (T_target).
     // We track it separately from the K-token verify for the speedup formula in GetStats.
     // (The fold path has no such run, so it leaves this at 0.)
-    total_reanchor_ms_ += ms_f(t_target_end - t_target_start).count();
+    const float reanchor_ms = ms_f(t_target_end - t_target_start).count();
+    total_reanchor_ms_ += reanchor_ms;
     reanchor_runs_++;
     g.SetLogits(target_lgt);
   }
@@ -783,7 +826,8 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   auto t_advance_start = clock::now();
   Advance(g, saved_proposal_, saved_n_direct_, saved_final_token_, saved_seed_length_);
   auto t_advance_end = clock::now();
-  total_propose_ms_ += ms_f(t_advance_end - t_advance_start).count();
+  const float advance_ms = ms_f(t_advance_end - t_advance_start).count();
+  total_propose_ms_ += advance_ms;
 
   // Non-fold re-anchored the target to the committed length (caches match); the fold leaves the
   // target one token behind -> it stays dirty until the next round / PrepareForAppend.
@@ -795,9 +839,12 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 // verification; deterministic sampling draws from the masked target and compares that draw with
 // the proposal. Caches are re-anchored in FinalizeRound.
 void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal& proposal,
-                                                   int seed_length, int K, float propose_ms) {
+                                                   int seed_length, int K,
+                                                   bool filled_proposal_budget,
+                                                   float propose_ms) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
+  const auto guidance_start = clock::now();
 
   const auto& params = *g.search_->params_;
   const int vocab_size = params.config.model.vocab_size;
@@ -1045,7 +1092,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   guidance_round_ = true;
   round_dirty_ = true;
 
-  BeginRound(K, n_evaluated, n_direct, pending_.size(), false);
+  BeginRound(K, n_evaluated, n_direct, pending_.size(), false,
+             filled_proposal_budget, propose_ms,
+             ms_f(clock::now() - guidance_start).count());
   total_propose_ms_ += propose_ms;
   total_target_ms_ += verify_ms;
 }
@@ -1067,7 +1116,8 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
   const auto draft_start = clock::now();
   FinalizeGuidanceProposer(g, seed, saved_K_, saved_committed_);
   const auto draft_end = clock::now();
-  total_propose_ms_ += ms_f(draft_end - draft_start).count();
+  const float finalize_propose_ms = ms_f(draft_end - draft_start).count();
+  total_propose_ms_ += finalize_propose_ms;
 
   // Target - the verify batch already built KV for the first verify_prefix committed tokens. Trim to
   // there and replay only the tail (a reject correction + its fast-forward tokens), which was never
@@ -1093,7 +1143,8 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
     target_runs_++;
   }
   const auto target_end = clock::now();
-  total_target_ms_ += ms_f(target_end - target_start).count();
+  const float finalize_target_ms = ms_f(target_end - target_start).count();
+  total_target_ms_ += finalize_target_ms;
   return target_logits;
 }
 
@@ -1122,6 +1173,12 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
   s.tokens_buffered = pending_.size();
   s.draft_forward_passes = draft_runs_;
   s.target_forward_passes = target_runs_;
+  s.effective_k = static_cast<size_t>(adaptive_k_.GetK());
+  s.adaptive_k_increases = adaptive_k_.Increases();
+  s.adaptive_k_decreases = adaptive_k_.Decreases();
+  s.adaptive_k_observations = adaptive_k_.Observations();
+  s.adaptive_k_probes = adaptive_k_.Probes();
+  s.adaptive_k_throughput = adaptive_k_.CurrentThroughput();
   s.formula_supported = (rounds_ > 0 && formula_rounds_ == rounds_) ? 1 : 0;
   s.total_draft_ms = total_propose_ms_;
   s.total_target_ms = total_target_ms_ + total_reanchor_ms_;

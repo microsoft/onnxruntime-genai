@@ -24,6 +24,11 @@ struct SpeculativeStats {
   size_t tokens_buffered{};
   size_t draft_forward_passes{};
   size_t target_forward_passes{};
+  size_t effective_k{};
+  size_t adaptive_k_increases{};
+  size_t adaptive_k_decreases{};
+  size_t adaptive_k_observations{};
+  size_t adaptive_k_probes{};
   size_t formula_supported{};
   float total_draft_ms{};
   float total_target_ms{};
@@ -38,6 +43,7 @@ struct SpeculativeStats {
   float target_overhead_ratio{};
   float estimated_speedup{};
   float observed_speedup{};
+  float adaptive_k_throughput{};
 };
 
 }  // namespace Generators

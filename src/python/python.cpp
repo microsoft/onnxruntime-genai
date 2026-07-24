@@ -197,10 +197,12 @@ struct PyGeneratorParams {
       auto name = entry.first.cast<std::string>();
       if (pybind11::isinstance<pybind11::float_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<bool>() ? 1.0 : 0.0);
       } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
       } else
-        throw std::runtime_error("Unknown speculative option type, must be int or float: " + name);
+        throw std::runtime_error("Unknown speculative option type, must be bool, int, or float: " + name);
     }
   }
 
@@ -208,6 +210,8 @@ struct PyGeneratorParams {
     pybind11::dict d;
     d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
     d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
+    d["adaptive_k_bool"] = params_->GetSpeculativeNumber("adaptive_k_bool") != 0.0;
+    d["adaptive_k_min"] = params_->GetSpeculativeNumber("adaptive_k_min");
     return d;
   }
 
@@ -316,14 +320,17 @@ struct PyGenerator {
                             "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
                             "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
                             "tokens_discarded", "tokens_buffered", "draft_forward_passes",
-                            "target_forward_passes"})
+                            "target_forward_passes", "effective_k", "adaptive_k_increases",
+                            "adaptive_k_decreases", "adaptive_k_observations",
+                            "adaptive_k_probes"})
       d[key] = stats->GetCount(key);
     d["formula_supported"] = stats->GetBool("formula_supported");
     for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
                             "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
                             "mean_emitted_tokens_per_round", "expected_tokens_per_round",
                             "avg_target_ms_per_round", "target_baseline_ms_per_token",
-                            "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
+                            "target_overhead_ratio", "estimated_speedup", "observed_speedup",
+                            "adaptive_k_throughput"})
       d[key] = stats->GetNumber(key);
     return d;
   }

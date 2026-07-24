@@ -433,6 +433,8 @@ struct Config {
   struct Speculative {
     int max_draft_tokens{4};  // Maximum number of tokens proposed per round.
     int ngram_size{};         // 0 disables n-gram decoding; N matches the last N-1 tokens.
+    int adaptive_k_bool{};    // 0 uses max_draft_tokens every round; 1 adapts up to the hard limit.
+    int adaptive_k_min{2};    // Starting width and floor when adaptive_k_bool is enabled.
   } speculative;
 
   struct Engine {

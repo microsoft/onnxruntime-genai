@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <cmath>
 #include <optional>
 #include <random>
 #include <span>
@@ -19,6 +22,170 @@ struct Model;
 struct State;
 struct SpeculativeStats;
 struct ConstrainedLogitsProcessor;
+
+// Learns committed-token throughput per K, probes only adjacent widths, and keeps a probe only
+// when acceptance stays high and its throughput is not materially worse.
+class AdaptiveKController {
+ public:
+  static constexpr int kAdaptiveMaxK = 16;
+
+  AdaptiveKController(int fixed_k, int adaptive_min_k, bool enabled)
+      : min_k_{enabled ? adaptive_min_k : fixed_k},
+        max_k_{enabled ? kAdaptiveMaxK : fixed_k},
+        enabled_{enabled},
+        effective_k_{min_k_} {}
+
+  int GetK() const {
+    return effective_k_;
+  }
+  std::size_t Increases() const { return increases_; }
+  std::size_t Decreases() const { return decreases_; }
+  std::size_t Observations() const { return observations_; }
+  std::size_t Probes() const { return probes_; }
+  float CurrentThroughput() const {
+    const Estimate& current = estimates_[static_cast<size_t>(effective_k_)];
+    if (current.samples > 0)
+      return current.Throughput();
+    if (probe_origin_k_ != 0)
+      return estimates_[static_cast<size_t>(probe_origin_k_)].Throughput();
+    return 0.0f;
+  }
+
+  void RecordCompletedRound(int k, int evaluated, int accepted,
+                            std::size_t committed_tokens, bool filled_proposal_budget,
+                            float propose_ms, float target_ms) {
+    const float total_ms = propose_ms + target_ms;
+    if (!enabled_ || k != effective_k_ || evaluated <= 0 || committed_tokens == 0 ||
+        !filled_proposal_budget || !std::isfinite(total_ms) || total_ms <= 0.0f)
+      return;
+
+    Estimate& estimate = estimates_[static_cast<size_t>(k)];
+    estimate.Update(static_cast<float>(committed_tokens), total_ms,
+                    static_cast<float>(accepted) / static_cast<float>(evaluated));
+    observations_++;
+
+    if (probe_origin_k_ != 0) {
+      probe_observations_++;
+      const Estimate& origin = estimates_[static_cast<size_t>(probe_origin_k_)];
+      const bool probing_up = effective_k_ > probe_origin_k_;
+      const bool severe_regression =
+          origin.Throughput() > 0.0f &&
+          estimate.Throughput() < origin.Throughput() * kSevereRegressionRatio;
+      if (severe_regression) {
+        FinishProbe(false);
+      } else if (probe_observations_ >= kProbeSamples) {
+        const bool throughput_safe =
+            origin.Throughput() <= 0.0f ||
+            estimate.Throughput() >= origin.Throughput() * kProbeRetentionRatio;
+        const bool acceptance_safe =
+            !probing_up || estimate.acceptance >= kHighAcceptanceThreshold;
+        FinishProbe(throughput_safe && acceptance_safe);
+      }
+      return;
+    }
+
+    stable_observations_++;
+    if (probe_cooldown_ > 0) {
+      probe_cooldown_--;
+      return;
+    }
+    if (estimate.samples < kMinSamples)
+      return;
+
+    if (estimate.acceptance < kLowAcceptanceThreshold && effective_k_ > min_k_) {
+      StartProbe(effective_k_ - 1);
+    } else if (estimate.acceptance >= kHighAcceptanceThreshold &&
+               effective_k_ < max_k_ && stable_observations_ >= kMinSamples) {
+      StartProbe(effective_k_ + 1);
+    }
+  }
+
+  void Reset() {
+    effective_k_ = min_k_;
+    estimates_ = {};
+    probe_origin_k_ = 0;
+    probe_observations_ = 0;
+    stable_observations_ = 0;
+    probe_cooldown_ = 0;
+  }
+
+ private:
+  static constexpr float kEwmaAlpha = 0.25f;
+  static constexpr float kHighAcceptanceThreshold = 0.75f;
+  static constexpr float kLowAcceptanceThreshold = 0.50f;
+  static constexpr float kProbeRetentionRatio = 0.97f;
+  static constexpr float kSevereRegressionRatio = 0.80f;
+  static constexpr int kMinSamples = 2;
+  static constexpr int kProbeSamples = 2;
+  static constexpr int kSuccessfulProbeCooldown = 1;
+  static constexpr int kRejectedProbeCooldown = 6;
+
+  struct Estimate {
+    float tokens{};
+    float milliseconds{};
+    float acceptance{};
+    std::size_t samples{};
+
+    void Update(float sample_tokens, float sample_ms, float sample_acceptance) {
+      if (samples == 0) {
+        tokens = sample_tokens;
+        milliseconds = sample_ms;
+        acceptance = sample_acceptance;
+      } else {
+        tokens += kEwmaAlpha * (sample_tokens - tokens);
+        milliseconds += kEwmaAlpha * (sample_ms - milliseconds);
+        acceptance += kEwmaAlpha * (sample_acceptance - acceptance);
+      }
+      samples++;
+    }
+
+    float Throughput() const {
+      return milliseconds > 0.0f ? tokens / milliseconds : 0.0f;
+    }
+  };
+
+  void MoveTo(int k) {
+    if (k == effective_k_)
+      return;
+    if (k > effective_k_)
+      increases_++;
+    else
+      decreases_++;
+    effective_k_ = k;
+  }
+
+  void StartProbe(int candidate_k) {
+    probe_origin_k_ = effective_k_;
+    probe_observations_ = 0;
+    stable_observations_ = 0;
+    probes_++;
+    MoveTo(candidate_k);
+  }
+
+  void FinishProbe(bool keep_candidate) {
+    if (!keep_candidate)
+      MoveTo(probe_origin_k_);
+    probe_origin_k_ = 0;
+    probe_observations_ = 0;
+    stable_observations_ = 0;
+    probe_cooldown_ =
+        keep_candidate ? kSuccessfulProbeCooldown : kRejectedProbeCooldown;
+  }
+
+  int min_k_;
+  int max_k_;
+  bool enabled_;
+  int effective_k_;
+  std::array<Estimate, 17> estimates_{};
+  int probe_origin_k_{};
+  int probe_observations_{};
+  int stable_observations_{};
+  int probe_cooldown_{};
+  std::size_t increases_{};
+  std::size_t decreases_{};
+  std::size_t observations_{};
+  std::size_t probes_{};
+};
 
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
@@ -128,7 +295,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void DrainOne(Generator& g);
   void FinalizeRound(Generator& g);
   bool EmitToken(Generator& g, int32_t tok);
-  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported);
+  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported,
+                  bool filled_proposal_budget, float propose_ms, float target_ms);
   void FinishRound();
   void DiscardPendingTokens();
   void ClearPendingExternalLogits();
@@ -137,7 +305,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
   // sampling. Runs instead of the normal batched path.
   void RunGuidanceRound(Generator& g, const Proposal& proposal, int seed_length, int K,
-                        float propose_ms);
+                        bool filled_proposal_budget, float propose_ms);
 
   // Cleans up after a guidance round and returns the target's logits for the next position. Keeps
   // the accepted tokens already in the cache and feeds the rest back one at a time; also refreshes
@@ -154,6 +322,15 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   std::deque<std::mt19937> pending_rng_states_;
   bool round_active_{};
   bool active_round_discarded_{};
+  int active_round_k_{};
+  int active_round_evaluated_{};
+  int active_round_accepted_{};
+  std::size_t active_round_emitted_{};
+  bool active_round_filled_proposal_budget_{};
+  float active_round_propose_ms_{};
+  float active_round_target_ms_{};
+
+  AdaptiveKController adaptive_k_;
 
   // K histogram for rounds that follow the standard geometric acceptance formula.
   std::array<std::size_t, 17> formula_k_counts_{};
