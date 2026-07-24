@@ -181,19 +181,49 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
+def _run_check_extra_options(
+    monkeypatch,
+    extra_options,
+    *,
+    precision="int4",
+    execution_provider="cpu",
+    tie_word_embeddings=True,
+):
+    # Avoid Hugging Face network/config loading and provide only the config fields needed.
+    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings)
+
+    def _fake_get_hf_details(*_args, **_kwargs):
+        return {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        }
+
+    monkeypatch.setattr(builder_module, "get_hf_details", _fake_get_hf_details)
+    builder_module.check_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision=precision,
+        execution_provider=execution_provider,
+        cache_dir="/tmp/fake-cache",
+        extra_options=extra_options,
+    )
+
+
 # ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
 
-def test_int8_with_qdq_is_rejected():
+def test_int8_with_qdq_is_rejected(monkeypatch):
     with pytest.raises(NotImplementedError, match="QDQ"):
-        builder_module.check_extra_options({"use_qdq": "true"}, "int8", "cpu")
+        _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int8")
 
 
-def test_int4_with_qdq_is_allowed():
+def test_int4_with_qdq_is_allowed(monkeypatch):
     # QDQ is only rejected for int8; int4 still supports it.
-    builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int4")
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +258,63 @@ def test_deprecated_alias_does_not_override_new_name():
     assert kv == {"algo_config": "k_quant"}
 
 
-def test_check_extra_options_accepts_deprecated_int4_names():
+def test_check_extra_options_accepts_deprecated_int4_names(monkeypatch):
     # End-to-end through check_extra_options: deprecated names are normalized in-place.
     kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
-    builder_module.check_extra_options(kv, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, kv, precision="int4")
     assert kv["algo_config"] == "k_quant"
     assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
     assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv
+
+
+def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=False,
+        )
+
+
+def test_shared_embeddings_with_tied_weights_is_accepted(monkeypatch):
+    # Should not raise when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {"shared_embeddings": "true"},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_tied_when_config_ties_embeddings(monkeypatch):
+    # When shared_embeddings is not specified, it defaults to tie_word_embeddings value
+    # Should not raise because shared_embeddings will default to True when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_false_when_config_doesnt_tie_embeddings(monkeypatch):
+    # When shared_embeddings is not specified and tie_word_embeddings=False,
+    # shared_embeddings will default to False
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=False,
+    )
+
+
+def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
+    # When tie_word_embeddings is None, it should default to False
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=None,
+        )

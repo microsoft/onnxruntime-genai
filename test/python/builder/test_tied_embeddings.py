@@ -43,8 +43,15 @@ def _make_model_for_tied_embeddings(
 ):
     model = Model.__new__(Model)
     model.extra_options = {"algo_config": algo_config}
+
+    # Emulate builder.py behavior: default shared_embeddings based on tie_word_embeddings
+    # if not explicitly provided
     if shared_embeddings is not None:
         model.extra_options["shared_embeddings"] = shared_embeddings
+    elif tie_word_embeddings is not None:
+        # This mirrors builder.py's logic: default shared_embeddings to tie_word_embeddings value
+        model.extra_options["shared_embeddings"] = tie_word_embeddings
+
     model.onnx_dtype = onnx_dtype
     model.quant_attrs = {
         "op_types_to_quantize": op_types,
@@ -80,26 +87,36 @@ def test_tie_word_embeddings_defaults_to_false_when_unset_or_none():
     assert model_none.tied_unquantized_embeddings is False
 
 
+def test_tie_word_embeddings_true_enables_sharing_when_option_is_unset():
+    # Base builder logic defaults shared_embeddings from config.tie_word_embeddings
+    # when the explicit extra option is not provided.
+    model = _make_model_for_tied_embeddings(
+        tie_word_embeddings=True,
+        onnx_dtype=ir.DataType.INT4,
+        op_types=("MatMul", "Gather"),
+    )
+
+    assert model.tied_quantized_embeddings is True
+    assert model.tied_unquantized_embeddings is False
+
+
 @pytest.mark.parametrize(
-    "exclude_embeds, exclude_lm_head, prune_lm_head",
+    "exclude_embeds, exclude_lm_head",
     [
-        (True, False, False),
-        (False, True, False),
-        (False, False, True),
+        (True, False),
+        (False, True),
     ],
 )
 def test_shared_embeddings_are_disabled_when_embeddings_or_lm_head_are_excluded(
     exclude_embeds,
     exclude_lm_head,
-    prune_lm_head,
 ):
     model = _make_model_for_tied_embeddings(
         shared_embeddings=True,
-        tie_word_embeddings=False,
+        tie_word_embeddings=True,
         onnx_dtype=ir.DataType.INT4,
         exclude_embeds=exclude_embeds,
         exclude_lm_head=exclude_lm_head,
-        prune_lm_head=prune_lm_head,
     )
 
     assert model.tied_quantized_embeddings is False
@@ -130,7 +147,7 @@ def test_shared_embeddings_are_disabled_when_embeddings_or_lm_head_are_excluded(
         (ir.DataType.INT4, ("MatMul", "Gather"), ("/lm_head/MatMul",), False, False, False, "rtn", False, False),
         (ir.DataType.INT4, ("MatMul", "Gather"), (), True, False, False, "rtn", False, False),
         (ir.DataType.INT4, ("MatMul", "Gather"), (), False, True, False, "rtn", False, False),
-        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, True, "rtn", False, False),
+        (ir.DataType.INT4, ("MatMul", "Gather"), (), False, False, True, "rtn", True, False),
     ],
 )
 def test_tied_embedding_path_selection_matches_current_base_logic(

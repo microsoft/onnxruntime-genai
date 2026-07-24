@@ -1509,13 +1509,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         // Xbox Series S Dev-Mode driver: deterministic garbage from the same
         // model that is correct on CPU EP and on non-captured ORT sessions).
         for (const auto& value : provider_options->options) {
-          if (value.first == "enable_graph_capture") {
-            std::string lower_value = value.second;
-            std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
-                           [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-            if (lower_value == "0" || lower_value == "false") {
-              return false;
-            }
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
           }
         }
         return true;
