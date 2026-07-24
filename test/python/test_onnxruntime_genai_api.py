@@ -1181,11 +1181,11 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
 # ---------------------------------------------------------------------------
 # Graph capture tests
 # ---------------------------------------------------------------------------
-# Note: Graph capture tests use separate fixtures (phi4_graph_for, qwen_graph_for)
-# that resolve to models stored under "-graph" aliases. This keeps them isolated
-# from regular unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.),
-# which use different fixtures (phi4_for, qwen_for) and thus won't accidentally
-# run on graph-capture-enabled models.
+# Note: Graph capture tests use separate fixtures (qwen_graph_for) that resolve
+# to models stored under "-graph" aliases. This keeps them isolated from regular
+# unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.), which use
+# different fixtures (phi4_for, qwen_for) and thus won't accidentally run on
+# graph-capture-enabled models.
 
 # Devices that support graph capture. We build a list at test collection time so we can:
 # 1. Parametrize tests only for available graph-capture-capable devices
@@ -1228,16 +1228,15 @@ def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
     assert run1 == run2, "Qwen graph capture model produced different outputs across two identical greedy runs"
 
 
-@pytest.mark.skipif(len(graph_capture_devices) == 0, reason="No graph-capture-capable EP available.")
-@pytest.mark.parametrize("device", graph_capture_devices)
-def test_qwen_graph_capture_disabled_on_dml(qwen_graph_for, device):
+@pytest.mark.skipif(not og.is_dml_available(), reason="DML ExecutionProvider not available.")
+def test_qwen_graph_capture_disabled_on_dml(qwen_graph_for):
     """Verify that the Qwen model built with the graph-capture flag loads correctly on DML.
 
     Qwen uses standalone RotaryEmbedding ops that DML cannot partition, so the builder
     sets enable_dml_graph=0 even when graph capture is requested. This test confirms
     the model still loads and generates valid output (i.e., the opt-out path works).
     """
-    model = og.Model(qwen_graph_for(device))
+    model = og.Model(qwen_graph_for("dml"))
 
     search_params = og.GeneratorParams(model)
     input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
