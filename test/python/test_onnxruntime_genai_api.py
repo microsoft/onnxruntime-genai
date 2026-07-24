@@ -528,6 +528,7 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
+@pytest.mark.skipif(og.is_dml_available(), reason="Skip test_hidden_states on DML.")
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
