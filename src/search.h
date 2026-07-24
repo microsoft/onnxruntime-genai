@@ -1,5 +1,6 @@
 #include "sequences.h"
 #include <random>
+#include <stdexcept>
 #include "beam_search_scorer.h"
 #pragma once
 
@@ -28,6 +29,13 @@ struct Search : LeakChecked<Search> {
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
+  // This is inline because the standalone CUDA shared library does not compile search.cpp.
+  virtual void ApplyNoRepeatNgram(int ngram_size) {
+    if (ngram_size <= 0)
+      return;
+
+    throw std::runtime_error("no_repeat_ngram_size is only supported for CPU search");
+  }
 
   // Set user input tokens
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };
@@ -50,6 +58,7 @@ struct Search_Cpu : Search {
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
+  void ApplyNoRepeatNgram(int ngram_size) override;
 
   std::span<float> GetScores(int batch_beam_index);
 

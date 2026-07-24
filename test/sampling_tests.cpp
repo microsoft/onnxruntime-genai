@@ -515,6 +515,52 @@ TEST(SamplingTests, TopKExceedingVocabSizeIsRejected) {
   EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
 }
 
+// Functional correctness test for ApplyNoRepeatNgram.
+// Greedy decoding is forced toward a token that would repeat an n-gram already
+// present in the sequence. With no_repeat_ngram_size=3 that token must be banned
+// so the next-best allowed token is chosen instead.
+TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
+  const int vocab_size = 1000;  // Must match tiny-random-gpt2-fp32 model's actual vocab
+  const int batch_size = 1;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+  std::vector<float> logits_cpu(vocab_size * batch_size, 5.0f);
+  logits_cpu[7] = 10.0f;  // highest score; would complete the repeated 3-gram (5, 6, 7)
+  logits_cpu[42] = 8.0f;  // best score among allowed tokens
+
+  // Sequence already contains the 3-gram (5, 6, 7) and currently ends with the
+  // prefix (5, 6), so token 7 would repeat that 3-gram.
+  std::vector<int32_t> prefill_tokens = {5, 6, 7, 8, 5, 6};
+
+  auto first_token = [&](int ngram_size) -> int32_t {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 32);
+    params->SetSearchOptionBool("do_sample", false);  // greedy
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 1.0);  // isolate the n-gram effect
+    params->SetSearchOption("no_repeat_ngram_size", static_cast<double>(ngram_size));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(prefill_tokens.data(), static_cast<int>(prefill_tokens.size()));
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    return generator->GetNextTokens()[0];
+  };
+
+  // Baseline: without n-gram blocking, greedy picks the highest-scoring token (7).
+  EXPECT_EQ(first_token(0), 7)
+      << "Greedy should pick the highest-scoring token when n-gram blocking is off.";
+
+  // With no_repeat_ngram_size=3, token 7 would repeat the 3-gram (5, 6, 7) and
+  // must be banned, so greedy falls back to the next-best allowed token (42).
+  EXPECT_EQ(first_token(3), 42)
+      << "Token 7 should be banned (repeats 3-gram 5,6,7); expected fallback to token 42.";
+}
+
 #if USE_CUDA
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
