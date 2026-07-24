@@ -88,13 +88,13 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # On the win-arm64 agent, Azure CLI (az) and azcopy are not pre-installed, but the
-# AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Azure CLI
-# has no native Windows ARM64 MSI, so install its x64 build under emulation.
+# AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Install the
+# 32-bit CLI, which is supported through Windows ARM64 emulation.
 - powershell: |
     $ErrorActionPreference = 'Stop'
     Write-Host "Downloading Azure CLI..."
-    $azCliUrl = "https://aka.ms/installazurecliwindowsx64"
-    $installerPath = "$(Agent.TempDirectory)/AzureCLI.msi"
+    $azCliUrl = "https://aka.ms/installazurecliwindows"
+    $installerPath = Join-Path "$(Agent.TempDirectory)" "AzureCLI.msi"
     Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
     if ((Get-Item $installerPath).Length -lt 1MB) {
       Write-Error "Azure CLI download is unexpectedly small and is not a valid installer"
@@ -108,11 +108,11 @@ steps:
       exit 1
     }
 
-    # Current Azure CLI MSIs install under Program Files on native ARM64, while
-    # older/x64 packages use Program Files (x86). Discover either layout.
+    # Keep both locations for compatibility if Microsoft changes the generic
+    # installer architecture in the future.
     $azCliBin = @(
-      "$env:ProgramFiles/Microsoft SDKs/Azure/CLI2/wbin",
-      "${env:ProgramFiles(x86)}/Microsoft SDKs/Azure/CLI2/wbin"
+      (Join-Path $env:ProgramFiles "Microsoft SDKs\Azure\CLI2\wbin"),
+      (Join-Path ${env:ProgramFiles(x86)} "Microsoft SDKs\Azure\CLI2\wbin")
     ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'az.cmd')) } |
       Select-Object -First 1
     if (-not $azCliBin) {
@@ -125,9 +125,9 @@ steps:
 
     Write-Host "Downloading AzCopy..."
     $azcopyUrl = "https://aka.ms/downloadazcopy-v10-windows"
-    $azcopyZip = "$(Agent.TempDirectory)/azcopy.zip"
+    $azcopyZip = Join-Path "$(Agent.TempDirectory)" "azcopy.zip"
     Invoke-WebRequest -Uri $azcopyUrl -OutFile $azcopyZip
-    $azcopyExtractPath = "$(Agent.TempDirectory)/azcopy"
+    $azcopyExtractPath = Join-Path "$(Agent.TempDirectory)" "azcopy"
     Expand-Archive -Path $azcopyZip -DestinationPath $azcopyExtractPath -Force
     $azcopyFullPath = Get-ChildItem -Path $azcopyExtractPath -Filter "azcopy.exe" -Recurse | Select-Object -First 1
     if (-not $azcopyFullPath) {
