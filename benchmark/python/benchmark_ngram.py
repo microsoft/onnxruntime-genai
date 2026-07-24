@@ -371,6 +371,8 @@ def run_once(
     sampling_options=None,
     ngram_size=0,
     max_draft_tokens=0,
+    adaptive_k=False,
+    adaptive_k_min=2,
 ):
     """Run one generation and return timing, output, and native stats."""
     import numpy as np
@@ -392,10 +394,16 @@ def run_once(
         )
     params.set_search_options(**search_options)
     if ngram_size:
-        params.set_speculative_options(
+        speculative_options = dict(
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
         )
+        if adaptive_k:
+            speculative_options.update(
+                adaptive_k_bool=True,
+                adaptive_k_min=adaptive_k_min,
+            )
+        params.set_speculative_options(**speculative_options)
 
     generator = og.Generator(model, params)
 
@@ -473,6 +481,14 @@ CSV_COLUMNS = [
     "decoder",
     "ngram_size",
     "K",
+    "adaptive_k",
+    "adaptive_k_min",
+    "effective_k",
+    "adaptive_k_increases",
+    "adaptive_k_decreases",
+    "adaptive_k_observations",
+    "adaptive_k_probes",
+    "adaptive_k_throughput",
     "prompt_tokens",
     "new_tokens",
     "prefill_s",
@@ -592,12 +608,15 @@ def format_seed(mode, seed):
     return str(seed) if mode == "sampling" else "-"
 
 
+def format_config(ngram_size, k):
+    return f"n={ngram_size}/adaptive" if k == "adaptive" else f"n={ngram_size}/K={k}"
+
+
 def print_detailed_run(item, rep, baseline, row):
     seed_text = f" seed={row['seed']}" if row["mode"] == "sampling" else ""
     print(
         f"  {item['task']}/{item['question_id']} mode={row['mode']}{seed_text} "
-        f"n={row['ngram_size']} "
-        f"K={row['K']} rep={rep + 1}"
+        f"{format_config(row['ngram_size'], row['K'])} rep={rep + 1}"
     )
     print(
         f"    speed: decode={row['speedup_decode']:.2f}x "
@@ -625,6 +644,15 @@ def print_detailed_run(item, rep, baseline, row):
         f"emitted/round={row['mean_emitted_tokens_per_round']:.2f} "
         f"target_passes/token={row['target_passes_per_token']:.3f}"
     )
+    if row["adaptive_k"]:
+        print(
+            f"    adaptive K: start={row['adaptive_k_min']} "
+            f"final={row['effective_k']} "
+            f"moves=+{row['adaptive_k_increases']}/-{row['adaptive_k_decreases']} "
+            f"probes={row['adaptive_k_probes']} "
+            f"observations={row['adaptive_k_observations']} "
+            f"throughput={row['adaptive_k_throughput']:.4f} tok/ms"
+        )
     if row["quality_metric"]:
         print(
             f"    quality: baseline={format_quality_with_reference(baseline['quality'])} "
@@ -655,7 +683,7 @@ def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_
     print(
         f"\n  [progress {completed}/{total} mode={config_rows[0]['mode']} "
         f"seed={format_seed(config_rows[0]['mode'], config_rows[0]['seed'])} "
-        f"n={ngram_size} K={max_draft_tokens}] "
+        f"{format_config(ngram_size, max_draft_tokens)}] "
         f"decode speedup median={statistics.median(speedups):.2f}x "
         f"p10={percentile(speedups, 10):.2f}x "
         f"p90={percentile(speedups, 90):.2f}x; "
@@ -663,6 +691,17 @@ def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_
         f"acceptance median={statistics.median(acceptance):.1%}; "
         f"exact={exact}/{len(config_rows)}"
     )
+    if config_rows[0]["adaptive_k"]:
+        print(
+            f"    adaptive K: start={config_rows[0]['adaptive_k_min']} "
+            f"final_p50={statistics.median(row['effective_k'] for row in config_rows):.1f} "
+            f"final_range={min(row['effective_k'] for row in config_rows)}-"
+            f"{max(row['effective_k'] for row in config_rows)} "
+            f"moves=+{sum(row['adaptive_k_increases'] for row in config_rows)}"
+            f"/-{sum(row['adaptive_k_decreases'] for row in config_rows)} "
+            f"probes={sum(row['adaptive_k_probes'] for row in config_rows)} "
+            f"observations={sum(row['adaptive_k_observations'] for row in config_rows)}"
+        )
     quality_rows = [
         row for row in config_rows
         if row["quality_metric"] and row["rep"] == 0
@@ -718,7 +757,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
         default=None,
     )
 
-    width = 88
+    width = 104
     seed_label = context.get(
         "seed_label", format_seed(context["mode"], context["seed"])
     )
@@ -735,11 +774,11 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
     if best:
         (best_n, best_k), best_score = best
         verdict = "faster" if best_score >= 1.0 else "did not beat baseline"
-        print(f"\n>> BEST: n={best_n}, K={best_k}: {best_score:.2f}x ({verdict})")
+        print(f"\n>> BEST: {format_config(best_n, best_k)}: {best_score:.2f}x ({verdict})")
 
     print("\nDecode speedup by configuration (>1.0 is faster; ! marks a regression)")
     header = f"  {'task':18}" + "".join(
-        f"{f'n={n}/K={k}':>12}" for n in ngram_sizes for k in draft_lengths
+        f"{format_config(n, k):>16}" for n in ngram_sizes for k in draft_lengths
     )
     print(header)
     for task in tasks:
@@ -750,21 +789,21 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                     rows, task, ngram_size, max_draft_tokens, "speedup_decode"
                 )
                 if value is None:
-                    cells.append(f"{'-':>12}")
+                    cells.append(f"{'-':>16}")
                 else:
-                    cells.append(f"{value:>11.2f}{'!' if value < 1.0 else ' '}")
+                    cells.append(f"{value:>15.2f}{'!' if value < 1.0 else ' '}")
         marker = "*" if task in common.INPUT_GUIDED_TASKS else ""
         print(f"  {task + marker:18}{''.join(cells)}")
-    print("  " + "-" * (16 + 12 * len(ngram_sizes) * len(draft_lengths)))
+    print("  " + "-" * (16 + 16 * len(ngram_sizes) * len(draft_lengths)))
     print(f"  {'GEOMEAN':18}" + "".join(
-        f"{scores[(n, k)]:>11.2f}{'!' if scores[(n, k)] < 1.0 else ' '}"
-        if scores[(n, k)] is not None else f"{'-':>12}"
+        f"{scores[(n, k)]:>15.2f}{'!' if scores[(n, k)] < 1.0 else ' '}"
+        if scores[(n, k)] is not None else f"{'-':>16}"
         for n in ngram_sizes for k in draft_lengths
     ))
 
     print("\nPerformance distribution across all measured rows")
     print(
-        f"  {'config':12}{'mean':>8}{'p10':>8}{'p50':>8}{'p90':>8}"
+        f"  {'config':16}{'min':>8}{'mean':>8}{'p10':>8}{'p50':>8}{'p90':>8}{'max':>8}"
         f"{'geomean':>10}{'>1x':>8}{'e2e p50':>10}"
     )
     for ngram_size in ngram_sizes:
@@ -781,11 +820,13 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
             e2e_speedups = [row["speedup_e2e"] for row in selected]
             faster = sum(value > 1.0 for value in speedups) / len(speedups)
             print(
-                f"  {f'n={ngram_size}/K={max_draft_tokens}':12}"
+                f"  {format_config(ngram_size, max_draft_tokens):16}"
+                f"{min(speedups):>8.2f}"
                 f"{statistics.mean(speedups):>8.2f}"
                 f"{percentile(speedups, 10):>8.2f}"
                 f"{statistics.median(speedups):>8.2f}"
                 f"{percentile(speedups, 90):>8.2f}"
+                f"{max(speedups):>8.2f}"
                 f"{geometric_mean(speedups):>10.2f}"
                 f"{faster:>8.0%}"
                 f"{statistics.median(e2e_speedups):>10.2f}"
@@ -793,7 +834,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
 
     print("\nSpeculation efficiency and correctness")
     print(
-        f"  {'config':12}{'accept':>9}{'weighted':>10}{'accepted/r':>12}"
+        f"  {'config':16}{'accept':>9}{'weighted':>10}{'accepted/r':>12}"
         f"{'emit/r':>9}{'target/tok':>11}{'exact':>8}{'match':>9}"
     )
     for ngram_size in ngram_sizes:
@@ -826,7 +867,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                 row["token_match_rate"] for row in selected
             )
             print(
-                f"  {f'n={ngram_size}/K={max_draft_tokens}':12}"
+                f"  {format_config(ngram_size, max_draft_tokens):16}"
                 f"{acceptance:>9.1%}{weighted_acceptance:>10.1%}"
                 f"{accepted_per_round:>12.2f}{emitted_per_round:>9.2f}"
                 f"{target_per_token:>11.3f}{exact:>8.1%}{token_match:>9.1%}"
@@ -860,6 +901,19 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                 f"target={sum(row['total_target_ms'] for row in selected):.1f}ms; "
                 f"mismatch_first_diff_p50={first_diff}; {counts}"
             )
+            if selected[0]["adaptive_k"]:
+                print(
+                    f"    adaptive K: start={selected[0]['adaptive_k_min']} "
+                    f"final_p50={statistics.median(row['effective_k'] for row in selected):.1f} "
+                    f"final_range={min(row['effective_k'] for row in selected)}-"
+                    f"{max(row['effective_k'] for row in selected)} "
+                    f"moves=+{sum(row['adaptive_k_increases'] for row in selected)}"
+                    f"/-{sum(row['adaptive_k_decreases'] for row in selected)} "
+                    f"probes={sum(row['adaptive_k_probes'] for row in selected)} "
+                    f"observations={sum(row['adaptive_k_observations'] for row in selected)} "
+                    f"throughput_p50="
+                    f"{statistics.median(row['adaptive_k_throughput'] for row in selected):.4f} tok/ms"
+                )
 
     print("\n* Input-guided task: prompt reuse can increase n-gram proposal coverage.")
     if context["mode"] == "greedy":
@@ -880,7 +934,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
     if quality_tasks:
         print("\nTask quality (first deterministic repetition)")
         print(f"  {'task':18}{'metric':>12}{'standard':>12}" + "".join(
-            f"{f'n={n}/K={k}':>12}" for n in ngram_sizes for k in draft_lengths
+            f"{format_config(n, k):>16}" for n in ngram_sizes for k in draft_lengths
         ))
         for task in quality_tasks:
             task_rows = [
@@ -910,7 +964,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                         if config_scores else None
                     )
                     cells.append(
-                        f"{score:>11.1%} " if score is not None else f"{'-':>12}"
+                        f"{score:>15.1%} " if score is not None else f"{'-':>16}"
                     )
             baseline_text = (
                 f"{baseline:>11.1%} " if baseline is not None else f"{'-':>12}"
@@ -934,7 +988,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                             for name, value in sorted(transitions.items())
                         )
                         print(
-                            f"    {task} n={ngram_size}/K={max_draft_tokens}: "
+                            f"    {task} {format_config(ngram_size, max_draft_tokens)}: "
                             f"{details}"
                         )
     print("=" * width)
@@ -993,7 +1047,18 @@ def main():
     parser.add_argument("--ngram-size", default="2,3,4",
                         help="comma-separated n-gram orders to benchmark")
     parser.add_argument("--k", default="2,4,8",
-                        help="comma-separated max draft-token counts")
+                        help="comma-separated fixed draft-token counts; ignored with --adaptive-k")
+    parser.add_argument(
+        "--adaptive-k",
+        action="store_true",
+        help="adapt K from --adaptive-k-min up to the native limit instead of sweeping --k",
+    )
+    parser.add_argument(
+        "--adaptive-k-min",
+        type=int,
+        default=2,
+        help="starting K and floor when --adaptive-k is enabled",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--reps", type=int, default=1,
                         help="measured repetitions per prompt/configuration")
@@ -1200,7 +1265,14 @@ def main():
     ngram_sizes = parse_int_list(
         parser, args.ngram_size, "--ngram-size", 2, 16
     )
-    draft_lengths = parse_int_list(parser, args.k, "--k", 1, 16)
+    if args.adaptive_k and not 1 <= args.adaptive_k_min <= 16:
+        parser.error("--adaptive-k-min must be in [1, 16]")
+    if args.adaptive_k:
+        draft_lengths = ["adaptive"]
+        runtime_draft_lengths = {"adaptive": args.adaptive_k_min}
+    else:
+        draft_lengths = parse_int_list(parser, args.k, "--k", 1, 16)
+        runtime_draft_lengths = {value: value for value in draft_lengths}
     provider = (
         None
         if args.execution_provider in ("follow_config", "cpu")
@@ -1298,6 +1370,11 @@ def main():
         f"K={draft_lengths}  modes={modes}  sampling_seeds={sampling_seeds}  "
         f"max_new={args.max_new_tokens}  reps={args.reps}"
     )
+    if args.adaptive_k:
+        print(
+            f"adaptive K enabled: start/floor={args.adaptive_k_min}, "
+            "native maximum=16; --k sweep ignored"
+        )
     if "sampling" in modes:
         print(
             f"sampling: temperature={args.temperature} top_k={args.top_k} "
@@ -1335,10 +1412,16 @@ def main():
     try:
         probe = og.GeneratorParams(model)
         probe.set_search_options(do_sample=False, max_length=len(encoded[0]) + 1)
-        probe.set_speculative_options(
+        probe_options = dict(
             ngram_size=ngram_sizes[0],
-            max_draft_tokens=draft_lengths[0],
+            max_draft_tokens=runtime_draft_lengths[draft_lengths[0]],
         )
+        if args.adaptive_k:
+            probe_options.update(
+                adaptive_k_bool=True,
+                adaptive_k_min=args.adaptive_k_min,
+            )
+        probe.set_speculative_options(**probe_options)
         del probe
     except Exception as error:
         raise RuntimeError(
@@ -1522,12 +1605,13 @@ def main():
         seed_value = seed if mode == "sampling" else ""
         for ngram_size in ngram_sizes:
             for max_draft_tokens in draft_lengths:
+                runtime_max_draft_tokens = runtime_draft_lengths[max_draft_tokens]
                 config_rows = []
                 config_index += 1
                 print(
                     f"\n[config {config_index}/{total_configs}] mode={mode}, "
                     f"seed={format_seed(mode, seed_value)}, "
-                    f"n={ngram_size}, K={max_draft_tokens}",
+                    f"{format_config(ngram_size, max_draft_tokens)}",
                     flush=True,
                 )
                 if args.warmup:
@@ -1541,7 +1625,9 @@ def main():
                             seed=seed,
                             sampling_options=sampling_options,
                             ngram_size=ngram_size,
-                            max_draft_tokens=max_draft_tokens,
+                            max_draft_tokens=runtime_max_draft_tokens,
+                            adaptive_k=args.adaptive_k,
+                            adaptive_k_min=args.adaptive_k_min,
                         )
 
                 for prompt_index, (item, token_ids) in enumerate(
@@ -1563,7 +1649,9 @@ def main():
                             seed=seed,
                             sampling_options=sampling_options,
                             ngram_size=ngram_size,
-                            max_draft_tokens=max_draft_tokens,
+                            max_draft_tokens=runtime_max_draft_tokens,
+                            adaptive_k=args.adaptive_k,
+                            adaptive_k_min=args.adaptive_k_min,
                         )
                         if reference_ngram_tail is None:
                             reference_ngram_tail = result["tail"]
@@ -1571,7 +1659,7 @@ def main():
                             raise RuntimeError(
                                 f"n-gram {mode} output was not reproducible for "
                                 f"prompt {prompt_index}, seed {seed}, "
-                                f"n={ngram_size}, K={max_draft_tokens}"
+                                f"{format_config(ngram_size, max_draft_tokens)}"
                             )
                         stats = result["stats"]
                         decode_rate = (
@@ -1653,6 +1741,28 @@ def main():
                             "decoder": "ngram",
                             "ngram_size": ngram_size,
                             "K": max_draft_tokens,
+                            "adaptive_k": args.adaptive_k,
+                            "adaptive_k_min": (
+                                args.adaptive_k_min if args.adaptive_k else ""
+                            ),
+                            "effective_k": int(
+                                stats.get("effective_k", runtime_max_draft_tokens)
+                            ),
+                            "adaptive_k_increases": int(
+                                stats.get("adaptive_k_increases", 0)
+                            ),
+                            "adaptive_k_decreases": int(
+                                stats.get("adaptive_k_decreases", 0)
+                            ),
+                            "adaptive_k_observations": int(
+                                stats.get("adaptive_k_observations", 0)
+                            ),
+                            "adaptive_k_probes": int(
+                                stats.get("adaptive_k_probes", 0)
+                            ),
+                            "adaptive_k_throughput": round(
+                                float(stats.get("adaptive_k_throughput", 0.0)), 6
+                            ),
                             "prompt_tokens": len(token_ids),
                             "new_tokens": result["new_tokens"],
                             "prefill_s": round(result["prefill_s"], 6),
@@ -1727,13 +1837,15 @@ def main():
                             seed=seed,
                             sampling_options=sampling_options,
                             ngram_size=ngram_size,
-                            max_draft_tokens=max_draft_tokens,
+                            max_draft_tokens=runtime_max_draft_tokens,
+                            adaptive_k=args.adaptive_k,
+                            adaptive_k_min=args.adaptive_k_min,
                         )
                         if reproducibility_result["tail"] != reference_ngram_tail:
                             raise RuntimeError(
                                 f"n-gram sampling output was not reproducible for "
                                 f"prompt {prompt_index}, seed {seed}, "
-                                f"n={ngram_size}, K={max_draft_tokens}"
+                                f"{format_config(ngram_size, max_draft_tokens)}"
                             )
 
                     if args.log_level in ("progress", "detailed"):
@@ -1751,6 +1863,16 @@ def main():
                             f"emitted/round={statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
                             f"target_passes/token={statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
                         )
+                        if args.adaptive_k:
+                            print(
+                                f"    adaptive K: start={args.adaptive_k_min} "
+                                f"final_p50={statistics.median(row['effective_k'] for row in prompt_rows):.1f} "
+                                f"final_range={min(row['effective_k'] for row in prompt_rows)}-"
+                                f"{max(row['effective_k'] for row in prompt_rows)} "
+                                f"moves=+{sum(row['adaptive_k_increases'] for row in prompt_rows)}"
+                                f"/-{sum(row['adaptive_k_decreases'] for row in prompt_rows)} "
+                                f"probes={sum(row['adaptive_k_probes'] for row in prompt_rows)}"
+                            )
                         print(
                             f"    output: baseline={len(baseline['tail'])} tokens "
                             f"ngram={representative['new_tokens']} tokens "

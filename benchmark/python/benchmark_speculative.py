@@ -12,6 +12,7 @@ template so results reflect real generation, and total decode time over total ne
 tokens is measured (not per-token latency, which is uneven across speculative rounds).
 
 Two things are swept: ``--modes`` (greedy/sampling) and ``--k`` (max_draft_tokens).
+With ``--adaptive-k``, the fixed-K sweep is replaced by one adaptive run per mode.
 The speculative config is composed on the fly from each model's own
 ``genai_config.json``, so any target/draft pair works. Prompts default to the bundled
 Spec-Bench dataset (``question.jsonl``); ``--limit-per-task`` subsamples it and
@@ -645,7 +646,8 @@ def encode_prompt(tokenizer, prompt, chat=True, think=False):
 # One measured generation.
 # ---------------------------------------------------------------------------
 
-def run_once(og, model, ids, max_new, mode, speculative, K, seed):
+def run_once(og, model, ids, max_new, mode, speculative, K, seed,
+             adaptive_k=False, adaptive_k_min=2):
     import numpy as np
     p = og.GeneratorParams(model)
     # past_present_share_buffer and min_length are inherited from each model's genai_config
@@ -660,7 +662,13 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed):
         opts.update(do_sample=False)
     p.set_search_options(**opts)
     if speculative:
-        p.set_speculative_options(max_draft_tokens=K)
+        speculative_options = dict(max_draft_tokens=K)
+        if adaptive_k:
+            speculative_options.update(
+                adaptive_k_bool=True,
+                adaptive_k_min=adaptive_k_min,
+            )
+        p.set_speculative_options(**speculative_options)
 
     g = og.Generator(model, p)
 
@@ -687,7 +695,10 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed):
 
 
 CSV_COLUMNS = [
-    "mode", "K", "task", "subcategory", "question_id", "prompt_id", "rep", "decoder",
+    "mode", "K", "adaptive_k", "adaptive_k_min", "effective_k",
+    "adaptive_k_increases", "adaptive_k_decreases", "adaptive_k_observations",
+    "adaptive_k_probes", "adaptive_k_throughput",
+    "task", "subcategory", "question_id", "prompt_id", "rep", "decoder",
     "provider", "device",
     "new_tokens", "prefill_s", "decode_s", "decode_tok_s", "e2e_tok_s",
     "speedup_decode", "speedup_e2e",
@@ -713,7 +724,12 @@ def main():
     ap.add_argument("--model-prefix", default="qwen3-", help="folder = prefix + key")
     # ---- the only two swept variables ----
     ap.add_argument("--modes", default="greedy,sampling", help="sweep var 1: greedy and/or sampling")
-    ap.add_argument("--k", default="1,2,4,8", help="sweep var 2: comma list of max_draft_tokens")
+    ap.add_argument("--k", default="1,2,4,8",
+                    help="sweep var 2: fixed max_draft_tokens; ignored with --adaptive-k")
+    ap.add_argument("--adaptive-k", action="store_true",
+                    help="adapt K from --adaptive-k-min to the native limit instead of sweeping --k")
+    ap.add_argument("--adaptive-k-min", type=int, default=2,
+                    help="starting K and floor when --adaptive-k is enabled")
     # ---- fixed run configuration (NOT swept) ----
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="new tokens to generate per prompt (fixed)")
@@ -781,10 +797,17 @@ def main():
     for m in modes:
         if m not in ("greedy", "sampling"):
             ap.error(f"unknown mode {m!r} (greedy|sampling)")
-    ks = [int(x) for x in args.k.split(",") if x.strip()]
-    for k in ks:
-        if not (1 <= k <= 16):
-            ap.error(f"K={k} out of range [1,16]")
+    if args.adaptive_k and not 1 <= args.adaptive_k_min <= 16:
+        ap.error("--adaptive-k-min must be in [1,16]")
+    if args.adaptive_k:
+        ks = ["adaptive"]
+        runtime_ks = {"adaptive": args.adaptive_k_min}
+    else:
+        ks = [int(x) for x in args.k.split(",") if x.strip()]
+        for k in ks:
+            if not (1 <= k <= 16):
+                ap.error(f"K={k} out of range [1,16]")
+        runtime_ks = {k: k for k in ks}
 
     if args.mt_bench_by_subcategory and (args.builtin or not args.dataset):
         ap.error("--by-category/--mt-bench-by-subcategory requires a dataset "
@@ -836,6 +859,9 @@ def main():
     print(f"onnxruntime_genai: {og.__file__}")
     print(f"prompts={len(prompt_items)}  tasks={dict(task_counts)}  modes={modes}  "
           f"K={ks}  max_new={max_new}  chat={chat}  think={think}  seed={args.seed}")
+    if args.adaptive_k:
+        print(f"adaptive K enabled: start/floor={args.adaptive_k_min}, "
+              "native maximum=16; --k sweep ignored")
     print(f"execution_provider={provider or 'cpu'}  device={device or '-'}  "
           f"device_dir={device_dir or '-'}  use_winml={use_winml}  results={out_prefix}")
 
@@ -920,7 +946,11 @@ def main():
                 base_e2e.append(e2e_tps)
                 base_tail = r["tail"]
                 rows.append(dict(
-                    mode=mode, K="", task=it["task"], subcategory=it["subcategory"],
+                    mode=mode, K="", adaptive_k="", adaptive_k_min="", effective_k="",
+                    adaptive_k_increases="", adaptive_k_decreases="",
+                    adaptive_k_observations="", adaptive_k_probes="",
+                    adaptive_k_throughput="",
+                    task=it["task"], subcategory=it["subcategory"],
                     question_id=it["question_id"], prompt_id=idx, rep=rep, decoder="standard",
                     provider=provider_label, device=device_label,
                     new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
@@ -961,17 +991,24 @@ def main():
     if args.warmup:
         print("Warming up (speculative) ...", flush=True)
         for _ in range(args.warmup):
-            run_once(og, spec_model, encoded[0], 16, "greedy", True, ks[0], args.seed)
+            run_once(
+                og, spec_model, encoded[0], 16, "greedy", True,
+                runtime_ks[ks[0]], args.seed, args.adaptive_k, args.adaptive_k_min
+            )
 
     for mode in modes:
         for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
             b = baselines[(mode, idx)]
             base_dec_med, base_e2e_med, base_tail = b["dec"], b["e2e"], b["tail"]
             for K in ks:
+                runtime_k = runtime_ks[K]
                 s_dec = []
                 last = None
                 for rep in range(args.reps):
-                    r = run_once(og, spec_model, ids, max_new, mode, True, K, args.seed)
+                    r = run_once(
+                        og, spec_model, ids, max_new, mode, True, runtime_k, args.seed,
+                        args.adaptive_k, args.adaptive_k_min
+                    )
                     st = r["stats"] or {}
                     dec_tps = r["new_tokens"] / r["decode_s"] if r["decode_s"] else 0.0
                     e2e_tps = r["new_tokens"] / (r["prefill_s"] + r["decode_s"]) \
@@ -984,7 +1021,16 @@ def main():
                         match = round(sum(1 for a, c in zip(base_tail[:n], r["tail"][:n])
                                           if a == c) / n, 4) if n else ""
                     rows.append(dict(
-                        mode=mode, K=K, task=it["task"], subcategory=it["subcategory"],
+                        mode=mode, K=K, adaptive_k=args.adaptive_k,
+                        adaptive_k_min=args.adaptive_k_min if args.adaptive_k else "",
+                        effective_k=st.get("effective_k", runtime_k),
+                        adaptive_k_increases=st.get("adaptive_k_increases", 0),
+                        adaptive_k_decreases=st.get("adaptive_k_decreases", 0),
+                        adaptive_k_observations=st.get("adaptive_k_observations", 0),
+                        adaptive_k_probes=st.get("adaptive_k_probes", 0),
+                        adaptive_k_throughput=round(
+                            st.get("adaptive_k_throughput", 0.0), 6),
+                        task=it["task"], subcategory=it["subcategory"],
                         question_id=it["question_id"], prompt_id=idx, rep=rep,
                         decoder="speculative",
                         provider=provider_label, device=device_label,
@@ -1012,6 +1058,17 @@ def main():
                 print(f"[{done}/{total_cfgs}] {mode} {it['task']}/{it['question_id']} "
                       f"spec K={K}: {s_dec_med:.1f} tok/s  speedup x{sp:.2f}  "
                       f"accept={acc:.0%}", flush=True)
+                if args.adaptive_k:
+                    print(
+                        f"    adaptive K: start={args.adaptive_k_min} "
+                        f"final={last.get('effective_k', runtime_k)} "
+                        f"moves=+{last.get('adaptive_k_increases', 0)}"
+                        f"/-{last.get('adaptive_k_decreases', 0)} "
+                        f"probes={last.get('adaptive_k_probes', 0)} "
+                        f"observations={last.get('adaptive_k_observations', 0)} "
+                        f"throughput={last.get('adaptive_k_throughput', 0.0):.4f} tok/ms",
+                        flush=True,
+                    )
                 flush()
 
     flush()
@@ -1023,7 +1080,8 @@ def main():
         rows, modes, ks,
         run_ctx=dict(target=tgt_label, draft=dft_label, provider=provider_label,
                      device=device_label, n_prompts=len(prompt_items),
-                     reps=args.reps, max_new=max_new),
+                     reps=args.reps, max_new=max_new, adaptive_k=args.adaptive_k,
+                     adaptive_k_min=args.adaptive_k_min),
         mem_baseline=mem_baseline, mem_spec=mem_spec)
 
 
@@ -1069,6 +1127,16 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         vals = [v for v in vals if v is not None]
         return math.exp(sum(math.log(max(v, 1e-9)) for v in vals) / len(vals)) if vals else None
 
+    def percentile(vals, percent):
+        vals = sorted(vals)
+        position = (len(vals) - 1) * percent / 100
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return vals[lower]
+        weight = position - lower
+        return vals[lower] * (1 - weight) + vals[upper] * weight
+
     def median_over_tasks(mode, K, key):
         vals = [v for v in (med_spec(mode, t, K, key) for t in tasks) if v is not None]
         return statistics.median(vals) if vals else 0.0
@@ -1092,6 +1160,9 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         print(f"target={run_ctx['target']}  draft={run_ctx['draft']}   EP={ep}   "
               f"prompts={run_ctx['n_prompts']}  reps={run_ctx['reps']}  "
               f"max_new={run_ctx['max_new']}")
+        if run_ctx.get("adaptive_k"):
+            print(f"adaptive K: enabled, start/floor={run_ctx['adaptive_k_min']}, "
+                  "native maximum=16")
 
     # ---- headline BEST config (highest geomean speedup across all mode x K) ----
     best = max((kv for kv in geo.items() if kv[1] is not None),
@@ -1122,6 +1193,40 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
     print("        mean_acc = avg tokens accepted per round (higher = fewer target calls)")
     print("        match    = greedy output matches baseline (sanity, expect ~100%; '-' in sampling)")
     print("        *        = input-guided task (prompt->output overlap inflates acceptance)")
+
+    print("\nPerformance distribution across all measured rows")
+    print(f"  {'mode/config':22}{'min':>8}{'p10':>8}{'p50':>8}{'p90':>8}"
+          f"{'max':>8}{'geomean':>10}{'>1x':>8}")
+    for mode in modes:
+        for K in ks:
+            selected = [
+                r for r in rows
+                if r["decoder"] == "speculative" and r["mode"] == mode
+                and r["K"] == K and r["speedup_decode"] != ""
+            ]
+            if not selected:
+                continue
+            speedups = [r["speedup_decode"] for r in selected]
+            faster = sum(value > 1.0 for value in speedups) / len(speedups)
+            print(
+                f"  {f'{mode}/K={K}':22}"
+                f"{min(speedups):>8.2f}{percentile(speedups, 10):>8.2f}"
+                f"{statistics.median(speedups):>8.2f}{percentile(speedups, 90):>8.2f}"
+                f"{max(speedups):>8.2f}{geomean(speedups):>10.2f}{faster:>8.0%}"
+            )
+            if selected[0]["adaptive_k"]:
+                print(
+                    f"    adaptive K: start={selected[0]['adaptive_k_min']} "
+                    f"final_p50={statistics.median(r['effective_k'] for r in selected):.1f} "
+                    f"final_range={min(r['effective_k'] for r in selected)}-"
+                    f"{max(r['effective_k'] for r in selected)} "
+                    f"moves=+{sum(r['adaptive_k_increases'] for r in selected)}"
+                    f"/-{sum(r['adaptive_k_decreases'] for r in selected)} "
+                    f"probes={sum(r['adaptive_k_probes'] for r in selected)} "
+                    f"observations={sum(r['adaptive_k_observations'] for r in selected)} "
+                    f"throughput_p50="
+                    f"{statistics.median(r['adaptive_k_throughput'] for r in selected):.4f} tok/ms"
+                )
 
     def sp_cell(sp):
         if sp is None:
