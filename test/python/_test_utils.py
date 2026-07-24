@@ -238,11 +238,18 @@ def download_models(download_path, precision, device, log):
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
 
+    # Models that don't support graph capture (e.g., due to unsupported operators like If nodes)
+    no_graph_capture_models = {"phi-4-mini"}
+
     log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer) in ci_paths.items():
         for graph_capture in {True, False}:
+            # Skip graph capture for models that don't support it
+            if graph_capture and model_name in no_graph_capture_models:
+                continue
+
             try:
                 new_name = model_name + "-graph" if graph_capture else model_name
                 output_path = os.path.join(download_path, new_name, precision, device)
@@ -258,6 +265,10 @@ def download_models(download_path, precision, device, log):
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, (hf_name, one_layer) in hf_paths.items():
         for graph_capture in {True, False}:
+            # Skip graph capture for models that don't support it
+            if graph_capture and model_name in no_graph_capture_models:
+                continue
+
             try:
                 model_info = importlib.import_module("huggingface_hub").model_info
                 model_info(hf_name)

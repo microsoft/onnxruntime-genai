@@ -1201,53 +1201,6 @@ if og.is_webgpu_available():
     graph_capture_devices.append("webgpu")
 
 
-@pytest.mark.skipif(len(graph_capture_devices) == 0, reason="No graph-capture-capable EP available.")
-@pytest.mark.parametrize("device", graph_capture_devices)
-def test_graph_capture_generation(phi4_graph_for, device):
-    """Verify that a model built with graph capture enabled loads and generates
-    without errors on every graph-capture-capable EP."""
-    model = og.Model(phi4_graph_for(device))
-
-    tokenizer = og.Tokenizer(model)
-    prompt = "def is_prime(n):"
-    input_ids = tokenizer.encode(prompt)
-
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=30)
-
-    generator = og.Generator(model, params)
-    generator.append_tokens(np.array([input_ids], dtype=np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-
-    output_ids = generator.get_sequence(0)
-    assert output_ids is not None
-    assert len(output_ids) > len(input_ids), "Graph capture model should generate at least one new token"
-
-
-@pytest.mark.skipif(len(graph_capture_devices) == 0, reason="No graph-capture-capable EP available.")
-@pytest.mark.parametrize("device", graph_capture_devices)
-def test_phi4_mini_graph_capture_output_consistency(phi4_graph_for, device):
-    """Verify that greedy generation is deterministic across two runs with graph capture."""
-    model = og.Model(phi4_graph_for(device))
-
-    tokenizer = og.Tokenizer(model)
-    prompt = "The capital of France is"
-    input_ids = tokenizer.encode(prompt)
-    input_array = np.array([input_ids], dtype=np.int32)
-
-    def _run():
-        params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=False, max_length=20)
-        generator = og.Generator(model, params)
-        generator.append_tokens(input_array)
-        while not generator.is_done():
-            generator.generate_next_token()
-        return list(generator.get_sequence(0))
-
-    run1 = _run()
-    run2 = _run()
-    assert run1 == run2, "Graph capture model produced different outputs across two identical greedy runs"
 
 
 @pytest.mark.skipif(len(graph_capture_devices) == 0, reason="No graph-capture-capable EP available.")

@@ -86,16 +86,6 @@ def qwen_for(request):
 
 
 @pytest.fixture
-def phi4_graph_for(request):
-    return functools.partial(
-        get_path_for_model,
-        request.config.getoption("--test_models"),
-        "phi-4-mini-graph",
-        "int4",
-    )
-
-
-@pytest.fixture
 def qwen_graph_for(request):
     return functools.partial(
         get_path_for_model,
