@@ -30,7 +30,8 @@ def qwen3_model_path(request):
 
 
 def _generator(model_path, prompt, max_length, *, ngram_size=0,
-               max_draft_tokens=4, **search_options):
+               max_draft_tokens=4, adaptive_k_bool=False, adaptive_k_min=2,
+               **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     options = {"do_sample": False, "max_length": max_length}
@@ -40,6 +41,8 @@ def _generator(model_path, prompt, max_length, *, ngram_size=0,
         params.set_speculative_options(
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
+            adaptive_k_bool=adaptive_k_bool,
+            adaptive_k_min=adaptive_k_min,
         )
     generator = og.Generator(model, params)
     generator.append_tokens(np.array([prompt], dtype=np.int32))
@@ -53,13 +56,16 @@ def _finish(generator):
 
 
 def _generate(model_path, prompt, max_length, *, ngram_size=0,
-              max_draft_tokens=4, **search_options):
+              max_draft_tokens=4, adaptive_k_bool=False, adaptive_k_min=2,
+              **search_options):
     generator = _generator(
         model_path,
         prompt,
         max_length,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
+        adaptive_k_bool=adaptive_k_bool,
+        adaptive_k_min=adaptive_k_min,
         **search_options,
     )
     sequence = _finish(generator)
@@ -206,6 +212,232 @@ def _invalid_guard_params(model, guard):
 
 
 class TestNGramControlledSemantics:
+    def test_adaptive_k_starts_at_two_and_waits_for_smoothed_evidence(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_initial",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+
+        assert generator.get_speculative_stats()["effective_k"] == 2
+        generator.generate_next_token()
+        active = generator.get_speculative_stats()
+        assert active["active_rounds"] == 1
+        assert active["effective_k"] == 2
+        generator.generate_next_token()
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["completed_rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 2
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+        for _ in range(3):
+            generator.generate_next_token()
+        probing = generator.get_speculative_stats()
+        assert probing["completed_rounds"] == 2
+        assert probing["draft_tokens_proposed"] == 4
+        assert probing["draft_tokens_accepted"] == 4
+        assert probing["effective_k"] == 3
+        assert probing["adaptive_k_observations"] == 2
+        assert probing["adaptive_k_probes"] == 1
+        assert probing["adaptive_k_increases"] == 1
+
+    def test_adaptive_k_partial_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_partial",
+            _transition_logits({2: 3, 3: 5}),
+        )
+        prompt = [1, 2, 3, 4, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+
+        generator.generate_next_token()
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_zero_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_zero", _transition_logits({2: 5}))
+        prompt = [1, 2, 3, 4, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_lookup_miss_does_not_change_policy(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_miss", _transition_logits({}))
+        prompt = [1, 3, 5]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=4, max_draft_tokens=8, adaptive_k_bool=True)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["rounds"] == 0
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_interrupted_round_does_not_update_policy(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_interrupted",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert generator.is_done()
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_mid_round_append_does_not_train_on_discarded_output(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_append",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["active_rounds"] == 1
+
+        generator.append_tokens(np.array([[1, 2]], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_reset_restores_initial_width(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_reset",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+        for _ in range(6):
+            generator.generate_next_token()
+        assert generator.get_speculative_stats()["effective_k"] == 3
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_throughput"] == 0.0
+
+    def test_adaptive_k_is_independent_between_generators(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_isolation",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        first = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+        second = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True)
+
+        for _ in range(6):
+            first.generate_next_token()
+
+        assert first.get_speculative_stats()["effective_k"] == 3
+        assert second.get_speculative_stats()["effective_k"] == 2
+        assert second.get_speculative_stats()["adaptive_k_observations"] == 0
+        assert second.get_speculative_stats()["adaptive_k_increases"] == 0
+
+    def test_disabling_adaptive_k_preserves_fixed_width_behavior(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_disabled",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=False)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["effective_k"] == 4
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_probes"] == 0
+
+    def test_adaptive_k_floor_one_starts_at_one(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_k1",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 2,
+            ngram_size=3, max_draft_tokens=4, adaptive_k_bool=True,
+            adaptive_k_min=1)
+
+        assert result == prompt + [1, 2]
+        assert stats["effective_k"] == 1
+        assert stats["adaptive_k_increases"] == 0
+
     def test_all_proposals_accept_then_bonus_is_buffered(self, tmp_path):
         model_path = _make_tiny_ngram_model(
             tmp_path / "all_accept", _transition_logits({1: 2, 2: 1}))
@@ -350,6 +582,85 @@ class TestNGramControlledSemantics:
 
         assert len(outputs) > 1
 
+    @pytest.mark.parametrize("adaptive_k_min", [1, 2, 4])
+    def test_adaptive_k_qwen_greedy_matches_standard_decoding(
+            self, qwen3_model_path, adaptive_k_min):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            adaptive_k_bool=True,
+            adaptive_k_min=adaptive_k_min,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_forward_passes"] == 0
+        assert adaptive_k_min <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_qwen_sampling_k1_matches_standard_rng_stream(
+            self, qwen3_model_path, seed):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        options = {
+            "do_sample": True,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+            "random_seed": seed,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+            **options,
+        )
+
+        assert actual == expected
+        assert stats["draft_forward_passes"] == 0
+        assert stats["effective_k"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_adaptive_k_qwen_sampling_collects_telemetry_and_varies_by_seed(
+            self, qwen3_model_path):
+        max_k = 8
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        outputs = set()
+
+        for seed in (0, 7, 1234):
+            options = {
+                "do_sample": True,
+                "top_k": 40,
+                "top_p": 0.95,
+                "temperature": 0.8,
+                "random_seed": seed,
+                "ngram_size": 3,
+                "max_draft_tokens": max_k,
+                "adaptive_k_bool": True,
+            }
+            result, stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+
+            assert stats["rounds"] > 0
+            assert stats["draft_forward_passes"] == 0
+            assert stats["adaptive_k_observations"] > 0
+            assert stats["adaptive_k_throughput"] > 0.0
+            assert 2 <= stats["effective_k"] <= 16
+            _assert_stats_consistent(stats)
+            outputs.add(tuple(result[len(_REPETITIVE_PROMPT):]))
+
+        assert len(outputs) > 1
+
     def test_mid_round_append_discards_pending_tokens_and_rebuilds(self, tmp_path):
         model_path = _make_tiny_ngram_model(
             tmp_path / "mid_round_append", _transition_logits({1: 2, 2: 1}))
@@ -488,10 +799,15 @@ class TestNGramDecoding:
     def test_options_round_trip_and_validation(self, qwen3_model_path):
         model = og.Model(qwen3_model_path)
         params = og.GeneratorParams(model)
-        params.set_speculative_options(ngram_size=4, max_draft_tokens=8)
+        params.set_speculative_options(
+            ngram_size=4,
+            max_draft_tokens=8,
+            adaptive_k_bool=True,
+        )
         options = params.get_speculative_options()
         assert options["ngram_size"] == 4
         assert options["max_draft_tokens"] == 8
+        assert options["adaptive_k_bool"] is True
 
         with pytest.raises(Exception, match="ngram_size"):
             params.set_speculative_options(ngram_size=1)
@@ -501,6 +817,10 @@ class TestNGramDecoding:
             params.set_speculative_options(max_draft_tokens=0)
         with pytest.raises(Exception, match="max_draft_tokens"):
             params.set_speculative_options(max_draft_tokens=17)
+        with pytest.raises(Exception, match="adaptive_k_bool"):
+            params.set_speculative_options(adaptive_k_bool=2)
+        with pytest.raises(Exception, match="adaptive_k_bool"):
+            params.set_speculative_options(adaptive_k_bool=0.5)
 
     def test_repetitive_prompt_matches_standard_greedy(self, qwen3_model_path):
         max_length = len(_REPETITIVE_PROMPT) + 12
@@ -1211,7 +1531,8 @@ def qwen3_guidance_model_path(qwen3_model_path):
 
 def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
                       max_length, ngram_size=0, max_draft_tokens=4,
-                      enable_ff_tokens=False, **search_options):
+                      adaptive_k_bool=False, enable_ff_tokens=False,
+                      **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     options = {
@@ -1224,6 +1545,7 @@ def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
         params.set_speculative_options(
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
+            adaptive_k_bool=adaptive_k_bool,
         )
     params.set_guidance(
         guidance_type,
@@ -1261,7 +1583,7 @@ def _assert_guidance_output(text, output_kind):
 
 def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
                 max_length, ngram_size=0, max_draft_tokens=4,
-                enable_ff_tokens=False, **search_options):
+                adaptive_k_bool=False, enable_ff_tokens=False, **search_options):
     generator = _guided_generator(
         model_path,
         prompt,
@@ -1270,6 +1592,7 @@ def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
         max_length=max_length,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
+        adaptive_k_bool=adaptive_k_bool,
         enable_ff_tokens=enable_ff_tokens,
         **search_options,
     )
@@ -1305,6 +1628,92 @@ def _forced_literal_lookup_prompt(model_path, literal, minimum_tokens):
 
 
 class TestNGramGuidance:
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_adaptive_k_greedy_matches_regular_guidance(
+            self, qwen3_guidance_model_path, guidance_type,
+            guidance_data, output_kind):
+        max_length = len(_PROMPT) + 64
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+        )
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            adaptive_k_bool=True,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_adaptive_k_sampled_guidance_is_valid(
+            self, qwen3_guidance_model_path, seed):
+        options = {
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+        }
+        max_length = len(_PROMPT) + 64
+
+        result, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type="lark_grammar",
+            guidance_data='start: "answer:" /[0-9]{2}/',
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            adaptive_k_bool=True,
+            **options,
+        )
+        assert result
+        assert re.fullmatch(r"answer:[0-9]{2}", text)
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    def test_adaptive_k_fast_forward_carry_remains_grammar_correct(
+            self, qwen3_guidance_model_path):
+        literal = "The capital of France is Paris and Berlin is in Germany."
+        prompt, _ = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path, literal, minimum_tokens=9)
+        max_length = len(prompt) + 64
+
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            adaptive_k_bool=True,
+            enable_ff_tokens=True,
+        )
+
+        assert actual
+        assert actual_text.strip() == literal
+        assert 2 <= stats["effective_k"] <= 16
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
     @pytest.mark.parametrize("max_draft_tokens", [1, 2, 4, 8])
     @pytest.mark.parametrize(
         "guidance_type,guidance_data,output_kind",
