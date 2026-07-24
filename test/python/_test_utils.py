@@ -150,7 +150,9 @@ def get_model_paths():
         # "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
         # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
-        "phi-4-mini": ("microsoft/Phi-4-mini-instruct", True, False),
+        # Note: phi-4-mini is intentionally NOT here. It is built locally from
+        # committed fixtures + deterministic weights (see get_local_model_paths)
+        # so CI never has to download the ~8GB Hugging Face checkpoint.
         "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False, False),
         "qwen-2.5-0.5b-graph": ("Qwen/Qwen2.5-0.5B-Instruct", False, True),
     }
@@ -177,6 +179,75 @@ def get_model_paths():
     }
 
     return ci_paths, hf_paths
+
+
+# Directory holding committed model fixtures (config + tokenizer files and a
+# `weights_skeleton.json`) used to build models locally without downloading the
+# original Hugging Face checkpoints.
+FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+def get_local_model_paths():
+    # Models that are built entirely from committed fixtures + deterministic
+    # weights, so no Hugging Face download is required.
+    #
+    # Format: model alias: (fixture directory, create only 1 layer, enable graph capture)
+    return {
+        # phi-4-mini is a ~8GB download on Hugging Face. We only ever build a
+        # single-layer smoke-test model from it, so instead we synthesize the
+        # PyTorch weights on the fly from `fixtures/phi-4-mini/weights_skeleton.json`.
+        "phi-4-mini": (os.path.join(FIXTURES_DIR, "phi-4-mini"), True, False),
+    }
+
+
+def generate_weights_from_skeleton(fixture_dir, output_dir, log=None):
+    """Assemble a local PyTorch model directory with deterministic weights.
+
+    Reads `weights_skeleton.json` from `fixture_dir` to learn the tensor names,
+    shapes and dtype the model requires, fills each tensor with deterministic
+    pseudo-random values, and writes `model.safetensors` alongside copies of the
+    committed config/tokenizer files into `output_dir`. This lets the model
+    builder produce an ONNX model with `-i <output_dir>` without downloading the
+    original (multi-GB) Hugging Face checkpoint.
+    """
+    import json
+    import shutil
+
+    import torch
+    from safetensors.torch import save_file
+
+    skeleton_path = os.path.join(fixture_dir, "weights_skeleton.json")
+    with open(skeleton_path, "r", encoding="utf-8") as f:
+        skeleton = json.load(f)
+
+    dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+    dtype = dtype_map[skeleton.get("dtype", "float32")]
+    init_std = float(skeleton.get("init_std", 0.02))
+    seed = int(skeleton.get("seed", 0))
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Copy every committed fixture file (config + tokenizer) except the skeleton itself.
+    for name in os.listdir(fixture_dir):
+        if name == "weights_skeleton.json":
+            continue
+        src = os.path.join(fixture_dir, name)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(output_dir, name))
+
+    # Fill each tensor deterministically. A per-tensor seeded generator keeps the
+    # values stable regardless of tensor ordering or how many tensors are generated.
+    tensors = {}
+    for index, (tensor_name, shape) in enumerate(skeleton["tensors"].items()):
+        generator = torch.Generator().manual_seed(seed + index)
+        values = torch.randn(*shape, generator=generator, dtype=torch.float32) * init_std
+        tensors[tensor_name] = values.to(dtype).contiguous()
+
+    save_file(tensors, os.path.join(output_dir, "model.safetensors"))
+    if log:
+        log.debug(f"Generated {len(tensors)} deterministic weight tensors ({skeleton.get('dtype')}) in {output_dir}")
+
+    return output_dir
 
 
 def download_model(model_name, input_path, output_path, precision, device, one_layer, enable_graph_capture):
@@ -242,6 +313,29 @@ def download_models(download_path, precision, device, log):
     output_paths = []
 
     log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
+
+    # Models built locally from committed fixtures + deterministic weights (no download).
+    local_paths = get_local_model_paths()
+    for model_name, (fixture_dir, one_layer, graph_capture) in local_paths.items():
+        if graph_capture and device.lower() not in _GRAPH_CAPTURE_DEVICES:
+            continue
+        output_path = os.path.join(download_path, model_name, precision, device)
+        if os.path.exists(output_path):
+            continue
+        try:
+            log.debug(f"Building {model_name} locally from fixtures at {fixture_dir} to {output_path}")
+            # Synthesize the PyTorch weights next to the ONNX output, then build with `-i`.
+            pytorch_dir = os.path.join(download_path, model_name, "pytorch")
+            generate_weights_from_skeleton(fixture_dir, pytorch_dir, log)
+            download_model(None, pytorch_dir, output_path, precision, device, one_layer, graph_capture)
+            output_paths.append(output_path)
+            # The synthesized safetensors are large; drop them once the ONNX model is built.
+            import shutil
+
+            shutil.rmtree(pytorch_dir, ignore_errors=True)
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping local model {model_name}.")
+            continue
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer, graph_capture) in ci_paths.items():

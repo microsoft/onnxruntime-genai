@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Skeleton key describing the PyTorch weights required to build a 1-layer",
+    "Phi-4-mini (Phi3ForCausalLM) model without downloading the ~8GB Hugging",
+    "Face checkpoint. `_test_utils.generate_phi4_weights()` reads this file and",
+    "writes a deterministic `model.safetensors` whose tensors match these names,",
+    "shapes and dtype. Shapes are derived from config.json for num_hidden_layers=1:",
+    "  hidden_size (H)        = 3072",
+    "  num_attention_heads    = 24   -> head_dim = H / 24 = 128",
+    "  num_key_value_heads    = 8    -> kv_dim   = 8 * 128 = 1024",
+    "  q_dim                  = 24 * 128 = 3072",
+    "  qkv_proj out           = q_dim + 2 * kv_dim = 3072 + 1024 + 1024 = 5120",
+    "  intermediate_size      = 8192 -> gate_up_proj out = 2 * 8192 = 16384",
+    "  vocab_size             = 200064",
+    "`lm_head.weight` is intentionally omitted because tie_word_embeddings=true,",
+    "so it is tied to `model.embed_tokens.weight` at load time."
+  ],
+  "dtype": "bfloat16",
+  "seed": 42,
+  "init_std": 0.02,
+  "num_hidden_layers": 1,
+  "tie_word_embeddings": true,
+  "tensors": {
+    "model.embed_tokens.weight": [200064, 3072],
+    "model.layers.0.input_layernorm.weight": [3072],
+    "model.layers.0.self_attn.qkv_proj.weight": [5120, 3072],
+    "model.layers.0.self_attn.o_proj.weight": [3072, 3072],
+    "model.layers.0.post_attention_layernorm.weight": [3072],
+    "model.layers.0.mlp.gate_up_proj.weight": [16384, 3072],
+    "model.layers.0.mlp.down_proj.weight": [3072, 8192],
+    "model.norm.weight": [3072]
+  }
+}
