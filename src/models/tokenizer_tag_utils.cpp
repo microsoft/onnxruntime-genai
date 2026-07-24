@@ -10,10 +10,10 @@ std::optional<int32_t> ResolveFallbackTokenId(const std::string& model_type,
                                               const std::string& tag_name,
                                               const Tokenizer& tokenizer) {
   static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fallback_map = {
-      {"qwen2", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
-      {"qwen3", {{"tool_call_start", "<tool_call>"}, {"tool_call_end", "</tool_call>"}, {"reasoning_start", "<think>"}, {"reasoning_end", "</think>"}}},
-      {"phi3", {{"tool_call_start", "<|tool_call|>"}, {"tool_call_end", "<|/tool_call|>"}}},
-      {"gptoss", {{"tool_call_start", "<|start|>"}, {"tool_call_end", "<|call|>"}}},
+      {"qwen2", {{"bot", "<tool_call>"}, {"eot", "</tool_call>"}, {"bor", "<think>"}, {"eor", "</think>"}}},
+      {"qwen3", {{"bot", "<tool_call>"}, {"eot", "</tool_call>"}, {"bor", "<think>"}, {"eor", "</think>"}}},
+      {"phi3", {{"bot", "<|tool_call|>"}, {"eot", "<|/tool_call|>"}}},
+      {"gptoss", {{"bot", "<|start|>"}, {"eot", "<|call|>"}}},
   };
 
   auto type_it = fallback_map.find(model_type);

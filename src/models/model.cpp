@@ -325,10 +325,10 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
-  if (!bot_token_id_) bot_token_id_ = ResolveFallbackTokenId(config.model.type, "tool_call_start", *this);
-  if (!eot_token_id_) eot_token_id_ = ResolveFallbackTokenId(config.model.type, "tool_call_end", *this);
-  if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, "reasoning_start", *this);
-  if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, "reasoning_end", *this);
+  if (!bot_token_id_) bot_token_id_ = ResolveFallbackTokenId(config.model.type, "bot", *this);
+  if (!eot_token_id_) eot_token_id_ = ResolveFallbackTokenId(config.model.type, "eot", *this);
+  if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, "bor", *this);
+  if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, "eor", *this);
 }
 
 int32_t Tokenizer::GetBotTokenId() const {
