@@ -30,7 +30,7 @@ steps:
       $extracted = "$(Agent.TempDirectory)/ort_extracted"
       Remove-Item -Recurse -Force $extracted -ErrorAction SilentlyContinue
       Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
-        -Headers @{ Authorization = "******" }
+        -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
       Expand-Archive -Path $zip -DestinationPath $extracted -Force
       New-Item -ItemType Directory -Force -Path "${{ parameters.ort_home }}/include","${{ parameters.ort_home }}/lib" | Out-Null
       $platform = 'win-${{ parameters.arch }}'
@@ -56,7 +56,7 @@ steps:
       echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
       mkdir -p '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
       curl --fail --retry 5 --retry-all-errors -L \
-        -H "Authorization: ******" \
+        -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
         -o ort.zip "$url"
       unzip -o ort.zip -d ort_extracted >/dev/null
       if [ '${{ parameters.arch }}' = 'arm64' ]; then
@@ -80,7 +80,7 @@ steps:
       echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
       mkdir -p '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
       curl --fail --retry 5 --retry-all-errors -L \
-        -H "Authorization: ******" \
+        -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
         -o ort.zip "$url"
       unzip -o ort.zip -d ort_extracted >/dev/null
       cp -r ort_extracted/build/native/include/* '${{ parameters.ort_home }}/include/'

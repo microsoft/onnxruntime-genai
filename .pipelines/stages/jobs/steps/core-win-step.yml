@@ -96,13 +96,27 @@ steps:
     $installerPath = "$(Agent.TempDirectory)/AzureCLI.msi"
     Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
     Write-Host "Installing Azure CLI..."
-    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
-    $azCliBin = "C:/Program Files (x86)/Microsoft SDKs/Azure/CLI2/wbin"
-    if (!(Test-Path $azCliBin)) {
-      Write-Error "Azure CLI install failed or path not found: $azCliBin"
+    $install = Start-Process -FilePath "msiexec.exe" `
+      -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait -PassThru
+    if ($install.ExitCode -notin 0, 1641, 3010) {
+      Write-Error "Azure CLI installer failed with exit code $($install.ExitCode)"
       exit 1
     }
+
+    # Current Azure CLI MSIs install under Program Files on native ARM64, while
+    # older/x64 packages use Program Files (x86). Discover either layout.
+    $azCliBin = @(
+      "$env:ProgramFiles/Microsoft SDKs/Azure/CLI2/wbin",
+      "${env:ProgramFiles(x86)}/Microsoft SDKs/Azure/CLI2/wbin"
+    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'az.cmd')) } |
+      Select-Object -First 1
+    if (-not $azCliBin) {
+      Write-Error "Azure CLI install succeeded, but az.cmd was not found under either Program Files root"
+      exit 1
+    }
+    Write-Host "Azure CLI path: $azCliBin"
     $env:PATH = "$azCliBin;$env:PATH"
+    Write-Host "##vso[task.prependpath]$azCliBin"
 
     Write-Host "Downloading AzCopy..."
     $azcopyUrl = "https://aka.ms/downloadazcopy-v10-windows"
@@ -117,7 +131,7 @@ steps:
     }
     $azcopyDir = $azcopyFullPath.Directory.FullName
     $env:PATH = "$azcopyDir;$env:PATH"
-    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    Write-Host "##vso[task.prependpath]$azcopyDir"
     az --version
     azcopy --version
   displayName: 'Install Azure CLI + AzCopy (arm64 CUDA)'
