@@ -6,8 +6,17 @@ import json
 import time
 
 import onnxruntime_genai as og
-from common import (apply_chat_template, get_config, get_ep_args, get_generator_params_args,
-                    get_guidance, get_guidance_args, get_search_options, register_ep, set_logger)
+from common import (
+    apply_chat_template,
+    get_config,
+    get_ep_args,
+    get_generator_params_args,
+    get_guidance,
+    get_guidance_args,
+    get_search_options,
+    register_ep,
+    set_logger,
+)
 
 
 def main(args):
@@ -68,7 +77,13 @@ def main(args):
 
     # Apply chat template
     try:
-        system_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), tools=tools, add_generation_prompt=False)
+        system_prompt = apply_chat_template(
+            model_path=args.model_path,
+            tokenizer=tokenizer,
+            messages=json.dumps(message),
+            tools=tools,
+            add_generation_prompt=False,
+        )
     except Exception as e:
         if args.verbose:
             print(f"Exception in apply_chat_template for system_prompt: {e}")
@@ -100,10 +115,15 @@ def main(args):
 
         # Create user message
         message = [{"role": "user", "content": text}]
-        
+
         # Apply chat template
         try:
-            user_prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=json.dumps(message), add_generation_prompt=True)
+            user_prompt = apply_chat_template(
+                model_path=args.model_path,
+                tokenizer=tokenizer,
+                messages=json.dumps(message),
+                add_generation_prompt=True,
+            )
         except Exception as e:
             if args.verbose:
                 print(f"Exception in apply_chat_template for user_prompt: {e}")
@@ -134,8 +154,9 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
-                print(stream.decode(new_token), end='', flush=True)
-                if args.timings: new_tokens.append(new_token)
+                print(stream.decode(new_token), end="", flush=True)
+                if args.timings:
+                    new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -154,13 +175,51 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI chat example for ORT GenAI")
-    parser.add_argument('-m', '--model_path', type=str, required=True, help='ONNX model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
-    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
-    parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
-    parser.add_argument('-rw', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
+    parser = argparse.ArgumentParser(
+        argument_default=argparse.SUPPRESS, description="End-to-end AI chat example for ORT GenAI"
+    )
+    parser.add_argument(
+        "-m",
+        "--model_path",
+        type=str,
+        required=True,
+        help="ONNX model folder path (must contain genai_config.json and model.onnx)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print verbose output and timing information. Defaults to false",
+    )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Dump input and output tensors with debug mode. Defaults to false",
+    )
+    parser.add_argument(
+        "-g",
+        "--timings",
+        action="store_true",
+        default=False,
+        help="Print timing information for each generation step. Defaults to false",
+    )
+    parser.add_argument(
+        "-sp",
+        "--system_prompt",
+        type=str,
+        default="You are a helpful AI assistant.",
+        help="System prompt to use for the model.",
+    )
+    parser.add_argument(
+        "-rw",
+        "--rewind",
+        action="store_true",
+        default=False,
+        help="Rewind to the system prompt after each generation. Defaults to false",
+    )
 
     get_ep_args(parser)
     get_generator_params_args(parser)

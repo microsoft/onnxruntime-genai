@@ -63,6 +63,11 @@ struct State {
 
  private:
   std::string graph_id_{};
+  int graph_id_value_{0};  // integer form of graph_id_, used to avoid re-parsing in the destructor
+  // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
+  // outlives this State because State is owned by Generator, and Generator is
+  // destroyed before the Model (and its session) that produced it.
+  OrtSession* graph_capture_session_{nullptr};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };

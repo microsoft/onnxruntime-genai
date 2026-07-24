@@ -57,8 +57,15 @@ def run_whisper():
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
         built_model = os.path.join(cwd, "..", "models", f"whisper-tiny-{precision}-{execution_provider}")
-        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision,
-                       device=execution_provider, one_layer=False, enable_graph_capture=False)
+        download_model(
+            model_name="openai/whisper-tiny",
+            input_path="",
+            output_path=built_model,
+            precision=precision,
+            device=execution_provider,
+            one_layer=False,
+            enable_graph_capture=False,
+        )
 
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
@@ -98,10 +105,13 @@ def run_tool_calling():
     user_prompt = "What is the weather in Redmond, WA?"
     response_format = "lark_grammar"
 
-    for (model_name, tool_call_start, tool_call_end) in tool_call_models:
-        for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
+    for model_name, tool_call_start, tool_call_end in tool_call_models:
+        for precision, execution_provider in [
+            ("int4", "cpu")
+        ]:  # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
             model_path = os.path.join(cwd, "..", "models", model_name, precision, execution_provider)
-            if not os.path.exists(model_path): continue
+            if not os.path.exists(model_path):
+                continue
 
             # Run special_tokens.py to mark tool call token ids as special
             command = [
@@ -144,7 +154,16 @@ def run_tool_calling():
 
             # Run model_qa.cpp for inference
             command = [
-                os.path.join(cwd, "..", "..", "examples", "c", "build", f"{'Release' if sys.platform.startswith('win') else ''}", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                os.path.join(
+                    cwd,
+                    "..",
+                    "..",
+                    "examples",
+                    "c",
+                    "build",
+                    f"{'Release' if sys.platform.startswith('win') else ''}",
+                    f"model_qa{'.exe' if sys.platform.startswith('win') else ''}",
+                ),
                 "-m",
                 model_path,
                 "-e",
@@ -247,7 +266,7 @@ if __name__ == "__main__":
             run_model(model_path)
         except Exception as e:
             log.error(e)
-            log.error(f"Failed to run {model_path}", exc_info=True)
+            log.exception(f"Failed to run {model_path}")
 
     # Run Whisper E2E tests
     run_whisper()

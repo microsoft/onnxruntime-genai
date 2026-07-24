@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/utils.h"
-#include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
 
@@ -118,6 +117,8 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::DML; }
 
+  bool SupportsPhi3RopeRewind(const Config& /*config*/) const override { return false; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
@@ -138,6 +139,13 @@ struct InterfaceImpl : DeviceInterface {
     return *ort_allocator_;
   }
 
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("DML",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }
@@ -147,11 +155,11 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
-    return GetCpuInterface()->CreateGreedy(params);
+    return GetDeviceInterface(DeviceType::CPU)->CreateGreedy(params);
   }
 
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
-    return GetCpuInterface()->CreateBeam(params);
+    return GetDeviceInterface(DeviceType::CPU)->CreateBeam(params);
   }
 
 #if 0

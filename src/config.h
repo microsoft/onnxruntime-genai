@@ -3,6 +3,9 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
+#include "provider_options.h"
+
+#include <functional>
 
 namespace Generators {
 
@@ -87,23 +90,20 @@ struct Config {
   fs::path config_path;   // Path of the config directory
   fs::path package_root;  // Package root if loaded from a model package, otherwise empty.
 
-  // Resolves a path-like string from genai_config.json. Empty -> config_path.
-  // "package:<rel>" -> package_root/<rel> (errors when package_root is empty). Anything
-  // else is joined with config_path.
+  // When loaded from a model package, resolves path-shaped genai_config.json values through
+  // ORT's package resolver: a "sha256:<hex>[/tail]" content-addressed shared-asset reference
+  // (honoring manifest overrides) or a plain relative path against base_dir. Empty for flat
+  // model directories. Captures the OrtModelPackageContext to keep it alive for resolution.
+  std::function<fs::path(const fs::path& base_dir, std::string_view value)> package_resolver;
+
+  // Resolves a path-like string from genai_config.json. Empty -> config_path. When loaded
+  // from a package, delegates to package_resolver (sha256: shared assets, relative paths);
+  // otherwise the value is joined with config_path.
   fs::path ResolvePath(std::string_view value) const;
 
-  using NamedString = std::pair<std::string, std::string>;
-  struct DeviceFilteringOptions {
-    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
-  };
-
-  struct ProviderOptions {
-    std::string name;
-    std::vector<NamedString> options;
-    std::optional<DeviceFilteringOptions> device_filtering_options;
-  };
+  using NamedString = Generators::NamedString;
+  using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
+  using ProviderOptions = Generators::ProviderOptions;
 
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
@@ -427,7 +427,7 @@ struct Config {
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
     bool early_stopping{true};         // Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
-    int no_repeat_ngram_size{};        // Unused param
+    int no_repeat_ngram_size{};        // If > 0, no n-gram of this size may repeat in the generated sequence. 0 disables.
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
@@ -465,6 +465,11 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+int SafeDoubleToInt(double x, std::string_view name);
+
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
+std::string_view NormalizeProviderName(std::string_view name);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 

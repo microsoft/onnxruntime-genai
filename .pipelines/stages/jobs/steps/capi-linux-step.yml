@@ -59,7 +59,7 @@ steps:
     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$cuda_dockerfile_version \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
+      --container-registry onnxruntimebuildcache.azurecr.io \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get CUDA Docker Image $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
@@ -76,7 +76,7 @@ steps:
     python3 tools/ci_build/get_docker_image.py --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
+      --container-registry onnxruntimebuildcache.azurecr.io \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
   condition: ne(variables['ep'], 'cuda')

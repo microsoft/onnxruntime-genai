@@ -60,18 +60,12 @@ def get_path_for(
 
     root = model_root or os.environ.get("ORTGENAI_MODEL_ROOT")
     if not root:
-        pytest.skip(
-            "No model source configured. Set ORTGENAI_MODEL_ROOT or pass --model-root."
-        )
+        pytest.skip("No model source configured. Set ORTGENAI_MODEL_ROOT or pass --model-root.")
 
     base = Path(root) / models.storage_subpath(logical_id, device)
     chosen = _newest_version_dir(base)
     if chosen is None:
-        pytest.fail(
-            f"Model '{logical_id}' (device={device}) has no v<N> directory under {base}."
-        )
+        pytest.fail(f"Model '{logical_id}' (device={device}) has no v<N> directory under {base}.")
     if not (chosen / "genai_config.json").exists():
-        pytest.fail(
-            f"Model '{logical_id}' (device={device}) has no genai_config.json at {chosen}."
-        )
+        pytest.fail(f"Model '{logical_id}' (device={device}) has no genai_config.json at {chosen}.")
     return chosen

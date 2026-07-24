@@ -13,7 +13,7 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
+  AZCOPY_MSI_CLIENT_ID: d712a4c7-a0cf-4e87-af75-31510eba0a8e
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8

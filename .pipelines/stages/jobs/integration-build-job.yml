@@ -64,7 +64,7 @@ jobs:
           --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8 \
           --context tools/ci_build/github/linux/docker/manylinux \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
+          --container-registry onnxruntimebuildcache.azurecr.io \
           --repository ortgenaicudabuildx64
       displayName: 'Build manylinux CUDA docker image'
       workingDirectory: '$(Build.Repository.LocalPath)'
@@ -84,7 +84,7 @@ jobs:
               --use_cuda \
               --cuda_home /usr/local/cuda \
               --cmake_extra_defines MANYLINUX=ON \
-              --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=90-real' \
+              --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=86-real' \
               --cmake_extra_defines PYTHON_EXECUTABLE=/opt/python/cp$(py_no_dot_ver)-cp$(py_no_dot_ver)/bin/python$(py_dot_ver) \
               --skip_tests \
               --skip_examples

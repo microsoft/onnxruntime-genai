@@ -482,6 +482,46 @@ Print all primes between 1 and n
 }
 #endif
 
+// Validation tests for search parameter bounds
+#if !USE_DML
+TEST(ModelTests, NumBeamsUpperBoundThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 512);  // exceeds upper bound of 256
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, BatchSizeUpperBoundThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 512);  // exceeds upper bound of 256
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumBeamsZeroThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 0);  // below lower bound of 1
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, BatchSizeZeroThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 0);  // below lower bound of 1
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+#endif
 // --- Validation tests (no model files required) ---
 
 TEST(ValidationTests, WindowIndexAcceptsValidParams) {

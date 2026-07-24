@@ -8,8 +8,12 @@ import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", "--path", required=True, type=str, help="Path to tokenizer.json")
-parser.add_argument("-s", "--start_tool_call", required=True, type=str, help="String representation of starting tool call token")
-parser.add_argument("-e", "--end_tool_call", required=True, type=str, help="String representation of ending tool call token")
+parser.add_argument(
+    "-s", "--start_tool_call", required=True, type=str, help="String representation of starting tool call token"
+)
+parser.add_argument(
+    "-e", "--end_tool_call", required=True, type=str, help="String representation of ending tool call token"
+)
 
 args = parser.parse_args()
 assert os.path.exists(args.path), "Invalid path to tokenizer.json"
