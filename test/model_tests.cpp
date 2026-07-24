@@ -561,3 +561,53 @@ TEST(ValidationTests, WindowIndexRejectsTotalSizeOverflow) {
   // Each dim individually <= kMaxElements, but grid_t * padded_h * padded_w > kMaxElements
   EXPECT_THROW(Generators::ValidateWindowIndexParams(1000, 2000000, 2000000, 2, 14, 112), std::runtime_error);
 }
+
+// Regression test: enable_profiling from genai_config.json must not be able to
+// escape the model directory via path traversal (CWE-22). Loading a model whose
+// config sets a traversing profiling path should be rejected.
+TEST(ModelTests, EnableProfilingRejectsPathTraversal) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "decoder": { "session_options": { "enable_profiling": "../../../../evil_profile" } } } })");
+
+  try {
+    OgaModel::Create(*config);
+    FAIL() << "Expected std::runtime_error for traversing enable_profiling path";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("enable_profiling"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// An absolute enable_profiling path must also be rejected.
+TEST(ModelTests, EnableProfilingRejectsAbsolutePath) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+#ifdef _WIN32
+  config->Overlay(R"({ "model": { "decoder": { "session_options": { "enable_profiling": "C:\\Windows\\Temp\\evil_profile" } } } })");
+#else
+  config->Overlay(R"({ "model": { "decoder": { "session_options": { "enable_profiling": "/tmp/evil_profile" } } } })");
+#endif
+
+  try {
+    OgaModel::Create(*config);
+    FAIL() << "Expected std::runtime_error for absolute enable_profiling path";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("enable_profiling"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// A parent-directory component with a trailing dot/space (".. ") must be
+// rejected too: Windows trims trailing dots/spaces, so such a component can be
+// interpreted by the OS as "..", bypassing a naive lexical check.
+TEST(ModelTests, EnableProfilingRejectsTrailingDotSpaceTraversal) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "decoder": { "session_options": { "enable_profiling": ".. /evil_profile" } } } })");
+
+  try {
+    OgaModel::Create(*config);
+    FAIL() << "Expected std::runtime_error for trailing-dot/space traversal path";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("enable_profiling"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
