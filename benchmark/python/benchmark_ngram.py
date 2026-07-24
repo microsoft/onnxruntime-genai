@@ -373,6 +373,7 @@ def run_once(
     max_draft_tokens=0,
     adaptive_k=False,
     adaptive_k_min=2,
+    chained_lookup=False,
 ):
     """Run one generation and return timing, output, and native stats."""
     import numpy as np
@@ -403,6 +404,8 @@ def run_once(
                 adaptive_k_bool=True,
                 adaptive_k_min=adaptive_k_min,
             )
+        if chained_lookup:
+            speculative_options["ngram_chained_lookup_bool"] = True
         params.set_speculative_options(**speculative_options)
 
     generator = og.Generator(model, params)
@@ -481,6 +484,7 @@ CSV_COLUMNS = [
     "decoder",
     "ngram_size",
     "K",
+    "chained_lookup",
     "adaptive_k",
     "adaptive_k_min",
     "effective_k",
@@ -616,7 +620,8 @@ def print_detailed_run(item, rep, baseline, row):
     seed_text = f" seed={row['seed']}" if row["mode"] == "sampling" else ""
     print(
         f"  {item['task']}/{item['question_id']} mode={row['mode']}{seed_text} "
-        f"{format_config(row['ngram_size'], row['K'])} rep={rep + 1}"
+        f"{format_config(row['ngram_size'], row['K'])} "
+        f"chained_lookup={'on' if row['chained_lookup'] else 'off'} rep={rep + 1}"
     )
     print(
         f"    speed: decode={row['speedup_decode']:.2f}x "
@@ -768,6 +773,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
         f"model={context['model']}  EP={context['provider']}  "
         f"device={context['device'] or '-'}  prompts={context['prompts']}  "
         f"mode={context['mode']}  seed={seed_label}  "
+        f"chained_lookup={'on' if context.get('chained_lookup', False) else 'off'}  "
         f"reps={context['reps']}  max_new={context['max_new']}  "
         f"peak_process_rss={context['peak_rss']:.2f} GiB"
     )
@@ -1058,6 +1064,11 @@ def main():
         type=int,
         default=2,
         help="starting K and floor when --adaptive-k is enabled",
+    )
+    parser.add_argument(
+        "--chained-lookup",
+        action="store_true",
+        help="refill n-gram proposals by repeatedly looking up synthetic context",
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--reps", type=int, default=1,
@@ -1368,6 +1379,7 @@ def main():
     print(
         f"suites={suites}  prompts={len(prompt_items)}  ngram_sizes={ngram_sizes}  "
         f"K={draft_lengths}  modes={modes}  sampling_seeds={sampling_seeds}  "
+        f"chained_lookup={args.chained_lookup}  "
         f"max_new={args.max_new_tokens}  reps={args.reps}"
     )
     if args.adaptive_k:
@@ -1421,6 +1433,8 @@ def main():
                 adaptive_k_bool=True,
                 adaptive_k_min=args.adaptive_k_min,
             )
+        if args.chained_lookup:
+            probe_options["ngram_chained_lookup_bool"] = True
         probe.set_speculative_options(**probe_options)
         del probe
     except Exception as error:
@@ -1628,6 +1642,7 @@ def main():
                             max_draft_tokens=runtime_max_draft_tokens,
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
+                            chained_lookup=args.chained_lookup,
                         )
 
                 for prompt_index, (item, token_ids) in enumerate(
@@ -1652,6 +1667,7 @@ def main():
                             max_draft_tokens=runtime_max_draft_tokens,
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
+                            chained_lookup=args.chained_lookup,
                         )
                         if reference_ngram_tail is None:
                             reference_ngram_tail = result["tail"]
@@ -1741,6 +1757,7 @@ def main():
                             "decoder": "ngram",
                             "ngram_size": ngram_size,
                             "K": max_draft_tokens,
+                            "chained_lookup": args.chained_lookup,
                             "adaptive_k": args.adaptive_k,
                             "adaptive_k_min": (
                                 args.adaptive_k_min if args.adaptive_k else ""
@@ -1840,6 +1857,7 @@ def main():
                             max_draft_tokens=runtime_max_draft_tokens,
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
+                            chained_lookup=args.chained_lookup,
                         )
                         if reproducibility_result["tail"] != reference_ngram_tail:
                             raise RuntimeError(
@@ -1926,6 +1944,7 @@ def main():
             "prompts": len(prompt_items),
             "reps": args.reps,
             "max_new": args.max_new_tokens,
+            "chained_lookup": args.chained_lookup,
             "peak_rss": monitor.peak_rss_gib,
         },
     )
