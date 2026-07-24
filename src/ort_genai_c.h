@@ -113,9 +113,10 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
 /**
  * \brief Enable or disable non-essential telemetry event collection.
  *
- * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or for the process lifetime
- * by setting ORT_DISABLE_TELEMETRY=1 before initialization. Runtime controls suppress new detailed
- * model, generation, adapter, and error telemetry; the process information event may still be emitted.
+ * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or by setting
+ * ORT_DISABLE_TELEMETRY=1 before initialization. The environment variable prevents the uploader,
+ * events, and persistent device identifier from being created for the process lifetime. Runtime
+ * controls suppress new detailed model, generation, adapter, and error telemetry.
  *
  * \param[in] enabled true to enable telemetry, false to disable.
  */

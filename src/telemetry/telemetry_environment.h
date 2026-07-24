@@ -72,12 +72,6 @@ inline std::string ToLowerAscii(std::string_view s) {
   return out;
 }
 
-// Case-insensitive check for explicit telemetry opt-out values.
-inline bool IsEnvTruthy(std::string_view value) {
-  const std::string v = ToLowerAscii(TrimAscii(value));
-  return v == "1" || v == "true" || v == "yes" || v == "on" || v == "y";
-}
-
 // A CI variable counts as present unless its (trimmed) value is empty or an explicit falsey token, so
 // a runner exporting e.g. CI=false does not trip detection.
 inline bool IsCiValueTruthy(std::string_view value) {
@@ -102,10 +96,11 @@ inline bool IsRunningUnitTests() {
   return IsCiValueTruthy(GetTelemetryEnv("ORT_RUNNING_UNIT_TESTS"));
 }
 
-// ORT_DISABLE_TELEMETRY is a process-lifetime full opt-out. The telemetry provider latches it
-// before initialization so no uploader, event, or persistent device identifier is created.
+// True if ORT_DISABLE_TELEMETRY is set to a truthy value (1/true/yes/on/y, case-insensitive).
+// The 1DS provider latches this full opt-out during initialization on every supported platform.
 inline bool IsTelemetryDisabledByEnvironment() {
-  return IsEnvTruthy(GetTelemetryEnv("ORT_DISABLE_TELEMETRY"));
+  const std::string value = ToLowerAscii(TrimAscii(GetTelemetryEnv("ORT_DISABLE_TELEMETRY")));
+  return value == "1" || value == "true" || value == "yes" || value == "on" || value == "y";
 }
 
 }  // namespace Generators::TelemetryInternal

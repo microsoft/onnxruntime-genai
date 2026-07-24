@@ -27,5 +27,5 @@ For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetr
 Telemetry can be disabled in any of these ways:
 
 - **Don't build it in.** Telemetry is only compiled when configuring with `--use_telemetry` (`-DENABLE_TELEMETRY=ON`). To produce a binary that collects no data, run the `build.bat` and `build.sh` scripts without `--use_telemetry`.
-- **Disable all telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before ONNX Runtime GenAI initializes. This disables telemetry for the lifetime of the process and cannot be reversed through the runtime API.
-- **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. The process information event may still be emitted.
+- **Disable all telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before ONNX Runtime GenAI initializes. This prevents the uploader, events, and persistent device identifier from being created for the process lifetime.
+- **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. For the full process-lifetime opt-out, use `ORT_DISABLE_TELEMETRY` before initialization.

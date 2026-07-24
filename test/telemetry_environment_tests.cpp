@@ -88,25 +88,6 @@ void ExpectOptOutEnv(const char* value, bool expected) {
 
 }  // namespace
 
-TEST(TelemetryEnvironmentTests, ExplicitOptOutTruthTable) {
-  using Generators::TelemetryInternal::IsEnvTruthy;
-
-  EXPECT_TRUE(IsEnvTruthy("1"));
-  EXPECT_TRUE(IsEnvTruthy("true"));
-  EXPECT_TRUE(IsEnvTruthy("TRUE"));
-  EXPECT_TRUE(IsEnvTruthy(" yes "));
-  EXPECT_TRUE(IsEnvTruthy("on"));
-  EXPECT_TRUE(IsEnvTruthy("Y"));
-
-  EXPECT_FALSE(IsEnvTruthy(""));
-  EXPECT_FALSE(IsEnvTruthy(" "));
-  EXPECT_FALSE(IsEnvTruthy("0"));
-  EXPECT_FALSE(IsEnvTruthy("false"));
-  EXPECT_FALSE(IsEnvTruthy("no"));
-  EXPECT_FALSE(IsEnvTruthy("off"));
-  EXPECT_FALSE(IsEnvTruthy("random"));
-}
-
 TEST(TelemetryEnvironmentTests, CiValueTruthTable) {
   using Generators::TelemetryInternal::IsCiValueTruthy;
 
@@ -125,10 +106,19 @@ TEST(TelemetryEnvironmentTests, CiValueTruthTable) {
   EXPECT_FALSE(IsCiValueTruthy("off"));
 }
 
-TEST(TelemetryEnvironmentTests, OptOutEnvVarParsing) {
+TEST(TelemetryEnvironmentTests, EnvVarOptOut) {
   ExpectOptOutEnv("1", true);
+  ExpectOptOutEnv("true", true);
   ExpectOptOutEnv("TRUE", true);
+  ExpectOptOutEnv(" yes ", true);
+  ExpectOptOutEnv("on", true);
+  ExpectOptOutEnv("Y", true);
+  ExpectOptOutEnv("", false);
+  ExpectOptOutEnv(" ", false);
   ExpectOptOutEnv("0", false);
+  ExpectOptOutEnv("false", false);
+  ExpectOptOutEnv("no", false);
+  ExpectOptOutEnv("off", false);
   ExpectOptOutEnv("random", false);
   ExpectOptOutEnv(nullptr, false);
 }
