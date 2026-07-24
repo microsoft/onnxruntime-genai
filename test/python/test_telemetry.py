@@ -246,6 +246,19 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
 
+    def test_runtime_disable_skips_pending_heartbeat(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = False
+        telemetry._telemetry_disabled = False
+        telemetry._store = MagicMock()
+        with patch("telemetry.telemetry.get_encrypted_device_id_and_status") as mock_device_id:
+            telemetry._send_heartbeat()
+
+        mock_device_id.assert_not_called()
+        telemetry._store.store.assert_not_called()
+
     def test_initialization_keeps_exporter_diagnostics_configurable(self):
         from telemetry.library.event_source import event_source
         from telemetry.telemetry import GenAITelemetry
@@ -650,6 +663,13 @@ class TestPathRedaction(unittest.TestCase):
             self.assertEqual(attributes["nested"]["paths"], ["[path]"])
             self.assertEqual(attributes["[path]"], "value")
             self.assertEqual(attributes["nested"]["[path]"], "value")
+
+    def test_public_helpers_never_propagate_failures(self):
+        from telemetry.telemetry_extensions import log_action, log_error
+
+        with patch("telemetry.telemetry_extensions._get_telemetry", side_effect=RuntimeError("telemetry failed")):
+            log_action("test", "work", 1.0, True, metadata=["not", "a", "dict"])
+            log_error("RuntimeError", "boom", metadata=["not", "a", "dict"])
 
 
 class TestDeviceId(unittest.TestCase):
