@@ -1969,6 +1969,74 @@ TEST(CAPITests, ParakeetTdtTranscribeLong) {
   EXPECT_FALSE(transcription.empty());
 }
 
+// Test that bot/eot/bor/eor throw for models without these tokens configured
+TEST(CAPITests, TokenId_Unsupported) {
+  // tiny-random-gpt2 model has type "gpt2" which is NOT in the fallback map → throws
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  EXPECT_THROW(tokenizer->GetBotTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetEotTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetBorTokenId(), std::runtime_error);
+  EXPECT_THROW(tokenizer->GetEorTokenId(), std::runtime_error);
+}
+
+TEST(CAPITests, TokenId_FromConfig) {
+  // Create a temporary model directory with bot/eot/bor/eor token IDs in model section
+  auto temp_dir = std::filesystem::temp_directory_path() / "oga_test_tool_tags";
+  std::filesystem::remove_all(temp_dir);  // Clean up any leftover from a previous failed run
+  std::filesystem::create_directories(temp_dir);
+
+  // Copy minimal model files from tiny-random-gpt2
+  std::string src_dir = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+  for (const auto& entry : std::filesystem::directory_iterator(src_dir)) {
+    if (entry.path().filename() != "genai_config.json") {
+      std::filesystem::copy_file(entry.path(), temp_dir / entry.path().filename(),
+                                 std::filesystem::copy_options::overwrite_existing);
+    }
+  }
+
+  // Write genai_config.json with token IDs in model section
+  {
+    std::ofstream f((temp_dir / "genai_config.json").string());
+    f << R"({
+  "model": {
+    "type": "gpt2",
+    "pad_token_id": 98,
+    "bos_token_id": 98,
+    "eos_token_id": 98,
+    "vocab_size": 1000,
+    "context_length": 512,
+    "bot_token_id": 151657,
+    "eot_token_id": 151658,
+    "bor_token_id": 151659,
+    "eor_token_id": 151660,
+    "decoder": {
+      "session_options": { "provider_options": [] },
+      "filename": "past.onnx",
+      "num_key_value_heads": 4,
+      "head_size": 8,
+      "num_hidden_layers": 5,
+      "inputs": { "past_names": "past_%d" },
+      "outputs": { "present_names": "present_%d" }
+    }
+  }
+})";
+  }
+
+  auto model = OgaModel::Create(temp_dir.string().c_str());
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Tokenizer returns configured IDs from model section
+  EXPECT_EQ(tokenizer->GetBotTokenId(), 151657);
+  EXPECT_EQ(tokenizer->GetEotTokenId(), 151658);
+  EXPECT_EQ(tokenizer->GetBorTokenId(), 151659);
+  EXPECT_EQ(tokenizer->GetEorTokenId(), 151660);
+
+  // Cleanup
+  std::filesystem::remove_all(temp_dir);
+}
+
 // Regression test for MSRC: malformed audio buffers smaller than the minimum valid
 // audio header size must be rejected with an error, not cause a crash.
 TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {

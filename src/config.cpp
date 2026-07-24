@@ -1181,6 +1181,14 @@ struct Model_Element : JSON::Element {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
       v_.right_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "bot_token_id") {
+      v_.bot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "eot_token_id") {
+      v_.eot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "bor_token_id") {
+      v_.bor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "eor_token_id") {
+      v_.eor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }

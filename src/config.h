@@ -145,6 +145,15 @@ struct Config {
     int video_token_id{};
     int vision_start_token_id{};
 
+    // Tool-calling and reasoning token IDs.
+    // Follows the bos/eos/pad naming convention:
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    std::optional<int> bot_token_id;
+    std::optional<int> eot_token_id;
+    std::optional<int> bor_token_id;
+    std::optional<int> eor_token_id;
+
     int vocab_size{};
     int context_length{};
 
