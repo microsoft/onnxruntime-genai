@@ -546,6 +546,29 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
 ```
 
+##### Quantize the KV Cache
+
+This scenario is for when you want to quantize the KV cache via the `kv_cache_quant_type` option. Quantized KV cache is only supported for the CPU and CUDA execution providers. Supported values are:
+
+- `none` (default): no KV cache quantization.
+- `int8_per_tensor` / `int8_per_channel`: 8-bit integer KV cache.
+- `int4_per_tensor` / `int4_per_channel`: 4-bit integer KV cache.
+- `fp8_per_tensor` / `fp8_per_channel`: FP8 (float8e4m3fn) KV cache.
+
+The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
+
+The scales applied to the KV cache are supplied through a required calibration file:
+
+- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). This option is required when `kv_cache_quant_type` is enabled.
+
+```bash
+# From wheel (int8 per-channel KV cache with calibrated scales):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+
+# From source (int8 per-channel KV cache with calibrated scales):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+```
+
 #### FP32 I/O for WebGPU EP
 
 This scenario is for when you want to force FP32 model I/O for WebGPU (useful for GPUs without FP16 support on WebGPU, such as GTX 10xx).

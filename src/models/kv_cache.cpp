@@ -10,8 +10,24 @@
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include <algorithm>
+#include <type_traits>
 
 namespace Generators {
+
+namespace {
+// KV cache tensors are copied/reordered as fixed-width elements. FLOAT8E4M3FN shares the
+// 1-byte width of uint8_t and is moved as raw bytes, but WrapTensor<uint8_t> asserts on the
+// tensor's element type, so wrap float8 tensors via ByteWrapTensor instead.
+template <typename T>
+DeviceSpan<T> WrapKvCacheTensor(DeviceInterface& device, OrtValue& value, ONNXTensorElementDataType type) {
+  if constexpr (std::is_same_v<T, uint8_t>) {
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+      return ByteWrapTensor(device, value);
+    }
+  }
+  return WrapTensor<T>(device, value);
+}
+}  // namespace
 
 CombinedKeyValueCache::CombinedKeyValueCache(State& state)
     : state_{state},
@@ -106,8 +122,8 @@ void CombinedKeyValueCache::RewindPastTensorsTo(size_t index) {
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
     std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-    auto present_span = WrapTensor<T>(Device(), present);
-    auto past_span = WrapTensor<T>(Device(), *past);
+    auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
+    auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
 
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
       auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -127,10 +143,10 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
   auto past_key_size = shape_[1] * block_size_per_beam;
 
   OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past);
-  auto present_span = WrapTensor<ScoreType>(Device(), present);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -635,8 +651,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -660,8 +676,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       OrtValue& present = *presents_[i];
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -692,10 +708,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), tensor_shape, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
-  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past_value, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present_value, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];

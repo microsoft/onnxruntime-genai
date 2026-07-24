@@ -249,8 +249,14 @@ def _capture_initializers(model):
     return captured
 
 
-def test_per_tensor_scale_initializers_are_scalar_per_layer():
-    model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", num_layers=2)
+def test_per_tensor_scale_initializers_are_scalar_per_layer(tmp_path):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"scales": {"k_scales": [0.1, 0.2], "v_scales": [0.3, 0.4]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=2,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
     model.kv_quant_type = "PER_TENSOR"
     captured = _capture_initializers(model)
 
@@ -267,8 +273,26 @@ def test_per_tensor_scale_initializers_are_scalar_per_layer():
         assert arr.size == 1
 
 
-def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size():
-    model = _make_kv_model(kv_cache_quant_type="int8_per_channel", num_kv_heads=2, head_size=16, num_layers=1)
+def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size(tmp_path):
+    scale_size = 2 * 16
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [[0.1] * scale_size],
+                    "v_scales": [[0.2] * scale_size],
+                }
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_channel",
+        num_kv_heads=2,
+        head_size=16,
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
     model.kv_quant_type = "PER_CHANNEL"
     captured = _capture_initializers(model)
 
@@ -278,19 +302,16 @@ def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size():
         assert arr.size == 2 * 16
 
 
-def test_default_scale_value_is_used_when_no_calibration_file():
+def test_missing_scale_file_is_rejected():
     model = _make_kv_model(
         kv_cache_quant_type="int8_per_tensor",
         num_layers=1,
-        extra_options={"kv_cache_scale": "0.125"},
     )
     model.kv_quant_type = "PER_TENSOR"
-    captured = _capture_initializers(model)
+    _capture_initializers(model)
 
-    model.make_kv_cache_scale_initializers()
-
-    for arr in captured.values():
-        np.testing.assert_allclose(arr, 0.125)
+    with pytest.raises(ValueError, match="kv_cache_scale_file"):
+        model.make_kv_cache_scale_initializers()
 
 
 def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):

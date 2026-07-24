@@ -595,30 +595,28 @@ class Model:
         per_channel = self.kv_quant_type == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
 
-        # Prefer calibrated per-layer scales from a JSON file:
+        # Calibrated per-layer scales are required and supplied via a JSON file:
         #   {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}
         # where each per-layer entry is a scalar (PER_TENSOR) or a length-scale_size
-        # vector (PER_CHANNEL). Fall back to a single constant scale otherwise.
+        # vector (PER_CHANNEL).
         scale_file = self.extra_options.get("kv_cache_scale_file", None)
-        k_scales_per_layer = v_scales_per_layer = None
-        if scale_file is not None:
-            with open(scale_file) as f:
-                scale_data = json.load(f)
-            k_scales_per_layer = scale_data["scales"]["k_scales"]
-            v_scales_per_layer = scale_data["scales"]["v_scales"]
-            if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
-                raise ValueError(
-                    f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
-                    f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
-                )
-
-        default_scale = float(self.extra_options.get("kv_cache_scale", 0.05))
+        if scale_file is None:
+            raise ValueError(
+                "Quantized KV cache requires calibrated scales; provide them via "
+                "extra_options['kv_cache_scale_file']."
+            )
+        with open(scale_file) as f:
+            scale_data = json.load(f)
+        k_scales_per_layer = scale_data["scales"]["k_scales"]
+        v_scales_per_layer = scale_data["scales"]["v_scales"]
+        if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
+            raise ValueError(
+                f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
+                f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
+            )
 
         def make_scale(per_layer, layer_id):
-            if per_layer is not None:
-                arr = np.array(per_layer[layer_id], dtype=np.float32).reshape(-1)
-            else:
-                arr = np.full(scale_size, default_scale, dtype=np.float32)
+            arr = np.array(per_layer[layer_id], dtype=np.float32).reshape(-1)
             if arr.size != scale_size:
                 raise ValueError(
                     f"kv_cache scale for layer {layer_id} has size {arr.size}, expected {scale_size}"
