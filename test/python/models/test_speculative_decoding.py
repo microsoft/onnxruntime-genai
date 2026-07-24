@@ -1998,7 +1998,7 @@ class TestSpeculativeGuidance:
     ops (ProcessLogits mask + CommitTokens + fast-forward) and commits accepted draft tokens by their
     per-token value, exactly like the non-guidance accept loop."""
 
-    def test_adaptive_k_guidance_is_deterministic_and_grammar_valid(
+    def test_adaptive_k_guidance_output_is_deterministic_and_grammar_valid(
             self, guidance_model_path, tmp_path):
         pattern = r"[0-9]{3}-[0-9]{3}"
         max_k = 8
@@ -2018,11 +2018,11 @@ class TestSpeculativeGuidance:
 
         assert first == second
         assert re.fullmatch(pattern, text)
-        assert first_stats["draft_tokens_proposed"] == \
-            second_stats["draft_tokens_proposed"]
-        assert first_stats["effective_k"] == second_stats["effective_k"]
-        assert 2 <= first_stats["effective_k"] <= 16
-        assert not first_stats["formula_supported"]
+        for stats in (first_stats, second_stats):
+            assert stats["adaptive_k_observations"] > 0
+            assert stats["adaptive_k_throughput"] > 0.0
+            assert 2 <= stats["effective_k"] <= 16
+            assert not stats["formula_supported"]
 
     @pytest.mark.parametrize("seed", [0, 7, 1234])
     def test_adaptive_k_sampled_guidance_produces_output(

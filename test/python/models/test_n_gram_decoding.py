@@ -18,6 +18,7 @@ import pytest
 
 _PROMPT = [785, 3838, 374, 279, 6722, 315, 9625, 30]
 _REPETITIVE_PROMPT = [785, 3838, 374, 785, 3838]
+_CHAINED_QWEN_PROMPT = [785, 3838, 374, 785, 3838, 374]
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +31,8 @@ def qwen3_model_path(request):
 
 
 def _generator(model_path, prompt, max_length, *, ngram_size=0,
-               max_draft_tokens=4, adaptive_k_bool=False, adaptive_k_min=2,
+               max_draft_tokens=4, ngram_chained_lookup_bool=False,
+               adaptive_k_bool=False, adaptive_k_min=2,
                **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
@@ -41,6 +43,7 @@ def _generator(model_path, prompt, max_length, *, ngram_size=0,
         params.set_speculative_options(
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup_bool=ngram_chained_lookup_bool,
             adaptive_k_bool=adaptive_k_bool,
             adaptive_k_min=adaptive_k_min,
         )
@@ -56,7 +59,8 @@ def _finish(generator):
 
 
 def _generate(model_path, prompt, max_length, *, ngram_size=0,
-              max_draft_tokens=4, adaptive_k_bool=False, adaptive_k_min=2,
+              max_draft_tokens=4, ngram_chained_lookup_bool=False,
+              adaptive_k_bool=False, adaptive_k_min=2,
               **search_options):
     generator = _generator(
         model_path,
@@ -64,6 +68,7 @@ def _generate(model_path, prompt, max_length, *, ngram_size=0,
         max_length,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
+        ngram_chained_lookup_bool=ngram_chained_lookup_bool,
         adaptive_k_bool=adaptive_k_bool,
         adaptive_k_min=adaptive_k_min,
         **search_options,
@@ -212,6 +217,359 @@ def _invalid_guard_params(model, guard):
 
 
 class TestNGramControlledSemantics:
+    def test_chained_lookup_crosses_occurrences_and_fills_target_batch(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_cross_occurrences",
+            _transition_logits({2: 3, 3: 4, 4: 5, 5: 6}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        max_length = len(prompt) + 4
+
+        contiguous = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=3)
+        chained = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup_bool=True)
+
+        contiguous.generate_next_token()
+        chained.generate_next_token()
+        contiguous_stats = contiguous.get_speculative_stats()
+        chained_stats = chained.get_speculative_stats()
+
+        assert [int(token) for token in contiguous.get_sequence(0)] == prompt + [3]
+        assert [int(token) for token in chained.get_sequence(0)] == prompt + [3]
+        assert contiguous_stats["draft_tokens_proposed"] == 3
+        assert contiguous_stats["draft_tokens_evaluated"] == 2
+        assert contiguous_stats["draft_tokens_accepted"] == 1
+        assert chained_stats["draft_tokens_proposed"] == 3
+        assert chained_stats["draft_tokens_evaluated"] == 3
+        assert chained_stats["draft_tokens_accepted"] == 3
+        assert chained_stats["bonus_tokens"] == 1
+        assert chained_stats["target_forward_passes"] == 1
+        assert chained_stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(contiguous_stats)
+        _assert_stats_consistent(chained_stats)
+
+    def test_chained_lookup_cycle_fills_maximum_supported_k(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_cycle",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 17,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup_bool=True)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert int(generator.get_sequence(0)[-1]) == 1
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 16
+        assert stats["draft_tokens_evaluated"] == 16
+        assert stats["draft_tokens_accepted"] == 16
+        assert stats["bonus_tokens"] == 1
+        assert stats["tokens_queued"] == 17
+        assert stats["tokens_emitted"] == 1
+        assert stats["tokens_buffered"] == 16
+        assert stats["target_forward_passes"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_keeps_one_visible_token_per_call(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_streaming",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 20,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup_bool=True)
+
+        calls = 0
+        while not generator.is_done():
+            old_length = len(generator.get_sequence(0))
+            generator.generate_next_token()
+            assert len(generator.get_sequence(0)) == old_length + 1
+            calls += 1
+
+        stats = generator.get_speculative_stats()
+        assert calls == 20
+        assert stats["tokens_emitted"] == 20
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_disabling_chained_lookup_preserves_contiguous_behavior(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_disabled",
+            _transition_logits({2: 3, 3: 4, 4: 5}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        options = {
+            "ngram_size": 3,
+            "max_draft_tokens": 4,
+        }
+
+        omitted, omitted_stats = _generate(
+            model_path, prompt, len(prompt) + 8, **options)
+        disabled, disabled_stats = _generate(
+            model_path, prompt, len(prompt) + 8,
+            ngram_chained_lookup_bool=False, **options)
+
+        assert disabled == omitted
+        for key in (
+                "rounds",
+                "draft_tokens_proposed",
+                "draft_tokens_evaluated",
+                "draft_tokens_accepted",
+                "tokens_queued",
+                "tokens_emitted",
+                "tokens_discarded",
+                "tokens_buffered",
+                "target_forward_passes",
+                "draft_forward_passes"):
+            assert disabled_stats[key] == omitted_stats[key]
+        _assert_stats_consistent(disabled_stats)
+        _assert_stats_consistent(omitted_stats)
+
+    def test_chained_lookup_respects_remaining_length_budget(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_max_length",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup_bool=True)
+
+        assert result == prompt + [1]
+        assert stats["draft_tokens_proposed"] == 1
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["tokens_emitted"] == 1
+        assert stats["tokens_discarded"] == 1
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_stops_verification_at_first_rejection(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_rejection",
+            _transition_logits({2: 3, 3: 7}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 2,
+            ngram_size=3, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+
+        assert result == prompt + [3, 7]
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["correction_tokens"] == 1
+        assert stats["bonus_tokens"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_eos_discards_unobserved_synthetic_tail(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_eos",
+            _transition_logits({2: 9, 9: 2}),
+        )
+        prompt = [2, 9, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+
+        assert result == prompt
+        assert stats["draft_tokens_proposed"] == 8
+        assert stats["draft_tokens_accepted"] >= 1
+        assert stats["tokens_emitted"] == 0
+        assert stats["tokens_discarded"] == stats["tokens_queued"]
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_sampling_matches_standard_on_controlled_model(
+            self, tmp_path):
+        table = np.full((10, 10), -20.0, dtype=np.float32)
+        table[:, 1:5] = np.array([0.0, 0.2, 0.4, 0.6], dtype=np.float32)
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_sampling", table)
+        prompt = [1, 2, 1, 2]
+        outputs = set()
+
+        for seed in range(24):
+            options = {
+                "do_sample": True,
+                "top_k": 4,
+                "temperature": 0.8,
+                "random_seed": seed,
+            }
+            expected, _ = _generate(
+                model_path, prompt, len(prompt) + 12, **options)
+            actual, stats = _generate(
+                model_path, prompt, len(prompt) + 12,
+                ngram_size=2, max_draft_tokens=8,
+                ngram_chained_lookup_bool=True, **options)
+
+            assert actual == expected
+            assert stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(stats)
+            outputs.add(tuple(actual[len(prompt):]))
+
+        assert len(outputs) > 1
+
+    def test_chained_lookup_and_adaptive_k_share_effective_budget(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_adaptive",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 24,
+            ngram_size=2, max_draft_tokens=1,
+            ngram_chained_lookup_bool=True,
+            adaptive_k_bool=True, adaptive_k_min=2)
+
+        for _ in range(6):
+            generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["completed_rounds"] == 2
+        assert stats["draft_tokens_proposed"] == 4
+        assert stats["draft_tokens_accepted"] == 4
+        assert stats["effective_k"] == 3
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_observations"] == 2
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_mid_round_append_discards_synthetic_tail(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_append",
+            _transition_logits({1: 2, 2: 1, 7: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 16
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+        generator.generate_next_token()
+        before_append = generator.get_speculative_stats()
+        committed = [int(token) for token in generator.get_sequence(0)]
+
+        generator.append_tokens(np.array([[7, 1, 2]], dtype=np.int32))
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, committed + [7, 1, 2], max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+        stats = generator.get_speculative_stats()
+
+        assert before_append["active_rounds"] == 1
+        assert before_append["tokens_buffered"] > 0
+        assert actual == expected
+        assert stats["interrupted_rounds"] >= 1
+        assert stats["active_rounds"] == 0
+        assert stats["tokens_buffered"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_rewind_rebuilds_only_committed_history(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_rewind",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 18
+        expected, _ = _generate(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["tokens_buffered"] > 0
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _finish(generator)
+        stats = generator.get_speculative_stats()
+
+        assert actual == expected
+        assert stats["interrupted_rounds"] >= 1
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_set_logits_reanchors_without_indexing_drafts(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_set_logits",
+            _transition_logits({1: 2, 2: 1, 7: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 16
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["tokens_buffered"] > 0
+
+        forced_logits = np.full_like(generator.get_logits(), -1e9)
+        forced_logits[0, 0, 7] = 1e9
+        generator.set_logits(forced_logits)
+        generator.generate_next_token()
+        assert int(generator.get_sequence(0)[-1]) == 7
+
+        committed = [int(token) for token in generator.get_sequence(0)]
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, committed, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup_bool=True)
+
+        assert actual == expected
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    def test_chained_lookup_state_is_independent_between_generators(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_isolation",
+            _transition_logits({2: 3, 3: 4, 4: 5}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        chained = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup_bool=True)
+        contiguous = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup_bool=False)
+
+        chained.generate_next_token()
+        contiguous.generate_next_token()
+        chained_stats = chained.get_speculative_stats()
+        contiguous_stats = contiguous.get_speculative_stats()
+
+        assert chained_stats["draft_tokens_accepted"] == 3
+        assert contiguous_stats["draft_tokens_accepted"] == 1
+        assert [int(token) for token in chained.get_sequence(0)] == \
+            [int(token) for token in contiguous.get_sequence(0)]
+
     def test_adaptive_k_starts_at_two_and_waits_for_smoothed_evidence(
             self, tmp_path):
         model_path = _make_tiny_ngram_model(
@@ -799,14 +1157,17 @@ class TestNGramDecoding:
     def test_options_round_trip_and_validation(self, qwen3_model_path):
         model = og.Model(qwen3_model_path)
         params = og.GeneratorParams(model)
+        assert params.get_speculative_options()["ngram_chained_lookup_bool"] is False
         params.set_speculative_options(
             ngram_size=4,
             max_draft_tokens=8,
+            ngram_chained_lookup_bool=True,
             adaptive_k_bool=True,
         )
         options = params.get_speculative_options()
         assert options["ngram_size"] == 4
         assert options["max_draft_tokens"] == 8
+        assert options["ngram_chained_lookup_bool"] is True
         assert options["adaptive_k_bool"] is True
 
         with pytest.raises(Exception, match="ngram_size"):
@@ -817,10 +1178,184 @@ class TestNGramDecoding:
             params.set_speculative_options(max_draft_tokens=0)
         with pytest.raises(Exception, match="max_draft_tokens"):
             params.set_speculative_options(max_draft_tokens=17)
+        with pytest.raises(Exception, match="ngram_chained_lookup_bool"):
+            params.set_speculative_options(ngram_chained_lookup_bool=2)
+        with pytest.raises(Exception, match="ngram_chained_lookup_bool"):
+            params.set_speculative_options(ngram_chained_lookup_bool=0.5)
         with pytest.raises(Exception, match="adaptive_k_bool"):
             params.set_speculative_options(adaptive_k_bool=2)
         with pytest.raises(Exception, match="adaptive_k_bool"):
             params.set_speculative_options(adaptive_k_bool=0.5)
+
+    def test_chained_lookup_requires_ngram_decoding(self, qwen3_model_path):
+        model = og.Model(qwen3_model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        params.set_speculative_options(ngram_chained_lookup_bool=True)
+
+        with pytest.raises(
+                Exception,
+                match="ngram_chained_lookup_bool.*requires.*ngram_size"):
+            og.Generator(model, params)
+
+    def test_chained_lookup_cannot_enable_draft_model_speculation(
+            self, qwen3_model_path, tmp_path):
+        model_path = _build_self_speculative_model(
+            qwen3_model_path, tmp_path / "chained_draft_model")
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        params.set_speculative_options(
+            ngram_size=3,
+            ngram_chained_lookup_bool=True,
+        )
+
+        with pytest.raises(
+                Exception,
+                match="cannot be combined with draft-model"):
+            og.Generator(model, params)
+
+    @pytest.mark.parametrize("ngram_size", [2, 3, 4])
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    def test_chained_lookup_qwen_greedy_matches_standard(
+            self, qwen3_model_path, ngram_size, max_draft_tokens):
+        max_length = len(_CHAINED_QWEN_PROMPT) + 24
+        expected, _ = _generate(
+            qwen3_model_path, _CHAINED_QWEN_PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _CHAINED_QWEN_PROMPT,
+            max_length,
+            ngram_size=ngram_size,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup_bool=True,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_qwen_initial_miss_uses_standard_path(
+            self, qwen3_model_path):
+        max_length = len(_PROMPT) + 4
+        expected, _ = _generate(qwen3_model_path, _PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _PROMPT,
+            max_length,
+            ngram_size=16,
+            max_draft_tokens=16,
+            ngram_chained_lookup_bool=True,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] == 0
+        assert stats["draft_tokens_proposed"] == 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"repetition_penalty": 1.1},
+            {"min_length": len(_REPETITIVE_PROMPT) + 12},
+            {"repetition_penalty": 1.1,
+             "min_length": len(_REPETITIVE_PROMPT) + 12},
+        ],
+    )
+    def test_chained_lookup_qwen_preserves_logits_processor_behavior(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup_bool=True,
+            **search_options,
+        )
+
+        assert actual == expected
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_chained_lookup_qwen_k1_matches_standard_sampling_rng(
+            self, qwen3_model_path, seed):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        search_options = {
+            "do_sample": True,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+            "random_seed": seed,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+            ngram_chained_lookup_bool=True,
+            **search_options,
+        )
+
+        assert actual == expected
+        assert stats["effective_k"] == 1
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_qwen_sampling_is_repeatable_and_varies_by_seed(
+            self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        outputs = set()
+
+        for seed in (0, 7, 1234):
+            options = {
+                "ngram_size": 3,
+                "max_draft_tokens": 8,
+                "ngram_chained_lookup_bool": True,
+                "do_sample": True,
+                "top_k": 40,
+                "top_p": 0.95,
+                "temperature": 0.8,
+                "random_seed": seed,
+            }
+            first, first_stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+            second, second_stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+
+            assert first == second
+            assert first_stats["draft_tokens_proposed"] == \
+                second_stats["draft_tokens_proposed"]
+            assert first_stats["draft_tokens_accepted"] == \
+                second_stats["draft_tokens_accepted"]
+            assert first_stats["draft_forward_passes"] == 0
+            assert second_stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(first_stats)
+            _assert_stats_consistent(second_stats)
+            outputs.add(tuple(first[len(_REPETITIVE_PROMPT):]))
+
+        assert len(outputs) > 1
 
     def test_repetitive_prompt_matches_standard_greedy(self, qwen3_model_path):
         max_length = len(_REPETITIVE_PROMPT) + 12
@@ -1531,6 +2066,7 @@ def qwen3_guidance_model_path(qwen3_model_path):
 
 def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
                       max_length, ngram_size=0, max_draft_tokens=4,
+                      ngram_chained_lookup_bool=False,
                       adaptive_k_bool=False, enable_ff_tokens=False,
                       **search_options):
     model = og.Model(model_path)
@@ -1545,6 +2081,7 @@ def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
         params.set_speculative_options(
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup_bool=ngram_chained_lookup_bool,
             adaptive_k_bool=adaptive_k_bool,
         )
     params.set_guidance(
@@ -1583,6 +2120,7 @@ def _assert_guidance_output(text, output_kind):
 
 def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
                 max_length, ngram_size=0, max_draft_tokens=4,
+                ngram_chained_lookup_bool=False,
                 adaptive_k_bool=False, enable_ff_tokens=False, **search_options):
     generator = _guided_generator(
         model_path,
@@ -1592,6 +2130,7 @@ def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
         max_length=max_length,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
+        ngram_chained_lookup_bool=ngram_chained_lookup_bool,
         adaptive_k_bool=adaptive_k_bool,
         enable_ff_tokens=enable_ff_tokens,
         **search_options,
@@ -1628,6 +2167,165 @@ def _forced_literal_lookup_prompt(model_path, literal, minimum_tokens):
 
 
 class TestNGramGuidance:
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_chained_lookup_greedy_matches_regular_guidance(
+            self, qwen3_guidance_model_path, max_draft_tokens,
+            guidance_type, guidance_data, output_kind):
+        max_length = len(_REPETITIVE_PROMPT) + 64
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+        )
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup_bool=True,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_chained_lookup_sampled_guidance_is_repeatable_and_valid(
+            self, qwen3_guidance_model_path, seed):
+        kwargs = {
+            "guidance_type": "lark_grammar",
+            "guidance_data": 'start: "answer:" /[0-9]{2}/',
+            "max_length": len(_REPETITIVE_PROMPT) + 64,
+            "ngram_size": 3,
+            "max_draft_tokens": 8,
+            "ngram_chained_lookup_bool": True,
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+        }
+
+        first, first_text, first_stats = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+        second, second_text, second_stats = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+
+        assert first == second
+        assert first_text == second_text
+        assert re.fullmatch(r"answer:[0-9]{2}", first_text)
+        assert first_stats["draft_tokens_proposed"] == \
+            second_stats["draft_tokens_proposed"]
+        assert first_stats["draft_tokens_accepted"] == \
+            second_stats["draft_tokens_accepted"]
+        assert first_stats["draft_forward_passes"] == 0
+        assert second_stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(first_stats)
+        _assert_stats_consistent(second_stats)
+
+    def test_chained_lookup_filters_synthetic_candidates_on_grammar_clone(
+            self, qwen3_guidance_model_path):
+        prompt = _grammar_probe_prompt(qwen3_guidance_model_path)
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup_bool=True,
+        )
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        actual_token = int(generator.get_sequence(0)[len(prompt)])
+
+        regular = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+        )
+        regular.generate_next_token()
+
+        assert stats["rounds"] == 1
+        assert 1 <= stats["draft_tokens_proposed"] <= 8
+        assert actual_token == int(regular.get_sequence(0)[len(prompt)])
+        assert re.fullmatch(
+            r"[0-9]+",
+            _decode_tokens(qwen3_guidance_model_path, [actual_token]),
+        )
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_fast_forward_carry_remains_ordered(
+            self, qwen3_guidance_model_path):
+        literal = "The capital of France is Paris and Berlin is in Germany."
+        prompt, _ = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path, literal, minimum_tokens=9)
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + 64,
+            ngram_size=3,
+            max_draft_tokens=8,
+            enable_ff_tokens=True,
+        )
+
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + 64,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup_bool=True,
+            enable_ff_tokens=True,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        assert actual_text.strip() == literal
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_and_adaptive_k_compose_under_guidance(
+            self, qwen3_guidance_model_path):
+        expected = "1 1 1 1 1 1 1 1"
+        tail, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{expected}"',
+            max_length=len(_PROMPT) + 32,
+            ngram_size=2,
+            max_draft_tokens=1,
+            ngram_chained_lookup_bool=True,
+            adaptive_k_bool=True,
+        )
+
+        assert tail
+        assert text.strip() == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
     @pytest.mark.parametrize(
         "guidance_type,guidance_data,output_kind",
         _NGRAM_GUIDANCE_CASES,
