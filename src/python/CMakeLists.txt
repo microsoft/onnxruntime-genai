@@ -68,7 +68,7 @@ if(NOT DEFINED REPO_ROOT)
       OUTPUT_STRIP_TRAILING_WHITESPACE
       RESULT_VARIABLE _pybind11_result)
     if(NOT _pybind11_result EQUAL 0)
-      message(FATAL_ERROR "pybind11 not found. Install it with `pip install pybind11` for standalone SDK builds.")
+      message(FATAL_ERROR "pybind11 not found. From the repository root, install build dependencies with `pip install -r requirements-dev.txt`.")
     endif()
     find_package(pybind11 CONFIG REQUIRED PATHS "${_pybind11_cmakedir}" NO_DEFAULT_PATH)
   endif()

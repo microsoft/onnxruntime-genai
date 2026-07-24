@@ -40,18 +40,6 @@ steps:
     addToPath: true
     architecture: '${{ parameters.arch }}'
 
-# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
-# Sets PIP_INDEX_URL to the authenticated Lotus PyPI index (no pypi.org fallback)
-# so every subsequent `pip install` resolves only from Lotus.
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
-
-- script: python -m pip install requests wheel
-  displayName: 'Install build-time Python deps'
-
 # --- Rust (required by --use_guidance) -------------------------------------
 - powershell: |
     $ErrorActionPreference = 'Stop'
@@ -94,10 +82,12 @@ steps:
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- task: CargoAuthenticate@0
-  displayName: 'Authenticate Cargo to Lotus feed'
-  inputs:
-    configFile: '$(Build.SourcesDirectory)\.cargo\config.toml'
+- template: utils/authenticate-core-build-feeds.yml
+  parameters:
+    cargo_config_file: '$(Build.SourcesDirectory)\.cargo\config.toml'
+
+- script: python -m pip install requests wheel
+  displayName: 'Install build-time Python deps'
 
 # --- LLVM (arm64 only — needed by guidance bindgen) ------------------------
 - powershell: |
@@ -292,9 +282,13 @@ steps:
       $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk\v${{ parameters.cuda_version }}"
       $args += '--use_cuda', '--cuda_home', $cudaHome
       if ('${{ parameters.cuda_version }}' -like '13.*') {
-        $cudaArchs = '75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual'
+        if ('${{ parameters.arch }}' -eq 'arm64') {
+          $cudaArchs = '110-real;120-real;121-real;120-virtual'
+        } else {
+          $cudaArchs = '75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+        }
       } else {
-        $cudaArchs = '60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120'
+        $cudaArchs = '61-real;75-real;86-real;89-real;120-real;120-virtual'
       }
       $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
     }

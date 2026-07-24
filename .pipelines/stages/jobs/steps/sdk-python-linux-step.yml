@@ -74,7 +74,7 @@ steps:
       if [ '${{ parameters.arch }}' = 'arm64' ]; then
         dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
       else
-        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu'
+        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
       fi
     fi
     python3 tools/ci_build/get_docker_image.py \

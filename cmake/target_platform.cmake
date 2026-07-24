@@ -28,7 +28,8 @@ if (MSVC)
     message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
 elseif(APPLE)
-  # TODO: do we need to support CMAKE_OSX_ARCHITECTURES having multiple values?
+  # Universal Apple builds are unsupported; configure one architecture per build.
+  # x86_64 remains necessary for iOS simulator and Mac Catalyst targets.
   set(_apple_target_arch ${CMAKE_OSX_ARCHITECTURES})
   if (NOT _apple_target_arch)
     set(_apple_target_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})

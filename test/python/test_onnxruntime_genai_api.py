@@ -34,9 +34,6 @@ if og.is_cuda_available():
 if og.is_dml_available():
     devices.append("dml")
 
-if og.is_rocm_available():
-    devices.append("rocm")
-
 if og.is_openvino_available():
     devices.append("openvino")
 

@@ -1,8 +1,8 @@
-# cmake/msvc_security.cmake — MSVC compiler and linker security hardening.
+# cmake/msvc_security.cmake — MSVC compiler security and warning policy.
 #
-# Applies the BinSkim-required security flags to *all targets* in the current
-# CMake directory scope. Designed to be included at the top of a project() so
-# the flags are inherited by every subsequent target.
+# Applies the BinSkim-required security flags and project warning policy to all
+# targets in the current CMake directory scope. Designed to be included at the
+# top of a project() so the flags are inherited by every subsequent target.
 #
 # Included by:
 #   - The top-level CMakeLists.txt (replacing the inline security block).
@@ -20,6 +20,32 @@ add_compile_options(
   "$<$<COMPILE_LANGUAGE:C>:/GS>"
   "$<$<COMPILE_LANGUAGE:CXX>:/GS>"
 )
+
+# --- /W4 /WX  Project warning policy ---
+add_compile_options(
+  "$<$<COMPILE_LANGUAGE:C>:/w15038>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
+  "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
+  "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
+  "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
+  "$<$<COMPILE_LANGUAGE:C>:/W4>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+  "$<$<COMPILE_LANGUAGE:C>:/WX>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+)
+
+# MSVC 19.50+ emits C4875 for a GSL construct used by third-party code. Also
+# silence the STL assertion for the deprecated coroutine header it includes.
+if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.50")
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:/wd4875>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4875>"
+  )
+  add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+endif()
 
 # --- /guard:cf  Control Flow Guard (compiler instrumentation + linker enforcement) ---
 add_compile_options(

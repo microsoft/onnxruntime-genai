@@ -50,15 +50,6 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Feed isolation: pip + cargo → Lotus ------------------------------------
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
-
-- script: python3 -m pip install --user --break-system-packages requests wheel
-  displayName: 'Install build-time Python deps'
-
 - bash: |
     set -e
     mkdir -p "$(Build.SourcesDirectory)/.cargo"
@@ -78,10 +69,12 @@ steps:
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- task: CargoAuthenticate@0
-  displayName: 'Authenticate Cargo to Lotus feed'
-  inputs:
-    configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+- template: utils/authenticate-core-build-feeds.yml
+  parameters:
+    cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
+
+- script: python3 -m pip install --user --break-system-packages requests wheel
+  displayName: 'Install build-time Python deps'
 
 # --- Download ORT from Lotus feed (authenticated) ---------------------------
 - bash: |

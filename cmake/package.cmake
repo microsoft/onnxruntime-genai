@@ -26,7 +26,7 @@ if(USE_CUDA OR USE_TRT_RTX)
 endif()
 
 # Tell consumers of the installed package where the public headers live, and expose the
-# execution-provider macros the Python binding relies on (USE_CUDA/USE_DML/USE_ROCM), so an
+# execution-provider macros the Python binding relies on (USE_CUDA/USE_DML), so an
 # incremental standalone SDK build compiles identically to an in-tree build.
 target_include_directories(onnxruntime-genai INTERFACE $<INSTALL_INTERFACE:include>)
 
@@ -50,7 +50,6 @@ if(USE_WINML)
 else()
   set(_genai_export_use_winml 0)
 endif()
-set(_genai_export_use_rocm 0)
 if(USE_GUIDANCE)
   set(_genai_export_use_guidance 1)
 else()
@@ -60,7 +59,6 @@ endif()
 target_compile_definitions(onnxruntime-genai INTERFACE
   $<INSTALL_INTERFACE:USE_CUDA=${_genai_export_use_cuda}>
   $<INSTALL_INTERFACE:USE_DML=${_genai_export_use_dml}>
-  $<INSTALL_INTERFACE:USE_ROCM=${_genai_export_use_rocm}>
 )
 
 # Generate and install the find_package(onnxruntime-genai) config + version files.

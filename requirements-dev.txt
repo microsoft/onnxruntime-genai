@@ -1,0 +1,4 @@
+# Common Python tooling for local source builds and standalone Python SDK builds.
+requests==2.32.3
+wheel==0.47.0
+pybind11==3.0.4

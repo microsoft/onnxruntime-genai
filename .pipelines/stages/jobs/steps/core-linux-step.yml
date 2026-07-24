@@ -32,24 +32,10 @@ parameters:
 
 steps:
 
-- task: Docker@2
-  displayName: 'Login to build cache ACR'
-  inputs:
-    containerRegistry: 'onnxruntimebuildcache'
-    command: 'login'
-    addPipelineData: false
-
-# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+# --- Feed isolation: pip + cargo → Lotus ------------------------------------
 # Sets PIP_INDEX_URL to the authenticated Lotus PyPI index (no pypi.org fallback)
 # for host pip (get_docker_image.py deps) and, forwarded into the container, for
 # the in-docker build.
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
-
-# --- Feed isolation: cargo → Lotus (crates.io replaced) ---------------------
 # Repo-root .cargo/config.toml is mounted into the container (repo is the volume)
 # and discovered by cargo when building the llguidance crate.
 - bash: |
@@ -72,10 +58,10 @@ steps:
   displayName: 'Configure cargo feed isolation (Lotus)'
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- task: CargoAuthenticate@0
-  displayName: 'Authenticate Cargo to Lotus feed'
-  inputs:
-    configFile: '$(Build.SourcesDirectory)/.cargo/config.toml'
+- template: utils/authenticate-core-build-feeds.yml
+  parameters:
+    cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
+    login_to_docker: true
 
 # --- Pull manylinux Docker image --------------------------------------------
 - bash: |
@@ -91,7 +77,7 @@ steps:
       if [ '${{ parameters.arch }}' = 'arm64' ]; then
         dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
       else
-        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu'
+        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
       fi
     fi
     python3 tools/ci_build/get_docker_image.py \
@@ -187,9 +173,13 @@ steps:
     )
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
-        cuda_archs='75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual'
+        if [ '${{ parameters.arch }}' = 'arm64' ]; then
+          cuda_archs='110-real;120-real;121-real;120-virtual'
+        else
+          cuda_archs='75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+        fi
       else
-        cuda_archs='60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120'
+        cuda_archs='61-real;75-real;86-real;89-real;120-real;120-virtual'
       fi
       docker_args+=(-e "CUDA_EXTRA_ARGS=--use_cuda --cuda_home /usr/local/cuda --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=${cuda_archs}")
     fi

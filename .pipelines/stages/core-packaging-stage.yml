@@ -121,7 +121,8 @@ stages:
         arch: arm64
         ep: cuda
         ort_version: ${{ parameters.ort_version }}
-        cuda_version: ${{ parameters.cuda_version }}
+        # NVIDIA Windows-on-ARM CUDA is available only from CUDA 13.x.
+        cuda_version: '13.1'
 
     - template: jobs/core-build-job.yml
       parameters:
@@ -164,4 +165,5 @@ stages:
         arch: arm64
         ep: winml
         ort_version: ${{ parameters.winml_sdk_version }}
-        cuda_version: ${{ parameters.cuda_version }}
+        # WinML also enables CUDA and therefore uses the supported ARM64 toolkit.
+        cuda_version: '13.1'

@@ -2,7 +2,7 @@
 
 This guide explains how to build, test, and lint **ONNX Runtime GenAI** from source. It is written to be quick to skim for humans and unambiguous for AI coding agents: every section lists the exact command to run.
 
-For end-user install instructions (pip / NuGet), see the [README](README.md) and the [official docs](https://onnxruntime.ai/docs/genai).
+For end-user install instructions (pip / NuGet), see the [README](../README.md) and the [official docs](https://onnxruntime.ai/docs/genai).
 
 ---
 
@@ -30,7 +30,7 @@ cd onnxruntime-genai
 Install the common Python build-time dependencies. `pybind11` is required when building the Python SDK incrementally with `--sdk python`:
 
 ```bash
-python -m pip install requests wheel pybind11
+python -m pip install -r requirements-dev.txt
 ```
 
 ---
@@ -150,6 +150,24 @@ python build.py --sdk python --prebuilt_genai_home /path/to/core-install --ort_h
 
 `--sdk` accepts `python`, `java`, or `csharp`. Both `--prebuilt_genai_home` and `--ort_home` are required in SDK mode.
 
+The core install prefix, including the native CPack archive, uses this layout:
+
+```text
+<prefix>/include/                         # Public C and C++ headers
+<prefix>/lib/                             # Native GenAI libraries
+<prefix>/lib/cmake/onnxruntime-genai/     # CMake package configuration
+```
+
+Use the exported CMake package from a native consumer:
+
+```cmake
+find_package(onnxruntime-genai CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE onnxruntime-genai::onnxruntime-genai)
+```
+
+Configure the consumer with `-Donnxruntime-genai_DIR=<prefix>/lib/cmake/onnxruntime-genai`.
+ONNX Runtime is an external runtime dependency and is not included in the core archive.
+
 ---
 
 ## 7. Running tests
@@ -258,7 +276,7 @@ For a physical iOS device, use `--apple_sysroot iphoneos`. Cross-compiled target
 ## 11. Troubleshooting
 
 - **Dependency fetch errors during CMake configure** — dependencies are downloaded via `FetchContent` (`cmake/deps.txt`); ensure network access to the declared URLs, then re-run with `--update`.
-- **Missing Python build dependency** — run `python -m pip install requests wheel pybind11`.
+- **Missing Python build dependency** — run `python -m pip install -r requirements-dev.txt`.
 - **Stale CMake cache after switching flags (e.g. adding `--arm64`)** — delete the build directory (or `CMakeCache.txt` inside it) and re-run with `--update`.
 - **`onnxruntime.lib` / ORT not found** — pass `--ort_home <path>` to point at a prebuilt ONNX Runtime, or omit it to let `build.py` auto-download a matching build.
 - **Clean an existing build** — `python build.py --clean --skip_examples` runs the CMake `clean` target for the selected configuration; it does not rebuild. Run a normal `python build.py` command afterward, or delete the build directory for a completely fresh configure.

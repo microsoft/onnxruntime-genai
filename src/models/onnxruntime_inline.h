@@ -724,11 +724,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(con
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options) {
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_ROCM(this, &provider_options));
-  return *this;
-}
-
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_TensorRT(const OrtTensorRTProviderOptions& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_TensorRT(this, &provider_options));
   return *this;

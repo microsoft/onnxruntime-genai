@@ -34,49 +34,6 @@ if(MSVC)
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-
-  add_compile_options(
-    # Suppress warning C5038: data member will be initialized after another
-    # Common when member initializer list is written out-of-order vs. declaration
-    "$<$<COMPILE_LANGUAGE:C>:/w15038>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
-
-    # Suppress warning C4100: unreferenced formal parameter
-    # Often appears in template or virtual function overrides where a param is unused
-    "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
-
-    # Suppress warning C4819: file contains character that cannot be represented in current code page
-    "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
-
-    # Suppress warning C4996: use of deprecated function or variable
-    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
-
-    # Enable warning level 4 (more aggressive than default /W3)
-    # Captures more potential bugs or code smells
-    "$<$<COMPILE_LANGUAGE:C>:/W4>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
-
-    # Treat all warnings as errors (fail build on any warning)
-    # Combine carefully with /W4 — suppress any known false positives
-    "$<$<COMPILE_LANGUAGE:C>:/WX>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
-  )
-
-  # MSVC 19.50+ (VS 2026) introduced C4875: non-string literal argument to [[gsl::suppress]] is
-  # deprecated. The GSL version used by onnxruntime_extensions (and other deps) hasn't adopted
-  # string-literal syntax yet. Suppress globally so third-party headers build cleanly.
-  # Also silence the STL1011 static assertion for <experimental/coroutine> being deprecated
-  # (ocos_operators in onnxruntime_extensions still uses it; the fix is upstream).
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.50")
-    add_compile_options(
-      "$<$<COMPILE_LANGUAGE:C>:/wd4875>"
-      "$<$<COMPILE_LANGUAGE:CXX>:/wd4875>"
-    )
-    add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
-  endif()
 endif()
 
 include(cmake/ortlib.cmake)
@@ -87,8 +44,6 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
-# Checking if ROCm is supported
-include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
 
@@ -159,7 +114,7 @@ else()
   if(WIN32)
     add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
   else()
-    add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/shared_library_anchor.cpp")
+    add_library(onnxruntime-genai SHARED)
   endif()
 
   # Bring in the object library's compiled objects and usage requirements without re-exporting

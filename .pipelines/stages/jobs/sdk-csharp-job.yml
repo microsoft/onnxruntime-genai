@@ -237,15 +237,16 @@ jobs:
           } elseif ($a -like "*.tar.gz") {
             tar -xf $file -C $outputDir/$rid
           }
-          # CPACK_INCLUDE_TOPLEVEL_DIRECTORY nests everything under a single top-level
-          # dir (named from the CPack package name, which may differ from the archive
-          # filename after the version rename). Locate that dir by its lib/ child and
-          # flatten its lib/ into <rid>/<config>.
-          $top = Get-ChildItem -Path $outputDir/$rid -Directory |
-            Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1
-          if ($top) {
-            Move-Item -Path (Join-Path $top.FullName 'lib/*') -Destination "$outputDir/$rid/$(buildConfig)" -Force
+          # CPACK_INCLUDE_TOPLEVEL_DIRECTORY nests the payload under exactly one
+          # directory (named from the CPack package name, which may differ from
+          # the archive filename after the version rename).
+          $tops = @(Get-ChildItem -Path $outputDir/$rid -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName 'lib') })
+          if ($tops.Count -ne 1) {
+            $candidates = if ($tops.Count) { $tops.FullName -join ', ' } else { '<none>' }
+            throw "Expected exactly one CPack top-level directory with lib/ for RID '$rid'; found $($tops.Count): $candidates"
           }
+          Move-Item -Path (Join-Path $tops[0].FullName 'lib/*') -Destination "$outputDir/$rid/$(buildConfig)" -Force
         }
         Get-ChildItem -Path $outputDir/$rid -Recurse | Select-Object FullName
       }

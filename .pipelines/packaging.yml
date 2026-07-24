@@ -32,11 +32,11 @@ parameters:
 # Build-time ORT (fetched from Lotus into --ort_home) is decoupled from the ORT
 # version the published packages depend on at runtime. The same runtime version
 # is shared by both the Python wheel and the C# NuGet.
-- name: ort_version
+- name: ort_build_version
   displayName: 'ONNX Runtime version (build-time)'
   type: string
   default: '1.26.0'
-- name: ort_dependency_version
+- name: ort_runtime_version
   displayName: 'ONNX Runtime version (runtime dependency)'
   type: string
   default: '1.27.0'
@@ -48,6 +48,7 @@ parameters:
   default: '2.1.1'
 
 # ---- CUDA toolkit version --------------------------------------------------
+# Windows ARM64 core builds always use CUDA 13.1 because CUDA 12.8 is unsupported.
 - name: cuda_version
   displayName: 'CUDA toolkit version'
   type: string
@@ -100,7 +101,7 @@ extends:
     # ---- Core (native) -----------------------------------------------------
     - template: stages/core-packaging-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_build_version }}
         cuda_version: ${{ parameters.cuda_version }}
         winml_sdk_version: ${{ parameters.winml_sdk_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
@@ -110,26 +111,26 @@ extends:
     # ---- iOS xcframework (bespoke Apple build; CPU) ------------------------
     - template: stages/ios-xcframework-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- macOS/iOS CocoaPods (bespoke Apple build; CPU) -------------------
     - template: stages/cocoapods-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- Android AAR (bespoke Android build; CPU) -------------------------
     - template: stages/android-aar-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- SDK · Python (CPU + CUDA + WinML wheels) -------------------------
     - template: stages/sdk-python-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
-        ort_dependency_version: ${{ parameters.ort_dependency_version }}
+        ort_version: ${{ parameters.ort_build_version }}
+        ort_dependency_version: ${{ parameters.ort_runtime_version }}
         winml_sdk_version: ${{ parameters.winml_sdk_version }}
         cuda_version: ${{ parameters.cuda_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
@@ -139,7 +140,7 @@ extends:
     # ---- SDK · C# (CPU + CUDA + WinML + .Foundry NuGet) -------------------
     - template: stages/sdk-csharp-stage.yml
       parameters:
-        ort_dependency_version: ${{ parameters.ort_dependency_version }}
+        ort_dependency_version: ${{ parameters.ort_runtime_version }}
         winml_sdk_version: ${{ parameters.winml_sdk_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
         enable_cuda: ${{ parameters.enable_cuda }}
@@ -148,7 +149,7 @@ extends:
     # ---- SDK · Java (desktop jar; CPU) ------------------------------------
     - template: stages/sdk-java-stage.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_build_version }}
         enable_cpu: ${{ parameters.enable_cpu }}
 
     # ---- SDK · WinML (Python + NuGet) and .Foundry are now produced inside
