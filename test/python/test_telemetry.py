@@ -498,7 +498,7 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(_redact_paths(r"err C:\Users\Alice Smith\models\phi.onnx"), "err [path]")
         self.assertEqual(_redact_paths("err /home/Alice Smith/models/phi.onnx"), "err [path]")
 
-    def test_redaction_matches_ort_relative_path_and_length_contract(self):
+    def test_redaction_relative_path_and_general_length_contract(self):
         from telemetry.telemetry import _redact_paths
 
         self.assertEqual(_redact_paths("a/b/c"), "[path]")
@@ -508,6 +508,29 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(_redact_paths("before /home/alice/model.onnx\nafter"), "before [path]")
         self.assertEqual(len(_redact_paths("x" * 300).encode("utf-8")), 256)
         self.assertEqual(_redact_paths("x" * 255 + "€"), "x" * 255)
+
+    def test_error_messages_are_capped_at_40960_utf8_bytes(self):
+        from telemetry.path_utils import MAX_ERROR_MESSAGE_LENGTH
+        from telemetry.telemetry import GenAITelemetry
+        from telemetry.telemetry_extensions import log_error
+
+        telemetry = MagicMock()
+        with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry):
+            log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH + 100))
+            truncated = telemetry.log.call_args.args[1]["exception_message"]
+            self.assertEqual(len(truncated.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
+
+            log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH - 1) + "€")
+            multibyte = telemetry.log.call_args.args[1]["exception_message"]
+            self.assertEqual(multibyte, "x" * (MAX_ERROR_MESSAGE_LENGTH - 1))
+
+        core = object.__new__(GenAITelemetry)
+        core._enabled = True
+        core._store = object()
+        core._emit = MagicMock()
+        core.log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH + 100))
+        core_message = core._emit.call_args.args[1]["exception_message"]
+        self.assertEqual(len(core_message.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
