@@ -23,7 +23,7 @@ class DmlReadbackHeap {
   // Overload supporting batching
   void ReadbackFromGpu(
       std::span<void*> dst,
-      std::span<const uint32_t> dst_sizes,
+      std::span<const size_t> dst_sizes,
       std::span<ID3D12Resource*> src,
       D3D12_RESOURCE_STATES src_state);
 
