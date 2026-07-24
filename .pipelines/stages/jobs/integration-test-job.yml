@@ -25,7 +25,7 @@ jobs:
   displayName: '${{ parameters.ep }} · ${{ parameters.model }}'
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Linux-GPU-A10'
+      pool: 'onnxruntime-ado-ubuntu-A10-NV32'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
