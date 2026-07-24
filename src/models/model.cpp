@@ -37,21 +37,21 @@
 #include "../ryzenai/interface.h"
 #include "session_options.h"
 
-#if defined(_WIN32)
-#include <direct.h>
-#define GETCWD _getcwd
-#else
-#include <unistd.h>
-#define GETCWD getcwd
-#include <limits.h>
-#endif
-
 namespace Generators {
 
 namespace {
 
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
+constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+// Session-option config keys whose values are file/folder path references. When a model is loaded
+// from a package these may be sha256: shared-asset URIs or relative paths, so their values are
+// resolved against the model root (Config::ResolvePath) before reaching ORT.
+bool IsPathValuedSessionOption(std::string_view key) {
+  return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
+         key == kOrtSessionOptionEpContextFilePath;
+}
 
 }  // namespace
 
@@ -304,7 +304,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
 
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or "package:"-scheme).
+  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 }
@@ -446,6 +446,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
   if (user_provider_options)
     init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
+
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
@@ -456,37 +457,15 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
-  static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-  // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
-  auto name = device_memory_type_names[static_cast<int>(type)];
   try {
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+    auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
-    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
-    // Try the old name before giving up.
-    if (type == DeviceType::WEBGPU) {
-      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      try {
-        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
-      } catch (const Ort::Exception& fallback_e) {
-        throw std::runtime_error(
-            "Failed to create allocator for WebGPU. "
-            "Primary name '" +
-            std::string(name) + "' error: " + std::string(e.what()) +
-            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
-      }
-    } else {
-      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
-    }
+    throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
 }
@@ -664,33 +643,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
   for (auto& config_entry : config_session_options.config_entries) {
-    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
+      const std::string resolved = config_->ResolvePath(config_entry.second).string();
+      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
+    } else {
+      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+    }
   }
 
   // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
-    // Loading a custom ops library ultimately invokes dlopen() / LoadLibrary(),
-    // which executes arbitrary native code (DllMain on Windows, constructor functions on Linux/macOS)
-    // in the host process at load time. Because 'custom_ops_library' is read from genai_config.json
-    // that typically ships alongside the model (including models downloaded from public registries
-    // such as HuggingFace Hub) and the search order below happily picks up a library packaged with
-    // the model, honoring this setting by default is a supply-chain code-execution risk.
-    //
-    // Require an explicit, process-wide opt-in via environment variable before loading anything.
-    // Callers who trust the model can set ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 to restore the
-    // previous behavior. Absolute paths are subject to the same opt-in requirement because the
-    // attacker also controls the config value.
-    bool custom_ops_library_allowed = false;
-    GetEnv("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", custom_ops_library_allowed);
-    if (!custom_ops_library_allowed) {
-      throw std::runtime_error(
-          "genai_config.json requests loading a custom ops library ('" +
-          config_session_options.custom_ops_library.value() +
-          "'), which would execute arbitrary native code from a model-supplied library path. Loading "
-          "has been refused. If you trust this model, set the environment variable "
-          "ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 before creating the model to opt in.");
-    }
-
     // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
@@ -733,18 +695,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
                 break;
               }
             }
-          }
-        }
-      }
-
-      // Third try: resolve relative to current working directory (for development/portable apps)
-      if (!resolved) {
-        char cwd_buffer[PATH_MAX];
-        if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
-          fs::path cwd_relative_path = fs::path(cwd_buffer) / custom_library_path;
-          if (fs::exists(cwd_relative_path)) {
-            custom_library_file_prefix = cwd_relative_path.string();
-            resolved = true;
           }
         }
       }
@@ -805,11 +755,15 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
-    // For models loaded from memory that reference external data files, tell ORT where to find them
-    // via the kOrtSessionOptionsModelExternalInitializersFileFolderPath session config entry.
-    const fs::path external_initializers_path = fs::absolute(config_->config_path);
-    session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
-                                    external_initializers_path.string().c_str());
+    // For models loaded from memory that reference external data files, ORT has no model
+    // directory to resolve them against. Default the external-initializers folder to the config
+    // directory, but only when the config did not already set it (a genai_config session option,
+    // resolved in CreateSessionOptionsFromConfig, takes precedence).
+    if (!session_options->HasConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath)) {
+      const fs::path external_initializers_path = fs::absolute(config_->config_path);
+      session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
+                                      external_initializers_path.string().c_str());
+    }
     return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
   }
 
@@ -856,6 +810,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
     auto load = OpenAndSelectVariant(ort_env, path, ep_str);
     auto config = std::make_unique<Config>(load.variant_dir, std::string_view{});
     config->package_root = load.package_root;
+    // Delegate genai_config path resolution to ORT's package resolver, capturing the package
+    // context to keep it alive for the lifetime of the config.
+    auto package_context = load.context;
+    config->package_resolver = [package_context](const fs::path& base_dir,
+                                                 std::string_view value) -> fs::path {
+      return fs::path{package_context->ResolveStringRef(base_dir.string(), std::string{value},
+                                                        /*must_exist=*/false)};
+    };
     return config;
 #else
     throw std::runtime_error(

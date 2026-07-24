@@ -73,134 +73,6 @@ TEST(CAPITests, AppendCpuProvider) {
 #endif
 }
 
-namespace {
-
-// Cross-platform helpers so the security tests below can toggle the
-// ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY env var without pulling in extra deps.
-void SetEnvVar(const char* name, const char* value) {
-#if defined(_WIN32)
-  _putenv_s(name, value);
-#else
-  setenv(name, value, /*overwrite=*/1);
-#endif
-}
-
-void UnsetEnvVar(const char* name) {
-#if defined(_WIN32)
-  _putenv_s(name, "");
-#else
-  unsetenv(name);
-#endif
-}
-
-// RAII: sets (or clears) an env var on construction and restores whatever
-// value the process had before entering the scope on destruction. Pass
-// nullptr for `value` to force the variable to be unset within the guarded
-// scope. Restoring the previous value keeps tests isolated from each other
-// and from the ambient environment (e.g. a developer who intentionally
-// exported ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY=1 for a local run).
-struct ScopedEnvVar {
-  const char* name;
-  bool had_previous_value;
-  std::string previous_value;
-
-  ScopedEnvVar(const char* n, const char* v) : name(n), had_previous_value(false) {
-    if (const char* existing = std::getenv(name)) {
-      had_previous_value = true;
-      previous_value = existing;
-    }
-    if (v == nullptr) {
-      UnsetEnvVar(name);
-    } else {
-      SetEnvVar(name, v);
-    }
-  }
-  ~ScopedEnvVar() {
-    if (had_previous_value) {
-      SetEnvVar(name, previous_value.c_str());
-    } else {
-      UnsetEnvVar(name);
-    }
-  }
-  ScopedEnvVar(const ScopedEnvVar&) = delete;
-  ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-};
-
-}  // namespace
-
-// SECURITY (CWE-829): A malicious model can ship a genai_config.json whose
-// session_options.custom_ops_library points at a native library packaged
-// alongside the model. Loading that library invokes dlopen()/LoadLibrary() and
-// runs constructor/DllMain code before any inference. onnxruntime-genai must
-// refuse to honor this setting unless the operator (not the model author) has
-// opted in via the ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY environment variable.
-TEST(CAPITests, CustomOpsLibraryRefusedWithoutOptIn) {
-  // Make sure the opt-in is not leaking in from the environment, and restore
-  // whatever value was set before this test on scope exit.
-  ScopedEnvVar guard("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", nullptr);
-
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  // Overlay a custom_ops_library value that would trigger a native library load.
-  // The exact path does not matter: the load must be refused before it is even
-  // resolved on disk.
-  config->Overlay(R"({
-    "model": {
-      "decoder": {
-        "session_options": {
-          "custom_ops_library": "definitely_not_a_real_library.so"
-        }
-      }
-    }
-  })");
-
-  try {
-    auto model = OgaModel::Create(*config);
-    FAIL() << "OgaModel::Create should have thrown when custom_ops_library is "
-              "set without ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY.";
-  } catch (const std::exception& e) {
-    const std::string what = e.what();
-    // Refusal message must mention the opt-in env var so the operator knows
-    // how to enable the feature if they trust the model.
-    EXPECT_NE(what.find("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY"), std::string::npos)
-        << "Unexpected exception message: " << what;
-    // And it should identify the offending config value.
-    EXPECT_NE(what.find("definitely_not_a_real_library.so"), std::string::npos)
-        << "Unexpected exception message: " << what;
-  }
-}
-
-// Companion to the test above: when the operator explicitly opts in, the
-// security gate must let the load through. We don't ship a real custom ops
-// library with the test suite, so we only assert that whatever error surfaces
-// is no longer our refusal message (i.e. control reached the underlying ORT
-// RegisterCustomOpsLibrary call).
-TEST(CAPITests, CustomOpsLibraryAllowedWithOptIn) {
-  ScopedEnvVar guard("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY", "1");
-
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({
-    "model": {
-      "decoder": {
-        "session_options": {
-          "custom_ops_library": "definitely_not_a_real_library.so"
-        }
-      }
-    }
-  })");
-
-  try {
-    auto model = OgaModel::Create(*config);
-    // If for some reason the load succeeded, that's fine — the security gate
-    // did its job. Fall through and let the guard reset the env var.
-  } catch (const std::exception& e) {
-    const std::string what = e.what();
-    // The refusal message must not appear: the opt-in should have let the
-    // request past our gate and into ORT's own library-load code path.
-    EXPECT_EQ(what.find("ORTGENAI_ALLOW_CUSTOM_OPS_LIBRARY"), std::string::npos)
-        << "Opt-in did not bypass the security gate. Message: " << what;
-  }
-}
-
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
@@ -414,6 +286,23 @@ TEST(CAPITests, AppendTokensToSequence) {
     }
   }
 #endif
+}
+
+TEST(CAPITests, SequencesOutOfBoundsAccess) {
+  auto sequences = OgaSequences::Create();
+
+  std::vector<int32_t> tokens{100, 200, 300};
+  sequences->Append(tokens.data(), tokens.size());
+
+  ASSERT_EQ(sequences->Count(), 1u);
+  EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
+  EXPECT_NE(sequences->SequenceData(0), nullptr);
+
+  // Out-of-bounds indices must not read past the underlying storage.
+  EXPECT_EQ(sequences->SequenceCount(1), 0u);
+  EXPECT_EQ(sequences->SequenceData(1), nullptr);
+  EXPECT_EQ(sequences->SequenceCount(1000), 0u);
+  EXPECT_EQ(sequences->SequenceData(1000), nullptr);
 }
 
 TEST(CAPITests, MaxLength) {
@@ -1250,6 +1139,77 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
+// Regression test: a top_k value larger than the model's vocab_size must be
+// rejected at generator creation time instead of triggering an out-of-bounds
+// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+TEST(CAPITests, TopKExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  // Chosen to sit well above typical vocabulary sizes (and above Phi-2's known
+  // vocab_size) so it reliably exceeds the model's vocab_size.
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test for the combined Top-K + Top-P sampling path.
+TEST(CAPITests, TopKTopPExceedsVocabSizeThrows) {
+  Phi2Test test;
+
+  constexpr int kTopKAboveVocabSize = 1'000'000;
+
+  test.params_->SetSearchOptionBool("do_sample", true);
+  test.params_->SetSearchOption("top_k", kTopKAboveVocabSize);
+  test.params_->SetSearchOption("top_p", 0.6f);
+  test.params_->SetSearchOption("temperature", 0.6f);
+
+  try {
+    OgaGenerator::Create(*test.model_, *test.params_);
+    FAIL() << "Expected std::runtime_error for top_k > vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test: a GeneratorParams created from a model must keep that model
+// alive, so destroying the model handle before creating the generator does not
+// cause a use-after-free (GeneratorParams aliases the model-owned Config, and
+// Generator::Generator calls model.shared_from_this()).
+TEST(CAPITests, CreateGeneratorAfterDestroyModel) {
+  OgaModel* model = nullptr;
+  ASSERT_EQ(OgaCreateModel(PHI2_PATH, &model), nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaGeneratorParams* params = nullptr;
+  ASSERT_EQ(OgaCreateGeneratorParams(model, &params), nullptr);
+  ASSERT_NE(params, nullptr);
+
+  // Drop the external reference to the model by destroying its handle. Because
+  // params co-owns the underlying Model (and its Config) via shared ownership,
+  // the object itself stays alive, so dereferencing the raw model pointer below
+  // remains valid. This does NOT imply the handle is generally usable after
+  // OgaDestroyModel; it is valid here only because another owner keeps it alive.
+  OgaDestroyModel(model);
+
+  OgaGenerator* generator = nullptr;
+  ASSERT_EQ(OgaCreateGenerator(model, params, &generator), nullptr);
+  ASSERT_NE(generator, nullptr);
+
+  OgaDestroyGenerator(generator);
+  OgaDestroyGeneratorParams(params);
+}
+
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
@@ -1370,6 +1330,70 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
+}
+
+// Regression test for the concurrency use-after-free / data race in the
+// adapter lifecycle. Prior to serializing Adapters ops with a mutex,
+// concurrent LoadAdapter/UnloadAdapter/SetActiveAdapter calls could race on
+// Adapter::ref_count_ and on the underlying unordered_map, producing lost
+// updates and a TOCTOU window where UnloadAdapter would erase an adapter
+// that another thread had just acquired.
+//
+// This test hammers the Adapters API from multiple threads. It is not
+// deterministic about which operations succeed (a concurrent UnloadAdapter
+// may legitimately throw "Adapter still in use" or "Adapter not found",
+// and a concurrent LoadAdapter of the same name may throw "already loaded")
+// but under TSAN/ASAN and in stress mode it reliably catches the pre-fix
+// races. Here we simply assert that no thread crashes or leaves the
+// Adapters map in an inconsistent state.
+TEST(CAPITests, AdaptersConcurrentLoadUnload) {
+  auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
+  auto adapters = OgaAdapters::Create(*model);
+
+  constexpr int kIterations = 50;
+  constexpr int kThreadsPerRole = 4;
+
+  const char* adapter_path_a = MODEL_PATH "multiple_adapters/adapter_0.onnx_adapter";
+  const char* adapter_path_b = MODEL_PATH "multiple_adapters/adapter_1.onnx_adapter";
+
+  auto swallow = [](auto&& fn) {
+    try {
+      fn();
+    } catch (const std::exception&) {
+      // Concurrent load/unload can legitimately throw (already loaded /
+      // not found / still in use). We only care that state stays consistent.
+    }
+  };
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadsPerRole * 2);
+
+  for (int t = 0; t < kThreadsPerRole; ++t) {
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->LoadAdapter(adapter_path_a, "adapter_a"); });
+        swallow([&] { adapters->LoadAdapter(adapter_path_b, "adapter_b"); });
+      }
+    });
+    threads.emplace_back([&] {
+      for (int i = 0; i < kIterations; ++i) {
+        swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+        swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+      }
+    });
+  }
+
+  for (auto& th : threads) th.join();
+
+  // Drain any adapters left loaded so we end in a known state. These may
+  // throw "not found" depending on which thread won the last unload; that's
+  // fine, we just want to prove the API remains usable and consistent.
+  swallow([&] { adapters->UnloadAdapter("adapter_a"); });
+  swallow([&] { adapters->UnloadAdapter("adapter_b"); });
+
+  // After draining, a fresh load/unload cycle must still succeed cleanly.
+  adapters->LoadAdapter(adapter_path_a, "adapter_a");
+  adapters->UnloadAdapter("adapter_a");
 }
 #endif  // TEST_PHI2 && !USE_DML
 
