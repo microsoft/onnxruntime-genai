@@ -484,6 +484,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
+      // WebGPU has no Zero() implementation; every other backend (incl. AMDGPU) zero-inits the KV.
       if (Device().GetType() != DeviceType::WEBGPU) {
         ByteWrapTensor(Device(), *presents_.back()).Zero();
       }

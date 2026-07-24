@@ -32,6 +32,7 @@
 #include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
+#include "../amdgpu/interface.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
@@ -434,7 +435,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -466,15 +467,25 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'. AMDGPU is "Hip".
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu", "Hip"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
   auto name = device_memory_type_names[static_cast<int>(type)];
+  // AMDGPU: use the selected device's id rather than a hardcoded 0. Single-GPU resolves to 0.
+  if (type == DeviceType::AMDGPU) {
+    auto ep_devices = FindRegisteredEpDevices("AMDGPUExecutionProvider");
+    if (user_provider_options)
+      ep_devices = ApplyDeviceFiltering(*user_provider_options, ep_devices);
+    if (!ep_devices.empty()) {
+      if (const OrtMemoryInfo* mi = Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &allocator.device_id_));
+    }
+  }
   try {
     auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+                                             allocator.device_id_, OrtMemType::OrtMemTypeDefault);
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
     // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
@@ -499,6 +510,33 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
+
+  // Host-accessible allocator for decode inputs (AMDGPU only). Request it via GetSharedAllocator;
+  // if unavailable, creation returns null and callers fall back to the default device inputs path.
+  if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
+    try {
+      // Use the host-accessible memory-info on the same device as the compute allocator.
+      const OrtMemoryInfo* host_info = nullptr;
+      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices("AMDGPUExecutionProvider")) {
+        const OrtMemoryInfo* mi =
+            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        if (!mi)
+          continue;
+        int host_device_id = 0;
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        if (host_device_id == allocator.device_id_) {
+          host_info = mi;
+          break;
+        }
+      }
+      if (host_info)
+        allocator.host_accessible_allocator_ = GetOrtEnv().GetSharedAllocator(*host_info);
+    } catch (const Ort::Exception&) {
+      allocator.host_accessible_allocator_ = nullptr;
+    }
+    if (allocator.host_accessible_allocator_)
+      device.InitHostAccessible(*allocator.host_accessible_allocator_);
+  }
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -591,6 +629,18 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // Host-accessible decode inputs (AMDGPU): route the small decode inputs through a
+  // host-accessible interface so the CPU updates them in place with no per-step roundtrip.
+  // KV cache and scoring stay on the default interface. Falls back if no allocator.
+  if (p_device_->GetType() == DeviceType::AMDGPU &&
+      p_device_->GetHostAccessibleAllocator() != nullptr) {
+    if (auto* pinned = GetAMDGPUPinnedInputsInterface())
+      p_device_inputs_ = pinned;
+  }
+
+  // Logits are CPU-read; AMDGPU host-accessible inputs aren't CPU-read-coherent, so route to CPU.
+  p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.
