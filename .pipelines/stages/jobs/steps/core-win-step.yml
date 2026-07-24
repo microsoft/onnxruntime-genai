@@ -88,13 +88,18 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # On the win-arm64 agent, Azure CLI (az) and azcopy are not pre-installed, but the
-# AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Install both
-# first.
+# AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Azure CLI
+# has no native Windows ARM64 MSI, so install its x64 build under emulation.
 - powershell: |
+    $ErrorActionPreference = 'Stop'
     Write-Host "Downloading Azure CLI..."
-    $azCliUrl = "https://aka.ms/installazurecliwindows"
+    $azCliUrl = "https://aka.ms/installazurecliwindowsx64"
     $installerPath = "$(Agent.TempDirectory)/AzureCLI.msi"
     Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
+    if ((Get-Item $installerPath).Length -lt 1MB) {
+      Write-Error "Azure CLI download is unexpectedly small and is not a valid installer"
+      exit 1
+    }
     Write-Host "Installing Azure CLI..."
     $install = Start-Process -FilePath "msiexec.exe" `
       -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait -PassThru
