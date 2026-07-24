@@ -122,6 +122,19 @@ jobs:
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/unit_tests"
 
+      - name: Docker -- Install Python Wheel and Run Python Tests
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            python3 -m pip install -r test/python/requirements.txt --user && \
+            python3 -m pip install -r test/python/cpu/torch/requirements.txt --user && \
+            python3 -m pip install -r test/python/cpu/ort/requirements.txt --user && \
+            python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai && \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib && \
+            python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models"
+
       - name: Docker -- Build and Run the C# Tests
         run: |
           docker run --rm \
