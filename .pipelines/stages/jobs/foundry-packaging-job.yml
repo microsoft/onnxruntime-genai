@@ -1,0 +1,142 @@
+# =============================================================================
+# foundry-packaging-job.yml — .Foundry NuGet repackage job.
+#
+# Repackages the prebuilt core native binaries into the fixed-name NuGet package
+# Microsoft.ML.OnnxRuntimeGenAI.Foundry. The package carries NO ORT dependency.
+#
+# Consumes the NEW core archive artifacts (core-<os>-<arch>-<ep>-archive) with a
+# fixed RID→EP mapping (win-x64/win-arm64/linux-x64 = cuda; osx-arm64/linux-arm64
+# = cpu). The stage only schedules this job when both EPs are built, so every RID
+# archive is available.
+# =============================================================================
+
+parameters: []
+
+jobs:
+- job: csharp_foundry_nuget
+  displayName: 'csharp · nuget · foundry'
+  pool:
+    name: 'onnxruntime-Win-CPU-2022'
+    os: windows
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: genai_nuget_package_name
+    value: 'Microsoft.ML.OnnxRuntimeGenAI.Foundry'
+  # Normalized SDK·C# pipeline artifact name (mirrors the job name csharp · nuget · <ep>).
+  - name: nugetArtifactName
+    value: 'csharp-nuget-foundry'
+  - name: downloadsDir
+    value: '$(Build.BinariesDirectory)/artifact-downloads'
+  - name: ridRoot
+    value: '$(Build.BinariesDirectory)/rids'
+
+  steps:
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download core archive (win-x64 / cuda)'
+    inputs:
+      artifactName: 'core-win-x64-cuda-archive'
+      targetPath: '$(downloadsDir)/win-x64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download core archive (win-arm64 / cuda)'
+    inputs:
+      artifactName: 'core-win-arm64-cuda-archive'
+      targetPath: '$(downloadsDir)/win-arm64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download core archive (osx-arm64 / cpu)'
+    inputs:
+      artifactName: 'core-osx-arm64-cpu-archive'
+      targetPath: '$(downloadsDir)/osx-arm64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download core archive (linux-x64 / cuda)'
+    inputs:
+      artifactName: 'core-linux-x64-cuda-archive'
+      targetPath: '$(downloadsDir)/linux-x64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download core archive (linux-arm64 / cpu)'
+    inputs:
+      artifactName: 'core-linux-arm64-cpu-archive'
+      targetPath: '$(downloadsDir)/linux-arm64'
+
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
+  # genai_version is inherited from the enclosing stage (computed once by the
+  # 'version' stage), so no per-job version computation is needed here.
+
+  # --- Extract each downloaded RID archive to a platform dir with lib/+include/
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $rids = @('win-x64','win-arm64','osx-arm64','linux-x64','linux-arm64')
+      New-Item -ItemType Directory -Force -Path '$(ridRoot)' | Out-Null
+      foreach ($rid in $rids) {
+        $dst = Join-Path '$(ridRoot)' $rid
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null   # placeholder (may stay empty)
+        $src = Join-Path '$(downloadsDir)' $rid
+        if (-not (Test-Path $src)) { Write-Host "RID $rid not enabled — empty placeholder"; continue }
+        $archive = Get-ChildItem -Path $src -Include *.zip,*.tar.gz -File -Recurse | Select-Object -First 1
+        if (-not $archive) { Write-Host "No archive for $rid"; continue }
+        Write-Host "Extracting $($archive.FullName) → $dst"
+        if ($archive.Name -like '*.zip') {
+          Expand-Archive -Path $archive.FullName -DestinationPath $dst -Force
+        } else {
+          tar -xf $archive.FullName -C $dst
+        }
+        # CPACK_INCLUDE_TOPLEVEL_DIRECTORY nests everything under a <stem> dir;
+        # the custom nuspec generator expects <platform_dir>/lib and /include, so
+        # flatten the single top-level dir up into the platform dir.
+        $top = Get-ChildItem -Path $dst -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'lib') } | Select-Object -First 1
+        if ($top) {
+          Get-ChildItem -Path $top.FullName -Force | Move-Item -Destination $dst -Force
+          Remove-Item -Path $top.FullName -Recurse -Force
+        }
+        Get-ChildItem -Path $dst -Recurse | Select-Object FullName
+      }
+    displayName: 'Extract core archives per-RID'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.11
+      addToPath: true
+
+  # --- Generate the .Foundry nuspec (fixed name, no ORT dependency)
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
+        --package_name $(genai_nuget_package_name) `
+        --package_version $(genai_version) `
+        --root_dir $(Build.Repository.LocalPath) `
+        --nuspec_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec `
+        --win_x64 '$(ridRoot)/win-x64' `
+        --win_arm64 '$(ridRoot)/win-arm64' `
+        --osx_arm64 '$(ridRoot)/osx-arm64' `
+        --linux_x64 '$(ridRoot)/linux-x64' `
+        --linux_arm64 '$(ridRoot)/linux-arm64' `
+        --commit_id $(Build.SourceVersion)
+      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"
+    displayName: 'Generate .Foundry nuspec'
+
+  - task: NuGetCommand@2
+    displayName: 'Pack .Foundry NuGet'
+    inputs:
+      command: 'pack'
+      packagesToPack: '$(nuspec_path)'
+      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+
+  # --- ESRP sign the .Foundry NuGet -----------------------------------------
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign .Foundry NuGet package'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish .Foundry NuGet ($(nugetArtifactName))'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: '$(nugetArtifactName)'

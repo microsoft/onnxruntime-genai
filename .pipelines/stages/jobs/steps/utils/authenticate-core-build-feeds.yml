@@ -1,0 +1,26 @@
+parameters:
+- name: cargo_config_file
+  type: string
+- name: login_to_docker
+  type: boolean
+  default: false
+
+steps:
+- ${{ if eq(parameters.login_to_docker, true) }}:
+  - task: Docker@2
+    displayName: 'Login to build cache ACR'
+    inputs:
+      containerRegistry: 'onnxruntimebuildcache'
+      command: 'login'
+      addPipelineData: false
+
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+- task: CargoAuthenticate@0
+  displayName: 'Authenticate Cargo to Lotus feed'
+  inputs:
+    configFile: '${{ parameters.cargo_config_file }}'

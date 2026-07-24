@@ -17,6 +17,6 @@ steps:
   parameters:
     condition: 'succeeded'
 
-- task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+- task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@4
   displayName: 'Clean Agent Directories'
   condition: always()

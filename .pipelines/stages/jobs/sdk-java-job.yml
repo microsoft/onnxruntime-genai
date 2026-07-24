@@ -1,0 +1,124 @@
+# =============================================================================
+# sdk-java-job.yml — Reusable Java SDK (desktop JVM jar) build job.
+#
+# Builds a per-platform desktop JVM jar incrementally against the prebuilt core.
+# Supports win/linux/macos on x64/arm64. Each job publishes a per-platform jar
+# (java-<os>-<arch>-<ep>-jar); the combine job later merges all platforms'
+# native subdirs into a single multi-platform jar.
+#
+# Consumes:  core-<os>-<arch>-<ep>-cmake-pkg
+# Publishes: java-<os>-<arch>-<ep>-jar
+# =============================================================================
+
+parameters:
+- name: os
+  type: string
+  values: [win, linux, osx]
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+
+jobs:
+- job: java_${{ parameters.os }}_${{ parameters.arch }}_${{ parameters.ep }}
+  displayName: 'java · ${{ parameters.os }}-${{ parameters.arch }} · ${{ parameters.ep }}'
+
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-linux-ARM64-CPU-2019'
+        hostArchitecture: Arm64
+      ${{ else }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+
+  # win-arm64 has no JDK on the native arm64 agent, so the arm64 JNI shim is
+  # cross-compiled on the win-x64 pool (which has a JDK) via -A ARM64.
+  ${{ if eq(parameters.os, 'win') }}:
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: 'Azure Pipelines'
+      image: 'macOS-latest'
+      os: macOS
+
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: artifactName
+    value: 'java-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}'
+  - name: coreArtifact
+    value: 'core-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}-cmake-pkg'
+  - name: corePkgDir
+    ${{ if eq(parameters.os, 'win') }}:
+      value: '$(Build.SourcesDirectory)\core_pkg'
+    ${{ else }}:
+      value: '$(Build.SourcesDirectory)/core_pkg'
+  - name: ortHome
+    ${{ if eq(parameters.os, 'win') }}:
+      value: '$(Build.SourcesDirectory)\ort_home'
+    ${{ else }}:
+      value: '$(Build.SourcesDirectory)/ort_home'
+  # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)
+  - name: jsdkBuildDir
+    value: 'build/jsdk'
+
+  steps:
+  - checkout: self
+    submodules: recursive
+    lfs: true
+    clean: true
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: windows
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: linux
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/utils/apply-genai-version.yml
+      parameters:
+        os: macos
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/sdk-java-linux-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/sdk-java-win-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/sdk-java-macos-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+        core_artifact: $(coreArtifact)
+
+  - template: steps/compliant-and-cleanup-step.yml

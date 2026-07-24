@@ -20,17 +20,40 @@ jobs:
     name: 'onnxruntime-Ubuntu2204-AMD-CPU'
     os: linux
 
-
   steps:
   - checkout: self
     clean: true
     submodules: none
 
   - template: steps/utils/use-android-ndk.yml
-  - template: steps/utils/set-genai-version.yml
+  - template: steps/utils/apply-genai-version.yml
+    parameters:
+      os: linux
   - template: steps/utils/set-cmake-build-type.yml
     parameters:
       build_config: ${{parameters.build_config}}
+
+  # --- Feed isolation: download ORT (Android AAR) from the Lotus feed ---------
+  - bash: |
+      set -e
+      pkg='Microsoft.ML.OnnxRuntime'
+      url="$(lotusOrtContentBase)/${pkg}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+      echo "Downloading $pkg ${{ parameters.ort_version }} (Android AAR) from Lotus"
+      rm -rf ort_nuget ort_home; mkdir -p ort_nuget ort_home
+      # No `set -x` — do not echo the token.
+      curl --fail --retry 5 --retry-all-errors -L \
+        -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+        -o ort_nuget.zip "$url"
+      unzip -o ort_nuget.zip -d ort_nuget >/dev/null
+      # The ORT nuget carries the Android AAR under runtimes/android/native; unzip
+      # it so ort_home has the layout cmake/ortlib.cmake expects (headers/ + jni/<abi>/).
+      unzip -o ort_nuget/runtimes/android/native/onnxruntime.aar -d ort_home >/dev/null
+      ls -la ort_home
+      echo "##vso[task.setvariable variable=ortHomeDir]$(Build.SourcesDirectory)/ort_home"
+    displayName: 'Download ORT (Android AAR) from Lotus feed'
+    workingDirectory: $(Build.SourcesDirectory)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   - task: CmdLine@2
     displayName: Build Android AAR Packages
@@ -44,9 +67,15 @@ jobs:
         PACKAGE_NAME=${{parameters.package_name}}
         ARTIFACTS_DIR=$(Build.ArtifactStagingDirectory)
 
+        # When feed isolation is on, ORT_HOME_DIR points at the unzipped Lotus ORT
+        # AAR so build.py uses it instead of the ORT-Nightly FetchContent download.
+        ORT_ARG=""
+        if [ -n "${ORT_HOME_DIR:-}" ]; then ORT_ARG="--ort_home ${ORT_HOME_DIR}"; fi
+
         python3 tools/ci_build/github/android/build_aar_package.py \
             --build_dir $BUILD_DIR \
             --config $BUILD_CONFIG \
+            ${ORT_ARG} \
             tools/ci_build/github/android/default_aar_build_settings.json
 
         # Copy the built artifacts to the artifacts staging directory
@@ -56,6 +85,15 @@ jobs:
         cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.aar          $ARTIFACTS_DIR
         cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.pom          $ARTIFACTS_DIR
       workingDirectory: $(Build.SourcesDirectory)
+    env:
+      # ORT native from Lotus (unzipped AAR) instead of the ORT-Nightly feed.
+      ORT_HOME_DIR: $(ortHomeDir)
+      # Route gradle dependency/plugin resolution at the Lotus Maven feed
+      # (src/java/build.gradle reads these as project properties).
+      ORG_GRADLE_PROJECT_lotusMavenUrl: $(lotusMavenFeed)
+      ORG_GRADLE_PROJECT_lotusMavenToken: $(System.AccessToken)
+      # Pin the ORT Maven dependency version to the ORT the native was built against.
+      ONNXRUNTIME_VERSION: ${{ parameters.ort_version }}
 
   - task: 1ES.PublishPipelineArtifact@1
     inputs:

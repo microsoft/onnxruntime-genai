@@ -1,0 +1,173 @@
+# =============================================================================
+# sdk-python-winml-win-step.yml — WinML Python SDK (wheel) build step.
+#
+# Builds the WinML Python wheel(s) (onnxruntime-genai-winml) *incrementally* and
+# multi-version against the prebuilt WinML core:
+#   1. Download the WinML core CMake-package artifact.
+#   2. Download the WinML SDK (Microsoft.Windows.AI.MachineLearning) from Lotus and
+#      re-shape it into the desktop ORT_HOME layout the standalone python cmake
+#      expects (include/ ← SDK include/winml/*, lib/ ← SDK runtimes/win-<arch>/native/*).
+#   3. For each requested Python version: build.py --sdk python (extension + wheel)
+#      against the prebuilt core; sign the .pyd; re-pack; assert winml + cp3XX tag.
+#   4. Publish all wheels.
+#
+# The core is NOT recompiled — only the pybind extension + wheel are built per
+# Python version, against the SAME prebuilt WinML core.
+#
+# Job-level variables expected from the parent job:
+#   corePkgDir    - dir the core cmake-pkg artifact is downloaded into
+#   ortHome       - dir the re-shaped WinML SDK (ORT_HOME) is written to
+#   pysdkBuildDir - build.py --build_dir base (e.g. build/pysdk)
+#   artifactName  - artifact name prefix (e.g. python-win-x64-winml)
+# =============================================================================
+
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [winml]
+- name: build_config
+  type: string
+  default: Release
+- name: winml_sdk_version
+  type: string
+- name: core_artifact
+  type: string
+- name: python_versions
+  type: object
+  default: [ '3.11', '3.12', '3.13', '3.14' ]
+
+steps:
+
+# --- Feed isolation: pip → Lotus + NuGetAuthenticate ------------------------
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+# --- Download prebuilt WinML core CMake package -----------------------------
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download WinML core CMake package (${{ parameters.core_artifact }})'
+  inputs:
+    artifactName: '${{ parameters.core_artifact }}'
+    targetPath: '$(corePkgDir)'
+
+# --- Download the WinML SDK from Lotus + re-shape into ORT_HOME --------------
+# The WinML SDK NuGet layout is: headers under include/winml/*, ORT runtime dlls
+# under runtimes/win-<arch>/native/*. The standalone python cmake expects the
+# desktop layout ORT_HOME/include + ORT_HOME/lib (and links onnxruntime.dll), so
+# copy the winml headers into include/ and the runtime dlls into lib/.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $pkg = 'Microsoft.Windows.AI.MachineLearning'
+    $url = "$(lotusOrtContentBase)/$pkg/versions/${{ parameters.winml_sdk_version }}/content?api-version=6.0-preview.1"
+    Write-Host "Downloading $pkg ${{ parameters.winml_sdk_version }} (WinML SDK) from Lotus"
+    $zip = "$(Agent.TempDirectory)\winmlsdk.zip"
+    # Authenticate with the pipeline build identity (do not echo the token).
+    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
+      -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+    $sdk = "$(Agent.TempDirectory)\winmlsdk"
+    Expand-Archive -Path $zip -DestinationPath $sdk -Force
+    New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
+    # Headers: the ORT C/C++ API lives under include/winml/ (+ the WinML extension
+    # headers directly under include/). Flatten both into ORT_HOME/include.
+    Copy-Item "$sdk\include\winml\*" "$(ortHome)\include\" -Recurse -Force
+    Copy-Item "$sdk\include\*.h" "$(ortHome)\include\" -Force -ErrorAction SilentlyContinue
+    # Runtime: onnxruntime.dll (+ DirectML.dll, WinML dll) for this arch.
+    $platform = 'win-${{ parameters.arch }}'
+    Copy-Item "$sdk\runtimes\$platform\native\*" "$(ortHome)\lib\" -Recurse -Force
+    # Import library: the WinML SDK keeps onnxruntime.lib under lib/native/<arch>/
+    # (not next to the runtime dlls). The python extension links the onnxruntime C
+    # API on Windows, so MSVC needs this .lib in ORT_HOME/lib — mirror what the
+    # in-tree WinML build does (cmake/ortlib.cmake copies lib/native/<arch>/onnxruntime.lib).
+    $implib = "$sdk\lib\native\${{ parameters.arch }}\onnxruntime.lib"
+    if (-not (Test-Path $implib)) { Write-Error "WinML SDK import lib not found: $implib"; exit 1 }
+    Copy-Item $implib "$(ortHome)\lib\" -Force
+    Write-Host 'ORT_HOME layout:'; Get-ChildItem '$(ortHome)' -Recurse | Select-Object -ExpandProperty FullName
+  displayName: 'Download WinML SDK ${{ parameters.winml_sdk_version }} + shape ORT_HOME'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Build a WinML wheel per Python version, incrementally ------------------
+- ${{ each pyVer in parameters.python_versions }}:
+  - task: UsePythonVersion@0
+    displayName: 'Use Python ${{ pyVer }} (${{ parameters.arch }})'
+    inputs:
+      versionSpec: '${{ pyVer }}'
+      addToPath: true
+      architecture: '${{ parameters.arch }}'
+
+  - script: python -m pip install pybind11 wheel requests
+    displayName: 'Install build-time Python deps (${{ pyVer }})'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $buildDir = '$(pysdkBuildDir)-${{ pyVer }}'
+      $args = @(
+        'build.py',
+        '--sdk', 'python',
+        '--config', '${{ parameters.build_config }}',
+        '--parallel',
+        '--prebuilt_genai_home', '$(corePkgDir)',
+        '--ort_home', '$(ortHome)',
+        '--build_dir', $buildDir
+      )
+      if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
+      Write-Host "Running: python $($args -join ' ')"
+      & python @args
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: 'Build WinML Python ${{ pyVer }} wheel (incremental)'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      # Pin the wheel's runtime onnxruntime dependency to the WinML SDK version.
+      ONNXRUNTIME_VERSION: '${{ parameters.winml_sdk_version }}'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim (winml python ${{ pyVer }} extension)'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\**\*.pyd'
+    continueOnError: true
+
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}'
+      DisplayName: 'ESRP - sign winml python ${{ pyVer }} extension'
+      Pattern: '*.pyd'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $cmakeDir = "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\python\${{ parameters.build_config }}"
+      cmake --build $cmakeDir --config ${{ parameters.build_config }} --target PyPackageBuild
+      if ($LASTEXITCODE -ne 0) { Write-Error "wheel re-pack failed"; exit 1 }
+    displayName: 'Re-pack WinML Python ${{ pyVer }} wheel with signed extension'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}" -Filter *.whl |
+        Select-Object -First 1
+      if (-not $whl) { Write-Error "ASSERT FAIL: no wheel produced for ${{ pyVer }}"; exit 1 }
+      Write-Host "Wheel: $($whl.FullName)"
+      if ($whl.Name -notmatch 'winml') {
+        Write-Error "ASSERT FAIL: wheel name missing 'winml': $($whl.Name)"; exit 1
+      }
+      $cpTag = 'cp' + '${{ pyVer }}'.Replace('.', '')
+      if ($whl.Name -notmatch $cpTag) {
+        Write-Error "ASSERT FAIL: wheel for ${{ pyVer }} not tagged $cpTag : $($whl.Name)"; exit 1
+      }
+      Write-Host "ASSERT OK: WinML wheel produced ($($whl.Name))"
+      $stage = "$(Build.ArtifactStagingDirectory)\wheel"
+      New-Item -ItemType Directory -Force -Path $stage | Out-Null
+      Copy-Item $whl.FullName $stage -Force
+    displayName: 'Assert: WinML Python ${{ pyVer }} wheel produced'
+
+# --- Publish all WinML wheels ------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish WinML Python wheels ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)'
+    targetPath: '$(Build.ArtifactStagingDirectory)\wheel'

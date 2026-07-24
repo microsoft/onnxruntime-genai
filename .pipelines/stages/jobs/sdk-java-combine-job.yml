@@ -1,0 +1,121 @@
+# =============================================================================
+# sdk-java-combine-job.yml — Combine per-platform Java jars into one.
+#
+# Downloads every per-platform jar (java-<os>-<arch>-cpu-jar) and merges them into
+# a SINGLE multi-platform jar. The Java classes are platform-independent, so one
+# jar is used as the base (its classes + manifest) and only the per-platform
+# native subdirs (ai/onnxruntime/genai/native/<os-arch>/) of the others are
+# merged in. A jar is a zip, so this is a plain unzip + rezip (no gradle / JDK
+# rebuild needed).
+#
+# Publishes: onnxruntime-genai-java  (the combined desktop jar)
+# =============================================================================
+
+parameters:
+- name: build_config
+  type: string
+  default: Release
+- name: combine_depends_on
+  type: object
+  default: []
+
+jobs:
+- job: java_combine
+  displayName: 'java · combine (multi-platform jar)'
+  dependsOn: ${{ parameters.combine_depends_on }}
+  pool:
+    name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    os: linux
+  timeoutInMinutes: 60
+  workspace:
+    clean: all
+
+  variables:
+  - name: downloadsDir
+    value: '$(Build.BinariesDirectory)/jar-downloads'
+  - name: mergeDir
+    value: '$(Build.BinariesDirectory)/merge'
+  - name: outDir
+    value: '$(Build.ArtifactStagingDirectory)/java'
+
+  steps:
+  # The base jar (Linux x64) supplies the platform-independent classes + manifest.
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download jar (linux-x64)'
+    inputs:
+      artifactName: 'java-linux-x64-cpu-jar'
+      targetPath: '$(downloadsDir)/linux-x64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download jar (linux-arm64)'
+    inputs:
+      artifactName: 'java-linux-arm64-cpu-jar'
+      targetPath: '$(downloadsDir)/linux-arm64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download jar (win-x64)'
+    inputs:
+      artifactName: 'java-win-x64-cpu-jar'
+      targetPath: '$(downloadsDir)/win-x64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download jar (win-arm64)'
+    inputs:
+      artifactName: 'java-win-arm64-cpu-jar'
+      targetPath: '$(downloadsDir)/win-arm64'
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download jar (osx-arm64)'
+    inputs:
+      artifactName: 'java-osx-arm64-cpu-jar'
+      targetPath: '$(downloadsDir)/osx-arm64'
+
+  - bash: |
+      set -e
+      base_rid='linux-x64'
+      # Locate one jar per RID (exclude sources/javadoc jars).
+      find_jar() { find "$(downloadsDir)/$1" -name 'onnxruntime-genai*.jar' \
+        ! -name '*sources*' ! -name '*javadoc*' | head -n1; }
+
+      base_jar=$(find_jar "$base_rid")
+      [ -n "$base_jar" ] || { echo "ERROR: base jar for $base_rid not found"; exit 1; }
+      base_name=$(basename "$base_jar")
+      echo "Base jar: $base_jar ($base_name)"
+
+      rm -rf "$(mergeDir)"; mkdir -p "$(mergeDir)"
+      # Explode the base jar (classes + META-INF + its own native subdir).
+      unzip -o "$base_jar" -d "$(mergeDir)" >/dev/null
+
+      # Merge in ONLY the native subtree from every other RID's jar.
+      for rid in linux-arm64 win-x64 win-arm64 osx-arm64; do
+        j=$(find_jar "$rid")
+        [ -n "$j" ] || { echo "ERROR: jar for $rid not found"; exit 1; }
+        echo "Merging natives from $rid ($j)"
+        unzip -o "$j" 'ai/onnxruntime/genai/native/*' -d "$(mergeDir)" >/dev/null
+      done
+
+      # Repackage the merged tree into a single jar (a jar is a zip).
+      mkdir -p "$(outDir)"
+      ( cd "$(mergeDir)" && zip -r -X "$(outDir)/$base_name" . >/dev/null )
+      echo "Combined jar: $(outDir)/$base_name"
+    displayName: 'Merge per-platform jars into one'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  # --- Assert the combined jar carries every platform's native libraries ------
+  - bash: |
+      set -e
+      jar=$(find "$(outDir)" -name 'onnxruntime-genai*.jar' | head -n1)
+      [ -n "$jar" ] || { echo "ASSERT FAIL: no combined jar produced"; exit 1; }
+      listing=$(unzip -l "$jar")
+      # NOTE: win-aarch64 is the JNI naming for the win-arm64 RID.
+      for tok in 'native/linux-x64/' 'native/linux-aarch64/' 'native/win-x64/' \
+                 'native/win-aarch64/' 'native/osx-aarch64/'; do
+        echo "$listing" | grep -q "$tok" || { echo "ASSERT FAIL: combined jar missing $tok"; exit 1; }
+      done
+      # Both the JNI shim and the core native lib must be present (any platform).
+      echo "$listing" | grep -Eq 'onnxruntime-genai-jni' || { echo "ASSERT FAIL: no JNI lib in jar"; exit 1; }
+      echo "ASSERT OK: combined jar carries all platform natives"
+    displayName: 'Assert: combined jar contains all platforms'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish combined Java jar (onnxruntime-genai-java)'
+    inputs:
+      artifactName: 'onnxruntime-genai-java'
+      targetPath: '$(outDir)'

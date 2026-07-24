@@ -8,6 +8,7 @@ set_target_properties(
 )
 install(TARGETS
   onnxruntime-genai
+  EXPORT onnxruntime-genai-targets
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib
   ARCHIVE DESTINATION lib
@@ -17,11 +18,72 @@ install(TARGETS
 if(USE_CUDA OR USE_TRT_RTX)
   install(TARGETS
     onnxruntime-genai-cuda
+    EXPORT onnxruntime-genai-targets
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION lib
     ARCHIVE DESTINATION lib
   )
 endif()
+
+# Tell consumers of the installed package where the public headers live, and expose the
+# execution-provider macros the Python binding relies on (USE_CUDA/USE_DML), so an
+# incremental standalone SDK build compiles identically to an in-tree build.
+target_include_directories(onnxruntime-genai INTERFACE $<INSTALL_INTERFACE:include>)
+
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  set(_genai_export_use_cuda 1)
+else()
+  set(_genai_export_use_cuda 0)
+endif()
+if(USE_TRT_RTX AND CMAKE_CUDA_COMPILER)
+  set(_genai_export_use_trt_rtx 1)
+else()
+  set(_genai_export_use_trt_rtx 0)
+endif()
+if(USE_DML)
+  set(_genai_export_use_dml 1)
+else()
+  set(_genai_export_use_dml 0)
+endif()
+if(USE_WINML)
+  set(_genai_export_use_winml 1)
+else()
+  set(_genai_export_use_winml 0)
+endif()
+if(USE_GUIDANCE)
+  set(_genai_export_use_guidance 1)
+else()
+  set(_genai_export_use_guidance 0)
+endif()
+
+target_compile_definitions(onnxruntime-genai INTERFACE
+  $<INSTALL_INTERFACE:USE_CUDA=${_genai_export_use_cuda}>
+  $<INSTALL_INTERFACE:USE_DML=${_genai_export_use_dml}>
+)
+
+# Generate and install the find_package(onnxruntime-genai) config + version files.
+include(CMakePackageConfigHelpers)
+set(_genai_cmake_install_dir "lib/cmake/onnxruntime-genai")
+configure_package_config_file(
+  "${REPO_ROOT}/cmake/onnxruntime-genaiConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfig.cmake"
+  INSTALL_DESTINATION "${_genai_cmake_install_dir}"
+)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfigVersion.cmake"
+  VERSION "${VERSION_STR}"
+  COMPATIBILITY SameMajorVersion
+)
+install(EXPORT onnxruntime-genai-targets
+  FILE onnxruntime-genai-targets.cmake
+  NAMESPACE onnxruntime-genai::
+  DESTINATION "${_genai_cmake_install_dir}"
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/onnxruntime-genaiConfigVersion.cmake"
+  DESTINATION "${_genai_cmake_install_dir}"
+)
 
 if (WIN32)
   install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo Debug)

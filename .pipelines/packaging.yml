@@ -1,0 +1,156 @@
+# =============================================================================
+# packaging.yml — Unified ONNX Runtime GenAI packaging pipeline.
+#
+# Single entry point that builds the core once per (EP, os, arch) and layers the
+# SDKs (Python, C#, Java) incrementally against the prebuilt core, plus the
+# bespoke Apple (iOS xcframework) and Android (AAR) artifacts and the .Foundry
+# NuGet. Feed-isolated to the internal Lotus feed; every published binary/package
+# is ESRP-signed where the platform supports it.
+#
+# The matrix is fixed per EP (goal 8); the pipeline inputs only select the EP(s),
+# the build-time ORT versions, and the CUDA toolkit version:
+#   CPU  : win-x64, win-arm64, macos-arm64, linux-x64, linux-arm64, android, ios
+#   CUDA : win-x64, win-arm64, linux-x64
+# =============================================================================
+
+parameters:
+# ---- Execution provider selection -----------------------------------------
+- name: enable_cpu
+  displayName: 'Build CPU packages'
+  type: boolean
+  default: true
+- name: enable_cuda
+  displayName: 'Build CUDA packages'
+  type: boolean
+  default: true
+- name: enable_winml
+  displayName: 'Build WinML packages'
+  type: boolean
+  default: true
+
+# ---- ONNX Runtime versions -------------------------------------------------
+# Build-time ORT (fetched from Lotus into --ort_home) is decoupled from the ORT
+# version the published packages depend on at runtime. The same runtime version
+# is shared by both the Python wheel and the C# NuGet.
+- name: ort_build_version
+  displayName: 'ONNX Runtime version (build-time)'
+  type: string
+  default: '1.26.0'
+- name: ort_runtime_version
+  displayName: 'ONNX Runtime version (runtime dependency)'
+  type: string
+  default: '1.27.0'
+
+# ---- WinML SDK version (Microsoft.Windows.AI.MachineLearning) --------------
+- name: winml_sdk_version
+  displayName: 'WinML SDK version'
+  type: string
+  default: '2.1.1'
+
+# ---- CUDA toolkit version --------------------------------------------------
+# Windows ARM64 core builds always use CUDA 13.1 because CUDA 12.8 is unsupported.
+- name: cuda_version
+  displayName: 'CUDA toolkit version'
+  type: string
+  default: '13.1'
+  values:
+    - '13.1'
+    - '12.8'
+
+# ---- Package version type --------------------------------------------------
+- name: version_type
+  displayName: 'Package version type'
+  type: string
+  default: 'dev'
+  values:
+    - 'dev'
+    - 'stable'
+
+resources:
+  repositories:
+    - repository: 1esPipelines
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+trigger: none
+
+variables:
+- template: lotus-feed-variables.yml
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
+  parameters:
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+    sdl:
+      policheck:
+        enabled: true
+        break: true
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    stages:
+    # ---- Version (compute the shared package version once) -----------------
+    - template: stages/version-stage.yml
+      parameters:
+        version_type: ${{ parameters.version_type }}
+
+    # ---- Core (native) -----------------------------------------------------
+    - template: stages/core-packaging-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+        winml_sdk_version: ${{ parameters.winml_sdk_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+        enable_cuda: ${{ parameters.enable_cuda }}
+        enable_winml: ${{ parameters.enable_winml }}
+
+    # ---- iOS xcframework (bespoke Apple build; CPU) ------------------------
+    - template: stages/ios-xcframework-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+
+    # ---- macOS/iOS CocoaPods (bespoke Apple build; CPU) -------------------
+    - template: stages/cocoapods-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+
+    # ---- Android AAR (bespoke Android build; CPU) -------------------------
+    - template: stages/android-aar-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+
+    # ---- SDK · Python (CPU + CUDA + WinML wheels) -------------------------
+    - template: stages/sdk-python-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        ort_dependency_version: ${{ parameters.ort_runtime_version }}
+        winml_sdk_version: ${{ parameters.winml_sdk_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+        enable_cuda: ${{ parameters.enable_cuda }}
+        enable_winml: ${{ parameters.enable_winml }}
+
+    # ---- SDK · C# (CPU + CUDA + WinML + .Foundry NuGet) -------------------
+    - template: stages/sdk-csharp-stage.yml
+      parameters:
+        ort_dependency_version: ${{ parameters.ort_runtime_version }}
+        winml_sdk_version: ${{ parameters.winml_sdk_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+        enable_cuda: ${{ parameters.enable_cuda }}
+        enable_winml: ${{ parameters.enable_winml }}
+
+    # ---- SDK · Java (desktop jar; CPU) ------------------------------------
+    - template: stages/sdk-java-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_build_version }}
+        enable_cpu: ${{ parameters.enable_cpu }}
+
+    # ---- SDK · WinML (Python + NuGet) and .Foundry are now produced inside
+    #      the consolidated SDK · Python and SDK · C# stages above.

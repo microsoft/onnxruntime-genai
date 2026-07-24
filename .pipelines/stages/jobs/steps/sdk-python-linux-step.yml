@@ -1,0 +1,190 @@
+# =============================================================================
+# sdk-python-linux-step.yml — Linux Python SDK (wheel) build step.
+#
+# Builds a manylinux wheel *incrementally* against a prebuilt core inside the
+# manylinux docker image:
+#   1. Download the core CMake-package artifact for this cell.
+#   2. Download ORT from Lotus (the standalone python cmake requires ORT_HOME).
+#   3. build.py --sdk python --prebuilt_genai_home <core> --ort_home <ort>
+#      --cmake_extra_defines MANYLINUX=ON  (auditwheel repair → manylinux tag).
+#   4. Smoke-assert the wheel imports (CPU) or is named correctly (CUDA).
+#   5. Publish the wheel artifact.
+#
+# The core is NOT recompiled — only the pybind extension + wheel are built.
+# =============================================================================
+
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+- name: core_artifact
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: python_versions
+  type: object
+  default: [ '3.11', '3.12', '3.13', '3.14' ]
+- name: python_dependency_version
+  type: string
+  default: '1.27.0'
+
+steps:
+
+- task: Docker@2
+  displayName: 'Login to build cache ACR'
+  inputs:
+    containerRegistry: 'onnxruntimebuildcache'
+    command: 'login'
+    addPipelineData: false
+
+# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+# --- Download prebuilt core CMake package -----------------------------------
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download core CMake package (${{ parameters.core_artifact }})'
+  inputs:
+    artifactName: '${{ parameters.core_artifact }}'
+    targetPath: '$(Build.SourcesDirectory)/core_pkg'
+
+# --- Pull manylinux Docker image --------------------------------------------
+- bash: |
+    set -e -x
+    python3 -m pip install requests
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      cudaDockerVer='${{ parameters.cuda_version }}'
+      if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
+        cudaDockerVer='13'
+      fi
+      dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_${cudaDockerVer}"
+    else
+      if [ '${{ parameters.arch }}' = 'arm64' ]; then
+        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
+      else
+        dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
+      fi
+    fi
+    python3 tools/ci_build/get_docker_image.py \
+      --dockerfile "$dockerfile" \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$(id -u)" \
+      --container-registry onnxruntimebuildcache.azurecr.io \
+      --repository "ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
+  displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Download ORT from Lotus feed (authenticated) ---------------------------
+- bash: |
+    set -e
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      pkg_name='Microsoft.ML.OnnxRuntime.Gpu.Linux'
+    else
+      pkg_name='Microsoft.ML.OnnxRuntime'
+    fi
+    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
+    mkdir -p ort_home/include ort_home/lib
+    # No `set -x` in this step so the Bearer token is never echoed.
+    curl --fail --retry 5 --retry-all-errors -L \
+      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+      -o ort.zip "$url"
+    unzip -o ort.zip -d ort_extracted >/dev/null
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      hdr_src='ort_extracted/buildTransitive/native/include'
+    else
+      hdr_src='ort_extracted/build/native/include'
+    fi
+    if [ '${{ parameters.arch }}' = 'arm64' ]; then
+      lib_platform='linux-arm64'
+    else
+      lib_platform='linux-x64'
+    fi
+    cp -r "${hdr_src}/"* ort_home/include/
+    cp -r "ort_extracted/runtimes/${lib_platform}/native/"* ort_home/lib/
+    echo "ORT layout:"; ls -la ort_home/include ort_home/lib
+  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Build the manylinux wheels incrementally (inside docker) ---------------
+# The core is built once (Python-agnostic). Here we loop over the requested
+# Python versions and (re)build ONLY the pybind extension + wheel for each, all
+# against the SAME prebuilt core — the incremental win. The manylinux image ships
+# every CPython under /opt/python/cp3XX-cp3XX/.
+- bash: |
+    set -e -x
+    docker_image="ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
+    docker run --rm \
+      --volume "$(Build.SourcesDirectory):/ort_genai_src" \
+      -w /ort_genai_src \
+      -e PIP_INDEX_URL \
+      -e ONNXRUNTIME_VERSION='${{ parameters.python_dependency_version }}' \
+      -e PY_VERSIONS='${{ join(' ', parameters.python_versions) }}' \
+      "$docker_image" bash -c '
+        set -e -x
+        mkdir -p /ort_genai_src/wheel_stage
+        for v in $PY_VERSIONS; do
+          cpv="cp${v//./}"                       # 3.11 -> cp311
+          PY="/opt/python/${cpv}-${cpv}/bin/python${v}"
+          if [ ! -x "$PY" ]; then echo "ASSERT FAIL: interpreter $PY not found in manylinux image"; exit 1; fi
+          echo "===== Building wheel for Python ${v} ($PY) ====="
+          $PY -m pip install pybind11 wheel requests
+
+          # Per-version build dir so the extensions/wheels do not clobber each other.
+          # The core is NOT recompiled — only the pybind extension + wheel are built.
+          $PY build.py --sdk python \
+            --config ${{ parameters.build_config }} \
+            --parallel \
+            --prebuilt_genai_home /ort_genai_src/core_pkg \
+            --ort_home /ort_genai_src/ort_home \
+            --cmake_extra_defines MANYLINUX=ON \
+            --build_dir "build/pysdk-${v}"
+
+          WHL=$(find "/ort_genai_src/build/pysdk-${v}" -name "*manylinux*.whl" | head -n1)
+          test -n "$WHL" || { echo "ASSERT FAIL: no manylinux wheel produced for ${v}"; exit 1; }
+          echo "Wheel: $WHL"
+          # The wheel must be tagged for this Python version (cp3XX).
+          echo "$WHL" | grep -q "${cpv}" || { echo "ASSERT FAIL: wheel for ${v} not tagged ${cpv}: $WHL"; exit 1; }
+
+          if [ "${{ parameters.ep }}" = "cuda" ]; then
+            echo "$WHL" | grep -q "cuda" || { echo "ASSERT FAIL: CUDA wheel name missing cuda"; exit 1; }
+            echo "ASSERT OK: CUDA wheel produced for ${v}"
+          else
+            # The wheel declares onnxruntime>=<python_dependency_version>; install
+            # that runtime to import-test it (the build linked against ort_version,
+            # but ORT keeps ABI compat within a major version).
+            $PY -m pip install onnxruntime==${{ parameters.python_dependency_version }}
+            $PY -m pip install --force-reinstall --no-deps "$WHL"
+            EXPECTED=$(tr -d "[:space:]" < /ort_genai_src/VERSION_INFO)
+            ACTUAL=$($PY -c "import onnxruntime_genai as og; print(og.__version__)" | tr -d "[:space:]")
+            echo "expected=$EXPECTED actual=$ACTUAL"
+            test "$EXPECTED" = "$ACTUAL" || { echo "ASSERT FAIL: wheel version mismatch for ${v}"; exit 1; }
+            echo "ASSERT OK: wheel for ${v} imports and reports $ACTUAL"
+          fi
+          cp "$WHL" /ort_genai_src/wheel_stage/
+        done
+        echo "All wheels:"; ls -la /ort_genai_src/wheel_stage/
+      '
+  displayName: 'Build Python wheels (incremental, manylinux)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Publish wheel -----------------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Python wheel ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)'
+    targetPath: '$(Build.SourcesDirectory)/wheel_stage'

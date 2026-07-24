@@ -95,6 +95,31 @@ def _parse_args():
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
+    # Incremental packaging: build the core once, install it, then build SDK layers against it.
+    parser.add_argument(
+        "--install_dir",
+        type=Path,
+        default=None,
+        help="If set, install the built core (libraries, public headers, and the exported "
+        "find_package(onnxruntime-genai) CMake package) to this prefix after building. This is "
+        "the hand-off point for incremental SDK builds.",
+    )
+    parser.add_argument(
+        "--prebuilt_genai_home",
+        type=Path,
+        default=None,
+        help="Path to a prebuilt-and-installed onnxruntime-genai core (produced by a prior "
+        "--install_dir build). When combined with --sdk, only the requested SDK layer is built, "
+        "linking against this prebuilt core instead of rebuilding it.",
+    )
+    parser.add_argument(
+        "--sdk",
+        choices=["python", "java", "csharp"],
+        default=None,
+        help="Build a single SDK layer incrementally against a prebuilt core "
+        "(requires --prebuilt_genai_home and --ort_home). Skips building the core.",
+    )
+
     # CI's sometimes explicitly set the path to the CMake and CTest executables.
     parser.add_argument("--cmake_path", default="cmake", type=Path, help="Path to the CMake program.")
     parser.add_argument("--ctest_path", default="ctest", type=Path, help="Path to the CTest program.")
@@ -375,6 +400,16 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 
 def _validate_args(args: argparse.Namespace):
+    # A standalone SDK build reuses a prebuilt core; it does not run the core update/build/test phases.
+    if args.sdk:
+        if not args.prebuilt_genai_home:
+            raise ValueError("--sdk requires --prebuilt_genai_home pointing at a prebuilt-and-installed core.")
+        if not args.ort_home:
+            raise ValueError("--sdk requires --ort_home pointing at the matching ONNX Runtime.")
+        if not args.prebuilt_genai_home.exists() or not args.prebuilt_genai_home.is_dir():
+            raise ValueError(f"{args.prebuilt_genai_home} does not exist or is not a directory.")
+        args.prebuilt_genai_home = args.prebuilt_genai_home.resolve(strict=True)
+
     # default to all 3 stages
     if not any((args.update, args.clean, args.build, args.test)):
         args.update = True
@@ -398,6 +433,10 @@ def _validate_args(args: argparse.Namespace):
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
 
         args.ort_home = args.ort_home.resolve(strict=True)
+
+    if args.install_dir:
+        # The install prefix may not exist yet; resolve without requiring existence.
+        args.install_dir = args.install_dir.resolve()
 
 
 def _create_env(args: argparse.Namespace):
@@ -515,6 +554,30 @@ def _get_windows_build_args(args: argparse.Namespace):
             '-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf /Qspectre " -allow-unsupported-compiler',
         ]
     return win_args
+
+
+def _get_vs_platform_args(args: argparse.Namespace) -> list[str]:
+    """
+    Return the Visual Studio generator platform (`-A`) arguments for the requested target
+    architecture.
+
+    Shared by the core, incremental SDK, and examples configure paths so that a
+    cross-compiled SDK targets the same architecture as the prebuilt core it links against.
+    Without this, a standalone SDK build (build.py --sdk ...) would silently default to the
+    host architecture and mismatch the prebuilt core.
+    """
+    platform_args: list[str] = []
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            platform_args += ["-A", "ARM64"]
+        elif args.arm64ec:
+            platform_args += ["-A", "ARM64EC"]
+        elif args.use_winml:
+            # WinML resolves its ONNX Runtime artifacts based on the generator
+            # platform (see cmake/ortlib.cmake). For a default x64 build the
+            # platform is otherwise left unset, so set it explicitly.
+            platform_args += ["-A", "x64"]
+    return platform_args
 
 
 def update(args: argparse.Namespace, env: dict[str, str]):
@@ -667,16 +730,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DMAC_CATALYST=1",
         ]
 
-    if args.cmake_generator.startswith("Visual Studio"):
-        if args.arm64:
-            command += ["-A", "ARM64"]
-        elif args.arm64ec:
-            command += ["-A", "ARM64EC"]
-        elif args.use_winml:
-            # WinML resolves its ONNX Runtime artifacts based on the generator
-            # platform (see cmake/ortlib.cmake). For a default x64 build the
-            # platform is otherwise left unset, so set it explicitly.
-            command += ["-A", "x64"]
+    command += _get_vs_platform_args(args)
 
     if args.arm64 or args.arm64ec:
         if args.test:
@@ -729,6 +783,108 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+
+
+def install_core(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Install the built core (libraries, public headers, and the exported
+    find_package(onnxruntime-genai) CMake package) to args.install_dir.
+
+    This is the hand-off point that lets SDK layers be built incrementally against a
+    prebuilt core (see build_sdk).
+    """
+    log.info(f"Installing core to {args.install_dir}")
+    cmd = [
+        str(args.cmake_path),
+        "--install",
+        str(args.build_dir),
+        "--config",
+        args.config,
+        "--prefix",
+        str(args.install_dir),
+    ]
+    util.run(cmd, env=env)
+
+
+def _sdk_build_dir(args: argparse.Namespace) -> Path:
+    # args.build_dir already ends with the config (see _validate_build_dir). Place SDK
+    # artifacts in a per-SDK sibling directory (…/<sdk>/<config>) so a standalone SDK
+    # configure never collides with (or is rejected against) the core CMake build tree
+    # that shares the same default build_dir.
+    config = args.build_dir.name
+    return args.build_dir.parent / args.sdk / config
+
+
+def build_sdk(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Build a single SDK layer (python, java, or csharp) incrementally against a prebuilt core
+    referenced by --prebuilt_genai_home. The core itself is not rebuilt.
+    """
+    if args.sdk == "csharp":
+        _build_sdk_csharp(args, env)
+    else:
+        _build_sdk_cmake(args, env)
+
+
+def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
+    """Configure and build a CMake-based SDK project (python or java) standalone."""
+    sdk_src = REPO_ROOT / "src" / args.sdk
+    build_dir = _sdk_build_dir(args)
+    genai_cmake_dir = args.prebuilt_genai_home / "lib" / "cmake" / "onnxruntime-genai"
+    if not genai_cmake_dir.is_dir():
+        raise RuntimeError(
+            f"Could not find the exported onnxruntime-genai CMake package at {genai_cmake_dir}. "
+            "Build the core with --install_dir first."
+        )
+
+    command = [str(args.cmake_path), "-G", args.cmake_generator]
+    command += [
+        "-S",
+        str(sdk_src),
+        "-B",
+        str(build_dir),
+        f"-DCMAKE_BUILD_TYPE={args.config}",
+        f"-Donnxruntime-genai_DIR={genai_cmake_dir}",
+        f"-DORT_HOME={args.ort_home}",
+    ]
+    # Target the same architecture as the prebuilt core (e.g. Windows ARM64 cross-compile),
+    # otherwise the SDK would configure for the host architecture and mismatch the core.
+    command += _get_vs_platform_args(args)
+    if args.sdk == "python":
+        command += [f"-DBUILD_WHEEL={'OFF' if args.skip_wheel else 'ON'}"]
+        # Pin CMake to the interpreter running build.py so it selects the correct
+        # (and possibly non-default-path) Python, e.g. the manylinux CPython.
+        command += [f"-DPython_EXECUTABLE={sys.executable}"]
+    if args.sdk == "java":
+        command += [f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}"]
+    if args.cmake_extra_defines:
+        command += args.cmake_extra_defines
+
+    util.run(command, env=env)
+
+    build_command = [str(args.cmake_path), "--build", str(build_dir), "--config", args.config]
+    if args.parallel:
+        build_command.append("--parallel")
+    util.run(build_command, env=env)
+
+    if args.sdk == "python" and not args.skip_wheel:
+        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+
+
+def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):
+    """Build the C# SDK against a prebuilt core's native libraries."""
+    dotnet = str(_resolve_executable_path("dotnet"))
+    native_lib_dir = args.prebuilt_genai_home / "lib"
+    csharp_build_command = [
+        dotnet,
+        "build",
+        ".",
+        f"/p:Configuration={args.config}",
+        "/p:Platform=Any CPU",
+        f"/p:NativeBuildOutputDir={native_lib_dir}",
+        f"/p:OrtLibDir={args.ort_home / 'lib'}",
+    ]
+    util.run(csharp_build_command, env=env, cwd=REPO_ROOT / "src" / "csharp")
 
 
 def package(args: argparse.Namespace, env: dict[str, str]):
@@ -828,11 +984,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DOGA_LIB_DIR=" + str(oga_lib_dir),
     ]
 
-    if args.cmake_generator.startswith("Visual Studio"):
-        if args.arm64:
-            cmake_command += ["-A", "ARM64"]
-        elif args.arm64ec:
-            cmake_command += ["-A", "ARM64EC"]
+    cmake_command += _get_vs_platform_args(args)
 
     if args.cmake_extra_defines != []:
         cmake_command += args.cmake_extra_defines
@@ -850,6 +1002,11 @@ if __name__ == "__main__":
     _validate_args(arguments)
     environment = _create_env(arguments)
 
+    if arguments.sdk:
+        # Incremental SDK build against a prebuilt core: skip the core update/build/test phases.
+        build_sdk(arguments, environment)
+        sys.exit(0)
+
     if arguments.update:
         update(arguments, environment)
 
@@ -861,6 +1018,9 @@ if __name__ == "__main__":
 
     if arguments.package:
         package(arguments, environment)
+
+    if arguments.install_dir:
+        install_core(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)

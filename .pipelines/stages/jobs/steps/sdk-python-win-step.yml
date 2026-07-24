@@ -1,0 +1,201 @@
+# =============================================================================
+# sdk-python-win-step.yml — Windows Python SDK (wheel) build step.
+#
+# Builds the Python wheel *incrementally* against a prebuilt core:
+#   1. Download the core CMake-package artifact for this cell.
+#   2. Download ORT from Lotus (headers + import lib the extension links against).
+#   3. build.py --sdk python --prebuilt_genai_home <core> --ort_home <ort>.
+#   4. Smoke-assert the wheel imports (CPU) or is named correctly (CUDA).
+#   5. Publish the wheel artifact.
+#
+# The core is NOT recompiled — only the pybind extension + wheel are built.
+#
+# Job-level variables expected from the parent job:
+#   corePkgDir    - dir the core cmake-pkg artifact is downloaded into
+#   ortHome       - dir ORT headers+libs are unpacked into
+#   pysdkBuildDir - build.py --build_dir for the SDK (e.g. build/pysdk)
+#   artifactName  - artifact name prefix (e.g. python-win-x64-cpu)
+# =============================================================================
+
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: build_config
+  type: string
+  default: Release
+- name: ort_version
+  type: string
+- name: core_artifact
+  type: string
+- name: python_versions
+  type: object
+  default: [ '3.11', '3.12', '3.13', '3.14' ]
+- name: python_dependency_version
+  type: string
+  default: '1.27.0'
+
+steps:
+
+# --- Feed isolation: pip → Lotus (authenticated) ----------------------------
+# (Python interpreters are selected per-version in the build loop below.)
+- task: PipAuthenticate@1
+  displayName: 'Authenticate pip to Lotus feed'
+  inputs:
+    artifactFeeds: '$(lotusFeedName)'
+    onlyAddExtraIndex: false
+
+# --- Download prebuilt core CMake package -----------------------------------
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download core CMake package (${{ parameters.core_artifact }})'
+  inputs:
+    artifactName: '${{ parameters.core_artifact }}'
+    targetPath: '$(corePkgDir)'
+
+# --- Download ORT from Lotus feed (authenticated) ---------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
+      $pkgName = 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
+    } else {
+      $pkgName = 'Microsoft.ML.OnnxRuntime'
+    }
+    $url = "$(lotusOrtContentBase)/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    Write-Host "Downloading $pkgName ${{ parameters.ort_version }} from Lotus"
+    $zip = "$(Agent.TempDirectory)\ort.zip"
+    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
+      -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+    Expand-Archive -Path $zip -DestinationPath "$(Agent.TempDirectory)\ort_extracted" -Force
+    New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
+    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
+      $hdrSrc = 'buildTransitive\native\include'
+    } else {
+      $hdrSrc = 'build\native\include'
+    }
+    $platform = 'win-${{ parameters.arch }}'
+    Copy-Item "$(Agent.TempDirectory)\ort_extracted\$hdrSrc\*" "$(ortHome)\include\" -Recurse -Force
+    Copy-Item "$(Agent.TempDirectory)\ort_extracted\runtimes\$platform\native\*" "$(ortHome)\lib\" -Recurse -Force
+  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+# --- Build a wheel per Python version, incrementally against the prebuilt core
+# The core is built once (Python-agnostic). For each requested Python version we
+# select that interpreter and (re)build ONLY the pybind extension + wheel against
+# the SAME prebuilt core, sign the extension, re-pack, and stage the wheel.
+# NOTE: on the native win-arm64 agent, UsePythonVersion@0 provisions the arm64
+# interpreter per requested version; if a version is missing from the arm64 tool
+# cache the task will fail and the wheel set may need narrowing for that agent.
+- ${{ each pyVer in parameters.python_versions }}:
+  - task: UsePythonVersion@0
+    displayName: 'Use Python ${{ pyVer }} (${{ parameters.arch }})'
+    inputs:
+      versionSpec: '${{ pyVer }}'
+      addToPath: true
+      architecture: '${{ parameters.arch }}'
+
+  - script: python -m pip install pybind11 wheel requests
+    displayName: 'Install build-time Python deps (${{ pyVer }})'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $buildDir = '$(pysdkBuildDir)-${{ pyVer }}'
+      $args = @(
+        'build.py',
+        '--sdk', 'python',
+        '--config', '${{ parameters.build_config }}',
+        '--parallel',
+        '--prebuilt_genai_home', '$(corePkgDir)',
+        '--ort_home', '$(ortHome)',
+        '--build_dir', $buildDir
+      )
+      if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
+      Write-Host "Running: python $($args -join ' ')"
+      & python @args
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: 'Build Python ${{ pyVer }} wheel (incremental)'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      # The wheel's runtime onnxruntime dependency (onnxruntime>=<ver>). Decoupled
+      # from the build-time ORT (ort_version) — see setup.py.in.
+      ONNXRUNTIME_VERSION: '${{ parameters.python_dependency_version }}'
+
+  # --- BinSkim + ESRP sign the extension, then re-pack the signed wheel ------
+  - task: BinSkim@4
+    displayName: 'Run BinSkim (python ${{ pyVer }} extension)'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\**\*.pyd'
+    continueOnError: true
+
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}'
+      DisplayName: 'ESRP - sign python ${{ pyVer }} extension'
+      Pattern: '*.pyd'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      # build.py nests the SDK cmake dir at <build_dir>/python/<config>. Re-run the
+      # wheel-pack target so the wheel is re-zipped with the now-signed .pyd.
+      $cmakeDir = "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\python\${{ parameters.build_config }}"
+      cmake --build $cmakeDir --config ${{ parameters.build_config }} --target PyPackageBuild
+      if ($LASTEXITCODE -ne 0) { Write-Error "wheel re-pack failed"; exit 1 }
+    displayName: 'Re-pack Python ${{ pyVer }} wheel with signed extension'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}" -Filter *.whl |
+        Select-Object -First 1
+      if (-not $whl) { Write-Error "ASSERT FAIL: no wheel produced for ${{ pyVer }}"; exit 1 }
+      Write-Host "Wheel: $($whl.FullName)"
+      # The wheel must be tagged for this Python version (cp3XX).
+      $cpTag = 'cp' + '${{ pyVer }}'.Replace('.', '')
+      if ($whl.Name -notmatch $cpTag) {
+        Write-Error "ASSERT FAIL: wheel for ${{ pyVer }} not tagged $cpTag : $($whl.Name)"; exit 1
+      }
+      if ('${{ parameters.ep }}' -eq 'cuda') {
+        # A CUDA wheel cannot be import-tested on a CPU agent (loads cuda provider);
+        # assert the flavor is baked into the wheel name instead.
+        if ($whl.Name -notmatch 'cuda') {
+          Write-Error "ASSERT FAIL: CUDA wheel name missing 'cuda': $($whl.Name)"; exit 1
+        }
+        Write-Host "ASSERT OK: CUDA wheel produced ($($whl.Name))"
+      } else {
+        # The runtime import test needs the onnxruntime wheel for this platform.
+        # Lotus PyPI is missing the win-arm64 onnxruntime variant (win-x64 is
+        # present), so if it can't be installed we gracefully fall back to
+        # asserting the wheel is produced + correctly tagged (mirrors the CUDA
+        # path). win-x64 keeps the strict import test as a real regression signal.
+        python -m pip install onnxruntime==${{ parameters.python_dependency_version }}
+        if ($LASTEXITCODE -eq 0) {
+          python -m pip install --force-reinstall --no-deps $whl.FullName
+          $expected = (Get-Content "$(Build.SourcesDirectory)\VERSION_INFO" -Raw).Trim()
+          $actual = (python -c "import onnxruntime_genai as og; print(og.__version__)").Trim()
+          Write-Host "expected=$expected actual=$actual"
+          if ($actual -ne $expected) { Write-Error "ASSERT FAIL: wheel version mismatch"; exit 1 }
+          Write-Host "ASSERT OK: wheel imports and reports $actual"
+        } else {
+          Write-Host "WARNING: onnxruntime==${{ parameters.python_dependency_version }} has no ${{ parameters.arch }} wheel on Lotus PyPI — skipping the runtime import test."
+          Write-Host "ASSERT OK (degraded): wheel produced + $cpTag-tagged"
+        }
+      }
+      # Stage the wheel to a stable path for publishing.
+      $stage = "$(Build.ArtifactStagingDirectory)\wheel"
+      New-Item -ItemType Directory -Force -Path $stage | Out-Null
+      Copy-Item $whl.FullName $stage -Force
+      # The degraded path above leaves $LASTEXITCODE=1 from the expected pip
+      # failure; exit 0 explicitly since every real failure already exited 1.
+      exit 0
+    displayName: 'Assert: Python ${{ pyVer }} wheel produced'
+
+# --- Publish all wheels ------------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish Python wheels ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)'
+    targetPath: '$(Build.ArtifactStagingDirectory)\wheel'

@@ -1,0 +1,26 @@
+# =============================================================================
+# apply-genai-version.yml — Stamp VERSION_INFO with the shared package version.
+#
+# Overwrites VERSION_INFO on disk with $(genai_version) (computed once by the
+# 'version' stage) so every artifact built from source in this job — wheel, jar,
+# aar, xcframework, core archive — reports the exact same version. The enclosing
+# stage must dependsOn 'version' and declare the genai_version variable.
+# =============================================================================
+parameters:
+- name: os
+  type: string
+  values: [windows, linux, macos]
+
+steps:
+- ${{ if eq(parameters.os, 'windows') }}:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      Set-Content -Path "$(Build.SourcesDirectory)\VERSION_INFO" -Value '$(genai_version)' -NoNewline
+      Write-Host "VERSION_INFO := $(genai_version)"
+    displayName: 'Stamp VERSION_INFO ($(genai_version))'
+- ${{ if ne(parameters.os, 'windows') }}:
+  - bash: |
+      set -e
+      printf '%s' '$(genai_version)' > "$(Build.SourcesDirectory)/VERSION_INFO"
+      echo "VERSION_INFO := $(genai_version)"
+    displayName: 'Stamp VERSION_INFO ($(genai_version))'

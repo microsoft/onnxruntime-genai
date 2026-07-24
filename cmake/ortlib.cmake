@@ -62,9 +62,31 @@ if(ORT_HOME)
 
   # Make sure the path provided is absolute, as some tools don't react well to relative paths.
   get_filename_component(ORT_HOME ${ORT_HOME} ABSOLUTE)
-  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absloute]")
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absolute]")
 
-  if (ANDROID)
+  # The Apple packaging pipeline extracts Microsoft.ML.OnnxRuntime from Lotus
+  # and passes the NuGet package root directly. Support that layout so macOS
+  # uses its dylib while iOS/Catalyst uses the packaged XCFramework.
+  if (APPLE AND EXISTS "${ORT_HOME}/build/native/include/onnxruntime_c_api.h")
+    set(ORT_HEADER_DIR ${ORT_HOME}/build/native/include)
+    if (IOS OR MAC_CATALYST)
+      set(_ort_xcframework_dir ${ORT_HOME}/runtimes/ios/native/onnxruntime.xcframework)
+      if (NOT EXISTS "${_ort_xcframework_dir}")
+        set(_ort_xcframework_zip ${ORT_HOME}/runtimes/ios/native/onnxruntime.xcframework.zip)
+        if (NOT EXISTS "${_ort_xcframework_zip}")
+          message(FATAL_ERROR "Expected the ONNX Runtime XCFramework archive at ${_ort_xcframework_zip}. Actual: Not found.")
+        endif()
+        file(ARCHIVE_EXTRACT INPUT ${_ort_xcframework_zip} DESTINATION ${ORT_HOME}/runtimes/ios/native/)
+      endif()
+      set(ORT_LIB_DIR ${ORT_HOME}/runtimes/ios/native)
+    else()
+      set(ORT_BINARY_PLATFORM "x64")
+      if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(ORT_BINARY_PLATFORM "arm64")
+      endif()
+      set(ORT_LIB_DIR ${ORT_HOME}/runtimes/osx-${ORT_BINARY_PLATFORM}/native)
+    endif()
+  elseif (ANDROID)
     # Paths are based on the directory structure of the ORT Android AAR.
     set(ORT_HEADER_DIR ${ORT_HOME}/headers)
     set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})

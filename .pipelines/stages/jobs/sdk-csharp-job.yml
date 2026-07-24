@@ -1,0 +1,361 @@
+# =============================================================================
+# sdk-csharp-job.yml — C# NuGet combine job.
+#
+# One combine job per EP flavor. Downloads the core *archive* artifacts for every
+# enabled RID of this EP, lays out the native libraries per-RID, builds the
+# managed assembly, and packs BOTH the native and managed NuGet packages.
+#
+# This is a "combine" job — it does NOT recompile the core; it repackages the
+# already-built core archives + the pure-C# managed assembly.
+#
+# Consumes:  core-<os>-<arch>-<ep>-archive   (per enabled RID)
+# Publishes: csharp-nuget-<ep>              (native + managed *.nupkg)
+# =============================================================================
+
+parameters:
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: ort_dependency_version
+  type: string
+- name: build_config
+  type: string
+  default: Release
+# genai_version is provided by the enclosing stage (from the 'version' stage
+# output) and inherited here as $(genai_version); see sdk-csharp-stage.yml.
+# RID enable toggles (which core archives to combine for this EP).
+- name: enable_win_x64
+  type: boolean
+  default: false
+- name: enable_win_arm64
+  type: boolean
+  default: false
+- name: enable_linux_x64
+  type: boolean
+  default: false
+- name: enable_linux_arm64
+  type: boolean
+  default: false
+# CPU-only RIDs bundled into the CPU native package (osx-arm64 dylib, iOS
+# xcframework, Android AAR). Ignored for the CUDA package.
+- name: enable_osx_arm64
+  type: boolean
+  default: false
+- name: enable_ios
+  type: boolean
+  default: false
+- name: enable_android
+  type: boolean
+  default: false
+
+jobs:
+- job: csharp_${{ parameters.ep }}_nuget
+  displayName: 'csharp · nuget · ${{ parameters.ep }}'
+  pool:
+    name: 'onnxruntime-Win-CPU-2022'
+    os: windows
+  timeoutInMinutes: 120
+  workspace:
+    clean: all
+
+  variables:
+  - name: ep
+    value: ${{ parameters.ep }}
+  # Runtime onnxruntime dependency version emitted into the native nuspec.
+  - name: ort_dependency_version
+    value: ${{ parameters.ort_dependency_version }}
+  - name: buildConfig
+    value: ${{ parameters.build_config }}
+  # native_build_path passed to the nuspec generator (per-RID libs land under here)
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: nugetArtifactName
+    value: 'csharp-nuget-${{ parameters.ep }}'
+  - name: genai_nuget_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI'
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
+  - name: ort_nuget_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: 'Microsoft.ML.OnnxRuntime.Gpu'
+
+  steps:
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
+  # --- Download the core archive for each enabled RID -----------------------
+  - ${{ if eq(parameters.enable_win_x64, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download core archive (win-x64)'
+      inputs:
+        artifactName: 'core-win-x64-${{ parameters.ep }}-archive'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  - ${{ if eq(parameters.enable_win_arm64, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download core archive (win-arm64)'
+      inputs:
+        artifactName: 'core-win-arm64-${{ parameters.ep }}-archive'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  - ${{ if eq(parameters.enable_linux_x64, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download core archive (linux-x64)'
+      inputs:
+        artifactName: 'core-linux-x64-${{ parameters.ep }}-archive'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  - ${{ if eq(parameters.enable_linux_arm64, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download core archive (linux-arm64)'
+      inputs:
+        artifactName: 'core-linux-arm64-${{ parameters.ep }}-archive'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  # CPU-only mobile/mac RIDs (bundled into the CPU native package).
+  - ${{ if eq(parameters.enable_osx_arm64, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download core archive (osx-arm64)'
+      inputs:
+        artifactName: 'core-osx-arm64-cpu-archive'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  - ${{ if eq(parameters.enable_ios, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download iOS xcframework'
+      inputs:
+        artifactName: 'onnxruntime-genai-ios-xcframework'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+  - ${{ if eq(parameters.enable_android, true) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Android AAR'
+      inputs:
+        artifactName: 'drop-android'
+        targetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  # genai_version is inherited from the enclosing stage (computed once by the
+  # 'version' stage), so no per-job version computation is needed here.
+
+  # --- Feed isolation: NuGet restore → Lotus --------------------------------
+  # Write a dedicated Lotus nuget.config (cleared, Lotus-only) into src/csharp so
+  # `dotnet restore` uses it (auto-discovered by directory). It is generated at
+  # build time (not committed). NuGetAuthenticate wires the pipeline identity to it.
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $cfg = "$(Build.Repository.LocalPath)\src\csharp\nuget.config"
+      $lines = @(
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<configuration>',
+        '  <packageSources>',
+        '    <clear />',
+        '    <add key="Lotus" value="$(lotusNuGetFeed)" />',
+        '  </packageSources>',
+        '</configuration>'
+      )
+      Set-Content -Path $cfg -Value $lines -Encoding utf8
+      Write-Host "Wrote $cfg"
+    displayName: 'Configure NuGet feed isolation (Lotus)'
+
+  - task: NuGetAuthenticate@1
+    displayName: 'Authenticate NuGet to Lotus feed'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      dotnet --info
+      # Feed isolation: install the mobile workload packs from the Lotus feed
+      # (which upstreams nuget.org). --skip-manifest-update uses the manifests
+      # baked into the SDK so no public SDK feed is contacted.
+      dotnet workload install android ios maccatalyst macos `
+        --skip-manifest-update `
+        --source "$(lotusNuGetFeed)"
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet workload install failed"; exit $LASTEXITCODE }
+    displayName: 'Install .NET mobile workloads'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      # Explicit restore against the Lotus-only nuget.config, then build without
+      # an implicit restore so no public feed is ever contacted.
+      dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
+        --configfile "$(Build.Repository.LocalPath)\src\csharp\nuget.config" `
+        -p:IncludeMobileTargets=true
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet restore failed"; exit $LASTEXITCODE }
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `
+        -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
+      if ($LASTEXITCODE -ne 0) { Write-Error "dotnet build failed"; exit $LASTEXITCODE }
+    displayName: 'Build C# managed assembly'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim (managed dlls)'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
+    continueOnError: true
+
+  # --- ESRP sign the managed assemblies (before packing) --------------------
+  - template: steps/compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)'
+      DisplayName: 'ESRP - sign C# managed dlls'
+      Pattern: '*OnnxRuntimeGenAI*.dll'
+
+  # --- Lay out native libraries per-RID from the downloaded core archives ---
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
+      # Core archives (win/linux/osx) plus the iOS xcframework zip and Android AAR.
+      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz,*.aar
+      Write-Host "Downloaded artifacts:"; $artifacts | ForEach-Object { Write-Host "  $_" }
+
+      $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
+      mkdir -Force $outputDir | Out-Null
+
+      foreach ($file in $artifacts) {
+        $a = $file.Name
+        if     ($a -like "*win-x64*")    { $rid = "win-x64" }
+        elseif ($a -like "*win-arm64*")  { $rid = "win-arm64" }
+        elseif ($a -like "*linux-x64*")  { $rid = "linux-x64" }
+        elseif ($a -like "*linux-arm64*"){ $rid = "linux-arm64" }
+        elseif ($a -like "*osx-arm64*")  { $rid = "osx-arm64" }
+        elseif ($a -like "*ios*")        { $rid = "ios" }
+        elseif ($a -like "*.aar")        { $rid = "android" }
+        else { throw "Unknown artifact name $a" }
+
+        mkdir -Force $outputDir/$rid | Out-Null
+        mkdir -Force $outputDir/$rid/$(buildConfig) | Out-Null
+
+        if ($rid -eq "ios") {
+          # Ship the xcframework zip as-is under the name the nuspec generator expects.
+          Move-Item $file.FullName $outputDir/$rid/$(buildConfig)/onnxruntime-genai.xcframework.zip -Force
+        }
+        elseif ($rid -eq "android") {
+          Move-Item $file.FullName $outputDir/$rid/$(buildConfig)/onnxruntime-genai.aar -Force
+        }
+        else {
+          if ($a -like "*.zip") {
+            Expand-Archive -Path $file -DestinationPath $outputDir/$rid -Force
+          } elseif ($a -like "*.tar.gz") {
+            tar -xf $file -C $outputDir/$rid
+          }
+          # CPACK_INCLUDE_TOPLEVEL_DIRECTORY nests the payload under exactly one
+          # directory (named from the CPack package name, which may differ from
+          # the archive filename after the version rename).
+          $tops = @(Get-ChildItem -Path $outputDir/$rid -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName 'lib') })
+          if ($tops.Count -ne 1) {
+            $candidates = if ($tops.Count) { $tops.FullName -join ', ' } else { '<none>' }
+            throw "Expected exactly one CPack top-level directory with lib/ for RID '$rid'; found $($tops.Count): $candidates"
+          }
+          Move-Item -Path (Join-Path $tops[0].FullName 'lib/*') -Destination "$outputDir/$rid/$(buildConfig)" -Force
+        }
+        Get-ChildItem -Path $outputDir/$rid -Recurse | Select-Object FullName
+      }
+
+      # Assert every enabled RID produced the expected native artifact (plan 3e).
+      $expected = @{}
+      if ('${{ parameters.enable_win_x64 }}' -eq 'True')     { $expected['win-x64']     = 'onnxruntime-genai.dll' }
+      if ('${{ parameters.enable_win_arm64 }}' -eq 'True')   { $expected['win-arm64']   = 'onnxruntime-genai.dll' }
+      if ('${{ parameters.enable_linux_x64 }}' -eq 'True')   { $expected['linux-x64']   = 'libonnxruntime-genai.so' }
+      if ('${{ parameters.enable_linux_arm64 }}' -eq 'True') { $expected['linux-arm64'] = 'libonnxruntime-genai.so' }
+      if ('${{ parameters.enable_osx_arm64 }}' -eq 'True')   { $expected['osx-arm64']   = 'libonnxruntime-genai.dylib' }
+      if ('${{ parameters.enable_ios }}' -eq 'True')         { $expected['ios']         = 'onnxruntime-genai.xcframework.zip' }
+      if ('${{ parameters.enable_android }}' -eq 'True')     { $expected['android']     = 'onnxruntime-genai.aar' }
+      foreach ($rid in $expected.Keys) {
+        $lib = "$outputDir/$rid/$(buildConfig)/$($expected[$rid])"
+        if (-not (Test-Path $lib)) { throw "Expected native artifact missing for RID '$rid': $lib" }
+      }
+      if ('${{ parameters.ep }}' -eq 'cuda') {
+        $cudaExpected = @{}
+        if ('${{ parameters.enable_win_x64 }}' -eq 'True')   { $cudaExpected['win-x64']   = 'onnxruntime-genai-cuda.dll' }
+        if ('${{ parameters.enable_win_arm64 }}' -eq 'True') { $cudaExpected['win-arm64'] = 'onnxruntime-genai-cuda.dll' }
+        if ('${{ parameters.enable_linux_x64 }}' -eq 'True') { $cudaExpected['linux-x64'] = 'libonnxruntime-genai-cuda.so' }
+        foreach ($rid in $cudaExpected.Keys) {
+          $lib = "$outputDir/$rid/$(buildConfig)/$($cudaExpected[$rid])"
+          if (-not (Test-Path $lib)) { throw "Expected CUDA native library missing for RID '$rid': $lib" }
+        }
+      }
+      Write-Host "ASSERT OK: all enabled RIDs have their native artifacts"
+    displayName: 'Extract artifacts & assert native RIDs'
+    workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  # --- BinSkim the core native binaries in this clean workspace --------------
+  # BinSkim can't run in the core-win build job (its --use_guidance cargo tree
+  # crashes the injected Guardian scanner). This combine job reconstructs the
+  # native layout at build/<ep>/<rid>/<config>/ — matching the paths already in
+  # .config/guardian/.gdnbaselines — so BinSkim findings here are baselined.
+  - task: BinSkim@4
+    displayName: 'Run BinSkim (core native binaries)'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\$(buildDir)\**\*genai*.dll;$(Build.Repository.LocalPath)\$(buildDir)\**\*genai*.so'
+    continueOnError: true
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.11
+      addToPath: true
+
+  # --- Generate + pack the native NuGet -------------------------------------
+  - powershell: |
+      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
+        --package_name $(genai_nuget_package_name) `
+        --package_version $(genai_version) `
+        --ort_package_name $(ort_nuget_package_name) `
+        --ort_package_version $(ort_dependency_version) `
+        --build_config $(buildConfig) `
+        --sources_path $(Build.Repository.LocalPath) `
+        --native_build_path $(buildDir) `
+        --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
+      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+    displayName: 'Generate native nuspec'
+
+  - task: NuGetCommand@2
+    displayName: 'Pack native NuGet'
+    inputs:
+      command: 'pack'
+      packagesToPack: '$(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec'
+      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+
+  - task: NuGetCommand@2
+    displayName: 'Pack managed NuGet'
+    inputs:
+      command: 'pack'
+      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec'
+      buildProperties: 'version=$(genai_version);configuration=$(buildConfig)'
+      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+
+  # --- Assert the native nupkg contains the expected runtime RIDs -----------
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $nupkg = Get-ChildItem '$(Build.ArtifactStagingDirectory)\nuget' -Filter "$(genai_nuget_package_name).*.nupkg" |
+        Select-Object -First 1
+      if (-not $nupkg) { Write-Error "ASSERT FAIL: native nupkg not produced"; exit 1 }
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      $names = [System.IO.Compression.ZipFile]::OpenRead($nupkg.FullName).Entries.FullName
+      $expectRids = @()
+      if ('${{ parameters.enable_win_x64 }}' -eq 'True')     { $expectRids += 'runtimes/win-x64/native' }
+      if ('${{ parameters.enable_win_arm64 }}' -eq 'True')   { $expectRids += 'runtimes/win-arm64/native' }
+      if ('${{ parameters.enable_linux_x64 }}' -eq 'True')   { $expectRids += 'runtimes/linux-x64/native' }
+      if ('${{ parameters.enable_linux_arm64 }}' -eq 'True') { $expectRids += 'runtimes/linux-arm64/native' }
+      if ('${{ parameters.enable_osx_arm64 }}' -eq 'True')   { $expectRids += 'runtimes/osx-arm64/native' }
+      if ('${{ parameters.enable_ios }}' -eq 'True')         { $expectRids += 'runtimes/ios/native' }
+      if ('${{ parameters.enable_android }}' -eq 'True')     { $expectRids += 'runtimes/android/native' }
+      foreach ($rid in $expectRids) {
+        if (-not ($names | Where-Object { $_ -replace '\\','/' -like "$rid/*" })) {
+          Write-Error "ASSERT FAIL: nupkg missing $rid"; exit 1
+        }
+      }
+      Write-Host "ASSERT OK: native nupkg contains expected RIDs: $($expectRids -join ', ')"
+    displayName: 'Assert: native nupkg contains RIDs'
+
+  # --- ESRP sign the NuGet packages -----------------------------------------
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign NuGet packages'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish NuGet ($(nugetArtifactName))'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: '$(nugetArtifactName)'
