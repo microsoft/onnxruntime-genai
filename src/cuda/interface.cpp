@@ -83,13 +83,19 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
-    Ort::api = &api;
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
   }
 
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
+  }
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Cuda",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -262,8 +268,11 @@ void operator delete(void* p, size_t /*size*/) noexcept {
 #endif
 
 extern "C" {
-Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
   Generators::gp_genai = p_genai;
+  // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
+  // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.
+  Ort::api = ort_api;
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {

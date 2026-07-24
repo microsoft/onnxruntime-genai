@@ -16,38 +16,33 @@ static bool IsAllocatorAvailable(const Config& config, DeviceType device_type) {
   //   a. The graphics drivers installed on the system
   //   b. The QNN EP package loaded by onnxruntime-genai
   // If either dependency is out-of-date, the allocator will not be available.
+  Config::ProviderOptions init_session_provider_options{"QNN", {}};
+  const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
+  const auto user_provider_options_it = std::find_if(
+      user_provider_options_list.begin(), user_provider_options_list.end(),
+      [](const Config::ProviderOptions& po) { return po.name == "QNN"; });
+  const Config::ProviderOptions* user_provider_options =
+      user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
+
+  auto* qnn_interface = GetDeviceInterface(device_type);
+  qnn_interface->ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
+
   auto session_options = OrtSessionOptions::Create();
-
-  auto provider_options = Config::ProviderOptions{"QNN", {}};
-  const auto& config_providers = config.model.decoder.session_options.providers;
-  const auto& config_provider_options = config.model.decoder.session_options.provider_options;
-
-  auto it = std::find_if(config_providers.begin(), config_providers.end(), [](const std::string& p) { return p == "QNN"; });
-  if (it != config_providers.end()) {
-    const auto i = std::distance(config_providers.begin(), it);
-    if (config_provider_options.size() > static_cast<size_t>(i)) {
-      for (const auto& pair : config_provider_options[i].options) {
-        provider_options.options.emplace_back(pair);
-      }
-    }
-  }
-
-  if (!AppendExecutionProviderV2(*session_options, provider_options,
+  if (!AppendExecutionProviderV2(*session_options, init_session_provider_options,
                                  device_type, "QNNExecutionProvider")) {
-    AppendExecutionProviderV1(*session_options, provider_options);
+    AppendExecutionProviderV1(*session_options, init_session_provider_options);
   }
 
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
 
-  const auto trivial_model = Generators::GetTrivialModel();
+  const auto trivial_model = GetTrivialModel();
   const auto session = OrtSession::Create(GetOrtEnv(),
                                           trivial_model.data(),
                                           trivial_model.size(),
                                           session_options.get());
 
   try {
-    const auto memory_info = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator,
-                                                   0, OrtMemType::OrtMemTypeDefault);
+    const auto memory_info = qnn_interface->GetMemoryInfo();
     const auto allocator = Ort::Allocator::Create(*session, *memory_info);
     return allocator != nullptr;
   } catch (const Ort::Exception&) {

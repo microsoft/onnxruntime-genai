@@ -287,9 +287,9 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
     return reinterpret_cast<decltype(&GetInterface)>(
-        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
+        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str(), Ort::api);
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }
