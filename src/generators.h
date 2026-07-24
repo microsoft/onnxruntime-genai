@@ -6,6 +6,7 @@
 #include <array>
 #include <assert.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -33,6 +34,7 @@
 #include "config.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
@@ -102,6 +104,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
@@ -112,6 +115,7 @@ struct Generator : LeakChecked<Generator> {
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
+  void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
@@ -128,6 +132,13 @@ struct Generator : LeakChecked<Generator> {
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
  private:
+#if defined(_MSC_VER)
+  [[msvc::no_unique_address]]
+#else
+  [[no_unique_address]]
+#endif
+  GenerationTelemetry generation_telemetry_;
+  void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case

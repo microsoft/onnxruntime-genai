@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <algorithm>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -19,6 +22,8 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "models/model_type.h"
+#include "telemetry/telemetry.h"
 #include "dll_load_error.h"
 
 namespace Generators {
@@ -95,6 +100,156 @@ T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
 
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+
+// Derive an aggregate model family from the model type (e.g. "qwen3_vl" -> "qwen",
+// "nemotron_speech" -> "nemotron", "phi3" -> "phi") so events can be grouped above type.
+static std::string DeriveModelFamily(const std::string& model_type) {
+  struct Prefix {
+    const char* prefix;
+    const char* family;
+  };
+  // Ordered: longer/more-specific prefixes first where it matters.
+  static constexpr Prefix kPrefixes[] = {
+      {"qwen", "qwen"},
+      {"phi", "phi"},
+      {"gemma", "gemma"},
+      {"llama", "llama"},
+      {"mistral", "mistral"},
+      {"nemotron", "nemotron"},
+      {"parakeet", "parakeet"},
+      {"whisper", "whisper"},
+      {"granite", "granite"},
+      {"olmo", "olmo"},
+      {"chatglm", "chatglm"},
+      {"ernie", "ernie"},
+      {"internlm", "internlm"},
+      {"smollm", "smollm"},
+      {"gptoss", "gptoss"},
+      {"gpt2", "gpt2"},
+      {"lfm2", "lfm2"},
+      {"hunyuan", "hunyuan"},
+  };
+  for (const auto& p : kPrefixes) {
+    if (model_type.rfind(p.prefix, 0) == 0)  // starts_with
+      return p.family;
+  }
+  return model_type;  // Fallback: use the type itself as the family.
+}
+
+// Derive the dominant attention mechanism from the decoder config.
+// Priority: hybrid (conv+attention) > sliding_window > gqa > full.
+static std::string DeriveAttentionType(const Generators::Config::Model::Decoder& decoder) {
+  bool has_conv = std::any_of(decoder.layer_types.begin(), decoder.layer_types.end(),
+                              [](const std::string& t) { return t == "conv"; });
+  if (has_conv)
+    return "hybrid";
+  if (decoder.sliding_window.has_value())
+    return "sliding_window";
+  if (decoder.num_key_value_heads > 0 && decoder.num_attention_heads > 0 &&
+      decoder.num_key_value_heads < decoder.num_attention_heads)
+    return "gqa";
+  return "full";
+}
+
+// Collect model/device configuration for the ModelLoad telemetry event.
+static Generators::ModelLoadInfo BuildModelLoadInfo(const Generators::Model& model) {
+  const auto& cfg = *model.config_;
+  const auto& decoder = cfg.model.decoder;
+
+  Generators::ModelLoadInfo info;
+  info.model_type = cfg.model.type;
+  info.model_family = DeriveModelFamily(cfg.model.type);
+  info.selected_device = Generators::to_string(model.p_device_->GetType());
+  info.attention_type = DeriveAttentionType(decoder);
+  info.vocab_size = cfg.model.vocab_size;
+  info.context_length = cfg.model.context_length;
+  info.num_hidden_layers = decoder.num_hidden_layers;
+  info.hidden_size = decoder.hidden_size;
+  info.num_attention_heads = decoder.num_attention_heads;
+  info.num_key_value_heads = decoder.num_key_value_heads;
+  info.is_in_memory = !cfg.model_data_spans_.empty();
+
+  for (const auto& p : decoder.session_options.providers) {
+    if (!info.execution_providers.empty()) info.execution_providers += ",";
+    info.execution_providers += p;
+  }
+
+  if (decoder.session_options.intra_op_num_threads.has_value())
+    info.intra_op_num_threads = *decoder.session_options.intra_op_num_threads;
+  if (decoder.session_options.graph_optimization_level.has_value())
+    info.graph_optimization_level = static_cast<int>(*decoder.session_options.graph_optimization_level);
+
+  // Supported modality (grouped) from the model type.
+  const auto& mt = cfg.model.type;
+  if (Generators::ModelType::IsMMM(mt))
+    info.modality = "multimodal";
+  else if (Generators::ModelType::IsVLM(mt))
+    info.modality = "vision";
+  else if (Generators::ModelType::IsALM(mt) || Generators::ModelType::IsTransducer(mt))
+    info.modality = "audio";
+  else
+    info.modality = "text";
+
+  // Transcription mode for audio models (architecture-derived: transducers stream
+  // chunk-by-chunk, Whisper-style encoder/decoder runs in batch).
+  if (Generators::ModelType::IsTransducer(mt))
+    info.transcription_mode = "streaming";
+  else if (Generators::ModelType::IsALM(mt))
+    info.transcription_mode = "batch";
+
+  // Total device memory (currently available for CUDA only; 0 = unknown).
+  if (model.p_device_->GetType() == Generators::DeviceType::CUDA) {
+    size_t free_bytes = 0, total_bytes = 0;
+    model.p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    info.gpu_memory_mb = static_cast<int>(total_bytes / (1024 * 1024));
+  }
+
+  return info;
+}
+
+#endif  // ORTGENAI_ENABLE_TELEMETRY
+
+template <typename CreateModelFn>
+static std::shared_ptr<Generators::Model> CreateModelWithLifecycleTracking(CreateModelFn&& create_model) {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  auto& telemetry = Generators::GenAiTelemetry::Instance();
+  telemetry.Initialize();
+  telemetry.LogProcessInfo();
+  const uint32_t session_id = telemetry.AllocateSessionId();
+
+  if (telemetry.IsEnabled()) {
+    const bool model_load_start_logged = telemetry.LogModelLoadStart(session_id);
+    const auto start = std::chrono::steady_clock::now();
+    try {
+      auto model = std::forward<CreateModelFn>(create_model)();
+      if (model_load_start_logged) {
+        telemetry.LogModelLoad(session_id, BuildModelLoadInfo(*model));
+        const auto elapsed_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        telemetry.LogModelLoadEnd(session_id, true, elapsed_ms);
+      }
+      model->telemetry_session_id_ = session_id;
+      return model;
+    } catch (const std::exception& e) {
+      if (model_load_start_logged) {
+        const auto elapsed_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        telemetry.LogModelLoadEnd(session_id, false, elapsed_ms, e.what());
+      }
+      telemetry.LogRuntimeError(session_id, "std::exception", e.what(), "model_load");
+      throw;
+    }
+  }
+
+  auto model = std::forward<CreateModelFn>(create_model)();
+  model->telemetry_session_id_ = session_id;
+  return model;
+#else
+  return std::forward<CreateModelFn>(create_model)();
+#endif
+}
+
 extern "C" {
 
 #define OGA_TRY try {
@@ -105,7 +260,16 @@ extern "C" {
   }
 
 void OGA_API_CALL OgaShutdown() {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().Shutdown();
+  }
   Generators::Shutdown();
+}
+
+void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().SetEnabled(enabled);
+  }
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -244,7 +408,8 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
+  auto model = CreateModelWithLifecycleTracking(
+      [&] { return Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings); });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -370,8 +535,10 @@ OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(Oga
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto config_copy = std::make_unique<Generators::Config>(*config);
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  auto model = CreateModelWithLifecycleTracking([&] {
+    auto config_copy = std::make_unique<Generators::Config>(*config);
+    return Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -447,7 +614,9 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams
 
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
+  auto generator = CreateGenerator(*model, *params);
+
+  *out = ReturnUnique<OgaGenerator>(std::move(generator));
   return nullptr;
   OGA_CATCH
 }
@@ -1026,6 +1195,7 @@ OgaResult* OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name) {
 OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, const char* adapter_name) {
   OGA_TRY
   generator->state_->SetActiveAdapter(adapters, adapter_name);
+  generator->LogAdapterActivated();
   return nullptr;
   OGA_CATCH
 }

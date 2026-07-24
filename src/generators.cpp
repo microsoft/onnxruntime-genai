@@ -4,6 +4,8 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
@@ -458,12 +460,15 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return params.p_device->CreateGreedy(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+Generator::Generator(const Model& model, const GeneratorParams& params)
+    : model_{model.shared_from_this()},
+      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)} {
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    LogGeneratorCreate(params);
     return;
   }
 
@@ -508,6 +513,20 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
+  LogGeneratorCreate(params);
+}
+
+void Generator::LogGeneratorCreate(const GeneratorParams& params) {
+  generation_telemetry_.LogGeneratorCreate(
+      params.search.batch_size,
+      params.search.num_beams,
+      params.search.max_length,
+      params.search.top_k,
+      params.search.top_p,
+      params.search.temperature,
+      params.search.do_sample,
+      params.use_graph_capture,
+      !params.guidance_type.empty());
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
@@ -544,6 +563,8 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
     }
   }
 }
+
+Generator::~Generator() = default;
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
@@ -599,6 +620,25 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+  std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
+  if (generation_telemetry_.BeginAppend()) {
+    bool used_vision = false, used_audio = false;
+    for (const auto& extra : extra_inputs_) {
+      std::string name = extra.name;
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name.find("image") != std::string::npos || name.find("pixel") != std::string::npos ||
+          name.find("vision") != std::string::npos)
+        used_vision = true;
+      else if (name.find("audio") != std::string::npos)
+        used_audio = true;
+    }
+    append_input_modality = (used_vision && used_audio) ? "multimodal"
+                            : used_vision               ? "vision"
+                            : used_audio                ? "audio"
+                                                        : "text";
+  }
+
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
@@ -609,6 +649,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
+
+  generation_telemetry_.CompleteAppend(
+      input_ids.size(), state_->params_->search.num_beams, append_input_modality);
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -639,6 +682,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
   }
+  generation_telemetry_.AddAudioDurationMs(named_tensors.AudioDurationMs());
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
@@ -675,6 +719,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
         stream_ << std::endl;
       }
       SetLogits(logits);
+      generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
   }
 
@@ -751,6 +796,9 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     transducer_state_->StepToken();
+
+    generation_telemetry_.OnTokenGenerated(
+        static_cast<int64_t>(transducer_state_->GetStepTokens().size()));
     return;
   }
 
@@ -766,8 +814,12 @@ void Generator::GenerateNextToken() {
   // needs recomputation of Position IDs and KV Cache via rewind + re-append.
   if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
-    RewindToLength(0);
-    AppendTokens(current_seq);
+    {
+      [[maybe_unused]] auto suppress_telemetry_append_tracking =
+          generation_telemetry_.SuppressAppendTracking();
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
   }
 
   if (!computed_logits_) {
@@ -796,6 +848,10 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
+
+  generation_telemetry_.OnTokenGenerated(
+      static_cast<int64_t>(search_->params_->BatchBeamSize()));
+
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:
       search_->SelectTop();
@@ -817,13 +873,19 @@ void Generator::GenerateNextToken() {
 void Generator::RewindToLength(size_t new_length) {
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
-  if (new_length > search_->GetSequenceLength())
+  const size_t current_length = search_->GetSequenceLength();
+  if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
-  if (new_length == search_->GetSequenceLength())
+  if (new_length == current_length)
     return;
   size_t batch_size = search_->params_->search.batch_size;
   if (batch_size > 1 && new_length != 0)
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+  if (search_->params_->search.num_beams > 1)
+    throw std::runtime_error("RewindToLength is not supported with beam search");
+  const int64_t rewound_token_count =
+      static_cast<int64_t>(current_length - new_length) *
+      static_cast<int64_t>(search_->params_->BatchBeamSize());
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
@@ -831,6 +893,7 @@ void Generator::RewindToLength(size_t new_length) {
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
+  generation_telemetry_.OnRewind(rewound_token_count);
 }
 
 DeviceSpan<float> Generator::GetLogits() {

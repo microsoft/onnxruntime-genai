@@ -21,6 +21,11 @@ NS_ASSUME_NONNULL_BEGIN
   self.continueAfterFailure = NO;
 }
 
+- (void)testTelemetryControl {
+  [OGAGenerator setTelemetryEnabled:NO];
+  [OGAGenerator setTelemetryEnabled:YES];
+}
+
 + (void)tearDown {
   [OGAGenerator shutdown];
 }

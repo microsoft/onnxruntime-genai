@@ -227,25 +227,25 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' -DENABLE_TELEMETRY=ON
   displayName: 'Configure CMake C API with WinML (arm64, WITH CUDA) - $(ort_version)'
   condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' -DENABLE_TELEMETRY=ON
   displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
   condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG)
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DCMAKE_CUDA_ARCHITECTURES='$(cuda_archs)' $(ORT_HOME_CMAKE_ARG) -DENABLE_TELEMETRY=ON
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG)
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) $(ORT_HOME_CMAKE_ARG) -DENABLE_TELEMETRY=ON
   displayName: 'Configure CMake C API without CUDA'
   condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
   workingDirectory: '$(Build.Repository.LocalPath)'

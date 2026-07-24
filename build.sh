@@ -4,4 +4,9 @@
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-python3 "$SCRIPT_DIR/build.py" "$@"
+TELEMETRY_ARG="--use_telemetry"
+if [[ "$*" == *"--use_telemetry"* ]]; then
+    TELEMETRY_ARG=""
+fi
+
+python3 "$SCRIPT_DIR/build.py" $TELEMETRY_ARG "$@"

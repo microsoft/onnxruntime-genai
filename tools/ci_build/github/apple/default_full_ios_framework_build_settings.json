@@ -16,6 +16,7 @@
         "base": [
             "--parallel",
             "--build_apple_framework",
+            "--use_telemetry",
             "--skip_tests",
             "--skip_wheel"
         ],

@@ -111,6 +111,19 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /**
+ * \brief Enable or disable non-essential telemetry event collection.
+ *
+ * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or by setting
+ * ORT_DISABLE_TELEMETRY=1 before initialization. The environment variable prevents the uploader,
+ * events, and persistent device identifier from being created for the process lifetime. Runtime
+ * controls suppress new detailed model, generation, adapter, and error telemetry; the process
+ * information event may still be emitted.
+ *
+ * \param[in] enabled true to enable telemetry, false to disable.
+ */
+OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
+
+/**
  * \param[in] result OgaResult that contains the error message.
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
  *         and can will be freed when the OgaResult is destroyed.
@@ -594,7 +607,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
 
 /**
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
- *        and continue generating from that point.
+ *        and continue generating from that point. Rewinding is not supported with beam search.
  * \param[in] generator The generator to rewind to the given length.
  * \param[in] new_length The desired length in tokens after rewinding.
  * \return OgaResult containing the error message if the rewinding failed.

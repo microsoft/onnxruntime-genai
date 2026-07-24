@@ -85,6 +85,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/vitisai/*.cpp"
   "${GENERATORS_ROOT}/dml/session_options.h"
   "${GENERATORS_ROOT}/dml/session_options.cpp"
+  "${GENERATORS_ROOT}/telemetry/*.h"
+  "${GENERATORS_ROOT}/telemetry/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
   "${ENGINE_ROOT}/*.h"
