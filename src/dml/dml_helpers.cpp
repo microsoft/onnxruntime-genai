@@ -135,12 +135,26 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device
   // Get the version from https://devblogs.microsoft.com/directx/directx12agility/. We are currently using 1.614.0.
   constexpr uint32_t agility_sdk_version = 614;
 
+  bool agility_device_created = false;
   if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&d3d12_sdk_config))) &&
       SUCCEEDED(d3d12_sdk_config->CreateDeviceFactory(agility_sdk_version, current_module_path.c_str(), IID_PPV_ARGS(&d3d12_factory)))) {
-    THROW_IF_FAILED(d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+    // The Agility SDK device factory can fail even when the factory itself was created successfully.
+    // A known case is DXGI_ERROR_ALREADY_EXISTS (0x887A0036): the process already holds a D3D12 device
+    // created with the system runtime (e.g. the XAML/WinUI compositor in a packaged app), and devices
+    // from different D3D12 runtimes cannot coexist in one process. Fall back to the system runtime
+    // instead of failing model creation.
+    HRESULT create_device_hr = d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device));
+    if (SUCCEEDED(create_device_hr)) {
+      agility_device_created = true;
+    } else {
+      printf("Warning: Unable to create a device from version 1.%u.0 of the DirectX 12 Agility SDK (HRESULT 0x%08X). Falling back to the system D3D12 runtime; some scenarios may not work.\n", agility_sdk_version, static_cast<unsigned int>(create_device_hr));
+    }
   } else {
-    printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
-    printf("The given module path: %s", current_module_path.c_str());
+    printf("Warning: Unable to create a device from version 1.%u.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n", agility_sdk_version);
+    printf("The given module path: %s\n", current_module_path.c_str());
+  }
+
+  if (!agility_device_created) {
     THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
   }
 

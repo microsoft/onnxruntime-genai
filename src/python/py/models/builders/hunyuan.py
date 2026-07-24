@@ -31,7 +31,7 @@ class HunyuanDenseV1Model(Model):
         #   effective_theta ≈ 10000 * 1000^(128/126) ≈ 10,359,000
         # Transformers versions have used both rope_scaling and rope_parameters
         # for RoPE metadata, so accept either shape before passing config to the base builder.
-        rope_config = getattr(config, "rope_scaling", None) or getattr(config, "rope_parameters", None)
+        rope_config = self.get_rope_parameters(config)
         if rope_config is not None:
             base_theta = getattr(config, "rope_theta", None) or rope_config.get("rope_theta")
             if base_theta is not None:

@@ -23,6 +23,8 @@ Run with:
     python -m pytest test/python/test_mistral3_preprocessor.py -v
 """
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -96,7 +98,7 @@ class TestSmartResize:
         assert w >= EFFECTIVE_PATCH
 
     def test_square_image(self):
-        """Square 224×224 stays 224×224 (already aligned)."""
+        """Square 224x224 stays 224x224 (already aligned)."""
         h, w = smart_resize(224, 224)
         assert h == 224
         assert w == 224
@@ -148,7 +150,7 @@ class TestPreprocessingValues:
 
     def test_normalization_formula(self):
         """Verify exact normalization for a known pixel value."""
-        # Create 28×28 image with pixel (100, 150, 200)
+        # Create 28x28 image with pixel (100, 150, 200)
         img = _create_test_image(28, 28, color=(100, 150, 200))
         arr = preprocess_image(img)
 
@@ -180,9 +182,8 @@ class TestMatchHuggingFace:
     def hf_processor(self):
         """Load HF PixtralImageProcessor if available."""
         try:
-            from transformers import PixtralImageProcessor
-
-            return PixtralImageProcessor.from_pretrained("mistralai/Ministral-3-3B-Instruct-2512")
+            pixtral_image_processor = importlib.import_module("transformers").PixtralImageProcessor
+            return pixtral_image_processor.from_pretrained("mistralai/Ministral-3-3B-Instruct-2512")
         except (ImportError, Exception):
             pytest.skip("HuggingFace transformers or model not available")
             return None  # unreachable; satisfies type checkers and CodeQL

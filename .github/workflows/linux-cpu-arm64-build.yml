@@ -83,7 +83,6 @@ jobs:
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry ghcr.io/microsoft/onnxruntime-genai \
           --repository ort_genai_linux_arm64_gha
 
       - name: Docker -- Configure with CMake and GCC

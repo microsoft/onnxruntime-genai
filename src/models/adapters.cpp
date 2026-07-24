@@ -10,25 +10,32 @@ Adapter::Adapter(const char* adapter_file_path, Ort::Allocator* allocator)
     : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str(), *allocator)} {}
 
 const OrtLoraAdapter* Adapter::AcquireRef() {
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_
+  // and therefore serializes all access to ref_count_.
   ref_count_++;
-
   return adapter_.get();
 }
 
 void Adapter::ReleaseRef() {
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_.
   ref_count_--;
   if (ref_count_ < 0) {
+    // Restore invariant so a caller catching the exception doesn't leave the
+    // counter in a negative state that would trip later releases too.
+    ref_count_++;
     throw std::runtime_error("Adapter ref count went negative.");
   }
 }
 
 int32_t Adapter::RefCount() const {
+  // Private; only callable by Adapters (friend), which holds Adapters::mutex_.
   return ref_count_;
 }
 
 Adapters::Adapters(const Model* model) : model_{model} {}
 
 void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& adapter_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (adapters_.find(adapter_name) != adapters_.end()) {
     throw std::runtime_error("Adapter already loaded: " + std::string{adapter_name});
   }
@@ -40,11 +47,16 @@ void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& ada
 }
 
 void Adapters::UnloadAdapter(const std::string& adapter_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto adapter = adapters_.find(adapter_name);
   if (adapter == adapters_.end()) {
     throw std::runtime_error("Adapter not found: " + std::string{adapter_name});
   }
 
+  // Check-and-erase must happen atomically with respect to AcquireAdapter /
+  // ReleaseAdapter, which also acquire mutex_. This closes the TOCTOU window
+  // where another thread could AcquireRef() between the RefCount() check and
+  // the erase(), producing a use-after-free.
   if (adapter->second->RefCount() > 0) {
     throw std::runtime_error("Adapter still in use: " + std::string{adapter_name});
   }
@@ -53,6 +65,7 @@ void Adapters::UnloadAdapter(const std::string& adapter_name) {
 }
 
 const OrtLoraAdapter* Adapters::AcquireAdapter(const std::string& adapter_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto adapter = adapters_.find(adapter_name);
   if (adapter == adapters_.end()) {
     throw std::runtime_error("Adapter not found: " + std::string{adapter_name});
@@ -62,6 +75,7 @@ const OrtLoraAdapter* Adapters::AcquireAdapter(const std::string& adapter_name) 
 }
 
 void Adapters::ReleaseAdapter(const std::string& adapter_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto adapter = adapters_.find(adapter_name);
   if (adapter == adapters_.end()) {
     throw std::runtime_error("Adapter not found: " + std::string{adapter_name});

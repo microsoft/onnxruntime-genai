@@ -73,7 +73,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  const Config& config;                  // The model outlives the GeneratorParams
+  // Co-owns the model so the aliased Config below cannot be freed while this
+  // params object is alive. Null for the benchmark-only Config constructor.
+  std::shared_ptr<const Model> model_;
+  const Config& config;                  // Aliases model-owned Config; kept alive by model_
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   // Query the params to get the value set for a param
@@ -145,10 +148,20 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
+// Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
+// add-on) are unloaded on teardown.
+struct LibraryHandle;
+
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+
+  // Get-or-create the DeviceInterface for a device type. The interface is owned by this
+  // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
+  // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
+  DeviceInterface* GetDeviceInterface(DeviceType type);
 
   struct Allocator {
     // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
@@ -173,6 +186,19 @@ struct OrtGlobals {
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
+
+  DeviceInterface* LoadCudaInterface(DeviceType type);
+
+  std::mutex device_interfaces_mutex_;
+  // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
+  // module-owned interface (DML). Rebuilt each env cycle.
+  std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
+  // In-process interfaces owned directly by genai (CPU / WebGPU / QNN / OpenVINO / RyzenAI).
+  std::vector<std::unique_ptr<DeviceInterface>> owned_interfaces_;
+  // The genai CUDA add-on library (onnxruntime-genai-cuda). Holds the loaded library so that
+  // unloading it (on teardown) runs the add-on's static destructors. The interface pointer it
+  // provides is non-owning and lives in device_interfaces_.
+  std::unique_ptr<LibraryHandle> cuda_library_;
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
