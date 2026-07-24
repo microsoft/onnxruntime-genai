@@ -183,6 +183,7 @@ target_link_directories(onnxruntime-genai-obj PUBLIC ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai-obj PUBLIC Threads::Threads)
 
 if(WIN32)
+  target_compile_definitions(onnxruntime-genai-obj PRIVATE BUILDING_ORT_GENAI_INTERNALS)
   add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
