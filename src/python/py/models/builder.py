@@ -33,6 +33,7 @@ from builders import (
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -364,6 +365,8 @@ def create_model(
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
@@ -427,6 +430,14 @@ def create_model(
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+
+    requested_cache_options = (
+        NemotronParseModel.DECODER_CACHE_EXTRA_OPTIONS & extra_options.keys()
+    )
+    if requested_cache_options and not isinstance(onnx_model, NemotronParseModel):
+        raise ValueError(
+            f"Decoder cache export options are not supported for {config.architectures[0]}."
+        )
 
     if not config_only:
         # Make ONNX model
@@ -614,6 +625,19 @@ def get_args():
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                image_height / image_width = Fixed image size used by Nemotron Parse ONNX export.
+                    Default is 768x768. The exported encoder graph is specialized to this resolution.
+                prefill_sequence_length = Fixed decoder prefill sequence length used by cached decoder export.
+                    Default is 8.
+                export_components = Comma-separated Nemotron Parse components to export: encoder,decoder.
+                    Default is encoder,decoder.
+                decoder_cache_mode = Nemotron Parse decoder KV cache export mode. Currently only tensor_scatter is supported.
+                    TensorScatter uses direct PyTorch export with PyTorch >= 2.12 and the compatibility ONNX rewrite
+                    on older PyTorch versions. It uses the main-domain operator from opset 24.
+                cache_sequence_length = Static self-KV cache and decoder attention-mask sequence length.
+                    Default is the model max sequence length.
+                export_device = Device used for model loading and dummy tensors during export.
+                    Supported values are cpu/cuda. Default is cpu.
             """),
     )
 

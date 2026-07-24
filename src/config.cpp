@@ -342,6 +342,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_values_length = JSON::Get<std::string_view>(value);
     } else if (name == "cache_indirection") {
       v_.cache_indirection = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_write_indices") {
+      v_.cache_write_indices = JSON::Get<std::string_view>(value);
     } else if (name == "cumulative_sequence_lengths") {
       v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_lengths") {
@@ -381,6 +383,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_key_names") {
+      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_value_names") {
+      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
@@ -608,6 +614,12 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "prefill_filename") {
+      v_.prefill_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_update_mode") {
+      v_.cache_update_mode = JSON::Get<std::string_view>(value);
+    } else if (name == "prefill_sequence_length") {
+      v_.prefill_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "hidden_size") {
       v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_attention_heads") {
