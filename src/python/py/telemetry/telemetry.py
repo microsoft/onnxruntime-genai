@@ -32,7 +32,7 @@ from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
 from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
 from .offline_store import OfflineEventStore
-from .path_utils import scrub_string_for_telemetry, scrub_value_for_telemetry
+from .path_utils import scrub_error_message_for_telemetry, scrub_string_for_telemetry, scrub_value_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
 from .uploader import EventUploader
 
@@ -101,6 +101,10 @@ def _redact_paths(text: str) -> str:
     return scrub_string_for_telemetry(text)
 
 
+def _redact_error_message(text: str) -> str:
+    return scrub_error_message_for_telemetry(text)
+
+
 def _format_exception_message(ex: BaseException, tb=None) -> str:
     """Format an exception and strip local paths for privacy.
 
@@ -119,7 +123,7 @@ def _format_exception_message(ex: BaseException, tb=None) -> str:
                 path_end = line_trunc.find('"', len('File "'))
                 if path_end != -1:
                     line_trunc = f'File "[path]"{line_trunc[path_end + 1 :]}'
-            line_trunc = _redact_paths(line_trunc)
+            line_trunc = _redact_error_message(line_trunc)
             lines.append(line_trunc)
     return "\n".join(lines)
 
@@ -472,7 +476,7 @@ class GenAITelemetry:
         try:
             attributes = {
                 "exception_type": exception_type,
-                "exception_message": _redact_paths(exception_message),
+                "exception_message": _redact_error_message(exception_message),
                 "action": action,
                 "model_name": _redact_paths(model_name),
                 "execution_provider": execution_provider,

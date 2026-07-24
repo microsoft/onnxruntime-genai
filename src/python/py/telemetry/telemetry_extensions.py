@@ -21,7 +21,7 @@ from .telemetry import (
     ERROR_EVENT,
     GenAITelemetry,
     _format_exception_message,
-    _redact_paths,
+    _redact_error_message,
 )
 
 _TFunc = TypeVar("_TFunc", bound=Callable[..., Any])
@@ -68,7 +68,7 @@ def log_error(
     attributes.update(
         {
             "exception_type": exception_type,
-            "exception_message": _redact_paths(exception_message),
+            "exception_message": _redact_error_message(exception_message),
         }
     )
     telemetry.log(ERROR_EVENT, attributes)
