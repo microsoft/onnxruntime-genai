@@ -29,10 +29,8 @@ parameters:
   default: ''
 - name: python_versions
   type: object
-  default: [ '3.11', '3.12', '3.13', '3.14' ]
 - name: python_dependency_version
   type: string
-  default: '1.27.0'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.arch }}_${{ parameters.ep }}
@@ -74,12 +72,12 @@ jobs:
   # Prebuilt core download dir (→ build.py --prebuilt_genai_home)
   - name: corePkgDir
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\core_pkg'
+      value: '$(Build.SourcesDirectory)/core_pkg'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/core_pkg'
   - name: ortHome
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\ort_home'
+      value: '$(Build.SourcesDirectory)/ort_home'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/ort_home'
   # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)

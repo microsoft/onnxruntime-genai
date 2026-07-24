@@ -17,7 +17,6 @@ parameters:
   default: Release
 - name: combine_depends_on
   type: object
-  default: []
 
 jobs:
 - job: java_combine

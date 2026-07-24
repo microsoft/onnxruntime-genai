@@ -106,7 +106,7 @@ jobs:
   # --- Generate the .Foundry nuspec (fixed name, no ORT dependency)
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
+      python.exe $(Build.Repository.LocalPath)/tools/nuget/generate_nuspec_for_custom_nuget.py `
         --package_name $(genai_nuget_package_name) `
         --package_version $(genai_version) `
         --root_dir $(Build.Repository.LocalPath) `
@@ -117,7 +117,7 @@ jobs:
         --linux_x64 '$(ridRoot)/linux-x64' `
         --linux_arm64 '$(ridRoot)/linux-arm64' `
         --commit_id $(Build.SourceVersion)
-      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
       Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"
     displayName: 'Generate .Foundry nuspec'
 
@@ -126,17 +126,17 @@ jobs:
     inputs:
       command: 'pack'
       packagesToPack: '$(nuspec_path)'
-      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+      packDestination: '$(Build.ArtifactStagingDirectory)/nuget'
 
   # --- ESRP sign the .Foundry NuGet -----------------------------------------
   - template: steps/compliant/esrp_nuget.yml
     parameters:
       DisplayName: 'ESRP - sign .Foundry NuGet package'
-      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      FolderPath: '$(Build.ArtifactStagingDirectory)/nuget'
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish .Foundry NuGet ($(nugetArtifactName))'
     inputs:
-      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      targetPath: '$(Build.ArtifactStagingDirectory)/nuget'
       artifactName: '$(nugetArtifactName)'

@@ -29,13 +29,10 @@ parameters:
 
 - name: enable_cpu
   type: boolean
-  default: true
 - name: enable_cuda
   type: boolean
-  default: true
 - name: enable_winml
   type: boolean
-  default: true
 
 stages:
 - stage: sdk_csharp

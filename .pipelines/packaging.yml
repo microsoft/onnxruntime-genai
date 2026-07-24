@@ -88,10 +88,10 @@ extends:
       policheck:
         enabled: true
         break: true
-        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+        exclusionsFile: '$(Build.SourcesDirectory)/.pipelines/policheck_exclusions.xml'
       tsa:
         enabled: true
-        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+        configFile: '$(Build.SourcesDirectory)/.config/tsaoptions.json'
     stages:
     # ---- Version (compute the shared package version once) -----------------
     - template: stages/version-stage.yml

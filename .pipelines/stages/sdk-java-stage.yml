@@ -15,7 +15,6 @@ parameters:
   type: string
 - name: enable_cpu
   type: boolean
-  default: true
 
 stages:
 # Java only builds CPU targets, so it is emitted only when the CPU EP is enabled.

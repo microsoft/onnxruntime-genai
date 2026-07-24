@@ -1,4 +1,7 @@
 parameters:
+- name: os
+  type: string
+  values: [windows, linux, macos]
 - name: cargo_config_file
   type: string
 - name: login_to_docker
@@ -6,6 +9,52 @@ parameters:
   default: false
 
 steps:
+- ${{ if eq(parameters.os, 'windows') }}:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $cargoConfigFile = '${{ parameters.cargo_config_file }}'
+      $cargoDir = Split-Path -Parent $cargoConfigFile
+      New-Item -ItemType Directory -Force -Path $cargoDir | Out-Null
+      $lines = @(
+        '[source.crates-io]',
+        'replace-with = "lotus_auth"',
+        '',
+        '[source.lotus_auth]',
+        'registry = "$(lotusCargoSparse)"',
+        '',
+        '[registries.lotus_auth]',
+        'index = "$(lotusCargoSparse)"',
+        '',
+        '[registry]',
+        'global-credential-providers = ["cargo:token"]'
+      )
+      [System.IO.File]::WriteAllLines($cargoConfigFile, $lines, [System.Text.UTF8Encoding]::new($false))
+      Write-Host "Wrote $cargoConfigFile"
+    displayName: 'Configure cargo feed isolation (Lotus)'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+- ${{ if ne(parameters.os, 'windows') }}:
+  - bash: |
+      set -e
+      cargo_config='${{ parameters.cargo_config_file }}'
+      mkdir -p "$(dirname "$cargo_config")"
+      {
+        echo '[source.crates-io]'
+        echo 'replace-with = "lotus_auth"'
+        echo ''
+        echo '[source.lotus_auth]'
+        echo 'registry = "$(lotusCargoSparse)"'
+        echo ''
+        echo '[registries.lotus_auth]'
+        echo 'index = "$(lotusCargoSparse)"'
+        echo ''
+        echo '[registry]'
+        echo 'global-credential-providers = ["cargo:token"]'
+      } > "$cargo_config"
+      echo "Wrote $cargo_config"
+    displayName: 'Configure cargo feed isolation (Lotus)'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
 - ${{ if eq(parameters.login_to_docker, true) }}:
   - task: Docker@2
     displayName: 'Login to build cache ACR'
@@ -14,11 +63,7 @@ steps:
       command: 'login'
       addPipelineData: false
 
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
+- template: authenticate-pip-lotus.yml
 
 - task: CargoAuthenticate@0
   displayName: 'Authenticate Cargo to Lotus feed'

@@ -1,7 +1,6 @@
 parameters:
 - name: arch
   type: string
-  default: 'x64'
 - name: ep
   type: string
   values:

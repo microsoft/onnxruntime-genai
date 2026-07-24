@@ -2,8 +2,8 @@
 # core-build-job.yml — Reusable core build job template.
 #
 # Selects the appropriate agent pool for the requested OS/arch, defines
-# job-level variables, and dispatches to the OS-specific step template
-# (core-win-step.yml, core-linux-step.yml).
+# job-level variables, and dispatches the same core build contract to the
+# OS-specific step template.
 #
 # Artifact naming convention:
 #   core-<os>-<arch>-<ep>-cmake-pkg   — exported find_package CMake package
@@ -67,13 +67,13 @@ jobs:
   # ORT install root — overridden inside docker on Linux (uses /ort_genai_src/ort_home)
   - name: ortHome
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\ort_home'
+      value: '$(Build.SourcesDirectory)/ort_home'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/ort_home'
   # CMake package install prefix (SDK handoff artifact)
   - name: coreInstall
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\install'
+      value: '$(Build.SourcesDirectory)/install'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/install'
   # build.py --build_dir (relative; build.py appends /<config> internally)
@@ -110,6 +110,7 @@ jobs:
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/core-win-step.yml
       parameters:
+        os: ${{ parameters.os }}
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
@@ -119,6 +120,7 @@ jobs:
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/core-linux-step.yml
       parameters:
+        os: ${{ parameters.os }}
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
@@ -128,9 +130,11 @@ jobs:
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/core-macos-step.yml
       parameters:
+        os: ${{ parameters.os }}
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
         ort_version: ${{ parameters.ort_version }}
+        cuda_version: ${{ parameters.cuda_version }}
 
   - template: steps/compliant-and-cleanup-step.yml

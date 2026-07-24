@@ -12,6 +12,9 @@
 # =============================================================================
 
 parameters:
+- name: os
+  type: string
+  values: [osx]
 - name: arch
   type: string
   values: [arm64]
@@ -20,8 +23,9 @@ parameters:
   values: [cpu]
 - name: build_config
   type: string
-  default: Release
 - name: ort_version
+  type: string
+- name: cuda_version
   type: string
 
 steps:
@@ -50,52 +54,27 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Feed isolation: pip + cargo → Lotus ------------------------------------
-- bash: |
-    set -e
-    mkdir -p "$(Build.SourcesDirectory)/.cargo"
-    {
-      echo '[source.crates-io]'
-      echo 'replace-with = "lotus_auth"'
-      echo ''
-      echo '[source.lotus_auth]'
-      echo 'registry = "$(lotusCargoSparse)"'
-      echo ''
-      echo '[registries.lotus_auth]'
-      echo 'index = "$(lotusCargoSparse)"'
-      echo ''
-      echo '[registry]'
-      echo 'global-credential-providers = ["cargo:token"]'
-    } > "$(Build.SourcesDirectory)/.cargo/config.toml"
-  displayName: 'Configure cargo feed isolation (Lotus)'
-  workingDirectory: '$(Build.SourcesDirectory)'
-
 - template: utils/authenticate-core-build-feeds.yml
   parameters:
+    os: macos
     cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
 
 - script: python3 -m pip install --user --break-system-packages requests wheel
   displayName: 'Install build-time Python deps'
 
 # --- Download ORT from Lotus feed (authenticated) ---------------------------
-- bash: |
-    set -e
-    pkg_name='Microsoft.ML.OnnxRuntime'
-    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
-    echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
-    mkdir -p ort_home/include ort_home/lib
-    # No `set -x` — do not echo the token.
-    curl --fail --retry 5 --retry-all-errors -L \
-      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
-      -o ort.zip "$url"
-    unzip -o ort.zip -d ort_extracted >/dev/null
-    cp -r ort_extracted/build/native/include/* ort_home/include/
-    cp -r ort_extracted/runtimes/osx-arm64/native/* ort_home/lib/
-    ls -la ort_home/include ort_home/lib
-  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
-  workingDirectory: '$(Build.SourcesDirectory)'
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-
+- template: utils/download-ort-desktop.yml
+  parameters:
+    os: macos
+    arch: ${{ parameters.arch }}
+    ep: ${{ parameters.ep }}
+    ort_version: ${{ parameters.ort_version }}
+    ort_home: '$(ortHome)'
+# --- Audit: no public package feeds -----------------------------------------
+- template: utils/audit-core-build-feeds.yml
+  parameters:
+    os: macos
+    cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
 # --- Build core (build only) ------------------------------------------------
 - bash: |
     set -e

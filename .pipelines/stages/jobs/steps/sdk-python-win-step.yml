@@ -26,62 +26,35 @@ parameters:
   values: [cpu, cuda]
 - name: build_config
   type: string
-  default: Release
 - name: ort_version
   type: string
 - name: core_artifact
   type: string
 - name: python_versions
   type: object
-  default: [ '3.11', '3.12', '3.13', '3.14' ]
 - name: python_dependency_version
   type: string
-  default: '1.27.0'
 
 steps:
 
 # --- Feed isolation: pip → Lotus (authenticated) ----------------------------
 # (Python interpreters are selected per-version in the build loop below.)
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
+- template: utils/authenticate-pip-lotus.yml
 
 # --- Download prebuilt core CMake package -----------------------------------
-- task: DownloadPipelineArtifact@2
-  displayName: 'Download core CMake package (${{ parameters.core_artifact }})'
-  inputs:
-    artifactName: '${{ parameters.core_artifact }}'
-    targetPath: '$(corePkgDir)'
+- template: utils/download-core-cmake-package.yml
+  parameters:
+    core_artifact: ${{ parameters.core_artifact }}
+    target_path: '$(corePkgDir)'
 
 # --- Download ORT from Lotus feed (authenticated) ---------------------------
-- powershell: |
-    $ErrorActionPreference = 'Stop'
-    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
-      $pkgName = 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-    } else {
-      $pkgName = 'Microsoft.ML.OnnxRuntime'
-    }
-    $url = "$(lotusOrtContentBase)/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
-    Write-Host "Downloading $pkgName ${{ parameters.ort_version }} from Lotus"
-    $zip = "$(Agent.TempDirectory)\ort.zip"
-    Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
-      -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
-    Expand-Archive -Path $zip -DestinationPath "$(Agent.TempDirectory)\ort_extracted" -Force
-    New-Item -ItemType Directory -Force -Path "$(ortHome)\include","$(ortHome)\lib" | Out-Null
-    if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
-      $hdrSrc = 'buildTransitive\native\include'
-    } else {
-      $hdrSrc = 'build\native\include'
-    }
-    $platform = 'win-${{ parameters.arch }}'
-    Copy-Item "$(Agent.TempDirectory)\ort_extracted\$hdrSrc\*" "$(ortHome)\include\" -Recurse -Force
-    Copy-Item "$(Agent.TempDirectory)\ort_extracted\runtimes\$platform\native\*" "$(ortHome)\lib\" -Recurse -Force
-  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
-  workingDirectory: '$(Build.SourcesDirectory)'
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+- template: utils/download-ort-desktop.yml
+  parameters:
+    os: windows
+    arch: ${{ parameters.arch }}
+    ep: ${{ parameters.ep }}
+    ort_version: ${{ parameters.ort_version }}
+    ort_home: '$(ortHome)'
 
 # --- Build a wheel per Python version, incrementally against the prebuilt core
 # The core is built once (Python-agnostic). For each requested Python version we
@@ -128,12 +101,12 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim (python ${{ pyVer }} extension)'
     inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\**\*.pyd'
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)/$(pysdkBuildDir)-${{ pyVer }}/**/*.pyd'
     continueOnError: true
 
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}'
+      FolderPath: '$(Build.SourcesDirectory)/$(pysdkBuildDir)-${{ pyVer }}'
       DisplayName: 'ESRP - sign python ${{ pyVer }} extension'
       Pattern: '*.pyd'
 
@@ -141,7 +114,7 @@ steps:
       $ErrorActionPreference = 'Stop'
       # build.py nests the SDK cmake dir at <build_dir>/python/<config>. Re-run the
       # wheel-pack target so the wheel is re-zipped with the now-signed .pyd.
-      $cmakeDir = "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}\python\${{ parameters.build_config }}"
+      $cmakeDir = "$(Build.SourcesDirectory)/$(pysdkBuildDir)-${{ pyVer }}/python/${{ parameters.build_config }}"
       cmake --build $cmakeDir --config ${{ parameters.build_config }} --target PyPackageBuild
       if ($LASTEXITCODE -ne 0) { Write-Error "wheel re-pack failed"; exit 1 }
     displayName: 'Re-pack Python ${{ pyVer }} wheel with signed extension'
@@ -149,7 +122,7 @@ steps:
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)\$(pysdkBuildDir)-${{ pyVer }}" -Filter *.whl |
+      $whl = Get-ChildItem -Recurse "$(Build.SourcesDirectory)/$(pysdkBuildDir)-${{ pyVer }}" -Filter *.whl |
         Select-Object -First 1
       if (-not $whl) { Write-Error "ASSERT FAIL: no wheel produced for ${{ pyVer }}"; exit 1 }
       Write-Host "Wheel: $($whl.FullName)"
@@ -174,7 +147,7 @@ steps:
         python -m pip install onnxruntime==${{ parameters.python_dependency_version }}
         if ($LASTEXITCODE -eq 0) {
           python -m pip install --force-reinstall --no-deps $whl.FullName
-          $expected = (Get-Content "$(Build.SourcesDirectory)\VERSION_INFO" -Raw).Trim()
+          $expected = (Get-Content "$(Build.SourcesDirectory)/VERSION_INFO" -Raw).Trim()
           $actual = (python -c "import onnxruntime_genai as og; print(og.__version__)").Trim()
           Write-Host "expected=$expected actual=$actual"
           if ($actual -ne $expected) { Write-Error "ASSERT FAIL: wheel version mismatch"; exit 1 }
@@ -185,7 +158,7 @@ steps:
         }
       }
       # Stage the wheel to a stable path for publishing.
-      $stage = "$(Build.ArtifactStagingDirectory)\wheel"
+      $stage = "$(Build.ArtifactStagingDirectory)/wheel"
       New-Item -ItemType Directory -Force -Path $stage | Out-Null
       Copy-Item $whl.FullName $stage -Force
       # The degraded path above leaves $LASTEXITCODE=1 from the expected pip
@@ -198,4 +171,4 @@ steps:
   displayName: 'Publish Python wheels ($(artifactName))'
   inputs:
     artifactName: '$(artifactName)'
-    targetPath: '$(Build.ArtifactStagingDirectory)\wheel'
+    targetPath: '$(Build.ArtifactStagingDirectory)/wheel'

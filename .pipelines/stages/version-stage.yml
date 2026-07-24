@@ -28,7 +28,6 @@
 parameters:
 - name: version_type
   type: string
-  default: 'dev'
   values:
     - 'dev'
     - 'stable'
@@ -54,7 +53,7 @@ stages:
         targetType: inline
         script: |
           $ErrorActionPreference = 'Stop'
-          $version_info = (Get-Content -Path .\VERSION_INFO).Trim()
+          $version_info = (Get-Content -Path ./VERSION_INFO).Trim()
           # Strip a single trailing '-dev' to form the base X.Y.Z; the dev suffix
           # (date + BuildId) is re-appended below so the string stays valid for
           # PEP 440 / SemVer / Maven.

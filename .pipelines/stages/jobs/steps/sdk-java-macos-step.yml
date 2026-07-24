@@ -22,7 +22,6 @@ parameters:
   values: [cpu]
 - name: build_config
   type: string
-  default: Release
 - name: ort_version
   type: string
 - name: core_artifact
@@ -42,41 +41,25 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 # --- Feed isolation: pip → Lotus (authenticated) ----------------------------
-- task: PipAuthenticate@1
-  displayName: 'Authenticate pip to Lotus feed'
-  inputs:
-    artifactFeeds: '$(lotusFeedName)'
-    onlyAddExtraIndex: false
+- template: utils/authenticate-pip-lotus.yml
 
 - script: python3 -m pip install --user --break-system-packages requests wheel
   displayName: 'Install build-time Python deps'
 
 # --- Download prebuilt core CMake package -----------------------------------
-- task: DownloadPipelineArtifact@2
-  displayName: 'Download core CMake package (${{ parameters.core_artifact }})'
-  inputs:
-    artifactName: '${{ parameters.core_artifact }}'
-    targetPath: '$(corePkgDir)'
+- template: utils/download-core-cmake-package.yml
+  parameters:
+    core_artifact: ${{ parameters.core_artifact }}
+    target_path: '$(corePkgDir)'
 
 # --- Download ORT from Lotus feed (authenticated) ---------------------------
-- bash: |
-    set -e
-    pkg_name='Microsoft.ML.OnnxRuntime'
-    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
-    echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
-    mkdir -p ort_home/include ort_home/lib
-    # No `set -x` — do not echo the token.
-    curl --fail --retry 5 --retry-all-errors -L \
-      -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
-      -o ort.zip "$url"
-    unzip -o ort.zip -d ort_extracted >/dev/null
-    cp -r ort_extracted/build/native/include/* ort_home/include/
-    cp -r ort_extracted/runtimes/osx-arm64/native/* ort_home/lib/
-    ls -la ort_home/include ort_home/lib
-  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
-  workingDirectory: '$(Build.SourcesDirectory)'
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+- template: utils/download-ort-desktop.yml
+  parameters:
+    os: macos
+    arch: ${{ parameters.arch }}
+    ep: ${{ parameters.ep }}
+    ort_version: ${{ parameters.ort_version }}
+    ort_home: '$(ortHome)'
 
 # --- Build the desktop jar incrementally against the prebuilt core ----------
 - bash: |

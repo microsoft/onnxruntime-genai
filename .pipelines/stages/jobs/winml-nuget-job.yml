@@ -94,7 +94,7 @@ jobs:
   # --- Generate the WinML nuspec (depends on the WinML SDK NuGet) ------------
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_winml_nuget.py `
+      python.exe $(Build.Repository.LocalPath)/tools/nuget/generate_nuspec_for_winml_nuget.py `
         --package_name $(genai_nuget_package_name) `
         --package_version $(genai_version) `
         --ort_package_name $(ort_nuget_package_name) `
@@ -104,7 +104,7 @@ jobs:
         --win_x64 '$(ridRoot)/win-x64' `
         --win_arm64 '$(ridRoot)/win-arm64' `
         --commit_id $(Build.SourceVersion)
-      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
       Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec"
     displayName: 'Generate WinML nuspec'
 
@@ -113,17 +113,17 @@ jobs:
     inputs:
       command: 'pack'
       packagesToPack: '$(nuspec_path)'
-      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+      packDestination: '$(Build.ArtifactStagingDirectory)/nuget'
 
   # --- ESRP sign the WinML NuGet --------------------------------------------
   - template: steps/compliant/esrp_nuget.yml
     parameters:
       DisplayName: 'ESRP - sign WinML NuGet package'
-      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      FolderPath: '$(Build.ArtifactStagingDirectory)/nuget'
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish WinML NuGet ($(nugetArtifactName))'
     inputs:
-      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      targetPath: '$(Build.ArtifactStagingDirectory)/nuget'
       artifactName: '$(nugetArtifactName)'

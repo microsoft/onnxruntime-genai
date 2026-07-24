@@ -20,22 +20,17 @@ parameters:
   type: string
 - name: build_config
   type: string
-  default: Release
 # genai_version is provided by the enclosing stage (from the 'version' stage
 # output) and inherited here as $(genai_version); see sdk-csharp-stage.yml.
 # RID enable toggles (which core archives to combine for this EP).
 - name: enable_win_x64
   type: boolean
-  default: false
 - name: enable_win_arm64
   type: boolean
-  default: false
 - name: enable_linux_x64
   type: boolean
-  default: false
 - name: enable_linux_arm64
   type: boolean
-  default: false
 # CPU-only RIDs bundled into the CPU native package (osx-arm64 dylib, iOS
 # xcframework, Android AAR). Ignored for the CUDA package.
 - name: enable_osx_arm64
@@ -142,7 +137,7 @@ jobs:
   # build time (not committed). NuGetAuthenticate wires the pipeline identity to it.
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      $cfg = "$(Build.Repository.LocalPath)\src\csharp\nuget.config"
+      $cfg = "$(Build.Repository.LocalPath)/src/csharp/nuget.config"
       $lines = @(
         '<?xml version="1.0" encoding="utf-8"?>',
         '<configuration>',
@@ -170,32 +165,32 @@ jobs:
         --source "$(lotusNuGetFeed)"
       if ($LASTEXITCODE -ne 0) { Write-Error "dotnet workload install failed"; exit $LASTEXITCODE }
     displayName: 'Install .NET mobile workloads'
-    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+    workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
       # Explicit restore against the Lotus-only nuget.config, then build without
       # an implicit restore so no public feed is ever contacted.
       dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
-        --configfile "$(Build.Repository.LocalPath)\src\csharp\nuget.config" `
+        --configfile "$(Build.Repository.LocalPath)/src/csharp/nuget.config" `
         -p:IncludeMobileTargets=true
       if ($LASTEXITCODE -ne 0) { Write-Error "dotnet restore failed"; exit $LASTEXITCODE }
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `
         -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
       if ($LASTEXITCODE -ne 0) { Write-Error "dotnet build failed"; exit $LASTEXITCODE }
     displayName: 'Build C# managed assembly'
-    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+    workingDirectory: '$(Build.Repository.LocalPath)/src/csharp'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim (managed dlls)'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/src/csharp/**/*.dll'
     continueOnError: true
 
   # --- ESRP sign the managed assemblies (before packing) --------------------
   - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)'
+      FolderPath: '$(Build.Repository.LocalPath)/src/csharp/bin/$(buildConfig)'
       DisplayName: 'ESRP - sign C# managed dlls'
       Pattern: '*OnnxRuntimeGenAI*.dll'
 
@@ -286,7 +281,7 @@ jobs:
   - task: BinSkim@4
     displayName: 'Run BinSkim (core native binaries)'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\$(buildDir)\**\*genai*.dll;$(Build.Repository.LocalPath)\$(buildDir)\**\*genai*.so'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/$(buildDir)/**/*genai*.dll;$(Build.Repository.LocalPath)/$(buildDir)/**/*genai*.so'
     continueOnError: true
 
   - task: UsePythonVersion@0
@@ -296,7 +291,7 @@ jobs:
 
   # --- Generate + pack the native NuGet -------------------------------------
   - powershell: |
-      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
+      python.exe $(Build.Repository.LocalPath)/tools/nuget/generate_nuspec_for_native_nuget.py `
         --package_name $(genai_nuget_package_name) `
         --package_version $(genai_version) `
         --ort_package_name $(ort_nuget_package_name) `
@@ -305,28 +300,28 @@ jobs:
         --sources_path $(Build.Repository.LocalPath) `
         --native_build_path $(buildDir) `
         --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
-      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      cat $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
     displayName: 'Generate native nuspec'
 
   - task: NuGetCommand@2
     displayName: 'Pack native NuGet'
     inputs:
       command: 'pack'
-      packagesToPack: '$(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec'
-      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+      packagesToPack: '$(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec'
+      packDestination: '$(Build.ArtifactStagingDirectory)/nuget'
 
   - task: NuGetCommand@2
     displayName: 'Pack managed NuGet'
     inputs:
       command: 'pack'
-      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec'
+      packagesToPack: '$(Build.Repository.LocalPath)/nuget/Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec'
       buildProperties: 'version=$(genai_version);configuration=$(buildConfig)'
-      packDestination: '$(Build.ArtifactStagingDirectory)\nuget'
+      packDestination: '$(Build.ArtifactStagingDirectory)/nuget'
 
   # --- Assert the native nupkg contains the expected runtime RIDs -----------
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      $nupkg = Get-ChildItem '$(Build.ArtifactStagingDirectory)\nuget' -Filter "$(genai_nuget_package_name).*.nupkg" |
+      $nupkg = Get-ChildItem '$(Build.ArtifactStagingDirectory)/nuget' -Filter "$(genai_nuget_package_name).*.nupkg" |
         Select-Object -First 1
       if (-not $nupkg) { Write-Error "ASSERT FAIL: native nupkg not produced"; exit 1 }
       Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -351,11 +346,11 @@ jobs:
   - template: steps/compliant/esrp_nuget.yml
     parameters:
       DisplayName: 'ESRP - sign NuGet packages'
-      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      FolderPath: '$(Build.ArtifactStagingDirectory)/nuget'
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish NuGet ($(nugetArtifactName))'
     inputs:
-      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      targetPath: '$(Build.ArtifactStagingDirectory)/nuget'
       artifactName: '$(nugetArtifactName)'

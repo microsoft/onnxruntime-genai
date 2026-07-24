@@ -15,7 +15,7 @@ steps:
 - ${{ if eq(parameters.os, 'windows') }}:
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      Set-Content -Path "$(Build.SourcesDirectory)\VERSION_INFO" -Value '$(genai_version)' -NoNewline
+      Set-Content -Path "$(Build.SourcesDirectory)/VERSION_INFO" -Value '$(genai_version)' -NoNewline
       Write-Host "VERSION_INFO := $(genai_version)"
     displayName: 'Stamp VERSION_INFO ($(genai_version))'
 - ${{ if ne(parameters.os, 'windows') }}:

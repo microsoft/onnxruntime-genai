@@ -17,7 +17,6 @@ parameters:
   type: string
 - name: cudaDockerImage
   type: string
-  default: ''
 - name: wheelDir
   type: string
 

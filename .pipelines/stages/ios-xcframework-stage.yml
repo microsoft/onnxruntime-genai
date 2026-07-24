@@ -16,7 +16,6 @@ parameters:
   type: string
 - name: enable_cpu
   type: boolean
-  default: true
 
 stages:
 - ${{ if eq(parameters.enable_cpu, true) }}:

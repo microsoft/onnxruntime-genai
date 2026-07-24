@@ -63,12 +63,12 @@ jobs:
     value: 'core-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep }}-cmake-pkg'
   - name: corePkgDir
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\core_pkg'
+      value: '$(Build.SourcesDirectory)/core_pkg'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/core_pkg'
   - name: ortHome
     ${{ if eq(parameters.os, 'win') }}:
-      value: '$(Build.SourcesDirectory)\ort_home'
+      value: '$(Build.SourcesDirectory)/ort_home'
     ${{ else }}:
       value: '$(Build.SourcesDirectory)/ort_home'
   # build.py --build_dir for the SDK (build.py nests <sdk>/<config> beneath it)

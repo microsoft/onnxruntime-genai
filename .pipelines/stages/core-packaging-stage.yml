@@ -22,23 +22,18 @@ parameters:
 # CUDA SDK version (default 13.1; override to 12.8 via pipeline parameter).
 - name: cuda_version
   type: string
-  default: '13.1'
 
 # WinML SDK (Microsoft.Windows.AI.MachineLearning) version — used by the WinML EP.
 - name: winml_sdk_version
   type: string
-  default: '2.1.1'
 
 # ---- Per-EP enable toggles -------------------------------------------------
 - name: enable_cpu
   type: boolean
-  default: true
 - name: enable_cuda
   type: boolean
-  default: true
 - name: enable_winml
   type: boolean
-  default: true
 
 stages:
 
