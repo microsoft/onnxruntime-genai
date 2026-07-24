@@ -33,6 +33,7 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
+        self.kv_cache_quant_type = "none"
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
