@@ -33,7 +33,7 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def _scrub_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    return scrub_value_for_telemetry(metadata or {})
+    return scrub_value_for_telemetry(metadata) if isinstance(metadata, dict) else {}
 
 
 def log_action(
@@ -44,17 +44,18 @@ def log_action(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log a telemetry action event."""
-    telemetry = _get_telemetry()
-    attributes = _scrub_metadata(metadata)
-    attributes.update(
-        {
-            "invoked_from": invoked_from,
-            "action_name": action_name,
-            "duration_ms": duration_ms,
-            "success": success,
-        }
-    )
-    telemetry.log(ACTION_EVENT, attributes)
+    with suppress(Exception):
+        telemetry = _get_telemetry()
+        attributes = _scrub_metadata(metadata)
+        attributes.update(
+            {
+                "invoked_from": invoked_from,
+                "action_name": action_name,
+                "duration_ms": duration_ms,
+                "success": success,
+            }
+        )
+        telemetry.log(ACTION_EVENT, attributes)
 
 
 def log_error(
@@ -63,15 +64,16 @@ def log_error(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Log a telemetry error event."""
-    telemetry = _get_telemetry()
-    attributes = _scrub_metadata(metadata)
-    attributes.update(
-        {
-            "exception_type": exception_type,
-            "exception_message": _redact_error_message(exception_message),
-        }
-    )
-    telemetry.log(ERROR_EVENT, attributes)
+    with suppress(Exception):
+        telemetry = _get_telemetry()
+        attributes = _scrub_metadata(metadata)
+        attributes.update(
+            {
+                "exception_type": exception_type,
+                "exception_message": _redact_error_message(exception_message),
+            }
+        )
+        telemetry.log(ERROR_EVENT, attributes)
 
 
 def _is_exception_logged(exc: BaseException) -> bool:

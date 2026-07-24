@@ -268,7 +268,7 @@ class GenAITelemetry:
 
     def _send_heartbeat(self) -> None:
         """Persist the enabled-run device-id heartbeat."""
-        if self._store is None:
+        if not self._enabled or self._telemetry_disabled or self._store is None:
             return
         try:
             data = {
