@@ -107,8 +107,6 @@ void DmlReadbackHeap::ReadbackFromGpu(
     std::span<const size_t> dst_sizes,
     std::span<ID3D12Resource*> src,
     D3D12_RESOURCE_STATES src_state) {
-  assert(dst.size() == src.size());
-  assert(dst_sizes.size() == src.size());
   THROW_HR_IF(E_INVALIDARG, dst.size() != src.size());
   THROW_HR_IF(E_INVALIDARG, dst_sizes.size() != src.size());
 
