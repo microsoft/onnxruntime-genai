@@ -703,6 +703,16 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->draft_forward_passes;
   else if (key == "target_forward_passes")
     *value = stats->target_forward_passes;
+  else if (key == "effective_k")
+    *value = stats->effective_k;
+  else if (key == "adaptive_k_increases")
+    *value = stats->adaptive_k_increases;
+  else if (key == "adaptive_k_decreases")
+    *value = stats->adaptive_k_decreases;
+  else if (key == "adaptive_k_observations")
+    *value = stats->adaptive_k_observations;
+  else if (key == "adaptive_k_probes")
+    *value = stats->adaptive_k_probes;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;
@@ -742,6 +752,8 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     *value = stats->estimated_speedup;
   else if (key == "observed_speedup")
     *value = stats->observed_speedup;
+  else if (key == "adaptive_k_throughput")
+    *value = stats->adaptive_k_throughput;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetNumber.");
   return nullptr;

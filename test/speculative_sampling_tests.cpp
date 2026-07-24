@@ -14,6 +14,187 @@
 
 namespace Generators::test {
 
+namespace {
+void RecordAdaptiveRound(AdaptiveKController& controller, int accepted,
+                         size_t committed_tokens, float total_ms,
+                         bool filled_proposal_budget = true, int evaluated = -1) {
+  const int k = controller.GetK();
+  controller.RecordCompletedRound(
+      k, evaluated < 0 ? k : evaluated, accepted, committed_tokens,
+      filled_proposal_budget, total_ms * 0.25f, total_ms * 0.75f);
+}
+
+void EstablishK3AsFaster(AdaptiveKController& controller) {
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+}
+}  // namespace
+
+TEST(AdaptiveKControllerTest, DisabledUsesConfiguredMaximumAndNeverUpdates) {
+  AdaptiveKController controller{/*fixed_k=*/8, /*adaptive_min_k=*/2, /*enabled=*/false};
+
+  EXPECT_EQ(controller.GetK(), 8);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/8.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/8, /*committed_tokens=*/9, /*total_ms=*/8.0f);
+
+  EXPECT_EQ(controller.GetK(), 8);
+  EXPECT_EQ(controller.Increases(), 0u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Observations(), 0u);
+  EXPECT_EQ(controller.Probes(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, StartsAtTwoAndProbesUpAfterSmoothedEvidence) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+
+  EXPECT_EQ(controller.GetK(), 2);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 2);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 3);
+  EXPECT_EQ(controller.Probes(), 1u);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_FLOAT_EQ(controller.CurrentThroughput(), 1.0f);
+}
+
+TEST(AdaptiveKControllerTest, KeepsFasterProbeAndContinuesGrowing) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  EstablishK3AsFaster(controller);
+
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 3);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 4);
+  RecordAdaptiveRound(controller, /*accepted=*/4, /*committed_tokens=*/5, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/4, /*committed_tokens=*/5, /*total_ms=*/3.0f);
+
+  EXPECT_EQ(controller.GetK(), 4);
+  EXPECT_EQ(controller.Increases(), 2u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Probes(), 2u);
+}
+
+TEST(AdaptiveKControllerTest, HighAcceptanceCanGrowToHardLimitSixteen) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+
+  for (int round = 0; round < 100 && controller.GetK() < 16; round++) {
+    const int k = controller.GetK();
+    RecordAdaptiveRound(
+        controller, /*accepted=*/k,
+        /*committed_tokens=*/static_cast<size_t>(k + 1),
+        /*total_ms=*/1.0f);
+  }
+
+  EXPECT_EQ(controller.GetK(), 16);
+  EXPECT_EQ(controller.Increases(), 14u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, UserFloorOneStartsAtOneAndCanGrow) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/1, /*enabled=*/true};
+
+  EXPECT_EQ(controller.GetK(), 1);
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Probes(), 1u);
+}
+
+TEST(AdaptiveKControllerTest, NeverDecreasesBelowUserFloor) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/1, /*enabled=*/true};
+
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+
+  EXPECT_EQ(controller.GetK(), 1);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, RejectsProbeThatReducesMeasuredThroughput) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/4.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 1u);
+  EXPECT_EQ(controller.Probes(), 1u);
+}
+
+TEST(AdaptiveKControllerTest, PartialAcceptanceCanWinWhenThroughputImproves) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  EstablishK3AsFaster(controller);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 4);
+
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/2.5f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/2.5f);
+
+  EXPECT_EQ(controller.GetK(), 4);
+  EXPECT_GT(controller.CurrentThroughput(), 1.5f);
+}
+
+TEST(AdaptiveKControllerTest, PoorUsefulWidthProbesDownAndKeepsFasterNeighbor) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  EstablishK3AsFaster(controller);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 2);
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/1.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/1.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_GT(controller.CurrentThroughput(), 1.0f);
+}
+
+TEST(AdaptiveKControllerTest, IneligibleRoundsDoNotTrainOrProbe) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f,
+                      /*filled_proposal_budget=*/false);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/2, /*total_ms=*/2.0f,
+                      /*filled_proposal_budget=*/true, /*evaluated=*/0);
+  controller.RecordCompletedRound(
+      controller.GetK(), /*evaluated=*/2, /*accepted=*/2, /*committed_tokens=*/0,
+      /*filled_proposal_budget=*/true, /*propose_ms=*/1.0f, /*target_ms=*/1.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Observations(), 0u);
+  EXPECT_EQ(controller.Probes(), 0u);
+  EXPECT_EQ(controller.Increases(), 0u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, ResetClearsLearnedRatesButPreservesCumulativeCounts) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+
+  controller.Reset();
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Observations(), 2u);
+  EXPECT_EQ(controller.Probes(), 1u);
+  EXPECT_FLOAT_EQ(controller.CurrentThroughput(), 0.0f);
+}
+
 TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
   // These intentionally inconsistent buffers prove that mode, not storage shape, selects behavior.
   // Runtime proposal validation rejects such inconsistencies before verification.

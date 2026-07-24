@@ -37,10 +37,10 @@ TEST(NGramDecodingCapabilitiesTest, RejectsMultipleReturnSequences) {
   EXPECT_THROW(ValidateNGramDecodingCapabilities(capabilities), std::runtime_error);
 }
 
-TEST(NGramDecodingCapabilitiesTest, RejectsGuidance) {
+TEST(NGramDecodingCapabilitiesTest, AcceptsGuidance) {
   NGramDecodingCapabilities capabilities;
   capabilities.uses_guidance = true;
-  EXPECT_THROW(ValidateNGramDecodingCapabilities(capabilities), std::runtime_error);
+  EXPECT_NO_THROW(ValidateNGramDecodingCapabilities(capabilities));
 }
 
 TEST(NGramDecodingCapabilitiesTest, RejectsNonDecoderOnlyTextModel) {
