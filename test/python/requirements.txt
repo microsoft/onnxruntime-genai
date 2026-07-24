@@ -1,5 +1,6 @@
 coloredlogs
 flatbuffers
+nanobind
 numpy<2
 packaging
 protobuf==6.33.5

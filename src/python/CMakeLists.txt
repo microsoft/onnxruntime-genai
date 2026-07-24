@@ -4,11 +4,42 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
-find_package(Python COMPONENTS Interpreter Development)
-pybind11_add_module(python ${python_srcs})
+
+# The Python bindings are built with nanobind. In addition to producing the
+# extension module, nanobind lets us emit a typed `.pyi` stub so that editors
+# such as VS Code (Pylance) can resolve the generated classes and methods for
+# go-to-definition, find-references, and autocompletion.
+find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+
+# Locate the pip-installed nanobind (declared in test/python/requirements.txt).
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  OUTPUT_VARIABLE nanobind_ROOT
+  RESULT_VARIABLE _nanobind_result)
+if(NOT _nanobind_result EQUAL 0)
+  message(FATAL_ERROR
+    "nanobind was not found for '${Python_EXECUTABLE}'. Install the Python build "
+    "requirements first, e.g. `pip install -r test/python/requirements.txt` "
+    "(or `pip install nanobind`).")
+endif()
+find_package(nanobind CONFIG REQUIRED)
+
+nanobind_add_module(python NB_STATIC ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai)
+
+# This project compiles with warnings-as-errors (`/WX`), but nanobind's bundled
+# runtime sources (and generated binding glue) are third-party code that isn't
+# held to that policy. Relax warnings-as-errors for the binding target and the
+# nanobind runtime library so their warnings don't fail the build.
+if(MSVC)
+  target_compile_options(python PRIVATE /WX-)
+  if(TARGET nanobind-static)
+    target_compile_options(nanobind-static PRIVATE /WX-)
+  endif()
+endif()
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
   target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
@@ -54,6 +85,21 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+
+  # Generate a typed stub (onnxruntime_genai.pyi) plus a py.typed marker next to
+  # the compiled extension so IDEs can resolve the nanobind-generated API. The
+  # stub is produced for the extension submodule and imported via the package so
+  # that its __init__ runs `add_onnxruntime_dependency` first, ensuring the
+  # matching onnxruntime shared library is on the DLL search path.
+  nanobind_add_stub(
+    onnxruntime_genai_stub
+    MODULE onnxruntime_genai.onnxruntime_genai
+    OUTPUT "${WHEEL_TARGET_NAME}/onnxruntime_genai.pyi"
+    MARKER_FILE "${WHEEL_TARGET_NAME}/py.typed"
+    PYTHON_PATH "${WHEEL_FILES_DIR}"
+    DEPENDS python
+  )
+
   set(auditwheel_exclude_list
     "libcublas.so.11"
     "libcublas.so.12"
@@ -105,4 +151,7 @@ if(BUILD_WHEEL)
       EXCLUDE_FROM_ALL
     )
   endif()
+
+  # Ensure the typed stub is generated before the wheel is packaged.
+  add_dependencies(PyPackageBuild onnxruntime_genai_stub)
 endif()
