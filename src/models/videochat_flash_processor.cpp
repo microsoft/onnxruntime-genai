@@ -8,7 +8,6 @@
 
 #include "../generators.h"
 #include "model.h"
-#include "validate_config_path.h"
 #include "videochat_flash_processor.h"
 #include <regex>
 
@@ -86,7 +85,6 @@ VideoChatFlashProcessor::VideoChatFlashProcessor(Config& config, const SessionIn
   if (num_visual_tokens_ <= 0)
     throw std::runtime_error("videochat_flash_qwen requires vision.num_visual_tokens > 0 in genai_config.json");
 
-  ValidateConfigPath(config.model.vision.config_filename, "vision config_filename");
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 

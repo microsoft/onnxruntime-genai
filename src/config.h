@@ -101,6 +101,13 @@ struct Config {
   // otherwise the value is joined with config_path.
   fs::path ResolvePath(std::string_view value) const;
 
+  // Validates that a config-specified filename/path stays inside the model directory.
+  // Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
+  // or contains a ".." path traversal component. Empty paths are allowed (no-op).
+  // The optional context label is prepended to error messages to identify which config
+  // field caused the failure.
+  static void ValidatePath(const std::string& path, std::string_view context = {});
+
   using NamedString = Generators::NamedString;
   using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
   using ProviderOptions = Generators::ProviderOptions;
