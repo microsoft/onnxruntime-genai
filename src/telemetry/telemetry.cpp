@@ -239,13 +239,15 @@ void GenAiTelemetry::Initialize() {
       TelemetryInternal::SuppressUnneededCommonContext(
           *pending_impl->logger->GetSemanticContext());
     });
+    bool network_context_suppressed = false;
     if (process_info_logged_.load()) {
       // ProcessInfo is once per process; a reinitialized logger no longer needs network context.
-      (void)TelemetryInternal::TrySuppressContext([&]() {
+      network_context_suppressed = TelemetryInternal::TrySuppressContext([&]() {
         TelemetryInternal::SuppressNetworkContext(
             *pending_impl->logger->GetSemanticContext());
       });
     }
+    network_context_suppressed_.store(network_context_suppressed);
     pending_impl->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
 
     // Process-wide AppSessionGuid stamped on every event as logger context (not a
@@ -323,6 +325,16 @@ uint32_t GenAiTelemetry::AllocateSessionId() {
 }
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+void GenAiTelemetry::TrySuppressNetworkContext() {
+  if (network_context_suppressed_.load()) return;
+
+  if (TelemetryInternal::TrySuppressContext([&]() {
+        TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
+      })) {
+    network_context_suppressed_.store(true);
+  }
+}
+
 std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if ((require_enabled && !enabled_.load()) || !initialized_.load() || !impl_ || !impl_->logger)
@@ -365,9 +377,7 @@ void GenAiTelemetry::LogProcessInfo() {
 
     impl_->logger->LogEvent(event);
     // ProcessInfo captures PAL network context. Clearing it afterward is best effort.
-    (void)TelemetryInternal::TrySuppressContext([&]() {
-      TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
-    });
+    TrySuppressNetworkContext();
     emitted = true;
   },
             /*require_enabled=*/false);
