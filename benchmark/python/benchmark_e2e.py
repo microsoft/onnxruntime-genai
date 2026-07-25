@@ -118,6 +118,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         "Sampling Throughput (tps)",
         "Sampling Latency (ms)",
         "Wall Clock Throughput (tps)",
+        "Wall Clock Throughput StdDev (tps)",
         "Wall Clock Time (s)",
     ]
 
@@ -162,6 +163,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
         record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
+        record.metrics.customized["wall_clock_throughput_tps_stddev"] = row["Wall Clock Throughput StdDev (tps)"]
         record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
 
         if print_memory_usage:
@@ -449,9 +451,12 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     # Calculate wall clock time
     avg_wall_clock_time = sum(wall_clock_times) / len(wall_clock_times)
+    wall_clock_throughputs = [batch_size * (max_length / t) for t in wall_clock_times if t > 0]
     avg_wall_clock_thrpt = batch_size * (max_length / avg_wall_clock_time)
+    std_wall_clock_thrpt = float(np.std(wall_clock_throughputs)) if wall_clock_throughputs else 0.0
     print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
     print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
+    print(f"Wall Clock Throughput StdDev: {std_wall_clock_thrpt} tps")
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
@@ -475,6 +480,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         avg_sampling_thrpt,
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
+        std_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
     return metrics
