@@ -182,6 +182,47 @@ def get_model_paths():
     return ci_paths, hf_paths
 
 
+def is_model_excluded(enable_graph_capture: bool, model_name: str, device: str) -> bool:
+    """Check if a model should be excluded based on enable_graph_capture, model name, and device.
+
+    Args:
+        enable_graph_capture: Whether graph capture is being requested
+        model_name: Name of the model to check (e.g., 'phi-4-mini', 'qwen-2.5-0.5b')
+        device: Execution provider name (e.g., 'cuda', 'dml', 'webgpu')
+
+    Returns:
+        True if the model should be excluded on this EP, False otherwise.
+    """
+    # Only apply exclusions when graph capture is explicitly requested
+    if not enable_graph_capture:
+        return False
+
+    import onnxruntime_genai as og  # noqa: PLC0415 - imported lazily
+
+    # Check if the device is available at runtime
+    device_availability = {
+        "cuda": og.is_cuda_available(),
+        "dml": og.is_dml_available(),
+        "webgpu": is_webgpu_ep_available(),  # WebGPU is plugin-based
+    }
+
+    # If device is not available, exclude the model
+    if not device_availability.get(device, False):
+        return True
+
+    # Map of models that have EP-specific graph capture incompatibilities
+    # Format: model_name -> set of EPs where graph capture is NOT supported
+    graph_capture_exclusions = {
+        # Phi-4-mini uses If nodes that break CUDA graph capture.
+        # The model works fine on DML and WebGPU where If nodes are not used in graph capture.
+        # Attempting graph capture with If nodes causes validation errors.
+        "phi-4-mini": {"cuda"},
+        "qwen-2.5-0.5b": {"dml"},  # DML has a known issue with Qwen-2.5 graph capture models
+    }
+
+    return model_name in graph_capture_exclusions and device in graph_capture_exclusions[model_name]
+
+
 def download_model(model_name, input_path, output_path, precision, device, one_layer, enable_graph_capture):
     command = [
         sys.executable,
@@ -218,8 +259,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     # Graph capture is a generic model option and maps to EP-specific builder flags.
     if enable_graph_capture and device == "cuda":
         extra_options += ["enable_cuda_graph=1"]
-    if device == "dml":
-        # Always disable graph capture on DML due to a pre-existing runtime issue with the Qwen-2.5 graph capture model.
+    if not enable_graph_capture and device == "dml":
         extra_options += ["enable_dml_graph=0"]
     if enable_graph_capture and device == "webgpu":
         extra_options += ["enable_webgpu_graph=1"]
@@ -229,60 +269,55 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     run_subprocess(command).check_returncode()
 
 
-def download_models(download_path, precision, device, log):
+def download_models(download_path, precision, device, log, enable_graph_capture):
     log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
 
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
 
-    # Models that don't support graph capture (e.g., due to unsupported operators like If nodes)
-    no_graph_capture_models = {"phi-4-mini"}
-
     log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, (input_path, one_layer) in ci_paths.items():
-        for graph_capture in {True, False}:
-            # Skip graph capture for models that don't support it
-            if graph_capture and model_name in no_graph_capture_models:
+        try:
+            # Skip excluded model/EP combinations
+            if is_model_excluded(enable_graph_capture, model_name, device):
                 continue
 
-            try:
-                new_name = model_name + "-graph" if graph_capture else model_name
-                output_path = os.path.join(download_path, new_name, precision, device)
-                log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
+            folder_name = model_name + "-graph" if enable_graph_capture else model_name
+            output_path = os.path.join(download_path, folder_name, precision, device)
+            log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
 
-                if not os.path.exists(output_path):
-                    download_model(None, input_path, output_path, precision, device, one_layer, graph_capture)
-                    output_paths.append(output_path)
-            except Exception as e:
-                log.warning(f"Error: {e}. Skipping CI model.")
-                continue
+            if not os.path.exists(output_path):
+                download_model(None, input_path, output_path, precision, device, one_layer, enable_graph_capture)
+                output_paths.append(output_path)
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping CI model.")
+            continue
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, (hf_name, one_layer) in hf_paths.items():
-        for graph_capture in {True, False}:
-            # Skip graph capture for models that don't support it
-            if graph_capture and model_name in no_graph_capture_models:
+        try:
+            # Skip excluded model/EP combinations
+            if is_model_excluded(enable_graph_capture, model_name, device):
                 continue
 
-            try:
-                model_info = importlib.import_module("huggingface_hub").model_info
-                model_info(hf_name)
-            except ImportError:
-                log.warning("huggingface_hub is not installed. Skipping downloading Hugging Face models.")
-                continue
-            except Exception as e:
-                log.warning(f"Error: {e}. Skipping downloading Hugging Face models")
-                continue
+            model_info = importlib.import_module("huggingface_hub").model_info
+            model_info(hf_name)
+        except ImportError:
+            log.warning("huggingface_hub is not installed. Skipping downloading Hugging Face models.")
+            continue
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping downloading Hugging Face models")
+            continue
 
-            new_name = model_name + "-graph" if graph_capture else model_name
-            output_path = os.path.join(download_path, new_name, precision, device)
-            log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
+        folder_name = model_name + "-graph" if enable_graph_capture else model_name
+        output_path = os.path.join(download_path, folder_name, precision, device)
+        log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
 
-            if not os.path.exists(output_path):
-                download_model(hf_name, "", output_path, precision, device, one_layer, graph_capture)
-                output_paths.append(output_path)
+        if not os.path.exists(output_path):
+            download_model(hf_name, "", output_path, precision, device, one_layer, enable_graph_capture)
+            output_paths.append(output_path)
 
     log.info(f"Successfully downloaded {len(output_paths)} models")
 

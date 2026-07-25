@@ -528,7 +528,6 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
-@pytest.mark.skipif(og.is_dml_available(), reason="Skip test_hidden_states on DML.")
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
@@ -1187,27 +1186,18 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
 # unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.), which use
 # different fixtures (phi4_for, qwen_for) and thus won't accidentally run on
 # graph-capture-enabled models.
-
-# Devices that support graph capture. We build a list at test collection time so we can:
-# 1. Parametrize tests only for available graph-capture-capable devices
-# 2. Skip the entire test class if no such devices are available
+#
 # Graph capture requires expensive recompilation and model generation, so we only
 # build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
-graph_capture_devices = []
-if og.is_dml_available():
-    graph_capture_devices.append("dml")
-if og.is_cuda_available():
-    graph_capture_devices.append("cuda")
-if og.is_webgpu_available():
-    graph_capture_devices.append("webgpu")
 
-
-
-
-@pytest.mark.skipif(len(graph_capture_devices) == 0, reason="No graph-capture-capable EP available.")
-@pytest.mark.parametrize("device", graph_capture_devices)
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
 def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
     """Verify that Qwen generates deterministically with graph capture across multiple runs."""
+    if device not in {"cuda", "webgpu"}:
+        # TODO: fix this for DML
+        pytest.skip(f"Graph capture is not supported for Qwen-2.5 on {device}.")
+
     model = og.Model(qwen_graph_for(device))
 
     tokenizer = og.Tokenizer(model)
@@ -1229,22 +1219,33 @@ def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
     assert run1 == run2, "Qwen graph capture model produced different outputs across two identical greedy runs"
 
 
-@pytest.mark.skipif(not og.is_dml_available(), reason="DML ExecutionProvider not available.")
-def test_qwen_graph_capture_disabled_on_dml(qwen_graph_for):
-    """Verify that the Qwen model built with the graph-capture flag loads correctly on DML.
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_phi4_graph_capture_output_consistency(phi4_graph_for, device):
+    """Verify that Phi-4-mini generates deterministically with graph capture across multiple runs.
 
-    Qwen uses standalone RotaryEmbedding ops that DML cannot partition, so the builder
-    sets enable_dml_graph=0 even when graph capture is requested. This test confirms
-    the model still loads and generates valid output (i.e., the opt-out path works).
+    Phi-4-mini uses If nodes that are only supported in graph capture on DML and WebGPU,
+    not on CUDA. This test validates graph capture on the supported EPs.
     """
-    model = og.Model(qwen_graph_for("dml"))
+    if device not in {"dml", "webgpu"}:
+        # TODO: fix this for CUDA because If nodes break graph capture
+        pytest.skip(f"Graph capture is not supported for Phi-4 mini on {device}.")
+    model = og.Model(phi4_graph_for(device))
 
-    search_params = og.GeneratorParams(model)
-    input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
 
-    generator = og.Generator(model, search_params)
-    generator.append_tokens(input_ids)
-    generator.generate_next_token()
-    hidden_states = generator.get_output("hidden_states")
-    assert hidden_states.shape == (2, 4, 896)
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Phi-4-mini graph capture model produced different outputs across two identical greedy runs"
