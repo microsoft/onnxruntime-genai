@@ -26,6 +26,7 @@ class DeviceIdStatus(Enum):
 
 
 _device_id_state = {"device_id": None, "status": DeviceIdStatus.NEW}
+_DEVICE_ID_HASH_SALT = "onnxruntime-genai:"
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
@@ -183,8 +184,8 @@ def get_device_id() -> str:
     return device_id
 
 
-def get_encrypted_device_id_and_status() -> tuple[str, DeviceIdStatus]:
-    """Get SHA-256 hashed device ID and its status."""
+def get_hashed_device_id_and_status() -> tuple[str, DeviceIdStatus]:
+    """Get the product-salted hashed device ID and its status."""
     device_id = _device_id_state["device_id"] if _device_id_state["device_id"] is not None else get_device_id()
-    encrypted = hashlib.sha256(device_id.encode("utf-8")).hexdigest().upper() if device_id else ""
-    return encrypted, _device_id_state["status"]
+    hashed = hashlib.sha256(f"{_DEVICE_ID_HASH_SALT}{device_id}".encode()).hexdigest() if device_id else ""
+    return f"c:{hashed}" if hashed else "", _device_id_state["status"]
