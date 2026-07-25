@@ -239,6 +239,13 @@ void GenAiTelemetry::Initialize() {
       TelemetryInternal::SuppressUnneededCommonContext(
           *pending_impl->logger->GetSemanticContext());
     });
+    if (process_info_logged_.load()) {
+      // ProcessInfo is once per process; a reinitialized logger no longer needs network context.
+      (void)TelemetryInternal::TrySuppressContext([&]() {
+        TelemetryInternal::SuppressNetworkContext(
+            *pending_impl->logger->GetSemanticContext());
+      });
+    }
     pending_impl->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
 
     // Process-wide AppSessionGuid stamped on every event as logger context (not a
@@ -256,7 +263,6 @@ void GenAiTelemetry::Initialize() {
       pending_impl->logger->GetSemanticContext()->SetDeviceId(device.device_id);
     }
 
-    network_context_suppressed_.store(false);
     impl_ = std::move(pending_impl);
     initialized_.store(true);
   } catch (...) {
@@ -317,19 +323,6 @@ uint32_t GenAiTelemetry::AllocateSessionId() {
 }
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
-void GenAiTelemetry::SuppressNetworkContext() {
-  if (network_context_suppressed_.load()) return;
-
-  std::lock_guard<std::mutex> context_lock(semantic_context_mutex_);
-  if (network_context_suppressed_.load()) return;
-
-  if (TelemetryInternal::TrySuppressContext([&]() {
-        TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
-      })) {
-    network_context_suppressed_.store(true);
-  }
-}
-
 std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if ((require_enabled && !enabled_.load()) || !initialized_.load() || !impl_ || !impl_->logger)
@@ -371,6 +364,10 @@ void GenAiTelemetry::LogProcessInfo() {
     event.SetProperty("deviceIdStatus", device.device_id_status);
 
     impl_->logger->LogEvent(event);
+    // ProcessInfo captures PAL network context. Clearing it afterward is best effort.
+    (void)TelemetryInternal::TrySuppressContext([&]() {
+      TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
+    });
     emitted = true;
   },
             /*require_enabled=*/false);
