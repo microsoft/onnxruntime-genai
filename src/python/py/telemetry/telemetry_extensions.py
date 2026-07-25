@@ -49,9 +49,9 @@ def log_action(
         attributes = _scrub_metadata(metadata)
         attributes.update(
             {
-                "invoked_from": invoked_from,
-                "action_name": action_name,
-                "duration_ms": duration_ms,
+                "invokedFrom": invoked_from,
+                "actionName": action_name,
+                "durationMs": duration_ms,
                 "success": success,
             }
         )
@@ -69,8 +69,8 @@ def log_error(
         attributes = _scrub_metadata(metadata)
         attributes.update(
             {
-                "exception_type": exception_type,
-                "exception_message": _redact_error_message(exception_message),
+                "exceptionType": exception_type,
+                "exceptionMessage": _redact_error_message(exception_message),
             }
         )
         telemetry.log(ERROR_EVENT, attributes)

@@ -207,7 +207,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         from telemetry.telemetry import GenAITelemetry
 
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
-        with patch("telemetry.telemetry.get_encrypted_device_id_and_status") as mock_device_id:
+        with patch("telemetry.telemetry.get_hashed_device_id_and_status") as mock_device_id:
             t = GenAITelemetry()
         # Full process-lifetime opt-out: no resources and no network sends.
         self.assertFalse(t._enabled)
@@ -221,9 +221,14 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertEqual(self.sent_payloads, [])
 
     def test_enabled_records_heartbeat_and_events(self):
+        import uuid
+
         from telemetry.telemetry import GenAITelemetry
 
         t = GenAITelemetry()
+        session_guid = uuid.UUID(t._app_session_guid)
+        self.assertEqual(session_guid.version, 4)
+        self.assertEqual(session_guid.variant, uuid.RFC_4122)
         self.assertTrue(t._enabled)
         self.assertTrue(t.accepts_detailed_events)
         self.assertIsNotNone(t._store)
@@ -253,7 +258,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         telemetry._enabled = False
         telemetry._telemetry_disabled = False
         telemetry._store = MagicMock()
-        with patch("telemetry.telemetry.get_encrypted_device_id_and_status") as mock_device_id:
+        with patch("telemetry.telemetry.get_hashed_device_id_and_status") as mock_device_id:
             telemetry._send_heartbeat()
 
         mock_device_id.assert_not_called()
@@ -530,11 +535,11 @@ class TestPathRedaction(unittest.TestCase):
         telemetry = MagicMock()
         with patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry):
             log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH + 100))
-            truncated = telemetry.log.call_args.args[1]["exception_message"]
+            truncated = telemetry.log.call_args.args[1]["exceptionMessage"]
             self.assertEqual(len(truncated.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
 
             log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH - 1) + "€")
-            multibyte = telemetry.log.call_args.args[1]["exception_message"]
+            multibyte = telemetry.log.call_args.args[1]["exceptionMessage"]
             self.assertEqual(multibyte, "x" * (MAX_ERROR_MESSAGE_LENGTH - 1))
 
         core = object.__new__(GenAITelemetry)
@@ -542,7 +547,7 @@ class TestPathRedaction(unittest.TestCase):
         core._store = object()
         core._emit = MagicMock()
         core.log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH + 100))
-        core_message = core._emit.call_args.args[1]["exception_message"]
+        core_message = core._emit.call_args.args[1]["exceptionMessage"]
         self.assertEqual(len(core_message.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
 
     def test_format_exception_message_redacts_source_line_paths(self):
@@ -590,7 +595,7 @@ class TestPathRedaction(unittest.TestCase):
             )
 
         attributes = telemetry.log.call_args.args[1]
-        self.assertEqual(attributes["exception_message"], "missing [path]")
+        self.assertEqual(attributes["exceptionMessage"], "missing [path]")
 
     def test_core_event_methods_redact_model_names(self):
         from telemetry.telemetry import GenAITelemetry
@@ -611,7 +616,7 @@ class TestPathRedaction(unittest.TestCase):
         for invoke in calls:
             telemetry._emit.reset_mock()
             invoke()
-            self.assertEqual(telemetry._emit.call_args.args[1]["model_name"], "[path]")
+            self.assertEqual(telemetry._emit.call_args.args[1]["modelName"], "[path]")
 
     def test_core_model_build_recursively_scrubs_extra_options(self):
         from telemetry.telemetry import GenAITelemetry
@@ -631,7 +636,7 @@ class TestPathRedaction(unittest.TestCase):
             },
         )
 
-        extra_options = telemetry._emit.call_args.args[1]["extra_options"]
+        extra_options = telemetry._emit.call_args.args[1]["extraOptions"]
         self.assertEqual(extra_options["adapter_path"], "[path]")
         self.assertEqual(extra_options["[path]"]["paths"], ["[path]"])
         self.assertEqual(extra_options["batch_size"], 4)
@@ -656,6 +661,11 @@ class TestPathRedaction(unittest.TestCase):
             log_error("RuntimeError", "boom", metadata)
             error_attributes = telemetry.log.call_args.args[1]
 
+        self.assertEqual(action_attributes["invokedFrom"], "test")
+        self.assertEqual(action_attributes["actionName"], "work")
+        self.assertEqual(action_attributes["durationMs"], 1.0)
+        self.assertEqual(error_attributes["exceptionType"], "RuntimeError")
+        self.assertEqual(error_attributes["exceptionMessage"], "boom")
         for attributes in (action_attributes, error_attributes):
             self.assertEqual(attributes["path"], "[path]")
             self.assertEqual(attributes["pathlike"], "[path]")
@@ -694,15 +704,20 @@ class TestDeviceId(unittest.TestCase):
         deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
         self._tmpdir.cleanup()
 
-    def test_get_encrypted_device_id(self):
+    def test_get_hashed_device_id(self):
+        import hashlib
+
         import telemetry.deviceid as deviceid
 
-        device_id, status = deviceid.get_encrypted_device_id_and_status()
-        # Should return a non-empty hex string (SHA256 = 64 hex chars)
+        device_id, status = deviceid.get_hashed_device_id_and_status()
+        # Product-salted SHA-256 with the custom-device-id prefix.
         if status != deviceid.DeviceIdStatus.FAILED:
-            self.assertEqual(len(device_id), 64)
-            # Should be uppercase hex
-            self.assertTrue(all(c in "0123456789ABCDEF" for c in device_id))
+            self.assertEqual(len(device_id), 66)
+            self.assertTrue(device_id.startswith("c:"))
+            self.assertTrue(all(c in "0123456789abcdef" for c in device_id[2:]))
+            raw_id = deviceid._device_id_state["device_id"]
+            expected = hashlib.sha256(f"onnxruntime-genai:{raw_id}".encode()).hexdigest()
+            self.assertEqual(device_id, f"c:{expected}")
         self.assertIn(status, list(deviceid.DeviceIdStatus))
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
@@ -723,8 +738,8 @@ class TestDeviceId(unittest.TestCase):
     def test_device_id_consistent(self):
         import telemetry.deviceid as deviceid
 
-        id1, _ = deviceid.get_encrypted_device_id_and_status()
-        id2, _ = deviceid.get_encrypted_device_id_and_status()
+        id1, _ = deviceid.get_hashed_device_id_and_status()
+        id2, _ = deviceid.get_hashed_device_id_and_status()
         self.assertEqual(id1, id2)
 
     def test_file_store_uses_owner_only_creation_mode(self):
@@ -954,6 +969,49 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
             exception_message="Test error",
             action="test_action",
         )
+
+    def test_common_and_event_fields_use_onnx_style_names(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "1.0"
+        telemetry._app_session_guid = "123e4567-e89b-42d3-a456-426614174000"
+        telemetry._envelope_ikey = "o:test"
+        telemetry._emit("TestEvent", {"durationMs": 1.0})
+
+        data = json.loads(telemetry._store.store.call_args.args[0])["data"]
+        self.assertEqual(data["appName"], "onnxruntime-genai")
+        self.assertEqual(data["appVersion"], "1.0")
+        self.assertEqual(data["appSessionGuid"], telemetry._app_session_guid)
+        self.assertEqual(data["durationMs"], 1.0)
+        self.assertFalse(any("_" in key for key in data))
+
+    def test_all_core_event_fields_are_camel_case(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = object()
+        telemetry._emit = MagicMock()
+        emitters = (
+            lambda: telemetry.log_model_build("build", 1.0, True),
+            telemetry.log_benchmark,
+            telemetry.log_model_load,
+            telemetry.log_inference,
+            lambda: telemetry.log_error("RuntimeError", "boom"),
+        )
+
+        for emit in emitters:
+            telemetry._emit.reset_mock()
+            emit()
+            attributes = telemetry._emit.call_args.args[1]
+            self.assertFalse(any("_" in key for key in attributes), attributes)
 
 
 class TestActionDecorator(_HermeticTelemetryTestCase):
@@ -1348,6 +1406,7 @@ class TestShutdownSafety(unittest.TestCase):
 
         telemetry = object.__new__(GenAITelemetry)
         telemetry._instrumentation_key = "abc-def"
+        telemetry._telemetry_disabled = False
         telemetry._enabled = False
         telemetry._store = MagicMock()
         telemetry._uploader = MagicMock(_send_timeout=10.0)

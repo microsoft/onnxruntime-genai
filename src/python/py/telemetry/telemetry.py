@@ -28,7 +28,7 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
-from .deviceid import get_encrypted_device_id_and_status, get_telemetry_base_dir
+from .deviceid import get_hashed_device_id_and_status, get_telemetry_base_dir
 from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
 from .offline_store import OfflineEventStore
@@ -170,7 +170,7 @@ class GenAITelemetry:
                 self._enabled = False
                 return
 
-            self._app_instance_id = uuid.uuid4().hex
+            self._app_session_guid = str(uuid.uuid4())
 
             try:
                 self._app_version = _get_app_version()
@@ -215,9 +215,9 @@ class GenAITelemetry:
             return
         try:
             data = {
-                "app_name": self._app_name,
-                "app_version": self._app_version,
-                "app_instance_id": self._app_instance_id,
+                "appName": self._app_name,
+                "appVersion": self._app_version,
+                "appSessionGuid": self._app_session_guid,
             }
             if attributes:
                 data.update(attributes)
@@ -241,29 +241,29 @@ class GenAITelemetry:
 
     def _build_heartbeat_attributes(self) -> dict[str, Any]:
         """Collect device-id + system info for the heartbeat event."""
-        device_id, id_status = get_encrypted_device_id_and_status()
+        device_id, id_status = get_hashed_device_id_and_status()
         sys_info = get_system_info()
         ep_info = get_execution_provider_info()
         return {
-            "device_id": device_id,
-            "device_id_status": id_status.value,
+            "deviceId": device_id,
+            "deviceIdStatus": id_status.value,
             "os": sys_info.get("os", ""),
-            "os_version": sys_info.get("os_version", ""),
-            "os_release": sys_info.get("os_release", ""),
-            "os_arch": sys_info.get("os_arch", ""),
-            "processor_count": sys_info.get("processor_count", 0),
-            "cpu_model": sys_info.get("cpu_model", ""),
-            "total_memory_mb": sys_info.get("total_memory_mb", 0),
-            "gpu_name": sys_info.get("gpu_name", ""),
-            "gpu_driver_version": sys_info.get("gpu_driver_version", ""),
-            "gpu_memory_mb": sys_info.get("gpu_memory_mb", 0),
-            "gpu_count": sys_info.get("gpu_count", 0),
-            "device_manufacturer": sys_info.get("device_manufacturer", ""),
-            "device_model": sys_info.get("device_model", ""),
-            "python_version": sys_info.get("python_version", ""),
-            "ort_version": sys_info.get("ort_version", ""),
-            "process_name": sys_info.get("process_name", ""),
-            "available_providers": ",".join(ep_info.get("available_providers", [])),
+            "osVersion": sys_info.get("os_version", ""),
+            "osRelease": sys_info.get("os_release", ""),
+            "osArchitecture": sys_info.get("os_arch", ""),
+            "processorCount": sys_info.get("processor_count", 0),
+            "cpuModel": sys_info.get("cpu_model", ""),
+            "totalMemoryMB": sys_info.get("total_memory_mb", 0),
+            "gpuName": sys_info.get("gpu_name", ""),
+            "gpuDriverVersion": sys_info.get("gpu_driver_version", ""),
+            "gpuMemoryMB": sys_info.get("gpu_memory_mb", 0),
+            "gpuCount": sys_info.get("gpu_count", 0),
+            "deviceManufacturer": sys_info.get("device_manufacturer", ""),
+            "deviceModel": sys_info.get("device_model", ""),
+            "pythonVersion": sys_info.get("python_version", ""),
+            "ortVersion": sys_info.get("ort_version", ""),
+            "processName": sys_info.get("process_name", ""),
+            "availableProviders": ",".join(ep_info.get("available_providers", [])),
         }
 
     def _send_heartbeat(self) -> None:
@@ -272,9 +272,9 @@ class GenAITelemetry:
             return
         try:
             data = {
-                "app_name": self._app_name,
-                "app_version": self._app_version,
-                "app_instance_id": self._app_instance_id,
+                "appName": self._app_name,
+                "appVersion": self._app_version,
+                "appSessionGuid": self._app_session_guid,
             }
             data.update(self._build_heartbeat_attributes())
             envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
@@ -327,28 +327,28 @@ class GenAITelemetry:
         try:
             attributes = {
                 "action": action,
-                "duration_ms": duration_ms,
+                "durationMs": duration_ms,
                 "success": success,
-                "model_name": _redact_paths(model_name),
-                "model_type": model_type,
-                "hidden_size": hidden_size,
-                "num_layers": num_layers,
-                "num_attn_heads": num_attn_heads,
-                "num_kv_heads": num_kv_heads,
-                "vocab_size": vocab_size,
-                "context_length": context_length,
-                "io_dtype": io_dtype,
-                "quant_type": quant_type,
-                "execution_provider": execution_provider,
-                "output_model_size_bytes": output_model_size_bytes,
-                "num_onnx_operators": num_onnx_operators,
-                "operator_types": operator_types,
-                "has_custom_ops": has_custom_ops,
-                "source_format": source_format,
-                "has_adapter": has_adapter,
+                "modelName": _redact_paths(model_name),
+                "modelType": model_type,
+                "hiddenSize": hidden_size,
+                "numLayers": num_layers,
+                "numAttentionHeads": num_attn_heads,
+                "numKeyValueHeads": num_kv_heads,
+                "vocabSize": vocab_size,
+                "contextLength": context_length,
+                "ioDtype": io_dtype,
+                "quantType": quant_type,
+                "executionProvider": execution_provider,
+                "outputModelSizeBytes": output_model_size_bytes,
+                "numOnnxOperators": num_onnx_operators,
+                "operatorTypes": operator_types,
+                "hasCustomOps": has_custom_ops,
+                "sourceFormat": source_format,
+                "hasAdapter": has_adapter,
             }
             if extra_options:
-                attributes["extra_options"] = scrub_value_for_telemetry(extra_options)
+                attributes["extraOptions"] = scrub_value_for_telemetry(extra_options)
             self._emit(MODEL_BUILD_EVENT, attributes)
         except Exception:
             return
@@ -381,26 +381,26 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": _redact_paths(model_name),
+                "modelName": _redact_paths(model_name),
                 "precision": precision,
                 "backend": backend,
                 "device": device,
-                "batch_size": batch_size,
-                "prompt_length": prompt_length,
-                "tokens_generated": tokens_generated,
-                "tokenization_latency_ms": tokenization_latency_ms,
-                "tokenization_throughput": tokenization_throughput,
-                "prompt_processing_latency_ms": prompt_processing_latency_ms,
-                "prompt_processing_throughput": prompt_processing_throughput,
-                "token_generation_latency_ms": token_generation_latency_ms,
-                "token_generation_throughput": token_generation_throughput,
-                "sampling_latency_ms": sampling_latency_ms,
-                "sampling_throughput": sampling_throughput,
-                "wall_clock_time_ms": wall_clock_time_ms,
-                "wall_clock_throughput": wall_clock_throughput,
-                "time_to_first_token_ms": time_to_first_token_ms,
-                "peak_memory_gpu_mb": peak_memory_gpu_mb,
-                "peak_memory_cpu_mb": peak_memory_cpu_mb,
+                "batchSize": batch_size,
+                "promptLength": prompt_length,
+                "tokensGenerated": tokens_generated,
+                "tokenizationLatencyMs": tokenization_latency_ms,
+                "tokenizationThroughput": tokenization_throughput,
+                "promptProcessingLatencyMs": prompt_processing_latency_ms,
+                "promptProcessingThroughput": prompt_processing_throughput,
+                "tokenGenerationLatencyMs": token_generation_latency_ms,
+                "tokenGenerationThroughput": token_generation_throughput,
+                "samplingLatencyMs": sampling_latency_ms,
+                "samplingThroughput": sampling_throughput,
+                "wallClockTimeMs": wall_clock_time_ms,
+                "wallClockThroughput": wall_clock_throughput,
+                "timeToFirstTokenMs": time_to_first_token_ms,
+                "peakGpuMemoryMB": peak_memory_gpu_mb,
+                "peakCpuMemoryMB": peak_memory_cpu_mb,
             }
             self._emit(BENCHMARK_EVENT, attributes)
         except Exception:
@@ -420,12 +420,12 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": _redact_paths(model_name),
-                "model_type": model_type,
-                "execution_provider": execution_provider,
-                "total_load_time_ms": total_load_time_ms,
-                "num_sessions": num_sessions,
-                "model_file_size_bytes": model_file_size_bytes,
+                "modelName": _redact_paths(model_name),
+                "modelType": model_type,
+                "executionProvider": execution_provider,
+                "totalLoadTimeMs": total_load_time_ms,
+                "numSessions": num_sessions,
+                "modelFileSizeBytes": model_file_size_bytes,
             }
             self._emit(MODEL_LOAD_EVENT, attributes)
         except Exception:
@@ -448,15 +448,15 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "model_name": _redact_paths(model_name),
-                "model_type": model_type,
-                "execution_provider": execution_provider,
-                "time_to_first_token_ms": time_to_first_token_ms,
-                "total_generation_time_ms": total_generation_time_ms,
-                "total_tokens_generated": total_tokens_generated,
-                "input_token_count": input_token_count,
-                "memory_used_mb": memory_used_mb,
-                "gpu_memory_used_mb": gpu_memory_used_mb,
+                "modelName": _redact_paths(model_name),
+                "modelType": model_type,
+                "executionProvider": execution_provider,
+                "timeToFirstTokenMs": time_to_first_token_ms,
+                "totalGenerationTimeMs": total_generation_time_ms,
+                "totalTokensGenerated": total_tokens_generated,
+                "inputTokenCount": input_token_count,
+                "memoryUsedMB": memory_used_mb,
+                "gpuMemoryUsedMB": gpu_memory_used_mb,
             }
             self._emit(INFERENCE_EVENT, attributes)
         except Exception:
@@ -475,11 +475,11 @@ class GenAITelemetry:
             return
         try:
             attributes = {
-                "exception_type": exception_type,
-                "exception_message": _redact_error_message(exception_message),
+                "exceptionType": exception_type,
+                "exceptionMessage": _redact_error_message(exception_message),
                 "action": action,
-                "model_name": _redact_paths(model_name),
-                "execution_provider": execution_provider,
+                "modelName": _redact_paths(model_name),
+                "executionProvider": execution_provider,
             }
             self._emit(ERROR_EVENT, attributes)
         except Exception:
