@@ -182,17 +182,17 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     memory_monitor = _MemoryMonitor()
 
+    monitor_threads = [threading.Thread(target=monitor_cpu_memory, args=(memory_monitor,))]
     if IS_NVIDIA_SYSTEM:
-        monitor_thread = threading.Thread(target=monitor_gpu_memory, args=(memory_monitor,))
-    else:
-        monitor_thread = threading.Thread(target=monitor_cpu_memory, args=(memory_monitor,))
-
-    monitor_thread.start()
+        monitor_threads.append(threading.Thread(target=monitor_gpu_memory, args=(memory_monitor,)))
+    for monitor_thread in monitor_threads:
+        monitor_thread.start()
     try:
         metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length, memory_monitor)
     finally:
         memory_monitor.stop.set()
-        monitor_thread.join()
+        for monitor_thread in monitor_threads:
+            monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
         metrics.append(memory_monitor.peak_gpu_memory)
