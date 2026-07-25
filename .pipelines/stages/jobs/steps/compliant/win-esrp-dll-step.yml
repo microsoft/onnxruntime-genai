@@ -5,15 +5,12 @@ parameters:
 
 - name: FolderPath
   type: string
-  default: ''
 
 - name: DisplayName
   type: string
-  default: ''
 
 - name: Pattern
   type: string
-  default: '*.dll'
 
 steps:
 - task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@5
@@ -90,7 +87,7 @@ steps:
           $pattern=$pattern_original.Trim()
           Write-Host "Validating pattern:" $pattern
 
-          $file_names=Get-ChildItem -Path ${{ parameters.FolderPath }} .\$pattern -Name -Recurse -Force
+          $file_names=Get-ChildItem -Path ${{ parameters.FolderPath }} ./$pattern -Name -Recurse -Force
 
           foreach($file in $file_names)
           {
