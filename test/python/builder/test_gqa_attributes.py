@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
@@ -56,9 +57,36 @@ class _FakeGQAModel:
         pass
 
 
+def _make_mock_ort(version: str) -> MagicMock:
+    """Return a minimal onnxruntime mock with the given __version__."""
+    mock = MagicMock()
+    mock.__version__ = version
+    return mock
+
+
 def test_cpu_does_not_enable_fused_qk_norm_gqa_by_default():
+    # CPU always returns False regardless of ORT version.
     assert not _FakeGQAModel("cpu").is_fused_qk_norm_gqa_supported()
-    assert _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
+
+
+def test_cuda_enables_fused_qk_norm_gqa_on_ort_1_28_plus():
+    # Fused QK-norm GQA requires at least ORT 1.28.0 (max 14 GQA inputs in earlier versions).
+    mock_ort = _make_mock_ort("1.28.0")
+    with patch.dict(sys.modules, {"onnxruntime": mock_ort}):
+        assert _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
+
+
+def test_cuda_disables_fused_qk_norm_gqa_on_ort_1_26():
+    # ORT 1.26.0 (and 1.27.0) only allow up to 14 GQA inputs; fused path needs 16 → must fall back.
+    mock_ort = _make_mock_ort("1.26.0")
+    with patch.dict(sys.modules, {"onnxruntime": mock_ort}):
+        assert not _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
+
+
+def test_cuda_disables_fused_qk_norm_gqa_on_ort_1_27():
+    mock_ort = _make_mock_ort("1.27.0")
+    with patch.dict(sys.modules, {"onnxruntime": mock_ort}):
+        assert not _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
 
 
 def test_plain_gqa_omits_qk_norm_epsilon_attribute():
@@ -71,15 +99,16 @@ def test_plain_gqa_omits_qk_norm_epsilon_attribute():
 
 def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():
     model = _FakeGQAModel("cuda")
-
-    model.make_group_query_attention(
-        "/gqa",
-        q_path="q",
-        k_path="k",
-        v_path="v",
-        q_norm_weight="q_norm_weight",
-        k_norm_weight="k_norm_weight",
-    )
+    mock_ort = _make_mock_ort("1.28.0")
+    with patch.dict(sys.modules, {"onnxruntime": mock_ort}):
+        model.make_group_query_attention(
+            "/gqa",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            q_norm_weight="q_norm_weight",
+            k_norm_weight="k_norm_weight",
+        )
 
     assert model.nodes[-1]["attributes"]["qk_norm_epsilon"] == 1e-6
 

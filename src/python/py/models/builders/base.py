@@ -516,6 +516,19 @@ class Model:
         return self.ep not in ["dml"]
 
     def is_fused_qk_norm_gqa_supported(self):
+        # Fused QK-norm GQA (q_norm_weight and k_norm_weight as extra GQA inputs at positions
+        # 14-15) requires ORT >= 1.28.0.  Earlier releases only allow up to 14 GQA inputs
+        # (schema error: "input size 16 not in range [min=7, max=14]").  Fall back to the
+        # non-fused path (separate SimplifiedLayerNormalization nodes) on older runtimes.
+        try:
+            import onnxruntime as ort  # noqa: PLC0415
+            from packaging.version import Version  # noqa: PLC0415
+
+            if Version(ort.__version__) < Version("1.28.0"):
+                return False
+        except Exception:
+            pass  # If onnxruntime or packaging is unavailable, assume the feature is supported
+
         return (
             self.attention_attrs["op_type"] == "GroupQueryAttention"
             and self.ep in {"cuda", "webgpu"}
