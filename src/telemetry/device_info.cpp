@@ -780,31 +780,6 @@ std::string GetOrCreatePersistentDeviceId(DeviceIdStatus& status) {
 #endif  // _WIN32
 }
 
-// Host executable name (basename only, never the full path — the path could embed a user name). Used
-// to understand which applications embed onnxruntime-genai. Mirrors ONNX Runtime's processName.
-std::string GetProcessName() {
-#if defined(_WIN32)
-  char path[MAX_PATH]{};
-  const DWORD n = GetModuleFileNameA(nullptr, path, static_cast<DWORD>(sizeof(path)));
-  if (n == 0) return "unknown";
-  const std::string full(path, n);
-  const size_t slash = full.find_last_of("\\/");
-  return slash == std::string::npos ? full : full.substr(slash + 1);
-#elif defined(__APPLE__)
-  const char* name = getprogname();
-  return name != nullptr ? std::string(name) : "unknown";
-#else  // Linux / other POSIX
-  // /proc/self/cmdline holds the null-separated argv; argv[0]'s basename is the executable name.
-  std::ifstream cmdline("/proc/self/cmdline", std::ios::binary);
-  std::string arg0;
-  if (cmdline && std::getline(cmdline, arg0, '\0') && !arg0.empty()) {
-    const size_t slash = arg0.find_last_of('/');
-    return slash == std::string::npos ? arg0 : arg0.substr(slash + 1);
-  }
-  return "unknown";
-#endif
-}
-
 bool UsePlatformDeviceId() {
 #if defined(__ANDROID__)
   return true;
@@ -845,7 +820,6 @@ const DeviceInfo& GetDeviceInfo() {
     di.processor_count = GetProcessorCount();
     di.total_memory_mb = GetTotalMemoryMB();
     di.cpu_model = GetCpuModel();
-    di.process_name = GetProcessName();
     return di;
   }();
   return info;

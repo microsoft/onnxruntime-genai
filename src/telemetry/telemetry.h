@@ -142,6 +142,9 @@ class GenAiTelemetry {
     auto lock = LockForLogging(require_enabled);
     if (!lock) return;
     try {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+      if (require_enabled) SuppressNetworkContext();
+#endif
       std::forward<Fn>(fn)();
     } catch (...) {
       // Telemetry must never affect host control flow.
@@ -149,9 +152,13 @@ class GenAiTelemetry {
   }
 
   struct Impl;
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  void SuppressNetworkContext();
+#endif
   std::unique_ptr<Impl> impl_;
   std::atomic<bool> enabled_{true};
   std::atomic<bool> telemetry_disabled_{false};
+  std::atomic<bool> network_context_suppressed_{false};
   std::atomic<bool> initialized_{false};
   std::atomic<bool> process_info_logged_{false};
 #if defined(__ANDROID__)
@@ -159,6 +166,7 @@ class GenAiTelemetry {
 #endif
   std::atomic<uint32_t> next_session_id_{1};
   std::string app_session_guid_;  // Tier 1 identity: process-wide GUID (logger context)
+  std::mutex semantic_context_mutex_;
   std::shared_mutex mutex_;
 };
 

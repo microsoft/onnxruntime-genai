@@ -3,6 +3,7 @@
 
 #include "telemetry.h"
 #include "device_info.h"
+#include "telemetry_context.h"
 #include "telemetry_environment.h"
 #include "telemetry_redaction.h"
 #include "telemetry_sampling.h"
@@ -234,6 +235,8 @@ void GenAiTelemetry::Initialize() {
       release_pending();
       return;
     }
+    TelemetryInternal::SuppressUnneededCommonContext(
+        *pending_impl->logger->GetSemanticContext());
     pending_impl->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
 
     // Process-wide AppSessionGuid stamped on every event as logger context (not a
@@ -242,7 +245,6 @@ void GenAiTelemetry::Initialize() {
     // per-event sessionId / generatorId counters globally unique.
     if (app_session_guid_.empty()) app_session_guid_ = GenerateGuidV4();
     pending_impl->logger->SetContext("AppSessionGuid", app_session_guid_);
-    pending_impl->logger->SetContext("LibraryName", "ONNXRuntimeGenAI");
     pending_impl->logger->SetContext("LibraryVersion", ORTGENAI_VERSION);
 
     const auto& device = GetDeviceInfo();
@@ -252,6 +254,7 @@ void GenAiTelemetry::Initialize() {
       pending_impl->logger->GetSemanticContext()->SetDeviceId(device.device_id);
     }
 
+    network_context_suppressed_.store(false);
     impl_ = std::move(pending_impl);
     initialized_.store(true);
   } catch (...) {
@@ -312,6 +315,16 @@ uint32_t GenAiTelemetry::AllocateSessionId() {
 }
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+void GenAiTelemetry::SuppressNetworkContext() {
+  if (network_context_suppressed_.load()) return;
+
+  std::lock_guard<std::mutex> context_lock(semantic_context_mutex_);
+  if (network_context_suppressed_.load()) return;
+
+  TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
+  network_context_suppressed_.store(true);
+}
+
 std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if ((require_enabled && !enabled_.load()) || !initialized_.load() || !impl_ || !impl_->logger)
@@ -350,7 +363,6 @@ void GenAiTelemetry::LogProcessInfo() {
     event.SetProperty("processorCount", static_cast<int64_t>(device.processor_count));
     event.SetProperty("totalMemoryMB", static_cast<int64_t>(device.total_memory_mb));
     event.SetProperty("cpuModel", device.cpu_model);
-    event.SetProperty("processName", device.process_name);
     event.SetProperty("deviceIdStatus", device.device_id_status);
 
     impl_->logger->LogEvent(event);
