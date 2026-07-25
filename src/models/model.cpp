@@ -37,15 +37,6 @@
 #include "../ryzenai/interface.h"
 #include "session_options.h"
 
-#if defined(_WIN32)
-#include <direct.h>
-#define GETCWD _getcwd
-#else
-#include <unistd.h>
-#define GETCWD getcwd
-#include <limits.h>
-#endif
-
 namespace Generators {
 
 namespace {
@@ -704,18 +695,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
                 break;
               }
             }
-          }
-        }
-      }
-
-      // Third try: resolve relative to current working directory (for development/portable apps)
-      if (!resolved) {
-        char cwd_buffer[PATH_MAX];
-        if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
-          fs::path cwd_relative_path = fs::path(cwd_buffer) / custom_library_path;
-          if (fs::exists(cwd_relative_path)) {
-            custom_library_file_prefix = cwd_relative_path.string();
-            resolved = true;
           }
         }
       }
