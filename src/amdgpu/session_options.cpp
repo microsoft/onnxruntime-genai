@@ -40,6 +40,9 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // Umbrella-level hint: the model architecture drives the EP's backend routing.
   session_options.AddConfigEntry("ep.amdgpuexecutionprovider.model_arch", config.model.type.c_str());
 
+  // DirectML backend: host-accessible decode inputs.
+  session_options.AddConfigEntry("ep.directml.enable_host_accessible", "1");
+
   AppendExecutionProviderV2(session_options, provider_options,
                             DeviceType::AMDGPU, "AMDGPUExecutionProvider");
 
