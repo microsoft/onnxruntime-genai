@@ -26,7 +26,7 @@ def _source_path():
 
 try:
     from onnxruntime_genai.telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
-except ModuleNotFoundError:
+except ImportError:
     with _source_path():
         from telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
 
@@ -35,7 +35,7 @@ def get_telemetry():
     """Create telemetry from either the installed wheel or repository source."""
     try:
         from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
-    except ModuleNotFoundError:
+    except ImportError:
         with _source_path():
             from telemetry import GenAITelemetry  # noqa: PLC0415
 
