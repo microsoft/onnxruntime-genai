@@ -109,6 +109,7 @@ struct DeviceInterface {
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
