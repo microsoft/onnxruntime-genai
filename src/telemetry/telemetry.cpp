@@ -235,8 +235,10 @@ void GenAiTelemetry::Initialize() {
       release_pending();
       return;
     }
-    TelemetryInternal::SuppressUnneededCommonContext(
-        *pending_impl->logger->GetSemanticContext());
+    (void)TelemetryInternal::TrySuppressContext([&]() {
+      TelemetryInternal::SuppressUnneededCommonContext(
+          *pending_impl->logger->GetSemanticContext());
+    });
     pending_impl->log_manager->SetTransmitProfile(MAT::TransmitProfile_BestEffort);
 
     // Process-wide AppSessionGuid stamped on every event as logger context (not a
@@ -321,8 +323,11 @@ void GenAiTelemetry::SuppressNetworkContext() {
   std::lock_guard<std::mutex> context_lock(semantic_context_mutex_);
   if (network_context_suppressed_.load()) return;
 
-  TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
-  network_context_suppressed_.store(true);
+  if (TelemetryInternal::TrySuppressContext([&]() {
+        TelemetryInternal::SuppressNetworkContext(*impl_->logger->GetSemanticContext());
+      })) {
+    network_context_suppressed_.store(true);
+  }
 }
 
 std::shared_lock<std::shared_mutex> GenAiTelemetry::LockForLogging(bool require_enabled) {

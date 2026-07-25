@@ -4,6 +4,7 @@
 #include "telemetry/telemetry_context.h"
 
 #include <map>
+#include <stdexcept>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -27,7 +28,8 @@ class RecordingSemanticContext {
 
 TEST(TelemetryContextTests, SuppressesUnneededCommonContext) {
   RecordingSemanticContext context;
-  TelemetryInternal::SuppressUnneededCommonContext(context);
+  EXPECT_TRUE(TelemetryInternal::TrySuppressContext(
+      [&]() { TelemetryInternal::SuppressUnneededCommonContext(context); }));
 
   ASSERT_EQ(context.Fields().size(), TelemetryInternal::kSuppressedCommonContextFields.size());
   for (const char* field : TelemetryInternal::kSuppressedCommonContextFields) {
@@ -37,12 +39,18 @@ TEST(TelemetryContextTests, SuppressesUnneededCommonContext) {
 
 TEST(TelemetryContextTests, SuppressesNetworkContextAfterProcessInfo) {
   RecordingSemanticContext context;
-  TelemetryInternal::SuppressNetworkContext(context);
+  EXPECT_TRUE(TelemetryInternal::TrySuppressContext(
+      [&]() { TelemetryInternal::SuppressNetworkContext(context); }));
 
   ASSERT_EQ(context.Fields().size(), TelemetryInternal::kProcessInfoOnlyNetworkContextFields.size());
   for (const char* field : TelemetryInternal::kProcessInfoOnlyNetworkContextFields) {
     EXPECT_EQ(context.Fields().at(field), "");
   }
+}
+
+TEST(TelemetryContextTests, SuppressionFailureIsBestEffort) {
+  EXPECT_FALSE(TelemetryInternal::TrySuppressContext(
+      []() { throw std::runtime_error("context unavailable"); }));
 }
 
 }  // namespace

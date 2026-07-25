@@ -5,6 +5,7 @@
 
 #include <array>
 #include <string>
+#include <utility>
 
 namespace Generators::TelemetryInternal {
 
@@ -26,6 +27,16 @@ inline constexpr std::array<const char*, 3> kProcessInfoOnlyNetworkContextFields
 
 // ext.sdk.* is populated by a separate decorator. Keep it intact because epoch/sequence are
 // per-event SDK ordering metadata and the public SDK has no field-level suppression control.
+
+template <typename Suppression>
+bool TrySuppressContext(Suppression&& suppression) noexcept {
+  try {
+    std::forward<Suppression>(suppression)();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
 
 template <typename SemanticContext>
 void SuppressUnneededCommonContext(SemanticContext& context) {
