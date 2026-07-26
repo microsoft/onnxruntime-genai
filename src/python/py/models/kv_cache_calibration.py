@@ -50,7 +50,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -59,104 +58,141 @@ logger = logging.getLogger(__name__)
 # Diverse, long-form corpus spanning MMLU-ish domains (STEM, humanities, social science,
 # reasoning). Passages are concatenated and sliced to TARGET_SEQ tokens so calibration covers
 # the same post-RoPE position range that the eval context length exercises.
-CORPUS = [
-    "The theory of general relativity, formulated by Albert Einstein in 1915, describes gravity "
-    "not as a force but as the curvature of spacetime caused by mass and energy. Massive objects "
-    "such as stars and planets warp the geometry of spacetime, and this curvature dictates how "
-    "other objects move. The theory predicted phenomena such as the bending of light by gravity, "
-    "the precession of Mercury's orbit, gravitational time dilation, and the existence of black "
-    "holes and gravitational waves, all of which have since been confirmed experimentally.",
-    "In computer science, a hash table is a data structure that implements an associative array, "
-    "mapping keys to values using a hash function to compute an index into an array of buckets. "
-    "Collisions, where two keys hash to the same bucket, are resolved by chaining or open "
-    "addressing. Under reasonable assumptions the average cost of lookup, insertion, and deletion "
-    "is constant time, which makes hash tables one of the most widely used structures in practice, "
-    "underpinning database indexes, caches, symbol tables in compilers, and set membership tests.",
-    "Photosynthesis is the process by which green plants, algae, and some bacteria convert "
-    "sunlight, water, and carbon dioxide into glucose and oxygen. It occurs in two stages: the "
-    "light-dependent reactions in the thylakoid membranes, which capture energy and produce ATP "
-    "and NADPH, and the Calvin cycle in the stroma, which fixes carbon dioxide into sugars. "
-    "Chlorophyll absorbs light most strongly in the blue and red parts of the spectrum, reflecting "
-    "green light, which is why leaves appear green to the human eye under normal daylight.",
-    "The French Revolution began in 1789 and led to the end of the absolute monarchy, the rise of "
-    "radical political factions such as the Jacobins, the Reign of Terror, and ultimately the "
-    "ascent of Napoleon Bonaparte. It was driven by financial crisis, Enlightenment ideas about "
-    "popular sovereignty and natural rights, and deep resentment of aristocratic privilege. The "
-    "Declaration of the Rights of Man proclaimed liberty, equality, and fraternity, principles that "
-    "reshaped European politics and inspired revolutionary and nationalist movements worldwide.",
-    "Quantum mechanics is the branch of physics that studies matter and energy at the scale of "
-    "atoms and subatomic particles, where classical intuitions break down. Particles exhibit both "
-    "wave and particle behavior, quantities such as energy are quantized, and the act of "
-    "measurement affects the system. The Heisenberg uncertainty principle sets a fundamental limit "
-    "on the simultaneous knowledge of position and momentum, while the Schrodinger equation "
-    "governs how the wavefunction, encoding the probabilities of outcomes, evolves over time.",
-    "In economics, supply and demand describe how prices are determined in a competitive market. "
-    "The demand curve slopes downward because consumers buy more of a good at lower prices, while "
-    "the supply curve slopes upward because producers supply more at higher prices. The equilibrium "
-    "price occurs where the two curves intersect, clearing the market. Shifts in demand or supply, "
-    "caused by changes in income, preferences, technology, or input costs, move the equilibrium and "
-    "explain phenomena such as shortages, surpluses, and the effects of taxes and price controls.",
-    "The human circulatory system transports oxygen, nutrients, hormones, and waste products "
-    "throughout the body. The heart, a muscular pump, drives blood through arteries, capillaries, "
-    "and veins. Oxygenated blood leaves the left ventricle through the aorta to the tissues, while "
-    "deoxygenated blood returns to the right side of the heart and is pumped to the lungs for gas "
-    "exchange. Red blood cells carry oxygen bound to hemoglobin, and the coordinated contraction of "
-    "cardiac muscle is regulated by electrical signals originating in the sinoatrial node.",
-    "Machine learning models learn patterns from data by minimizing a loss function through "
-    "iterative optimization such as gradient descent, generalizing from training examples to unseen "
-    "inputs. Overfitting occurs when a model memorizes noise in the training set and fails to "
-    "generalize; it is mitigated by regularization, early stopping, dropout, and larger or more "
-    "diverse datasets. The bias-variance tradeoff captures the tension between models that are too "
-    "simple to fit the data and models so flexible that they are sensitive to sampling noise.",
-    "In organic chemistry, the carbon atom's ability to form four covalent bonds allows it to build "
-    "long chains, branched structures, and rings, giving rise to the vast diversity of organic "
-    "molecules. Functional groups such as hydroxyl, carbonyl, carboxyl, and amino groups determine "
-    "the chemical reactivity and physical properties of compounds. Isomers share a molecular formula "
-    "but differ in connectivity or spatial arrangement, and stereochemistry, including chirality, "
-    "profoundly affects how molecules interact with biological systems such as enzymes and receptors.",
-    "The United States Constitution, ratified in 1788, establishes a federal system that divides "
-    "power between the national government and the states, and separates the national government "
-    "into legislative, executive, and judicial branches. A system of checks and balances lets each "
-    "branch limit the others: Congress writes laws and controls spending, the President enforces "
-    "laws and commands the military, and the courts interpret laws and can strike down those that "
-    "violate the Constitution. The Bill of Rights guarantees fundamental liberties such as speech.",
-    "Plate tectonics is the theory that Earth's rigid outer shell, the lithosphere, is divided into "
-    "plates that move slowly over the more fluid asthenosphere beneath. At divergent boundaries "
-    "plates pull apart and new crust forms; at convergent boundaries plates collide, producing "
-    "mountains, volcanoes, and deep ocean trenches through subduction; and at transform boundaries "
-    "plates slide past one another, generating earthquakes. This unifying theory explains the "
-    "distribution of continents, the pattern of seismic activity, and the geologic history of Earth.",
-    "In probability theory, the central limit theorem states that the sum or average of a large "
-    "number of independent, identically distributed random variables tends toward a normal "
-    "distribution, regardless of the underlying distribution, provided the variance is finite. This "
-    "result explains why the bell curve appears so often in nature and underpins much of statistical "
-    "inference, including confidence intervals and hypothesis tests. The standard deviation of the "
-    "sample mean shrinks in proportion to the inverse square root of the sample size as data grows.",
-    "The Industrial Revolution, beginning in Britain in the late eighteenth century, transformed "
-    "economies from agrarian and handcraft production to machine-based manufacturing. Innovations "
-    "such as the steam engine, the power loom, and improvements in iron and steel production raised "
-    "productivity dramatically. Urbanization accelerated as workers moved to factory towns, living "
-    "standards eventually rose, and new social classes emerged. The period also brought harsh labor "
-    "conditions, child labor, and pollution, prompting reform movements, labor unions, and new laws.",
-    "In cell biology, mitochondria are membrane-bound organelles that generate most of the cell's "
-    "supply of adenosine triphosphate, used as chemical energy. Through oxidative phosphorylation, "
-    "electrons are passed along a chain of protein complexes in the inner membrane, pumping protons "
-    "to create a gradient that drives ATP synthase. Mitochondria possess their own circular DNA and "
-    "are thought to have originated from an ancient endosymbiotic bacterium, a hypothesis supported "
-    "by their double membrane, independent replication, and similarities to modern prokaryotes.",
-    "Linguistics is the scientific study of language and its structure, encompassing phonetics, "
-    "phonology, morphology, syntax, semantics, and pragmatics. Phonology studies sound systems, "
-    "morphology the structure of words, syntax the rules that combine words into sentences, and "
-    "semantics the meaning conveyed. Languages change over time through sound shifts, borrowing, and "
-    "grammaticalization, and comparative methods reconstruct ancestral languages. Chomsky's theory "
-    "of universal grammar proposed that humans share an innate capacity underlying all languages.",
-    "The greenhouse effect is the process by which certain gases in a planet's atmosphere, such as "
-    "carbon dioxide, methane, and water vapor, trap heat by absorbing and re-emitting infrared "
-    "radiation. This natural effect keeps Earth warm enough to support life, but human activities "
-    "since the Industrial Revolution have increased greenhouse gas concentrations, enhancing the "
-    "effect and driving global warming. Consequences include rising sea levels, more frequent "
-    "extreme weather, ocean acidification, and shifts in ecosystems and agricultural patterns.",
+# Each passage is a single triple-quoted block; the line breaks below exist only for
+# readability and are collapsed to single spaces when CORPUS is built.
+_CORPUS_PASSAGES = [
+    """
+    The theory of general relativity, formulated by Albert Einstein in 1915, describes gravity
+    not as a force but as the curvature of spacetime caused by mass and energy. Massive objects
+    such as stars and planets warp the geometry of spacetime, and this curvature dictates how
+    other objects move. The theory predicted phenomena such as the bending of light by gravity,
+    the precession of Mercury's orbit, gravitational time dilation, and the existence of black
+    holes and gravitational waves, all of which have since been confirmed experimentally.
+    """,
+    """
+    In computer science, a hash table is a data structure that implements an associative array,
+    mapping keys to values using a hash function to compute an index into an array of buckets.
+    Collisions, where two keys hash to the same bucket, are resolved by chaining or open
+    addressing. Under reasonable assumptions the average cost of lookup, insertion, and deletion
+    is constant time, which makes hash tables one of the most widely used structures in practice,
+    underpinning database indexes, caches, symbol tables in compilers, and set membership tests.
+    """,
+    """
+    Photosynthesis is the process by which green plants, algae, and some bacteria convert
+    sunlight, water, and carbon dioxide into glucose and oxygen. It occurs in two stages: the
+    light-dependent reactions in the thylakoid membranes, which capture energy and produce ATP
+    and NADPH, and the Calvin cycle in the stroma, which fixes carbon dioxide into sugars.
+    Chlorophyll absorbs light most strongly in the blue and red parts of the spectrum, reflecting
+    green light, which is why leaves appear green to the human eye under normal daylight.
+    """,
+    """
+    The French Revolution began in 1789 and led to the end of the absolute monarchy, the rise of
+    radical political factions such as the Jacobins, the Reign of Terror, and ultimately the
+    ascent of Napoleon Bonaparte. It was driven by financial crisis, Enlightenment ideas about
+    popular sovereignty and natural rights, and deep resentment of aristocratic privilege. The
+    Declaration of the Rights of Man proclaimed liberty, equality, and fraternity, principles that
+    reshaped European politics and inspired revolutionary and nationalist movements worldwide.
+    """,
+    """
+    Quantum mechanics is the branch of physics that studies matter and energy at the scale of
+    atoms and subatomic particles, where classical intuitions break down. Particles exhibit both
+    wave and particle behavior, quantities such as energy are quantized, and the act of
+    measurement affects the system. The Heisenberg uncertainty principle sets a fundamental limit
+    on the simultaneous knowledge of position and momentum, while the Schrodinger equation
+    governs how the wavefunction, encoding the probabilities of outcomes, evolves over time.
+    """,
+    """
+    In economics, supply and demand describe how prices are determined in a competitive market.
+    The demand curve slopes downward because consumers buy more of a good at lower prices, while
+    the supply curve slopes upward because producers supply more at higher prices. The equilibrium
+    price occurs where the two curves intersect, clearing the market. Shifts in demand or supply,
+    caused by changes in income, preferences, technology, or input costs, move the equilibrium and
+    explain phenomena such as shortages, surpluses, and the effects of taxes and price controls.
+    """,
+    """
+    The human circulatory system transports oxygen, nutrients, hormones, and waste products
+    throughout the body. The heart, a muscular pump, drives blood through arteries, capillaries,
+    and veins. Oxygenated blood leaves the left ventricle through the aorta to the tissues, while
+    deoxygenated blood returns to the right side of the heart and is pumped to the lungs for gas
+    exchange. Red blood cells carry oxygen bound to hemoglobin, and the coordinated contraction of
+    cardiac muscle is regulated by electrical signals originating in the sinoatrial node.
+    """,
+    """
+    Machine learning models learn patterns from data by minimizing a loss function through
+    iterative optimization such as gradient descent, generalizing from training examples to unseen
+    inputs. Overfitting occurs when a model memorizes noise in the training set and fails to
+    generalize; it is mitigated by regularization, early stopping, dropout, and larger or more
+    diverse datasets. The bias-variance tradeoff captures the tension between models that are too
+    simple to fit the data and models so flexible that they are sensitive to sampling noise.
+    """,
+    """
+    In organic chemistry, the carbon atom's ability to form four covalent bonds allows it to build
+    long chains, branched structures, and rings, giving rise to the vast diversity of organic
+    molecules. Functional groups such as hydroxyl, carbonyl, carboxyl, and amino groups determine
+    the chemical reactivity and physical properties of compounds. Isomers share a molecular formula
+    but differ in connectivity or spatial arrangement, and stereochemistry, including chirality,
+    profoundly affects how molecules interact with biological systems such as enzymes and receptors.
+    """,
+    """
+    The United States Constitution, ratified in 1788, establishes a federal system that divides
+    power between the national government and the states, and separates the national government
+    into legislative, executive, and judicial branches. A system of checks and balances lets each
+    branch limit the others: Congress writes laws and controls spending, the President enforces
+    laws and commands the military, and the courts interpret laws and can strike down those that
+    violate the Constitution. The Bill of Rights guarantees fundamental liberties such as speech.
+    """,
+    """
+    Plate tectonics is the theory that Earth's rigid outer shell, the lithosphere, is divided into
+    plates that move slowly over the more fluid asthenosphere beneath. At divergent boundaries
+    plates pull apart and new crust forms; at convergent boundaries plates collide, producing
+    mountains, volcanoes, and deep ocean trenches through subduction; and at transform boundaries
+    plates slide past one another, generating earthquakes. This unifying theory explains the
+    distribution of continents, the pattern of seismic activity, and the geologic history of Earth.
+    """,
+    """
+    In probability theory, the central limit theorem states that the sum or average of a large
+    number of independent, identically distributed random variables tends toward a normal
+    distribution, regardless of the underlying distribution, provided the variance is finite. This
+    result explains why the bell curve appears so often in nature and underpins much of statistical
+    inference, including confidence intervals and hypothesis tests. The standard deviation of the
+    sample mean shrinks in proportion to the inverse square root of the sample size as data grows.
+    """,
+    """
+    The Industrial Revolution, beginning in Britain in the late eighteenth century, transformed
+    economies from agrarian and handcraft production to machine-based manufacturing. Innovations
+    such as the steam engine, the power loom, and improvements in iron and steel production raised
+    productivity dramatically. Urbanization accelerated as workers moved to factory towns, living
+    standards eventually rose, and new social classes emerged. The period also brought harsh labor
+    conditions, child labor, and pollution, prompting reform movements, labor unions, and new laws.
+    """,
+    """
+    In cell biology, mitochondria are membrane-bound organelles that generate most of the cell's
+    supply of adenosine triphosphate, used as chemical energy. Through oxidative phosphorylation,
+    electrons are passed along a chain of protein complexes in the inner membrane, pumping protons
+    to create a gradient that drives ATP synthase. Mitochondria possess their own circular DNA and
+    are thought to have originated from an ancient endosymbiotic bacterium, a hypothesis supported
+    by their double membrane, independent replication, and similarities to modern prokaryotes.
+    """,
+    """
+    Linguistics is the scientific study of language and its structure, encompassing phonetics,
+    phonology, morphology, syntax, semantics, and pragmatics. Phonology studies sound systems,
+    morphology the structure of words, syntax the rules that combine words into sentences, and
+    semantics the meaning conveyed. Languages change over time through sound shifts, borrowing, and
+    grammaticalization, and comparative methods reconstruct ancestral languages. Chomsky's theory
+    of universal grammar proposed that humans share an innate capacity underlying all languages.
+    """,
+    """
+    The greenhouse effect is the process by which certain gases in a planet's atmosphere, such as
+    carbon dioxide, methane, and water vapor, trap heat by absorbing and re-emitting infrared
+    radiation. This natural effect keeps Earth warm enough to support life, but human activities
+    since the Industrial Revolution have increased greenhouse gas concentrations, enhancing the
+    effect and driving global warming. Consequences include rising sea levels, more frequent
+    extreme weather, ocean acidification, and shifts in ecosystems and agricultural patterns.
+    """,
 ]
+
+CORPUS = [" ".join(passage.split()) for passage in _CORPUS_PASSAGES]
+
 
 def _get_quant_type_max(quant_type: str) -> float:
     """Return the qmax divisor for the given quant_type (int8/int4/fp8 prefix like int8_per_channel)."""
