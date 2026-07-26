@@ -57,6 +57,9 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
+    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # real, dependency-free modules rather than the catch-all above.
+    builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
 
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
@@ -164,6 +167,30 @@ def test_quantized_kv_cache_requires_group_query_attention():
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", op_type="MultiHeadAttention")
     with pytest.raises(ValueError, match="requires GroupQueryAttention"):
         model.make_quantized_kv_cache_init()
+
+
+@pytest.mark.parametrize("ep", ["webgpu", "dml", "trt-rtx"])
+def test_quantized_kv_cache_init_rejects_unsupported_ep(ep):
+    # `check_extra_options` only guards the CLI path, so the builder itself must also reject
+    # unsupported EPs for direct `create_model()` callers.
+    model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", ep=ep)
+    with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
+        model.make_quantized_kv_cache_init()
+
+
+def test_kv_cache_quant_types_constant_matches_builder_validation():
+    # `check_extra_options` and the builder's own re-validation both read the constant from
+    # `builders.quant_config`, so they cannot drift apart.
+    assert builder_module.KV_CACHE_QUANT_TYPES == base_module.KV_CACHE_QUANT_TYPES
+    assert set(base_module.KV_CACHE_QUANT_TYPES) == {
+        "none",
+        "int8_per_tensor",
+        "int8_per_channel",
+        "int4_per_tensor",
+        "int4_per_channel",
+        "fp8_per_tensor",
+        "fp8_per_channel",
+    }
 
 
 @pytest.mark.parametrize(

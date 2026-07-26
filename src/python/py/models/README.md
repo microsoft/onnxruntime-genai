@@ -562,6 +562,18 @@ The scales applied to the KV cache are supplied through a required calibration f
 
 - `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). This option is required when `kv_cache_quant_type` is enabled.
 
+The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
+
+```bash
+# 1. Build the baseline (no kv_cache_quant_type) used for calibration:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
+
+# 2. Calibrate the scales:
+python -m onnxruntime_genai.models.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
+```
+
+Then rebuild with the quantized KV cache:
+
 ```bash
 # From wheel (int8 per-channel KV cache with calibrated scales):
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json

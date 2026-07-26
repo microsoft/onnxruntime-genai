@@ -33,7 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
-from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
+from .quant_config import KV_CACHE_QUANT_TYPES, QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
@@ -283,7 +283,12 @@ class Model:
         }
         self.make_attention_init(config)
 
-        self.kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
+        kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
+        self.kv_cache_quant_type = str(kv_cache_quant_type).strip().lower()
+        if self.kv_cache_quant_type not in KV_CACHE_QUANT_TYPES:
+            raise ValueError(
+                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, got '{kv_cache_quant_type}'"
+            )
         if self.kv_cache_quant_type != "none":
             self.make_quantized_kv_cache_init()
 
@@ -563,6 +568,11 @@ class Model:
     def make_quantized_kv_cache_init(self):
         if self.attention_attrs["op_type"] != "GroupQueryAttention":
             raise ValueError("Quantized KV cache requires GroupQueryAttention.")
+        if self.ep not in {"cpu", "cuda"}:
+            raise ValueError(
+                "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
+                f"Got execution_provider='{self.ep}'."
+            )
 
         is_int4 = self.kv_cache_quant_type.startswith("int4")
         is_fp8 = self.kv_cache_quant_type.startswith("fp8")

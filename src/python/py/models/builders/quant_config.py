@@ -62,6 +62,18 @@ _DTYPES: dict[str, DtypeDescriptor] = {
 
 IO_DTYPES = ("fp16", "bf16", "fp32")
 
+# Accepted values for the `kv_cache_quant_type` extra option: a bit width plus a scale
+# granularity. The KV cache is not part of `QuantConfig` yet (see the scope note above), so
+# this stays a standalone vocabulary that both `check_extra_options()` and the builder read.
+KV_CACHE_QUANT_TYPES = frozenset(
+    {"none"}
+    | {
+        f"{bit_width}_{granularity}"
+        for bit_width in ("int8", "int4", "fp8")
+        for granularity in ("per_tensor", "per_channel")
+    }
+)
+
 
 def resolve_dtype(name: str) -> DtypeDescriptor:
     """Resolve a dtype string to its descriptor. Raises ``ValueError`` if unknown."""

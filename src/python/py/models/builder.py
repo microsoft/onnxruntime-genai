@@ -52,6 +52,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
+from builders.quant_config import KV_CACHE_QUANT_TYPES
 from transformers import (
     AutoConfig,
 )
@@ -192,19 +193,10 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         )
 
     if "kv_cache_quant_type" in kv_pairs:
-        valid_kv_quant_types = {
-            "none",
-            "int8_per_tensor",
-            "int8_per_channel",
-            "int4_per_tensor",
-            "int4_per_channel",
-            "fp8_per_tensor",
-            "fp8_per_channel",
-        }
         quant_type = kv_pairs["kv_cache_quant_type"].lower()
-        if quant_type not in valid_kv_quant_types:
+        if quant_type not in KV_CACHE_QUANT_TYPES:
             raise ValueError(
-                f"kv_cache_quant_type must be one of {sorted(valid_kv_quant_types)}, "
+                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
                 f"got '{kv_pairs['kv_cache_quant_type']}'"
             )
         if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:

@@ -444,9 +444,16 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
 
     session = _FakeSession(inputs, outputs, run)
     session_options = types.SimpleNamespace(log_severity_level=None)
+    requested_providers = []
+
+    def make_session(*args, **kwargs):
+        requested_providers.extend(kwargs["providers"])
+        return session
+
     ort = types.SimpleNamespace(
         SessionOptions=lambda: session_options,
-        InferenceSession=lambda *args, **kwargs: session,
+        InferenceSession=make_session,
+        get_available_providers=lambda: ["CPUExecutionProvider"],
     )
     tokenizer = _FakeTokenizer(tokens_per_call=target_seq * 2)
     transformers = types.SimpleNamespace(AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda path: tokenizer))
@@ -469,6 +476,8 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
     )
 
     assert result == str(output_path.resolve())
+    # Unavailable providers must be filtered out so CPU-only onnxruntime installs work.
+    assert requested_providers == ["CPUExecutionProvider"]
     scales = json.loads(output_path.read_text())["scales"]
     np.testing.assert_allclose(scales["k_scales"], [[2.0 / 128.0] * 4])
     np.testing.assert_allclose(scales["v_scales"], [[4.0 / 128.0] * 4])

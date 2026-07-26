@@ -187,6 +187,11 @@ def _pair_envelope(x: np.ndarray, num_kv_heads: int, head_size: int) -> np.ndarr
     point they pick up the partner component ``k_{d+h}`` that calibration never saw.
 
     Returns an array shaped like ``x`` where both channels of every pair hold the pair norm.
+
+    Assumes the half-rotated (non-interleaved) RoPE layout that the builder emits
+    (``rotary_interleaved=0``), where the partner of channel ``d`` is ``d + head_size/2``. For
+    an interleaved model the pairing is wrong, but since ``||(a, b)|| >= |a|`` the result is
+    still an upper bound on ``|x|``, so scales stay conservative (coarser, never clipping).
     """
     if head_size % 2 != 0:
         raise ValueError(f"RoPE pair envelope requires an even head_size, got {head_size}.")
@@ -420,9 +425,18 @@ def calibrate_kv_scales(
 
     so = ort.SessionOptions()
     so.log_severity_level = 3
-    sess = ort.InferenceSession(
-        model_path, sess_options=so, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-    )
+    available_providers = ort.get_available_providers()
+    providers = [
+        provider
+        for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+        if provider in available_providers
+    ]
+    if not providers:
+        raise RuntimeError(
+            "Neither CUDAExecutionProvider nor CPUExecutionProvider is available in this "
+            f"onnxruntime install (available: {available_providers})."
+        )
+    sess = ort.InferenceSession(model_path, sess_options=so, providers=providers)
 
     if num_kv_heads is None or head_size is None:
         detected_heads, detected_head_size = _detect_kv_shape(sess, model_path)
@@ -549,8 +563,10 @@ def calibrate_kv_scales(
                 k_thr[i] = _mse_threshold(ks, k_amax[i], qmax, qneg, qpos)
                 v_thr[i] = _mse_threshold(vs, v_amax[i], qmax, qneg, qpos)
 
-    k_clip = float(np.mean(k_amax > k_thr * 1.0001))
-    v_clip = float(np.mean(v_amax > v_thr * 1.0001))
+    # Fraction of channels whose observed abs-max exceeds the calibrated threshold, i.e. the
+    # channels where `percentile`/`mse` chose to clip the tail. Not the fraction of clipped values.
+    k_clipped_channels = float(np.mean(k_amax > k_thr * 1.0001))
+    v_clipped_channels = float(np.mean(v_amax > v_thr * 1.0001))
 
     if not per_channel:
         k_thr = k_thr.max(axis=1, keepdims=True)
@@ -570,13 +586,13 @@ def calibrate_kv_scales(
 
     logger.info(
         "Wrote %s (quant=%s, per_channel=%s, k_rotary_envelope=%s). "
-        "k clipped=%.3f v clipped=%.3f k_scale[%.6f,%.6f] v_scale[%.6f,%.6f]",
+        "k clipped channels=%.3f v clipped channels=%.3f k_scale[%.6f,%.6f] v_scale[%.6f,%.6f]",
         out_json,
         quant_type,
         per_channel,
         k_rotary_envelope,
-        k_clip,
-        v_clip,
+        k_clipped_channels,
+        v_clipped_channels,
         float(k_scales.min()),
         float(k_scales.max()),
         float(v_scales.min()),
