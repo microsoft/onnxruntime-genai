@@ -41,6 +41,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
       - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
       - [Use FP4 Quantization in QMoE](#use-fp4-quantization-in-qmoe)
+      - [Quantize the KV Cache](#quantize-the-kv-cache)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
     - [LoRA Models](#lora-models)

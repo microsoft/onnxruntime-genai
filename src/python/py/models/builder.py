@@ -204,7 +204,8 @@ def check_extra_options(kv_pairs, precision, execution_provider):
         quant_type = kv_pairs["kv_cache_quant_type"].lower()
         if quant_type not in valid_kv_quant_types:
             raise ValueError(
-                f"kv_cache_quant_type must be one of {valid_kv_quant_types}, got '{kv_pairs['kv_cache_quant_type']}'"
+                f"kv_cache_quant_type must be one of {sorted(valid_kv_quant_types)}, "
+                f"got '{kv_pairs['kv_cache_quant_type']}'"
             )
         if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
             raise ValueError(

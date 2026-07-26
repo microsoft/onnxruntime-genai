@@ -651,6 +651,7 @@ class Qwen25VLTextModel(Model):
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name,
+            layer_id=layer_id,
             q_path=self.attention_attrs["q_path"],
             k_path=self.attention_attrs["k_path"],
             v_path=self.attention_attrs["v_path"],
@@ -1305,6 +1306,7 @@ class Qwen35TextModel(Model):
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name,
+            layer_id=layer_id,
             q_path=self.attention_attrs["q_path"],
             k_path=self.attention_attrs["k_path"],
             v_path=self.attention_attrs["v_path"],

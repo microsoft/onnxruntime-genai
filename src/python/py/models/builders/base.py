@@ -605,10 +605,15 @@ class Model:
                 "Quantized KV cache requires calibrated scales; provide them via "
                 "extra_options['kv_cache_scale_file']."
             )
-        with open(scale_file) as f:
-            scale_data = json.load(f)
-        k_scales_per_layer = scale_data["scales"]["k_scales"]
-        v_scales_per_layer = scale_data["scales"]["v_scales"]
+        with open(scale_file, encoding="utf-8") as file:
+            scale_data = json.load(file)
+        try:
+            k_scales_per_layer = scale_data["scales"]["k_scales"]
+            v_scales_per_layer = scale_data["scales"]["v_scales"]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "kv_cache_scale_file must contain scales.k_scales and scales.v_scales."
+            ) from error
         if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
             raise ValueError(
                 f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
@@ -616,12 +621,14 @@ class Model:
             )
 
         def make_scale(per_layer, layer_id):
-            arr = np.array(per_layer[layer_id], dtype=np.float32).reshape(-1)
-            if arr.size != scale_size:
+            scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
+            if scale.size != scale_size:
                 raise ValueError(
-                    f"kv_cache scale for layer {layer_id} has size {arr.size}, expected {scale_size}"
+                    f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}"
                 )
-            return arr
+            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
+            return scale
 
         for layer_id in range(self.num_layers):
             self.make_initializer(
