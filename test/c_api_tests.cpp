@@ -1629,7 +1629,13 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 // (graph-capture) and dynamic-mask (baseline) code paths. Full rewind (RewindTo(0))
 // and shallow partial rewind (e.g. RewindTo(input_ids.size()-1)) work correctly.
 // TODO: Remove !USE_CUDA once the CUDA partial rewind bug is fixed.
-#if TEST_QWEN_2_5 && !USE_CUDA
+//
+// DML is explicitly disabled: The Qwen-2.5 graph capture model seems to have a node
+// that is not placed on either the CPU EP or DML EP, which causes a runtime error when
+// the model is loaded. This is a pre-existing runtime issue.
+// TODO: Remove !USE_DML once the Qwen-2.5 graph capture model is fixed to place all nodes
+// on a valid EP.
+#if TEST_QWEN_2_5 && !USE_CUDA && !USE_DML
 TEST(CAPITests, RewindQwen25CAPI) {
   // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),
   // fall back to baseline model when it is not available.
@@ -1713,6 +1719,30 @@ TEST(CAPITests, StreamingASRCreate) {
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
   ASSERT_NE(generator, nullptr);
+}
+
+// Test that the public StreamingProcessor API produces the expected named mel tensor.
+TEST(CAPITests, StreamingASRProcessReturnsAudioFeaturesTensor) {
+  if (!std::filesystem::exists(STREAMING_ASR_PATH))
+    GTEST_SKIP() << "Streaming ASR model not found at " << STREAMING_ASR_PATH;
+  auto model = OgaModel::Create(STREAMING_ASR_PATH);
+  auto processor = OgaStreamingProcessor::Create(*model);
+
+  std::vector<float> silence(STREAMING_ASR_CHUNK_SAMPLES, 0.0f);
+  auto inputs = processor->Process(silence.data(), silence.size());
+  ASSERT_NE(inputs, nullptr);
+
+  auto audio_features = inputs->Get("audio_features");
+  ASSERT_NE(audio_features, nullptr);
+
+  const auto type = audio_features->Type();
+  EXPECT_TRUE(type == OgaElementType_float32 || type == OgaElementType_float16);
+
+  const auto shape = audio_features->Shape();
+  ASSERT_EQ(shape.size(), 3U);
+  EXPECT_EQ(shape[0], 1);
+  EXPECT_GT(shape[1], 0);
+  EXPECT_GT(shape[2], 0);
 }
 
 // Test transcribing silence (all zeros) via GenerateNextToken

@@ -4,7 +4,7 @@ import os
 
 import onnxruntime_genai as og
 from awq import AutoAWQForCausalLM
-from onnxruntime_genai.models.builder import create_model
+from onnxruntime_genai.models.builder import create_model, parse_extra_options
 from transformers import AutoTokenizer
 
 
@@ -148,10 +148,18 @@ def main():
     execution_provider = args.execution_provider
     cache_dir = os.path.join(".", "cache_dir")
 
-    extra_options = {
-        "use_qdq": args.use_qdq,
-        "hf_remote": args.trust_remote_code,
-    }
+    extra_options = parse_extra_options(
+        model_name,
+        input_folder,
+        output_folder,
+        precision,
+        execution_provider,
+        cache_dir,
+        [
+            f"use_qdq={'true' if args.use_qdq else 'false'}",
+            f"hf_remote={'true' if args.trust_remote_code else 'false'}",
+        ],
+    )
 
     create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
 

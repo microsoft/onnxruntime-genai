@@ -223,9 +223,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
+            provider_to_append = "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
             if args.verbose:
-                print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
+                print(f"Setting model to {provider_to_append}")
+            config.append_provider(provider_to_append)
     if args.verbose:
         print("Loading model... ")
     model = og.Model(config)

@@ -73,6 +73,9 @@ struct NemotronConfig {
   void PopulateFromConfig(const Config& config);
 };
 
+int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty);
+ONNXTensorElementDataType ValidateNemotronFloatType(std::span<const ONNXTensorElementDataType> types);
+
 /// Holds the rolling encoder cache state between streaming chunks.
 struct NemotronEncoderCache {
   std::unique_ptr<OrtValue> cache_last_channel;
@@ -109,6 +112,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
   NemotronConfig nemotron_config_;
+  ONNXTensorElementDataType float_type_{};
 };
 
 /// Sub-state for the streaming encoder.
@@ -224,7 +228,7 @@ struct NemotronSpeechState : TransducerState {
   std::unique_ptr<OrtValue> encoded_output_;
   int64_t encoded_len_{0};
 
-  // Pre-allocated encoder frame for joiner input
+  // Pre-allocated encoder frame for the homogeneous joiner input type
   std::unique_ptr<OrtValue> encoder_frame_;
 
   // Decoder state machine

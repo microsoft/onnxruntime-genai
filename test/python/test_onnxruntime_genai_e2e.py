@@ -40,6 +40,32 @@ def run_model(model_path: str | bytes | os.PathLike):
         assert generator.get_sequence(i) is not None
 
 
+def run_graph_capture_model(model_path: str | bytes | os.PathLike):
+    """Run a graph-capture model for validation.
+
+    Graph-capture models have special compilation to use CUDA/DML/WebGPU
+    graph capture optimization. This method validates that they load and
+    generate output correctly.
+    """
+    model = og.Model(model_path)
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=50)
+
+    generator = og.Generator(model, params)
+    generator.append_tokens([input_ids])
+    while not generator.is_done():
+        generator.generate_next_token()
+
+    output = generator.get_sequence(0)
+    assert output is not None
+    assert len(output) > len(input_ids), "Graph-capture model should generate at least one new token"
+
+
 def run_whisper():
     log.debug("Running Whisper Python E2E Test")
 
@@ -253,8 +279,17 @@ def get_args():
         help="List of model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
     )
 
+    parser.add_argument(
+        "-g",
+        "--graph-capture-models",
+        type=str,
+        default="[]",
+        help="List of graph-capture model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
+    )
+
     args = parser.parse_args()
     args.models = json.loads(args.models)
+    args.graph_capture_models = json.loads(args.graph_capture_models)
     return args
 
 
@@ -267,6 +302,15 @@ if __name__ == "__main__":
         except Exception as e:
             log.error(e)
             log.exception(f"Failed to run {model_path}")
+
+    # Run graph-capture models with pytest for proper marker filtering
+    for model_path in args.graph_capture_models:
+        try:
+            log.info(f"Running graph-capture model {model_path}")
+            run_graph_capture_model(model_path)
+        except Exception as e:
+            log.error(e)
+            log.exception(f"Failed to run graph-capture model {model_path}")
 
     # Run Whisper E2E tests
     run_whisper()
