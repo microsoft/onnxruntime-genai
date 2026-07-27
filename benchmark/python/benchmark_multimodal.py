@@ -98,7 +98,7 @@ def save_results(results, filename):
     print(f"Results saved in {filename}!")
 
 
-def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length):
+def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length, model_session_id=None):
     """
     This function is to run benchmark and print the memory usage
     """
@@ -110,7 +110,9 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
     for monitor_thread in monitor_threads:
         monitor_thread.start()
     try:
-        metrics = run_benchmark(args, model, processor, image, audio, generation_length, max_length, memory_monitor)
+        metrics = run_benchmark(
+            args, model, processor, image, audio, generation_length, max_length, memory_monitor, model_session_id
+        )
     finally:
         memory_monitor.stop.set()
         for monitor_thread in monitor_threads:
@@ -124,7 +126,9 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
     return metrics
 
 
-def run_benchmark(args, model, processor, image, audio, generation_length, max_length, memory_monitor=None):
+def run_benchmark(
+    args, model, processor, image, audio, generation_length, max_length, memory_monitor=None, model_session_id=None
+):
     memory_monitor = memory_monitor or _MemoryMonitor()
     # Get user arguments
     num_repetitions = args.repetitions
@@ -321,6 +325,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
             time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
             peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
             peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
+            session_id=model_session_id,
         )
 
     return metrics
@@ -340,12 +345,15 @@ def main(args):
         print(f"Model loaded in {model_load_time_ms:.1f} ms, loading processor...")
 
     # Emit model load telemetry
+    model_session_id = None
     with suppress(Exception):
         telemetry = _get_telemetry()
+        model_session_id = telemetry.allocate_model_session_id()
         telemetry.log_model_load(
             model_name=sanitize_model_identifier(model_path),
             execution_provider="default",
             total_load_time_ms=model_load_time_ms,
+            session_id=model_session_id,
         )
 
     processor = model.create_multimodal_processor()
@@ -378,7 +386,7 @@ def main(args):
         else:
             max_length = 3072
         print(f"Args: tokens = {gen_length}, max_length = {max_length}")
-        metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length)
+        metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length, model_session_id)
         all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose:

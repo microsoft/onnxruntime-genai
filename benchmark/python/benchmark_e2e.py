@@ -228,12 +228,15 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         print(f"Model loaded in {model_load_time_ms:.1f} ms")
 
     # Emit model load telemetry
+    model_session_id = None
     with suppress(Exception):
         telemetry = _get_telemetry()
+        model_session_id = telemetry.allocate_model_session_id()
         telemetry.log_model_load(
             model_name=sanitize_model_identifier(args.model_name),
             execution_provider=normalize_execution_provider(args.execution_provider),
             total_load_time_ms=model_load_time_ms,
+            session_id=model_session_id,
         )
 
     tokenizer = og.Tokenizer(model)
@@ -497,6 +500,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
             peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
             peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
+            session_id=model_session_id,
         )
 
     return metrics

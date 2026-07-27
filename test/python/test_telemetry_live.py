@@ -84,6 +84,7 @@ def main():
             print("  FAIL: telemetry did not initialize")
             return 1
         print("  OK: store + uploader initialized")
+        model_session_id = telemetry.allocate_model_session_id()
 
         # The heartbeat is enqueued on a background thread (system-info
         # collection uses blocking subprocesses); wait for that thread so it is
@@ -124,6 +125,7 @@ def main():
             execution_provider="cuda",
             total_load_time_ms=842.17,
             num_sessions=2,
+            session_id=model_session_id,
         )
 
         print("[5/8] log_benchmark ...")
@@ -139,6 +141,7 @@ def main():
             token_generation_throughput=208.3,
             time_to_first_token_ms=20.3,
             peak_memory_gpu_mb=3200.0,
+            session_id=model_session_id,
         )
 
         print("[6/8] log_inference ...")
@@ -148,6 +151,7 @@ def main():
             total_generation_time_ms=1100.0,
             total_tokens_generated=200,
             input_token_count=50,
+            session_id=model_session_id,
         )
 
         print("[7/8] log_error ...")
@@ -157,6 +161,7 @@ def main():
             action="generate_next_token",
             model_name="phi-3-mini-int4-cuda",
             execution_provider="cuda",
+            session_id=model_session_id,
         )
 
         pending_before = telemetry._store.count()
