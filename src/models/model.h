@@ -8,6 +8,7 @@
 #include "ortx_tokenizer.h"
 #include "../generators.h"
 #include "utils.h"
+#include <optional>
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
 #include "parakeet_processor.h"
@@ -106,12 +107,26 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
   int32_t GetPadTokenId() const { return pad_token_id_; }
 
+  // Tool-calling and reasoning token IDs.
+  // Naming follows the bos/eos/pad convention:
+  //   bot = beginning of tool (call), eot = end of tool (call)
+  //   bor = beginning of reasoning,   eor = end of reasoning
+  // Throws if the model does not define the requested token.
+  int32_t GetBotTokenId() const;
+  int32_t GetEotTokenId() const;
+  int32_t GetBorTokenId() const;
+  int32_t GetEorTokenId() const;
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
+  std::optional<int32_t> bot_token_id_;
+  std::optional<int32_t> eot_token_id_;
+  std::optional<int32_t> bor_token_id_;
+  std::optional<int32_t> eor_token_id_;
 };
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {

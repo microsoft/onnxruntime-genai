@@ -342,6 +342,32 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
+  // Tool-calling and reasoning token IDs (bot/eot/bor/eor).
+  // Throws if the model does not define the token.
+  int32_t GetBotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetBorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBorTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEorTokenId(this, &token_id));
+    return token_id;
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
