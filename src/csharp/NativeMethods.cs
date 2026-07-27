@@ -29,7 +29,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* const char* */ OgaResultGetError(IntPtr /* const OgaResult* */ result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult */ OgaSetLogBool(byte[] /* const char* */ name, bool value);
+        public static extern IntPtr /* OgaResult */ OgaSetLogBool(byte[] /* const char* */ name,
+                                                                  [MarshalAs(UnmanagedType.I1)] bool value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult */ OgaSetLogString(byte[] /* const char* */ name, byte[] /* const char* */ value);
@@ -112,12 +113,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSearchBool(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                      byte[] /* const char* */ searchOption,
-                                                                                     bool value);
+                                                                                     [MarshalAs(UnmanagedType.I1)] bool value);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidance(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                    byte[] /* const char* */ type,
                                                                                    byte[] /* const char* */ data,
-                                                                                   bool /* boolean */ enable_ff_tokens);
+                                                                                   [MarshalAs(UnmanagedType.I1)] bool /* boolean */ enable_ff_tokens);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSearchNumber(IntPtr /* OgaGeneratorParams* */ generatorParams,
@@ -127,7 +128,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSearchBool(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                      byte[] /* const char* */ searchOption,
-                                                                                     out bool /* const bool* */ value);
+                                                                                     [MarshalAs(UnmanagedType.I1)] out bool /* const bool* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
@@ -286,7 +287,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                    byte[] /* const char* */ template_string,
                                                                                    byte[] /* const char* */ message,
                                                                                    byte[] /* const char* */ tool_calls,
-                                                                                   bool /* bool */ add_gen_prompt,
+                                                                                   [MarshalAs(UnmanagedType.I1)] bool /* bool */ add_gen_prompt,
                                                                                    out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
