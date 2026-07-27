@@ -1629,7 +1629,13 @@ TEST(CAPITests, RewindGraphCaptureNvTensorRtRtxCAPI) {
 // (graph-capture) and dynamic-mask (baseline) code paths. Full rewind (RewindTo(0))
 // and shallow partial rewind (e.g. RewindTo(input_ids.size()-1)) work correctly.
 // TODO: Remove !USE_CUDA once the CUDA partial rewind bug is fixed.
-#if TEST_QWEN_2_5 && !USE_CUDA
+//
+// DML is explicitly disabled: The Qwen-2.5 graph capture model seems to have a node
+// that is not placed on either the CPU EP or DML EP, which causes a runtime error when
+// the model is loaded. This is a pre-existing runtime issue.
+// TODO: Remove !USE_DML once the Qwen-2.5 graph capture model is fixed to place all nodes
+// on a valid EP.
+#if TEST_QWEN_2_5 && !USE_CUDA && !USE_DML
 TEST(CAPITests, RewindQwen25CAPI) {
   // Prefer graph-capture variant (exercises static mask rewind on CUDA/WebGPU/DML),
   // fall back to baseline model when it is not available.
