@@ -19,9 +19,7 @@ def generate_files(lines, args):
     }
 
     avoid_keywords = {"pdb"}
-    # The onnxruntime-genai-cuda.dll is shipped through a separate mechanism, so it is
-    # historically excluded from this package. On win-arm64 we currently include it.
-    # TODO: Remove the win-arm64 exception once the CUDA dll is shipped separately for win-arm64.
+    # The CUDA library is shipped through a separate mechanism and is excluded from this package.
     cuda_keyword = "onnxruntime-genai-cuda"
     processed_includes = set()
     for platform, platform_dir in platform_map.items():
@@ -31,7 +29,7 @@ def generate_files(lines, args):
             file_name = os.path.basename(file)
             if any(keyword in file_name for keyword in avoid_keywords):
                 continue
-            if cuda_keyword in file_name and platform != "win-arm64":
+            if cuda_keyword in file_name:
                 continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
