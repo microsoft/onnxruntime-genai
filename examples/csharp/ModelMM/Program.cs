@@ -1,10 +1,10 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-using CommonUtils;
-using Microsoft.ML.OnnxRuntimeGenAI;
 using System.CommandLine;
 using System.Text.Json;
+using CommonUtils;
+using Microsoft.ML.OnnxRuntimeGenAI;
 
 /// <summary>
 /// Example of model-mm

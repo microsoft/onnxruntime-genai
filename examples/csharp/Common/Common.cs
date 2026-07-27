@@ -1,5 +1,4 @@
 ﻿using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntimeGenAI;
 using System.CommandLine;
 using System.Reflection;
 using System.Reflection.Metadata.Ecma335;
@@ -7,7 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-
+using Microsoft.ML.OnnxRuntimeGenAI;
 namespace CommonUtils
 {
     public static class Common

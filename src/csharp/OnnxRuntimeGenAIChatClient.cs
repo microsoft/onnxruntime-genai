@@ -1,7 +1,6 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-using Microsoft.Extensions.AI;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -10,7 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-
+using Microsoft.Extensions.AI;
 #nullable enable
 
 namespace Microsoft.ML.OnnxRuntimeGenAI;

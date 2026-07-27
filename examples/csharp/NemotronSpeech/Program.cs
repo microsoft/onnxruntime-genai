@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using CommonUtils;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
-using System.Text.Json;
-
 if (args.Length < 2) {
   Console.WriteLine("Usage: NemotronSpeech <model_path> <audio_file.wav> [execution_provider]");
   return;
@@ -54,10 +53,10 @@ if (useVad == "true") {
     Console.WriteLine("  VAD threshold: " + processor.GetOption("vad_threshold"));
 }
 
+using var generator = new Generator(model, genParams);
+using var genParams = new GeneratorParams(model);
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
-using var genParams = new GeneratorParams(model);
-using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
 int chunksTotal = 0;
