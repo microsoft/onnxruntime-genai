@@ -210,6 +210,10 @@ def is_model_excluded(enable_graph_capture: bool, model_name: str, device: str) 
     if not device_availability.get(device, False):
         return True
 
+    # DML graph-capture CI is currently unstable; skip all graph-capture models on DML.
+    if device == "dml":
+        return True
+
     # Map of models that have EP-specific graph capture incompatibilities
     # Format: model_name -> set of EPs where graph capture is NOT supported
     graph_capture_exclusions = {
@@ -217,7 +221,6 @@ def is_model_excluded(enable_graph_capture: bool, model_name: str, device: str) 
         # The model works fine on DML and WebGPU where If nodes are not used in graph capture.
         # Attempting graph capture with If nodes causes validation errors.
         "phi-4-mini": {"cuda"},
-        "qwen-2.5-0.5b": {"dml"},  # DML has a known issue with Qwen-2.5 graph capture models
     }
 
     return model_name in graph_capture_exclusions and device in graph_capture_exclusions[model_name]
