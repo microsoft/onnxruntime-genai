@@ -238,7 +238,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIn("GenAIHeartbeat", names)
         self.assertIn("GenAIModelBuild", names)
 
-    def test_disable_enable_api(self):
+    def test_runtime_disable_is_process_latched(self):
         from telemetry.telemetry import GenAITelemetry
 
         t = GenAITelemetry()
@@ -247,9 +247,12 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIsNotNone(t._store)
         t.disable_telemetry()
         self.assertFalse(t._enabled)
-        t.enable_telemetry()
-        self.assertTrue(t._enabled)
-        self.assertIsNotNone(t._store)
+        self.assertTrue(t._telemetry_disabled)
+        t.shutdown()
+
+        self.assertIs(GenAITelemetry(), t)
+        self.assertFalse(t._enabled)
+        self.assertIsNone(t._store)
 
     def test_runtime_disable_skips_pending_heartbeat(self):
         from telemetry.telemetry import GenAITelemetry
@@ -274,7 +277,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
         self.assertFalse(event_source.logger.disabled)
 
-    def test_enable_telemetry_does_not_override_env_opt_out(self):
+    def test_env_opt_out_remains_latched_after_reinitialization(self):
         from telemetry.telemetry import GenAITelemetry
 
         os.environ["ORT_DISABLE_TELEMETRY"] = "true"
@@ -286,7 +289,6 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
         # Full suppression remains latched after env removal and reinitialization.
         self.assertIs(GenAITelemetry(), t)
-        t.enable_telemetry()
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
         self.assertIsNone(t._heartbeat_thread)
@@ -603,6 +605,7 @@ class TestPathRedaction(unittest.TestCase):
         telemetry = object.__new__(GenAITelemetry)
         telemetry._enabled = True
         telemetry._store = object()
+        telemetry._next_model_session_id = 1
         telemetry._emit = MagicMock()
         model_path = r"C:\Users\Alice Smith\models\phi.onnx"
         calls = (
@@ -824,6 +827,7 @@ class TestSystemInfo(unittest.TestCase):
 
         # Python version should match
         self.assertTrue(info["python_version"].startswith(str(sys.version_info.major)))
+        self.assertNotIn("process_name", info)
         mock_run.assert_called()
 
     def test_nvidia_gpu_count_uses_output_rows(self):
@@ -987,10 +991,54 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
 
         data = json.loads(telemetry._store.store.call_args.args[0])["data"]
         self.assertEqual(data["appName"], "onnxruntime-genai")
-        self.assertEqual(data["appVersion"], "1.0")
-        self.assertEqual(data["appSessionGuid"], telemetry._app_session_guid)
+        self.assertEqual(data["LibraryVersion"], "1.0")
+        self.assertEqual(data["AppSessionGuid"], telemetry._app_session_guid)
+        self.assertNotIn("appVersion", data)
+        self.assertNotIn("appSessionGuid", data)
         self.assertEqual(data["durationMs"], 1.0)
         self.assertFalse(any("_" in key for key in data))
+
+    def test_model_session_ids_are_monotonic_and_correlate_model_events(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = object()
+        telemetry._next_model_session_id = 1
+        telemetry._emit = MagicMock()
+
+        session_id = telemetry.allocate_model_session_id()
+        self.assertEqual(session_id, 1)
+        self.assertEqual(telemetry.allocate_model_session_id(), 2)
+
+        emitters = (
+            lambda: telemetry.log_model_load(session_id=session_id),
+            lambda: telemetry.log_benchmark(session_id=session_id),
+            lambda: telemetry.log_inference(session_id=session_id),
+            lambda: telemetry.log_error("RuntimeError", "boom", session_id=session_id),
+        )
+        for emit in emitters:
+            with self.subTest(emit=emit):
+                telemetry._emit.reset_mock()
+                emit()
+                self.assertEqual(telemetry._emit.call_args.args[1]["sessionId"], session_id)
+
+    def test_heartbeat_uses_process_scope_session_id_and_omits_process_name(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        with (
+            patch(
+                "telemetry.telemetry.get_hashed_device_id_and_status",
+                return_value=("c:device", MagicMock(value="existing")),
+            ),
+            patch("telemetry.telemetry.get_system_info", return_value={"process_name": "python.exe"}),
+            patch("telemetry.telemetry.get_execution_provider_info", return_value={}),
+        ):
+            attributes = telemetry._build_heartbeat_attributes()
+
+        self.assertEqual(attributes["sessionId"], 0)
+        self.assertNotIn("processName", attributes)
 
     def test_all_core_event_fields_are_camel_case(self):
         from telemetry.telemetry import GenAITelemetry
@@ -998,6 +1046,7 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
         telemetry = object.__new__(GenAITelemetry)
         telemetry._enabled = True
         telemetry._store = object()
+        telemetry._next_model_session_id = 1
         telemetry._emit = MagicMock()
         emitters = (
             lambda: telemetry.log_model_build("build", 1.0, True),
@@ -1401,28 +1450,24 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertIsNone(telemetry._store)
         self.assertFalse(telemetry._initialized)
 
-    def test_enable_does_not_replace_live_uploader(self):
+    def test_runtime_disable_keeps_live_uploader_until_it_stops(self):
         from telemetry.telemetry import GenAITelemetry
 
         telemetry = object.__new__(GenAITelemetry)
-        telemetry._instrumentation_key = "abc-def"
         telemetry._telemetry_disabled = False
-        telemetry._enabled = False
+        telemetry._enabled = True
         telemetry._store = MagicMock()
-        telemetry._uploader = MagicMock(_send_timeout=10.0)
+        telemetry._uploader = MagicMock()
         telemetry._uploader.stop_loop.return_value = False
         old_uploader = telemetry._uploader
 
-        with (
-            patch("telemetry.telemetry._is_ci_environment", return_value=False),
-            patch("telemetry.telemetry.EventUploader") as mock_new_uploader,
-        ):
-            telemetry.enable_telemetry()
+        telemetry.disable_telemetry()
 
         self.assertIs(telemetry._uploader, old_uploader)
         self.assertFalse(telemetry._enabled)
-        old_uploader.stop_loop.assert_called_once_with(11.0)
-        mock_new_uploader.assert_not_called()
+        self.assertTrue(telemetry._telemetry_disabled)
+        old_uploader.signal_stop.assert_called_once()
+        old_uploader.stop_loop.assert_called_once_with(0)
 
 
 if __name__ == "__main__":

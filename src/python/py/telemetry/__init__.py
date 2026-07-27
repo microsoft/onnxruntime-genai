@@ -7,7 +7,7 @@
 
 Provides telemetry integration for ONNX Runtime GenAI via Microsoft OneCollector.
 Set ORT_DISABLE_TELEMETRY=1 before initialization for a full process-lifetime opt-out.
-Call disable_telemetry() to stop detailed events at runtime.
+Call disable_telemetry() to stop telemetry for the remainder of the process.
 
 Usage:
     from onnxruntime_genai.telemetry import GenAITelemetry, action, ActionContext
@@ -32,7 +32,7 @@ Usage:
     telemetry.shutdown()
 """
 
-from .telemetry import GenAITelemetry, disable_telemetry, enable_telemetry
+from .telemetry import GenAITelemetry, disable_telemetry
 from .telemetry_extensions import ActionContext, action, log_action, log_error
 
 __all__ = [
@@ -40,7 +40,6 @@ __all__ = [
     "GenAITelemetry",
     "action",
     "disable_telemetry",
-    "enable_telemetry",
     "log_action",
     "log_error",
 ]

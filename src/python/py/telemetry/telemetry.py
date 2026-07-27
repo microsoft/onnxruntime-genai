@@ -145,6 +145,7 @@ class GenAITelemetry:
                     instance = super().__new__(cls)
                     instance._initialized = False
                     instance._telemetry_disabled = False
+                    instance._next_model_session_id = 1
                     cls._instance = instance
         return cls._instance
 
@@ -209,16 +210,26 @@ class GenAITelemetry:
                 self._enabled = False
                 self.shutdown(1.0)
 
+    def _common_context(self) -> dict[str, str]:
+        return {
+            "appName": self._app_name,
+            "LibraryVersion": self._app_version,
+            "AppSessionGuid": self._app_session_guid,
+        }
+
+    def allocate_model_session_id(self) -> int:
+        """Allocate a process-local, monotonic ID for one model lifecycle."""
+        with self._lock:
+            session_id = self._next_model_session_id
+            self._next_model_session_id += 1
+        return session_id
+
     def _emit(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
         if not self._enabled or self._store is None:
             return
         try:
-            data = {
-                "appName": self._app_name,
-                "appVersion": self._app_version,
-                "appSessionGuid": self._app_session_guid,
-            }
+            data = self._common_context()
             if attributes:
                 data.update(attributes)
             envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
@@ -245,6 +256,7 @@ class GenAITelemetry:
         sys_info = get_system_info()
         ep_info = get_execution_provider_info()
         return {
+            "sessionId": 0,
             "deviceId": device_id,
             "deviceIdStatus": id_status.value,
             "os": sys_info.get("os", ""),
@@ -262,7 +274,6 @@ class GenAITelemetry:
             "deviceModel": sys_info.get("device_model", ""),
             "pythonVersion": sys_info.get("python_version", ""),
             "ortVersion": sys_info.get("ort_version", ""),
-            "processName": sys_info.get("process_name", ""),
             "availableProviders": ",".join(ep_info.get("available_providers", [])),
         }
 
@@ -271,22 +282,7 @@ class GenAITelemetry:
         if not self._enabled or self._telemetry_disabled or self._store is None:
             return
         try:
-            data = {
-                "appName": self._app_name,
-                "appVersion": self._app_version,
-                "appSessionGuid": self._app_session_guid,
-            }
-            data.update(self._build_heartbeat_attributes())
-            envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
-                event_name=HEARTBEAT_EVENT,
-                timestamp=datetime.now(timezone.utc),
-                ikey=self._envelope_ikey,
-                data=data,
-            )
-            payload = CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
-            self._store.store(payload)
-            if self._uploader is not None:
-                self._uploader.request_drain()
+            self._emit(HEARTBEAT_EVENT, self._build_heartbeat_attributes())
         except Exception:
             return
 
@@ -375,12 +371,15 @@ class GenAITelemetry:
         time_to_first_token_ms: float = 0.0,
         peak_memory_gpu_mb: float = 0.0,
         peak_memory_cpu_mb: float = 0.0,
+        session_id: int | None = None,
     ) -> None:
         """Log benchmark telemetry; prompt/tokenization latency fields are total milliseconds per prompt."""
         if not self._enabled or self._store is None:
             return
         try:
+            session_id = session_id if session_id is not None else self.allocate_model_session_id()
             attributes = {
+                "sessionId": session_id,
                 "modelName": _redact_paths(model_name),
                 "precision": precision,
                 "backend": backend,
@@ -414,12 +413,15 @@ class GenAITelemetry:
         total_load_time_ms: float = 0.0,
         num_sessions: int = 0,
         model_file_size_bytes: int = 0,
+        session_id: int | None = None,
     ) -> None:
         """Log a model loading telemetry event."""
         if not self._enabled or self._store is None:
             return
         try:
+            session_id = session_id if session_id is not None else self.allocate_model_session_id()
             attributes = {
+                "sessionId": session_id,
                 "modelName": _redact_paths(model_name),
                 "modelType": model_type,
                 "executionProvider": execution_provider,
@@ -442,12 +444,15 @@ class GenAITelemetry:
         input_token_count: int = 0,
         memory_used_mb: float = 0.0,
         gpu_memory_used_mb: float = 0.0,
+        session_id: int | None = None,
     ) -> None:
         """Log an inference telemetry event."""
         if not self._enabled or self._store is None:
             return
         try:
+            session_id = session_id if session_id is not None else self.allocate_model_session_id()
             attributes = {
+                "sessionId": session_id,
                 "modelName": _redact_paths(model_name),
                 "modelType": model_type,
                 "executionProvider": execution_provider,
@@ -469,6 +474,7 @@ class GenAITelemetry:
         action: str = "",
         model_name: str = "",
         execution_provider: str = "",
+        session_id: int | None = None,
     ) -> None:
         """Log an error/crash telemetry event."""
         if not self._enabled or self._store is None:
@@ -481,13 +487,16 @@ class GenAITelemetry:
                 "modelName": _redact_paths(model_name),
                 "executionProvider": execution_provider,
             }
+            if session_id is not None:
+                attributes["sessionId"] = session_id
             self._emit(ERROR_EVENT, attributes)
         except Exception:
             return
 
     def disable_telemetry(self) -> None:
-        """Disable detailed telemetry and stop the uploader (non-blocking)."""
+        """Disable telemetry irreversibly for the remainder of this process."""
         with self._lock:
+            self._telemetry_disabled = True
             self._enabled = False
             if self._uploader is not None:
                 # Signal the daemon thread to wind down without joining, so opting
@@ -498,40 +507,6 @@ class GenAITelemetry:
                 if self._uploader.stop_loop(0):
                     self._uploader.close()
                     self._uploader = None
-
-    def enable_telemetry(self) -> None:
-        """Enable telemetry (creates/restarts the uploader if needed).
-
-        Has no effect when telemetry was fully suppressed before initialization.
-        """
-        with self._lock:
-            if self._telemetry_disabled or not self._instrumentation_key:
-                return
-            if self._uploader is not None:
-                old_uploader = self._uploader
-                old_uploader.signal_stop()
-                stop_timeout = max(5.0, getattr(old_uploader, "_send_timeout", 10.0) + 1.0)
-                if not old_uploader.stop_loop(stop_timeout):
-                    return
-                old_uploader.close()
-                self._uploader = None
-            if self._store is None:
-                try:
-                    db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
-                    self._store = OfflineEventStore(db_path)
-                    if not self._store.is_open:
-                        self._store = None
-                        return
-                except Exception:
-                    self._store = None
-                    return
-            try:
-                self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
-                self._uploader.start()
-                self._enabled = True
-            except Exception:
-                self._uploader = None
-                self._enabled = False
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.
@@ -584,10 +559,5 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable detailed GenAI telemetry at runtime."""
+    """Disable GenAI telemetry for the remainder of this process."""
     _get_telemetry().disable_telemetry()
-
-
-def enable_telemetry() -> None:
-    """Enable GenAI telemetry."""
-    _get_telemetry().enable_telemetry()

@@ -51,9 +51,6 @@ def get_system_info() -> dict[str, Any]:
     # ORT version
     info["ort_version"] = _get_ort_version()
 
-    # Process info
-    info["process_name"] = os.path.basename(sys.argv[0]) if sys.argv else ""
-
     return info
 
 
