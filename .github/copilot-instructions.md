@@ -38,7 +38,7 @@ build.sh          # Linux/Mac shell
 
 ### Key Build Options (cmake/options.cmake)
 
-- `USE_CUDA/USE_DML/USE_ROCM` - Hardware acceleration backends
+- `USE_CUDA/USE_DML` - Hardware acceleration backends
 - `USE_WINML` - Windows ML integration requiring `WINML_SDK_VERSION` parameter
 - `ENABLE_JAVA/ENABLE_PYTHON` - Language binding compilation
 - `USE_GUIDANCE` - Constrained generation support

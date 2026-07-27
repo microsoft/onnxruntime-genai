@@ -1,0 +1,62 @@
+parameters:
+- name: os
+  type: string
+  values: [windows, linux, macos]
+- name: cargo_config_file
+  type: string
+
+steps:
+- ${{ if eq(parameters.os, 'windows') }}:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $failed = $false
+      # Do not print PIP_INDEX_URL: it contains an embedded credential.
+      if (-not $env:PIP_INDEX_URL) {
+        Write-Host 'AUDIT FAIL: PIP_INDEX_URL is not set'; $failed = $true
+      } elseif ($env:PIP_INDEX_URL -notmatch '_packaging/Lotus/' -or $env:PIP_INDEX_URL -match 'pypi\.org') {
+        Write-Host 'AUDIT FAIL: PIP_INDEX_URL does not point exclusively at Lotus'; $failed = $true
+      } else {
+        Write-Host 'AUDIT OK: pip resolves from Lotus only'
+      }
+      $cargoCfg = '${{ parameters.cargo_config_file }}'
+      if (-not (Test-Path $cargoCfg)) {
+        Write-Host "AUDIT FAIL: $cargoCfg missing"; $failed = $true
+      } else {
+        $cargoConfig = Get-Content $cargoCfg -Raw
+        if ($cargoConfig -notmatch 'replace-with\s*=\s*"lotus_auth"' -or $cargoConfig -notmatch '_packaging/Lotus/Cargo/') {
+          Write-Host 'AUDIT FAIL: cargo config does not redirect crates.io to Lotus'; $failed = $true
+        } else {
+          Write-Host 'AUDIT OK: cargo resolves from Lotus only'
+        }
+      }
+      if ($failed) { Write-Error 'Feed isolation audit failed — a public feed could be reached'; exit 1 }
+      Write-Host 'AUDIT OK: no public package feeds configured'
+    displayName: 'Audit: no public package feeds'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+- ${{ if ne(parameters.os, 'windows') }}:
+  - bash: |
+      set -e
+      failed=0
+      # Do not print PIP_INDEX_URL: it contains an embedded credential.
+      if [ -z "${PIP_INDEX_URL:-}" ]; then
+        echo 'AUDIT FAIL: PIP_INDEX_URL is not set'; failed=1
+      elif ! echo "$PIP_INDEX_URL" | grep -q '_packaging/Lotus/' || echo "$PIP_INDEX_URL" | grep -q 'pypi\.org'; then
+        echo 'AUDIT FAIL: PIP_INDEX_URL does not point exclusively at Lotus'; failed=1
+      else
+        echo 'AUDIT OK: pip resolves from Lotus only'
+      fi
+      cargo_config='${{ parameters.cargo_config_file }}'
+      if [ ! -f "$cargo_config" ]; then
+        echo "AUDIT FAIL: $cargo_config missing"; failed=1
+      elif ! grep -q 'replace-with = "lotus_auth"' "$cargo_config" || ! grep -q '_packaging/Lotus/Cargo/' "$cargo_config"; then
+        echo 'AUDIT FAIL: cargo config does not redirect crates.io to Lotus'; failed=1
+      else
+        echo 'AUDIT OK: cargo resolves from Lotus only'
+      fi
+      if [ "$failed" -ne 0 ]; then
+        echo 'Feed isolation audit failed — a public feed could be reached'; exit 1
+      fi
+      echo 'AUDIT OK: no public package feeds configured'
+    displayName: 'Audit: no public package feeds'
+    workingDirectory: '$(Build.SourcesDirectory)'
