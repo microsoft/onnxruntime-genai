@@ -5,17 +5,13 @@
 #
 # The 1DS SDK is obtained one of two ways, in priority order:
 #
-#   1. vcpkg port "cpp-client-telemetry" (preferred on desktop): exposes the MSTelemetry::mat
-#      CONFIG target with its include dirs and transitive dependencies (sqlite3 / zlib /
-#      nlohmann-json) already wired up. Selected automatically when the vcpkg toolchain
-#      provides the package (e.g. build.py --use_telemetry with a vcpkg root). A static
-#      triplet lets the linker dead-strip the unused SDK for minimum binary footprint.
+#   1. A caller-supplied MSTelemetry::mat CONFIG package, when already available in the
+#      configured CMake environment.
 #
-#   2. FetchContent source build (fallback): when the vcpkg package is NOT available, the
+#   2. FetchContent source build (default): when the package is not available, the
 #      SDK source (pinned in cmake/deps.txt) is downloaded, patched, and built locally.
-#      This lets telemetry be enabled without vcpkg, matching the rest of
-#      onnxruntime-genai's dependency model (ORT_HOME + FetchContent), and works on supported
-#      platforms since genai uses 1DS everywhere (unlike ONNX Runtime, which uses ETW on Windows).
+#      This matches onnxruntime-genai's dependency model (ORT_HOME + FetchContent) and works
+#      on supported platforms since GenAI uses 1DS everywhere.
 #
 # Either way this module defines the INTERFACE target `onnxruntime-genai-telemetry`, which
 # the main library links, so the rest of the build is agnostic to how the SDK was obtained.
@@ -31,44 +27,38 @@ if(ANDROID AND NOT ENABLE_JAVA)
 endif()
 
 # ---------------------------------------------------------------------------
-# Path 1: vcpkg port (preferred)
+# Path 1: caller-supplied package
 # ---------------------------------------------------------------------------
 if(NOT ANDROID)
   find_package(MSTelemetry CONFIG QUIET)
 endif()
 if(NOT ANDROID AND TARGET MSTelemetry::mat)
-  message(STATUS "Telemetry: using the 1DS SDK from the cpp-client-telemetry vcpkg port (MSTelemetry::mat).")
+  message(STATUS "Telemetry: using the caller-supplied MSTelemetry::mat package.")
 
   add_library(onnxruntime-genai-telemetry INTERFACE)
   target_link_libraries(onnxruntime-genai-telemetry INTERFACE MSTelemetry::mat)
 
-  # Minimum-binary-footprint guidance: a dynamic triplet ships mat.dll (+ sqlite3/zlib) regardless of
-  # how little of the SDK is used, whereas a static triplet links only the referenced SDK code and lets
-  # the linker dead-strip the rest (the consumer enables /OPT:REF,ICF // --gc-sections // -dead_strip in
-  # CMakeLists.txt). Configure with a static triplet to realize this, e.g.
-  #   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md   (Windows, dynamic CRT)
-  #   -DVCPKG_TARGET_TRIPLET=x64-linux               (Linux)
+  # A static package lets the linker dead-strip unused SDK code. A shared package ships the full
+  # MAT library and its dependencies, which GenAI does not package.
   get_target_property(_mat_type MSTelemetry::mat TYPE)
   if(_mat_type STREQUAL "SHARED_LIBRARY")
-    message(STATUS
-      "Telemetry: MSTelemetry::mat is a SHARED library, so mat.dll (and sqlite3/zlib) will be shipped. "
-      "For minimum binary footprint, configure with a static triplet "
-      "(e.g. -DVCPKG_TARGET_TRIPLET=x64-windows-static-md).")
+    message(FATAL_ERROR
+      "Telemetry requires a static caller-supplied MSTelemetry::mat target because GenAI packages "
+      "do not bundle the MAT shared library or its runtime dependencies.")
   endif()
 
   return()
 endif()
 
 # ---------------------------------------------------------------------------
-# Path 2: FetchContent source build (fallback, no vcpkg)
+# Path 2: FetchContent source build
 # ---------------------------------------------------------------------------
-message(STATUS "Telemetry: cpp-client-telemetry vcpkg package not found; building the 1DS SDK from source via FetchContent.")
+message(STATUS "Telemetry: MSTelemetry::mat not found; building the 1DS SDK from source via FetchContent.")
 
 include(FetchContent)
 
 # The FetchContent fallback relies on genai's patch for a correct source-root include path and portable
-# static packaging. Require the patch tool up front with a clear message rather than failing obscurely
-# (or build with vcpkg so MSTelemetry::mat is provided by the port instead).
+# static packaging. Require the patch tool up front with a clear message rather than failing obscurely.
 find_program(ORTGENAI_PATCH_EXECUTABLE NAMES patch)
 if(NOT ORTGENAI_PATCH_EXECUTABLE AND WIN32)
   find_program(ORTGENAI_GIT_EXECUTABLE NAMES git)
@@ -86,9 +76,8 @@ if(NOT ORTGENAI_PATCH_EXECUTABLE AND WIN32)
 endif()
 if(NOT ORTGENAI_PATCH_EXECUTABLE)
   message(FATAL_ERROR
-    "ENABLE_TELEMETRY without the cpp-client-telemetry vcpkg package requires the 'patch' tool to build "
-    "the 1DS SDK from source. Install 'patch' (on Windows it ships with Git, in <Git>/usr/bin), or build "
-    "with vcpkg so MSTelemetry::mat is provided by the port.")
+    "ENABLE_TELEMETRY requires the 'patch' tool to build the 1DS SDK from source when "
+    "MSTelemetry::mat is not already available. On Windows, patch ships with Git in <Git>/usr/bin.")
 endif()
 
 # The 1DS SDK reads these generic option() names from its own CMakeLists. Disable its tests and the
@@ -99,6 +88,18 @@ set(BUILD_PRIVACYGUARD OFF CACHE BOOL "Disable 1DS privacy guard module" FORCE)
 set(BUILD_SANITIZER OFF CACHE BOOL "Disable 1DS sanitizer module" FORCE)
 set(BUILD_OBJC_WRAPPER OFF CACHE BOOL "Disable 1DS ObjC wrapper" FORCE)
 set(BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
+
+# The 1DS project does not infer its iOS source selection on the normal FetchContent path.
+if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  if(NOT PLATFORM_NAME OR NOT IPHONEOS_DEPLOYMENT_TARGET OR NOT IOS_ARCH)
+    message(FATAL_ERROR
+      "iOS telemetry requires PLATFORM_NAME (iphoneos/iphonesimulator), IOS_ARCH, and "
+      "IPHONEOS_DEPLOYMENT_TARGET to configure the 1DS SDK.")
+  endif()
+  set(BUILD_IOS ON CACHE BOOL "Build the 1DS SDK for iOS" FORCE)
+  set(IOS_PLAT "${PLATFORM_NAME}" CACHE STRING "1DS iOS platform" FORCE)
+  set(IOS_DEPLOYMENT_TARGET "${IPHONEOS_DEPLOYMENT_TARGET}" CACHE STRING "1DS iOS deployment target" FORCE)
+endif()
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
 # selects mat's library type from it. Save it and restore it after the SDK is configured. Desktop and

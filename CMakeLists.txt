@@ -152,14 +152,14 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
 endif()
 
-target_compile_definitions(onnxruntime-genai-obj PRIVATE ORTGENAI_VERSION=\"${VERSION_INFO}\")
+target_compile_definitions(${ORTGENAI_COMPILE_TARGET} PRIVATE ORTGENAI_VERSION=\"${VERSION_INFO}\")
 
 if(ENABLE_TELEMETRY)
-  # cmake/telemetry.cmake defines onnxruntime-genai-telemetry as an INTERFACE target wrapping either the
-  # vcpkg MSTelemetry::mat target or a FetchContent-built `mat`, so this link is agnostic to the source.
-  target_link_libraries(onnxruntime-genai-obj PUBLIC onnxruntime-genai-telemetry)
+  # cmake/telemetry.cmake defines an INTERFACE target around either a caller-supplied
+  # MSTelemetry::mat target or a FetchContent-built `mat`.
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime-genai-telemetry)
   if(WIN32)
-    target_link_libraries(onnxruntime-genai-obj PUBLIC Advapi32)
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Advapi32)
   endif()
 
   # Optional ingestion-token override written into a generated header in the build tree (kept off the
@@ -185,12 +185,12 @@ if(ENABLE_TELEMETRY)
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ortgenai_telemetry_tenant_token.h.in"
     "${_ortgenai_telemetry_gen_dir}/ortgenai_telemetry_tenant_token.h"
     @ONLY)
-  target_include_directories(onnxruntime-genai-obj PRIVATE "${_ortgenai_telemetry_gen_dir}")
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE "${_ortgenai_telemetry_gen_dir}")
 
   # The 1DS SDK (cpp-client-telemetry >= 3.10.173.1) is compiled with per-function
   # and per-data sections, so let the linker dead-strip the (large) portion of the
-  # SDK that onnxruntime-genai never references. Combined with a static triplet
-  # (see cmake/telemetry.cmake) this keeps the binary-size added by telemetry minimal.
+  # SDK that onnxruntime-genai never references. Combined with a static MAT library this keeps
+  # the binary-size added by telemetry minimal.
   if(MSVC)
     target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
   elseif(APPLE)
