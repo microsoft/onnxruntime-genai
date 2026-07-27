@@ -699,10 +699,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     // 3. Current working directory
     {
-      char cwd_buffer[PATH_MAX];
-      if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
-        auto cwd_dir = std::filesystem::canonical(std::filesystem::path(cwd_buffer), ec);
-        if (!ec) allowed_dirs.push_back(cwd_dir);
+      auto cwd = std::filesystem::current_path(ec);
+      if (!ec) {
+        auto cwd_canonical = std::filesystem::canonical(cwd, ec);
+        if (!ec) allowed_dirs.push_back(cwd_canonical);
       }
     }
 
