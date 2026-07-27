@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace Generators {
@@ -23,6 +24,6 @@ struct DeviceInfo {
 const DeviceInfo& GetDeviceInfo();
 
 // Per-user telemetry storage directory. Empty when no per-user location is available.
-std::string GetTelemetryStorageDir();
+std::filesystem::path GetTelemetryStorageDir();
 
 }  // namespace Generators

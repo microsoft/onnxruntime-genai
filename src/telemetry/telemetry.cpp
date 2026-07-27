@@ -211,12 +211,12 @@ void GenAiTelemetry::Initialize() {
     config[MAT::CFG_INT_MAX_TEARDOWN_TIME] = 0;
 
 #if !defined(__ANDROID__)
-    const std::string cache_dir = GetTelemetryStorageDir();
+    const std::filesystem::path cache_dir = GetTelemetryStorageDir();
     if (!cache_dir.empty()) {
       // Product-specific cache file name: the .onnxruntime directory is shared with ONNX Runtime (and
       // Olive) for the device id, but each product needs its OWN 1DS offline cache so two log managers
       // with different tenant tokens never share one SQLite db (which could mix or misroute events).
-      config[MAT::CFG_STR_CACHE_FILE_PATH] = (std::filesystem::path{cache_dir} / "onnxruntime-genai.db").string();
+      config[MAT::CFG_STR_CACHE_FILE_PATH] = (cache_dir / "onnxruntime-genai.db").string();
     }
 #endif
 
@@ -283,20 +283,23 @@ void GenAiTelemetry::Shutdown() {
   // new ones from observing the logger while teardown is in progress.
   initialized_.store(false);
 
-  // 1DS-recommended shutdown sequence: Flush() persists in-memory events to disk,
-  // FlushAndTeardown() quiesces background activity (PauseActivity/WaitPause), and
-  // LogManagerProvider::Release() disposes the instance. Wrapped so a teardown
-  // failure can never propagate (Shutdown runs from ~GenAiTelemetry and the
-  // extern-C OgaShutdown, where an escaping exception would call std::terminate).
-  try {
-    if (impl_ && impl_->log_manager) {
+  // 1DS-recommended shutdown sequence. Each operation is independent and best effort so Release()
+  // still runs if flushing or teardown fails.
+  if (impl_ && impl_->log_manager) {
+    try {
       impl_->log_manager->Flush();
-      impl_->log_manager->FlushAndTeardown();
-      MAT::LogManagerProvider::Release(impl_->config);
-      impl_->log_manager = nullptr;
-      impl_->logger = nullptr;
+    } catch (...) {
     }
-  } catch (...) {
+    try {
+      impl_->log_manager->FlushAndTeardown();
+    } catch (...) {
+    }
+    try {
+      MAT::LogManagerProvider::Release(impl_->config);
+    } catch (...) {
+    }
+    impl_->log_manager = nullptr;
+    impl_->logger = nullptr;
   }
   impl_.reset();
 #endif

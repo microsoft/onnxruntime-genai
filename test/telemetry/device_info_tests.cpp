@@ -71,7 +71,7 @@ TEST(TelemetryDeviceInfoTest, UsesAbsoluteXdgCacheHomeWithoutHome) {
   ScopedEnvironmentVariable home{"HOME", std::nullopt};
   ScopedEnvironmentVariable xdg_cache_home{"XDG_CACHE_HOME", cache_home.string()};
 
-  EXPECT_EQ(fs::path(Generators::GetTelemetryStorageDir()),
+  EXPECT_EQ(Generators::GetTelemetryStorageDir(),
             cache_home / "Microsoft" / "DeveloperTools" / ".onnxruntime");
 }
 
@@ -81,7 +81,7 @@ TEST(TelemetryDeviceInfoTest, IgnoresRelativeXdgCacheHome) {
   ScopedEnvironmentVariable home{"HOME", home_path.string()};
   ScopedEnvironmentVariable xdg_cache_home{"XDG_CACHE_HOME", "relative-cache"};
 
-  EXPECT_EQ(fs::path(Generators::GetTelemetryStorageDir()),
+  EXPECT_EQ(Generators::GetTelemetryStorageDir(),
             home_path / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime");
 }
 

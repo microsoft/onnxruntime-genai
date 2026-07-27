@@ -157,14 +157,45 @@ std::string GetCpuModel() {
   if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
                     "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
                     0, KEY_READ, &key) == ERROR_SUCCESS) {
-    char buf[256]{};
-    DWORD size = sizeof(buf);
-    if (RegQueryValueExA(key, "ProcessorNameString", nullptr, nullptr,
-                         reinterpret_cast<LPBYTE>(buf), &size) == ERROR_SUCCESS) {
-      RegCloseKey(key);
-      return std::string(buf);
-    }
+    const auto read_processor_name = [&]() -> std::string {
+      constexpr DWORD kMaxProcessorNameBytes = 64 * 1024;
+      DWORD type = 0;
+      DWORD size = 0;
+      if (RegQueryValueExA(key, "ProcessorNameString", nullptr, &type, nullptr, &size) !=
+              ERROR_SUCCESS ||
+          type != REG_SZ || size == 0 || size > kMaxProcessorNameBytes) {
+        return {};
+      }
+
+      for (;;) {
+        std::string value(size, '\0');
+        DWORD bytes_read = size;
+        type = 0;
+        const LONG status = RegQueryValueExA(
+            key, "ProcessorNameString", nullptr, &type,
+            reinterpret_cast<LPBYTE>(value.data()), &bytes_read);
+        if (status == ERROR_MORE_DATA && bytes_read > size &&
+            bytes_read <= kMaxProcessorNameBytes) {
+          size = bytes_read;
+          continue;
+        }
+        if (status != ERROR_SUCCESS || type != REG_SZ) {
+          return {};
+        }
+
+        value.resize(std::min<size_t>(bytes_read, value.size()));
+        while (!value.empty() && value.back() == '\0') {
+          value.pop_back();
+        }
+        return value;
+      }
+    };
+
+    const std::string processor_name = read_processor_name();
     RegCloseKey(key);
+    if (!processor_name.empty()) {
+      return processor_name;
+    }
   }
   return "unknown";
 #elif defined(__APPLE__)
@@ -792,7 +823,7 @@ bool UsePlatformDeviceId() {
 
 }  // namespace
 
-std::string GetTelemetryStorageDir() {
+std::filesystem::path GetTelemetryStorageDir() {
   const std::filesystem::path dir = GetDeviceIdStorageDir();
   if (dir.empty()) return {};
 #if !defined(_WIN32)
@@ -801,7 +832,7 @@ std::string GetTelemetryStorageDir() {
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
 #endif
-  return dir.string();
+  return dir;
 }
 
 const DeviceInfo& GetDeviceInfo() {
@@ -836,7 +867,7 @@ const DeviceInfo& GetDeviceInfo() {
   return info;
 }
 
-std::string GetTelemetryStorageDir() {
+std::filesystem::path GetTelemetryStorageDir() {
   return {};
 }
 
