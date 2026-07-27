@@ -6,7 +6,9 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
+#include <cctype>
 #include <functional>
+#include <stdexcept>
 
 namespace Generators {
 
@@ -107,7 +109,40 @@ struct Config {
   // or contains a ".." path traversal component. Empty paths are allowed (no-op).
   // The optional context label is prepended to error messages to identify which config
   // field caused the failure.
-  static void ValidatePath(const std::string& path, std::string_view context = {});
+  //
+  // Defined inline so that binaries that consume this header (including tests that link
+  // the shared onnxruntime-genai library without importing internal symbols) can call it
+  // without requiring a DLL export.
+  static void ValidatePath(const std::string& path, std::string_view context = {}) {
+    if (path.empty()) return;
+
+    auto make_error = [&](const std::string& msg) -> std::string {
+      return context.empty() ? msg : (std::string{context} + ": " + msg);
+    };
+
+    // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
+    if (path[0] == '/' || path[0] == '\\') {
+      throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+    }
+#ifdef _WIN32
+    if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+      throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+    }
+#endif
+
+    // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
+    std::string component;
+    for (size_t i = 0; i <= path.size(); ++i) {
+      if (i == path.size() || path[i] == '/' || path[i] == '\\') {
+        if (component == "..") {
+          throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
+        }
+        component.clear();
+      } else {
+        component += path[i];
+      }
+    }
+  }
 
   using NamedString = Generators::NamedString;
   using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
