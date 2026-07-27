@@ -107,15 +107,18 @@ def main():
         eps_to_build = args.eps
         log.info(f"Building models for explicitly specified EPs: {eps_to_build}")
     else:
-        # Auto-detect available EPs
-        eps_to_build = ["cpu"]  # CPU is always available
+        # Auto-detect available EPs. In CI, prefer accelerator EPs and avoid CPU model
+        # downloads when CUDA/DML/WebGPU is available.
+        eps_to_build = []
         if og.is_cuda_available():
             eps_to_build.append("cuda")
         if og.is_dml_available():
             eps_to_build.append("dml")
-        # Only build WebGPU models if the WebGPU EP plugin package is installed
+        # Only build WebGPU models if the WebGPU EP plugin package is installed.
         if is_webgpu_ep_available():
             eps_to_build.append("webgpu")
+        if not eps_to_build:
+            eps_to_build = ["cpu"]
         log.info(f"Auto-detected available EPs: {eps_to_build}")
 
     # Get INT4 ONNX models for specified/detected EPs

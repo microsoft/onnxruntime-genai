@@ -22,11 +22,11 @@ from _test_utils import register_plugin_providers
 
 logger = logging.getLogger(__name__)
 
-
-devices = ["cpu"]
-
 # Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
 register_plugin_providers(logger)
+
+has_accelerator_ep = og.is_cuda_available() or og.is_dml_available() or og.is_webgpu_available()
+devices = [] if has_accelerator_ep else ["cpu"]
 
 if og.is_cuda_available():
     devices.append("cuda")
