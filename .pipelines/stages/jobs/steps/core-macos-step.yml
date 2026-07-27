@@ -89,7 +89,6 @@ steps:
       --skip_examples \
       --skip_wheel \
       --use_guidance \
-      --use_telemetry \
       --ort_home "$(Build.SourcesDirectory)/ort_home" \
       --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF CMAKE_OSX_ARCHITECTURES=arm64 Rust_CARGO_TARGET=aarch64-apple-darwin \
       --build_dir "$(buildDir)"

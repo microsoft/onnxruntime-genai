@@ -176,9 +176,9 @@ def _parse_args():
     )
 
     parser.add_argument(
-        "--use_telemetry",
+        "--no_telemetry",
         action="store_true",
-        help="Enable telemetry via the 1DS cpp-client-telemetry SDK built from source via FetchContent.",
+        help="Disable telemetry. Telemetry is enabled by default on supported platforms.",
     )
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
@@ -632,7 +632,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
         f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
-        f"-DENABLE_TELEMETRY={'ON' if args.use_telemetry else 'OFF'}",
+        f"-DENABLE_TELEMETRY={'OFF' if args.no_telemetry or util.is_aix() or args.macos == 'Catalyst' else 'ON'}",
     ]
 
     if args.ort_home:

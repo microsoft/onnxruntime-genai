@@ -109,7 +109,6 @@ steps:
         --skip_examples \
         --skip_wheel \
         --use_guidance \
-        --use_telemetry \
         --ort_home /ort_genai_src/ort_home \
         --cmake_extra_defines ENABLE_PYTHON=OFF ENABLE_TESTS=OFF \
         --build_dir build/core \

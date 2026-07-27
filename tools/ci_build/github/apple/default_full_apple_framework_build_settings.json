@@ -16,7 +16,6 @@
             "--parallel",
             "--cmake_generator",
             "Xcode",
-            "--use_telemetry",
             "--build_apple_framework",
             "--skip_tests",
             "--skip_wheel"
