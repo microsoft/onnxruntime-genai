@@ -214,6 +214,10 @@ def is_model_excluded(enable_graph_capture: bool, model_name: str, device: str) 
     if device == "dml":
         return True
 
+    # LFM graph-capture is currently unstable across EPs.
+    if model_name.lower().startswith("lfm"):
+        return True
+
     # Map of models that have EP-specific graph capture incompatibilities
     # Format: model_name -> set of EPs where graph capture is NOT supported
     graph_capture_exclusions = {
