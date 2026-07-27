@@ -179,10 +179,9 @@ if(ENABLE_TELEMETRY)
     @ONLY)
   target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE "${_ortgenai_telemetry_gen_dir}")
 
-  # The 1DS SDK (cpp-client-telemetry >= 3.10.173.1) is compiled with per-function
-  # and per-data sections, so let the linker dead-strip the (large) portion of the
-  # SDK that onnxruntime-genai never references. Combined with a static MAT library this keeps
-  # the binary-size added by telemetry minimal.
+  # The 1DS SDK is compiled with per-function and per-data sections, so let the linker
+  # dead-strip the (large) portion of the SDK that onnxruntime-genai never references. Combined
+  # with a static MAT library this keeps the binary-size added by telemetry minimal.
   if(MSVC)
     target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
   elseif(APPLE)
