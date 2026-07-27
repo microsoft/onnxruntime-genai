@@ -1,38 +1,66 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-if(NOT DEFINED SOURCE_DIR OR
-   NOT DEFINED PATCH_EXECUTABLE OR
-   NOT DEFINED PATCH_FILE)
-  message(FATAL_ERROR "SOURCE_DIR, PATCH_EXECUTABLE, and PATCH_FILE are required.")
+if(NOT DEFINED SOURCE_DIR)
+  message(FATAL_ERROR "SOURCE_DIR is required.")
 endif()
 
-set(_marker_file "${SOURCE_DIR}/lib/CMakeLists.txt")
-if(NOT EXISTS "${_marker_file}")
-  message(FATAL_ERROR "1DS source marker file not found: ${_marker_file}")
-endif()
+function(ortgenai_replace_required file_path old_text new_text)
+  if(NOT EXISTS "${file_path}")
+    message(FATAL_ERROR "1DS source file not found: ${file_path}")
+  endif()
 
-file(READ "${_marker_file}" _marker_contents)
-if(_marker_contents MATCHES "MATSDK_BUNDLE_VENDORED_DEPS")
-  message(STATUS "1DS patch is already applied.")
-  return()
-endif()
+  file(READ "${file_path}" contents)
+  string(FIND "${contents}" "${new_text}" new_position)
+  if(NOT new_position EQUAL -1)
+    return()
+  endif()
 
-set(_patch_command "${PATCH_EXECUTABLE}")
-if(USE_BINARY)
-  list(APPEND _patch_command --binary)
-endif()
-list(APPEND _patch_command -l -p1 -i "${PATCH_FILE}")
+  string(FIND "${contents}" "${old_text}" old_position)
+  if(old_position EQUAL -1)
+    message(FATAL_ERROR "Expected 1DS source text was not found in ${file_path}: ${old_text}")
+  endif()
 
-execute_process(
-  COMMAND ${_patch_command}
-  WORKING_DIRECTORY "${SOURCE_DIR}"
-  RESULT_VARIABLE _patch_result
-  OUTPUT_VARIABLE _patch_output
-  ERROR_VARIABLE _patch_error)
+  string(REPLACE "${old_text}" "${new_text}" contents "${contents}")
+  file(WRITE "${file_path}" "${contents}")
+endfunction()
 
-if(NOT _patch_result EQUAL 0)
-  message(FATAL_ERROR
-    "Failed to patch the 1DS SDK (exit ${_patch_result}).\n"
-    "${_patch_output}${_patch_error}")
-endif()
+set(root_cmake "${SOURCE_DIR}/CMakeLists.txt")
+set(lib_cmake "${SOURCE_DIR}/lib/CMakeLists.txt")
+
+ortgenai_replace_required(
+  "${root_cmake}"
+  [=[include_directories(${CMAKE_SOURCE_DIR})]=]
+  [=[include_directories(${CMAKE_CURRENT_SOURCE_DIR})]=])
+
+ortgenai_replace_required(
+  "${lib_cmake}"
+  [=[if(NOT MATSDK_USE_VCPKG_DEPS)]=]
+  [=[if(NOT MATSDK_USE_VCPKG_DEPS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")]=])
+
+ortgenai_replace_required(
+  "${lib_cmake}"
+  [=[else()
+  # Legacy mode: use vendored or system-installed deps
+  if(CMAKE_SYSTEM_NAME STREQUAL "Android")]=]
+  [=[else()
+  # Legacy mode: use vendored or system-installed deps
+  if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR MATSDK_BUNDLE_VENDORED_DEPS)]=])
+
+ortgenai_replace_required(
+  "${lib_cmake}"
+  [=[target_compile_options(sqlite3_bundled PRIVATE -fno-finite-math-only -Wno-unused-function)]=]
+  [=[target_compile_options(sqlite3_bundled PRIVATE -fno-finite-math-only -Wno-unused-function)
+    target_compile_definitions(sqlite3_bundled PRIVATE HAVE_GETHOSTUUID=0)]=])
+
+ortgenai_replace_required(
+  "${lib_cmake}"
+  [=[  elseif(PAL_IMPLEMENTATION STREQUAL "WIN32")]=]
+  [=[  elseif(APPLE)
+    target_link_libraries(mat PRIVATE sqlite3 z ${LIBS})
+  elseif(PAL_IMPLEMENTATION STREQUAL "WIN32")]=])
+
+ortgenai_replace_required(
+  "${SOURCE_DIR}/lib/system/EventProperties.cpp"
+  [=[calloc(sizeof(evt_prop), size)]=]
+  [=[calloc(size, sizeof(evt_prop))]=])

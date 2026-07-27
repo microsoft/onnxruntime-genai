@@ -57,28 +57,8 @@ message(STATUS "Telemetry: MSTelemetry::mat not found; building the 1DS SDK from
 
 include(FetchContent)
 
-# The FetchContent fallback relies on genai's patch for a correct source-root include path and portable
-# static packaging. Require the patch tool up front with a clear message rather than failing obscurely.
-find_program(ORTGENAI_PATCH_EXECUTABLE NAMES patch)
-if(NOT ORTGENAI_PATCH_EXECUTABLE AND WIN32)
-  find_program(ORTGENAI_GIT_EXECUTABLE NAMES git)
-  if(ORTGENAI_GIT_EXECUTABLE)
-    get_filename_component(_ortgenai_git_dir "${ORTGENAI_GIT_EXECUTABLE}" DIRECTORY)
-    foreach(_ortgenai_patch_candidate
-        "${_ortgenai_git_dir}/../usr/bin/patch.exe"
-        "${_ortgenai_git_dir}/patch.exe")
-      if(EXISTS "${_ortgenai_patch_candidate}")
-        set(ORTGENAI_PATCH_EXECUTABLE "${_ortgenai_patch_candidate}")
-        break()
-      endif()
-    endforeach()
-  endif()
-endif()
-if(NOT ORTGENAI_PATCH_EXECUTABLE)
-  message(FATAL_ERROR
-    "ENABLE_TELEMETRY requires the 'patch' tool to build the 1DS SDK from source when "
-    "MSTelemetry::mat is not already available. On Windows, patch ships with Git in <Git>/usr/bin.")
-endif()
+# The FetchContent source requires a few deterministic CMake adjustments for nested include paths,
+# self-contained static dependencies, and Apple portability. Apply them without external tools.
 
 # The 1DS SDK reads these generic option() names from its own CMakeLists. Disable its tests and the
 # optional modules whose source may be absent from the release archive; genai uses the C++ API directly.
@@ -125,9 +105,6 @@ set(MATSDK_BUNDLE_VENDORED_DEPS ON CACHE BOOL "Build 1DS SDK vendored sqlite3/zl
 set(_ortgenai_telemetry_patch
   "${CMAKE_COMMAND}"
   "-DSOURCE_DIR=<SOURCE_DIR>"
-  "-DPATCH_EXECUTABLE=${ORTGENAI_PATCH_EXECUTABLE}"
-  "-DPATCH_FILE=${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/cpp_client_telemetry.patch"
-  "-DUSE_BINARY=${WIN32}"
   "-P"
   "${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/apply_patch.cmake")
 
@@ -199,6 +176,16 @@ if(WIN32)
       set_target_properties(sqlite3_bundled PROPERTIES COMPILE_OPTIONS "${_ortgenai_sqlite_opts}")
     endif()
   endif()
+endif()
+
+# Vendored sqlite is third-party C code and emits unavoidable narrowing warnings under the Apple
+# warning policy. Keep those warnings enabled for GenAI sources while preventing -Werror failures here.
+if(APPLE AND TARGET sqlite3_bundled)
+  target_compile_options(sqlite3_bundled PRIVATE -Wno-shorten-64-to-32)
+endif()
+if(TARGET sqlite3_bundled)
+  target_compile_options(sqlite3_bundled PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU>:-Wno-error=stringop-overread>)
 endif()
 
 # Guard SDK warnings that the consumer treats as errors without weakening warnings for GenAI targets.
