@@ -182,6 +182,7 @@ endif()
 # warning policy. Keep those warnings enabled for GenAI sources while preventing -Werror failures here.
 if(APPLE AND TARGET sqlite3_bundled)
   target_compile_options(sqlite3_bundled PRIVATE -Wno-shorten-64-to-32)
+  target_compile_options(mat PRIVATE -Wno-shorten-64-to-32)
 endif()
 if(TARGET sqlite3_bundled)
   target_compile_options(sqlite3_bundled PRIVATE
