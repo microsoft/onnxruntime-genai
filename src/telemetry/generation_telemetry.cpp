@@ -73,10 +73,6 @@ void GenerationTelemetry::CompleteAppend(size_t input_token_count, int num_beams
   input_modality_ = input_modality;
 }
 
-void GenerationTelemetry::AddAudioDurationMs(double duration_ms) {
-  if (duration_ms > 0.0 && IsEnabled()) audio_duration_ms_ += duration_ms;
-}
-
 void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
   const bool track_telemetry = IsEnabled();
   if (track_telemetry && !generation_abandoned_) {
@@ -137,7 +133,6 @@ void GenerationTelemetry::Finish() {
     info.generated_tokens = generated_tokens_;
     info.rewind_count = rewind_count_;
     info.rewound_tokens = rewound_tokens_;
-    info.audio_duration_ms = audio_duration_ms_;
     info.time_to_first_token_ms = time_to_first_token_ms;
     info.total_time_ms = total_time_ms;
     info.tokens_per_second = tokens_per_second;
@@ -151,7 +146,6 @@ void GenerationTelemetry::Reset() {
   generated_tokens_ = 0;
   rewind_count_ = 0;
   rewound_tokens_ = 0;
-  audio_duration_ms_ = 0.0;
   first_token_logged_ = false;
   generate_start_logged_ = false;
   start_time_ = std::chrono::steady_clock::now();

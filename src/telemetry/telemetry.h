@@ -35,8 +35,6 @@ struct ModelLoadInfo {
   std::string execution_providers;  // Configured EP list (comma-separated)
   std::string selected_device;      // Actual device chosen (CPU/CUDA/DML/...)
   std::string modality;             // Supported modality (grouped): text / vision / audio / multimodal
-  std::string attention_type;       // full / gqa / sliding_window / hybrid
-  std::string transcription_mode;   // Audio models only: streaming / batch ("" otherwise)
   int vocab_size{};
   int context_length{};
   int num_hidden_layers{};
@@ -54,7 +52,6 @@ struct GenerateEndInfo {
   int64_t generated_tokens{};
   int64_t rewind_count{};
   int64_t rewound_tokens{};
-  double audio_duration_ms{};
   double time_to_first_token_ms{};
   double total_time_ms{};
   double tokens_per_second{};

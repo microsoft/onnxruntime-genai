@@ -8,7 +8,6 @@
 #include "../models/model_type.h"
 #include "../smartptrs.h"
 
-#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <string>
@@ -52,23 +51,6 @@ std::string DeriveModelFamily(const std::string& model_type) {
   return model_type;
 }
 
-std::string DeriveAttentionType(const Config::Model::Decoder& decoder) {
-  const bool has_conv = std::any_of(
-      decoder.layer_types.begin(), decoder.layer_types.end(),
-      [](const std::string& layer_type) { return layer_type == "conv"; });
-  if (has_conv) {
-    return "hybrid";
-  }
-  if (decoder.sliding_window.has_value()) {
-    return "sliding_window";
-  }
-  if (decoder.num_key_value_heads > 0 && decoder.num_attention_heads > 0 &&
-      decoder.num_key_value_heads < decoder.num_attention_heads) {
-    return "gqa";
-  }
-  return "full";
-}
-
 ModelLoadInfo BuildModelLoadInfo(const Model& model) {
   const auto& config = *model.config_;
   const auto& decoder = config.model.decoder;
@@ -77,7 +59,6 @@ ModelLoadInfo BuildModelLoadInfo(const Model& model) {
   info.model_type = config.model.type;
   info.model_family = DeriveModelFamily(config.model.type);
   info.selected_device = to_string(model.p_device_->GetType());
-  info.attention_type = DeriveAttentionType(decoder);
   info.vocab_size = config.model.vocab_size;
   info.context_length = config.model.context_length;
   info.num_hidden_layers = decoder.num_hidden_layers;
@@ -110,12 +91,6 @@ ModelLoadInfo BuildModelLoadInfo(const Model& model) {
     info.modality = "audio";
   } else {
     info.modality = "text";
-  }
-
-  if (ModelType::IsTransducer(model_type)) {
-    info.transcription_mode = "streaming";
-  } else if (ModelType::IsALM(model_type)) {
-    info.transcription_mode = "batch";
   }
 
   if (model.p_device_->GetType() == DeviceType::CUDA) {

@@ -94,9 +94,6 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
               static_cast<size_t>(m.num_mels) * num_frames * sizeof(float));
   const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
   named_tensors->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel_value)));
-  named_tensors->SetAudioDurationMs(
-      static_cast<double>(num_samples) * 1000.0 / static_cast<double>(m.sample_rate),
-      audio_features_name);
 
   return named_tensors;
 }

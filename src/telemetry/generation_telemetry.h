@@ -40,7 +40,6 @@ class GenerationTelemetry {
   void LogAdapterActivated();
   bool BeginAppend();
   void CompleteAppend(size_t input_token_count, int num_beams, std::string_view input_modality);
-  void AddAudioDurationMs(double duration_ms);
   void OnTokenGenerated(int64_t active_token_count);
   void OnRewind(int64_t rewound_token_count);
   AppendTrackingSuppression SuppressAppendTracking();
@@ -57,7 +56,6 @@ class GenerationTelemetry {
   int64_t generated_tokens_{0};
   int64_t rewind_count_{0};
   int64_t rewound_tokens_{0};
-  double audio_duration_ms_{0.0};
   bool first_token_logged_{false};
   bool generate_start_logged_{false};
   bool generation_abandoned_{false};
@@ -80,7 +78,6 @@ class GenerationTelemetry {
   void LogAdapterActivated() {}
   bool BeginAppend() { return false; }
   void CompleteAppend(size_t, int, std::string_view) {}
-  void AddAudioDurationMs(double) {}
   void OnTokenGenerated(int64_t) {}
   void OnRewind(int64_t) {}
   AppendTrackingSuppression SuppressAppendTracking() { return {}; }

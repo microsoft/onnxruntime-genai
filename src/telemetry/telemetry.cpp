@@ -420,8 +420,6 @@ void GenAiTelemetry::LogModelLoad(uint32_t session_id, const ModelLoadInfo& info
     event.SetProperty("modelType", info.model_type);
     event.SetProperty("modelFamily", info.model_family);
     event.SetProperty("modality", info.modality);
-    event.SetProperty("attentionType", info.attention_type);
-    event.SetProperty("transcriptionMode", info.transcription_mode);
     event.SetProperty("executionProviders", info.execution_providers);
     event.SetProperty("selectedDevice", info.selected_device);
     event.SetProperty("vocabSize", static_cast<int64_t>(info.vocab_size));
@@ -515,7 +513,6 @@ void GenAiTelemetry::LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
     event.SetProperty("generatedTokens", info.generated_tokens);
     event.SetProperty("rewindCount", info.rewind_count);
     event.SetProperty("rewoundTokens", info.rewound_tokens);
-    if (info.audio_duration_ms > 0.0) event.SetProperty("audioDurationMs", info.audio_duration_ms);
     event.SetProperty("timeToFirstTokenMs", info.time_to_first_token_ms);
     event.SetProperty("totalTimeMs", info.total_time_ms);
     event.SetProperty("tokensPerSecond", info.tokens_per_second);

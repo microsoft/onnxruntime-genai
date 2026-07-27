@@ -682,7 +682,6 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
   }
-  generation_telemetry_.AddAudioDurationMs(named_tensors.AudioDurationMs());
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
