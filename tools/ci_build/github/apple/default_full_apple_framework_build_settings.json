@@ -8,8 +8,7 @@
             "x86_64"
         ],
         "macosx": [
-            "arm64",
-            "x86_64"
+            "arm64"
         ]
     },
     "build_params": {
@@ -19,7 +18,8 @@
             "Xcode",
             "--use_telemetry",
             "--build_apple_framework",
-            "--skip_tests"
+            "--skip_tests",
+            "--skip_wheel"
         ],
         "macosx": [
             "--macos=MacOSX",

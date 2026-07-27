@@ -1,0 +1,358 @@
+# =============================================================================
+# core-win-step.yml — Windows core build step template.
+#
+# Builds onnxruntime-genai core using build.py on a Windows agent, installs
+# the exported find_package CMake package, runs CPack to produce a zip archive,
+# asserts both artifacts, and publishes two pipeline artifacts:
+#   $(artifactName)-cmake-pkg  — CMake package (SDK handoff)
+#   $(artifactName)-archive    — CPack zip (distribution)
+#
+# Job-level variables expected from the parent job:
+#   ortHome       - path where ORT headers+libs are unpacked
+#   coreInstall   - cmake --install prefix (exported CMake package)
+#   buildDir      - build.py --build_dir (relative, e.g. build/core)
+#   artifactName  - artifact name prefix (e.g. core-win-x64-cpu)
+# =============================================================================
+
+parameters:
+- name: os
+  type: string
+  values: [win]
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda, winml]
+- name: build_config
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+
+steps:
+
+# --- Python -----------------------------------------------------------------
+- task: UsePythonVersion@0
+  displayName: 'Use Python 3.12 (${{ parameters.arch }})'
+  inputs:
+    versionSpec: '3.12'
+    addToPath: true
+    architecture: '${{ parameters.arch }}'
+
+# --- Rust (required by --use_guidance) -------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $exePath = "$env:TEMP/rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile(
+      'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.86.0
+    $env:PATH = "$env:USERPROFILE/.cargo/bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    rustc --version
+  displayName: 'Install Rust toolchain'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- template: utils/authenticate-core-build-feeds.yml
+  parameters:
+    os: windows
+    cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
+
+- script: python -m pip install requests wheel
+  displayName: 'Install build-time Python deps'
+
+# --- LLVM (arm64 only — needed by guidance bindgen) ------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $llvmUrl = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe'
+    $installer = "$(Agent.TempDirectory)/LLVM-18.1.8-woa64.exe"
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installer
+    Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+    $llvmBin = 'C:/Program Files/LLVM/bin'
+    if (-not (Test-Path $llvmBin)) { Write-Error 'LLVM install failed'; exit 1 }
+    $env:PATH = "$llvmBin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    clang --version
+  displayName: 'Install LLVM 18 (arm64 guidance bindgen)'
+  condition: eq('${{ parameters.arch }}', 'arm64')
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- CUDA SDK (CUDA + WinML EPs; WinML enables CUDA) -----------------------
+- powershell: |
+    azcopy.exe cp --recursive `
+      "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" `
+      'cuda_sdk'
+  displayName: 'Download CUDA ${{ parameters.cuda_version }} SDK (x64)'
+  condition: and(in('${{ parameters.ep }}', 'cuda', 'winml'), eq('${{ parameters.arch }}', 'x64'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# On the win-arm64 agent, Azure CLI (az) and azcopy are not pre-installed, but the
+# AzureCLI@2 task (used to auth the CUDA SDK download) requires `az`. Install the
+# 32-bit CLI, which is supported through Windows ARM64 emulation.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    Write-Host "Downloading Azure CLI..."
+    $azCliUrl = "https://aka.ms/installazurecliwindows"
+    $installerPath = Join-Path "$(Agent.TempDirectory)" "AzureCLI.msi"
+    Invoke-WebRequest -Uri $azCliUrl -OutFile $installerPath
+    if ((Get-Item $installerPath).Length -lt 1MB) {
+      Write-Error "Azure CLI download is unexpectedly small and is not a valid installer"
+      exit 1
+    }
+    Write-Host "Installing Azure CLI..."
+    $install = Start-Process -FilePath "msiexec.exe" `
+      -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait -PassThru
+    if ($install.ExitCode -notin 0, 1641, 3010) {
+      Write-Error "Azure CLI installer failed with exit code $($install.ExitCode)"
+      exit 1
+    }
+
+    # Keep both locations for compatibility if Microsoft changes the generic
+    # installer architecture in the future.
+    $azCliBin = @(
+      (Join-Path $env:ProgramFiles "Microsoft SDKs\Azure\CLI2\wbin"),
+      (Join-Path ${env:ProgramFiles(x86)} "Microsoft SDKs\Azure\CLI2\wbin")
+    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'az.cmd')) } |
+      Select-Object -First 1
+    if (-not $azCliBin) {
+      Write-Error "Azure CLI install succeeded, but az.cmd was not found under either Program Files root"
+      exit 1
+    }
+    Write-Host "Azure CLI path: $azCliBin"
+    $env:PATH = "$azCliBin;$env:PATH"
+    Write-Host "##vso[task.prependpath]$azCliBin"
+
+    Write-Host "Downloading AzCopy..."
+    $azcopyUrl = "https://aka.ms/downloadazcopy-v10-windows"
+    $azcopyZip = Join-Path "$(Agent.TempDirectory)" "azcopy.zip"
+    Invoke-WebRequest -Uri $azcopyUrl -OutFile $azcopyZip
+    $azcopyExtractPath = Join-Path "$(Agent.TempDirectory)" "azcopy"
+    Expand-Archive -Path $azcopyZip -DestinationPath $azcopyExtractPath -Force
+    $azcopyFullPath = Get-ChildItem -Path $azcopyExtractPath -Filter "azcopy.exe" -Recurse | Select-Object -First 1
+    if (-not $azcopyFullPath) {
+      Write-Error "AzCopy executable not found after extraction"
+      exit 1
+    }
+    $azcopyDir = $azcopyFullPath.Directory.FullName
+    $env:PATH = "$azcopyDir;$env:PATH"
+    Write-Host "##vso[task.prependpath]$azcopyDir"
+    az --version
+    azcopy --version
+  displayName: 'Install Azure CLI + AzCopy (arm64 CUDA)'
+  condition: and(in('${{ parameters.ep }}', 'cuda', 'winml'), eq('${{ parameters.arch }}', 'arm64'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- task: AzureCLI@2
+  displayName: 'Download CUDA ${{ parameters.cuda_version }} SDK (arm64)'
+  condition: and(in('${{ parameters.ep }}', 'cuda', 'winml'), eq('${{ parameters.arch }}', 'arm64'))
+  inputs:
+    azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+    scriptType: batch
+    scriptLocation: inlineScript
+    inlineScript: |
+      set AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+      azcopy cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/win-arm64/v${{ parameters.cuda_version }}" "cuda_sdk"
+
+# --- ORT download from Lotus feed (authenticated; not for WinML) ------------
+- ${{ if ne(parameters.ep, 'winml') }}:
+  - template: utils/download-ort-desktop.yml
+    parameters:
+      os: windows
+      arch: ${{ parameters.arch }}
+      ep: ${{ parameters.ep }}
+      ort_version: ${{ parameters.ort_version }}
+      ort_home: '$(ortHome)'
+# --- WinML SDK feed isolation: nuget.config → Lotus (WinML EP only) ----------
+# cmake/ortlib.cmake (USE_WINML) runs `nuget install Microsoft.Windows.AI.MachineLearning`
+# via cmake/nuget.cmake. Write a cleared, Lotus-only nuget.config at the sources
+# root (nuget.exe walks up from the build dir to find it) so that download resolves
+# from Lotus, and authenticate the pipeline identity to it.
+- ${{ if eq(parameters.ep, 'winml') }}:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $cfg = "$(Build.SourcesDirectory)/nuget.config"
+      @(
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<configuration>',
+        '  <packageSources>',
+        '    <clear />',
+        '    <add key="Lotus" value="$(lotusNuGetFeed)" />',
+        '  </packageSources>',
+        '</configuration>'
+      ) | Set-Content -Path $cfg -Encoding utf8
+      Write-Host "Wrote $cfg"
+    displayName: 'Configure WinML SDK nuget feed isolation (Lotus)'
+    workingDirectory: '$(Build.SourcesDirectory)'
+  - task: NuGetAuthenticate@1
+    displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
+
+# --- Audit: no public package feeds -----------------------------------------
+- template: utils/audit-core-build-feeds.yml
+  parameters:
+    os: windows
+    cargo_config_file: '$(Build.SourcesDirectory)/.cargo/config.toml'
+# --- Build core (build only) ------------------------------------------------
+# Signing must happen BEFORE CPack/install so the signed DLL ends up in BOTH the
+# archive and the exported CMake package. So we build first, sign, then package
+# + install via direct cmake (build.py appends /<config> to --build_dir).
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $args = @(
+      'build.py',
+      '--config', '${{ parameters.build_config }}',
+      '--parallel',
+      '--skip_tests',
+      '--skip_examples',
+      '--skip_wheel',
+      '--use_guidance',
+      '--use_telemetry',
+      '--cmake_extra_defines', 'ENABLE_PYTHON=OFF', 'ENABLE_TESTS=OFF',
+      '--build_dir', '$(buildDir)'
+    )
+    # WinML resolves ONNX Runtime via the WinML SDK NuGet inside cmake/ortlib.cmake,
+    # so it does not take an --ort_home; every other EP links the downloaded ORT.
+    if ('${{ parameters.ep }}' -ne 'winml') { $args += '--ort_home', '$(ortHome)' }
+    if ('${{ parameters.arch }}' -eq 'arm64') { $args += '--arm64' }
+    # CUDA is enabled for both the CUDA EP and WinML (WinML = CUDA + DML + WinML).
+    if ('${{ parameters.ep }}' -eq 'cuda' -or '${{ parameters.ep }}' -eq 'winml') {
+      $cudaHome = Join-Path '$(Build.SourcesDirectory)' "cuda_sdk/v${{ parameters.cuda_version }}"
+      $args += '--use_cuda', '--cuda_home', $cudaHome
+      if ('${{ parameters.cuda_version }}' -like '13.*') {
+        if ('${{ parameters.arch }}' -eq 'arm64') {
+          $cudaArchs = '110-real;120-real;121-real;120-virtual'
+        } else {
+          $cudaArchs = '75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+        }
+      } else {
+        $cudaArchs = '61-real;75-real;86-real;89-real;120-real;120-virtual'
+      }
+      $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
+    }
+    # WinML additionally enables DML and pins the WinML SDK version (carried in the
+    # ort_version parameter for the WinML EP).
+    if ('${{ parameters.ep }}' -eq 'winml') {
+      $args += '--use_winml', '--use_dml', '--winml_sdk_version', '${{ parameters.ort_version }}'
+    }
+    Write-Host "Running: python $($args -join ' ')"
+    & python @args
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  displayName: 'Build core (build.py)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # cargo auth for the Lotus registry (Bearer token consumed by cargo:token
+    # credential provider). Not echoed — ADO masks System.AccessToken.
+    CARGO_REGISTRIES_LOTUS_TOKEN: 'Bearer $(System.AccessToken)'
+
+# --- ESRP sign the core native dlls (before packaging) ----------------------
+# NOTE: BinSkim is intentionally NOT run here. Adding a BinSkim@4 task to this
+# job activates 1ES's Guardian glass-box SDL analysis, whose injected credential
+# scanner ("sarifpatternmatcher") crashes Guardian Post Analysis with a
+# driver-less SARIF when scanning this job's --use_guidance Rust/cargo build tree
+# (confirmed by bisect: removing BinSkim here makes the job green; ESRP is fine).
+# BinSkim coverage for the core native binaries is instead run in a clean-workspace
+# job (see sdk-csharp-job.yml, which BinSkims the downloaded core dlls).
+#
+# build.py's VS build nests the dll under <build_dir>/<config>/<config>/; the ESRP
+# template searches FolderPath recursively so the config sub-dir is covered.
+- template: compliant/win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}'
+    DisplayName: 'ESRP - sign core native dlls'
+    Pattern: '*genai*.dll'
+
+# --- Package (CPack) + install the CMake package with the SIGNED dll --------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    # build.py resolves --build_dir to <build_dir>/<config>; drive CPack + install
+    # directly against that tree so the already-signed dll is what gets packaged.
+    $cmakeBuildDir = "$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}"
+    cmake --build $cmakeBuildDir --config ${{ parameters.build_config }} --target package
+    if ($LASTEXITCODE -ne 0) { Write-Error "CPack failed"; exit 1 }
+    cmake --install $cmakeBuildDir --config ${{ parameters.build_config }} --prefix "$(coreInstall)"
+    if ($LASTEXITCODE -ne 0) { Write-Error "install failed"; exit 1 }
+  displayName: 'Package + install core (signed)'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# --- Assert: CMake package installed ----------------------------------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $req = @(
+      '$(coreInstall)/lib/cmake/onnxruntime-genai/onnxruntime-genaiConfig.cmake',
+      '$(coreInstall)/lib/cmake/onnxruntime-genai/onnxruntime-genaiConfigVersion.cmake',
+      '$(coreInstall)/lib/cmake/onnxruntime-genai/onnxruntime-genai-targets.cmake',
+      '$(coreInstall)/include/ort_genai_c.h',
+      '$(coreInstall)/include/ort_genai.h',
+      '$(coreInstall)/lib/onnxruntime-genai.dll'
+    )
+    foreach ($f in $req) {
+      if (-not (Test-Path $f)) { Write-Error "ASSERT FAIL: missing $f"; exit 1 }
+    }
+    Write-Host "ASSERT OK: CMake package installed at $(coreInstall)"
+  displayName: 'Assert: CMake package installed'
+
+# --- Probe: find_package(onnxruntime-genai) resolves and links --------------
+# Configuring and building the committed consumer probe is the real proof that
+# the exported CMake package is consumable — a broken export (missing target,
+# bad include/link interface) fails here rather than in a later SDK job.
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $probeBuild = "$(Agent.TempDirectory)/probe-build"
+    cmake -S "$(Build.SourcesDirectory)/.pipelines/consumer-smoke-test" -B $probeBuild `
+      -Donnxruntime-genai_DIR="$(coreInstall)/lib/cmake/onnxruntime-genai"
+    if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe configure failed"; exit 1 }
+    cmake --build $probeBuild --config ${{ parameters.build_config }}
+    if ($LASTEXITCODE -ne 0) { Write-Error "ASSERT FAIL: probe build failed"; exit 1 }
+    if (-not (Test-Path "$probeBuild/${{ parameters.build_config }}/genai_probe.exe")) {
+      Write-Error "ASSERT FAIL: probe exe missing"; exit 1
+    }
+    Write-Host "ASSERT OK: find_package(onnxruntime-genai) resolves and links"
+  displayName: 'Probe: find_package links imported target'
+
+# --- Assert: CPack archive produced + contains expected payload -------------
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    $pkgDir = '$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}/package'
+    $zip = Get-ChildItem -Path $pkgDir -Filter '*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $zip) {
+      Write-Error "ASSERT FAIL: no CPack .zip found in $pkgDir"; exit 1
+    }
+    Write-Host "CPack archive: $($zip.FullName)"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $entries = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
+    # The archive must ship the native library and the public C/C++ headers.
+    $required = @(
+      @{ desc = 'core DLL';      pattern = 'onnxruntime-genai\.dll$' },
+      @{ desc = 'C API header';  pattern = 'ort_genai_c\.h$' },
+      @{ desc = 'C++ API header'; pattern = 'ort_genai\.h$' }
+    )
+    foreach ($r in $required) {
+      if (-not ($entries | Where-Object { $_ -match $r.pattern })) {
+        Write-Error "ASSERT FAIL: archive missing $($r.desc) (/$($r.pattern)/)"; exit 1
+      }
+    }
+    Write-Host "ASSERT OK: archive contains native lib + public headers"
+  displayName: 'Assert: CPack archive contents'
+
+# --- Publish artifacts -------------------------------------------------------
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish core CMake package ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)-cmake-pkg'
+    targetPath: '$(coreInstall)'
+
+- task: 1ES.PublishPipelineArtifact@1
+  displayName: 'Publish core archive ($(artifactName))'
+  inputs:
+    artifactName: '$(artifactName)-archive'
+    targetPath: '$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}/package'
+
+# --- Publish build symbols (RelWithDebInfo only) ----------------------------
+- task: PublishSymbols@2
+  displayName: 'Publish core build symbols'
+  condition: and(succeeded(), eq('${{ parameters.build_config }}', 'RelWithDebInfo'))
+  inputs:
+    SymbolsFolder: '$(Build.SourcesDirectory)/$(buildDir)/${{ parameters.build_config }}'
+    SearchPattern: 'onnxruntime-genai*.pdb'
+    SymbolServerType: teamServices
+    SymbolExpirationInDays: 365
