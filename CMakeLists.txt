@@ -11,14 +11,6 @@ endif()
 include(FetchContent)
 include(CMakeDependentOption)
 
-# Activate the vcpkg "telemetry" manifest feature when telemetry is requested.
-# Must run before project() so vcpkg installs cpp-client-telemetry during configure.
-# ENABLE_TELEMETRY is supplied on the command line (-DENABLE_TELEMETRY=ON); its
-# default (OFF) is defined later in cmake/options.cmake.
-if(ENABLE_TELEMETRY)
-  list(APPEND VCPKG_MANIFEST_FEATURES "telemetry")
-endif()
-
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
