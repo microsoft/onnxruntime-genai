@@ -1,0 +1,33 @@
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: cuda_version
+  type: string
+
+steps:
+- bash: |
+    set -e -x
+    python3 -m pip install requests
+    if [ '${{ parameters.ep }}' = 'cuda' ]; then
+      cudaDockerVer='${{ parameters.cuda_version }}'
+      if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
+        cudaDockerVer='13'
+      fi
+      dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_${cudaDockerVer}"
+    elif [ '${{ parameters.arch }}' = 'arm64' ]; then
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
+    else
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
+    fi
+    python3 tools/ci_build/get_docker_image.py \
+      --dockerfile "$dockerfile" \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$(id -u)" \
+      --container-registry onnxruntimebuildcache.azurecr.io \
+      --repository "ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
+  displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'
+  workingDirectory: '$(Build.SourcesDirectory)'

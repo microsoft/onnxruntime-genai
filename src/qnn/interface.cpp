@@ -44,6 +44,12 @@ struct QnnMemory final : DeviceBuffer {
 };
 
 struct QnnInterfaceBase : DeviceInterface {
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    // Note: "QnnHtpShared" allocator is the correct name for both HTP and GPU backends. Eventually, the plan is to
+    // migrate to "QnnShared".
+    return OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  }
+
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
