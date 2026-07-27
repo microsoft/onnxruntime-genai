@@ -16,18 +16,19 @@
         "base": [
             "--parallel",
             "--build_apple_framework",
-            "--use_telemetry",
             "--skip_tests",
             "--skip_wheel"
         ],
         "iphoneos": [
             "--ios",
+            "--use_telemetry",
             "--cmake_generator",
             "Xcode",
             "--apple_deploy_target=13.0"
         ],
         "iphonesimulator": [
             "--ios",
+            "--use_telemetry",
             "--cmake_generator",
             "Xcode",
             "--apple_deploy_target=13.0"

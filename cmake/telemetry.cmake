@@ -99,6 +99,7 @@ if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set(BUILD_IOS ON CACHE BOOL "Build the 1DS SDK for iOS" FORCE)
   set(IOS_PLAT "${PLATFORM_NAME}" CACHE STRING "1DS iOS platform" FORCE)
   set(IOS_DEPLOYMENT_TARGET "${IPHONEOS_DEPLOYMENT_TARGET}" CACHE STRING "1DS iOS deployment target" FORCE)
+  set(FORCE_RESET_OSX_DEPLOYMENT_TARGET OFF CACHE BOOL "Preserve the caller's iOS deployment target" FORCE)
 endif()
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
@@ -122,8 +123,13 @@ endif()
 set(MATSDK_BUNDLE_VENDORED_DEPS ON CACHE BOOL "Build 1DS SDK vendored sqlite3/zlib dependencies" FORCE)
 
 set(_ortgenai_telemetry_patch
-  ${ORTGENAI_PATCH_EXECUTABLE} --binary --ignore-whitespace -p1 -i
-  ${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/cpp_client_telemetry.patch)
+  "${CMAKE_COMMAND}"
+  "-DSOURCE_DIR=<SOURCE_DIR>"
+  "-DPATCH_EXECUTABLE=${ORTGENAI_PATCH_EXECUTABLE}"
+  "-DPATCH_FILE=${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/cpp_client_telemetry.patch"
+  "-DUSE_BINARY=${WIN32}"
+  "-P"
+  "${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/apply_patch.cmake")
 
 FetchContent_Declare(
   cpp_client_telemetry
@@ -195,9 +201,19 @@ if(WIN32)
   endif()
 endif()
 
-# On GCC/Clang, guard the SDK's bundled nlohmann/json.hpp use of infinity() against any -ffast-math /
-# -ffinite-math-only in the inherited flags, and silence SDK warnings the consumer may treat as errors.
-if(NOT MSVC)
+# Guard SDK warnings that the consumer treats as errors without weakening warnings for GenAI targets.
+if(MSVC)
+  get_target_property(_ortgenai_mat_opts mat COMPILE_OPTIONS)
+  if(_ortgenai_mat_opts)
+    list(REMOVE_ITEM _ortgenai_mat_opts
+      "$<$<COMPILE_LANGUAGE:C>:/w15038>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/w15038>")
+    set_target_properties(mat PROPERTIES COMPILE_OPTIONS "${_ortgenai_mat_opts}")
+  endif()
+  target_compile_options(mat PRIVATE /wd5038)
+else()
+  # Guard the SDK's bundled nlohmann/json.hpp use of infinity() against any -ffast-math /
+  # -ffinite-math-only in the inherited flags.
   target_compile_options(mat PRIVATE
     -fno-finite-math-only
     -Wno-unused-const-variable
