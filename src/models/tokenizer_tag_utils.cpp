@@ -3,6 +3,7 @@
 
 #include "tokenizer_tag_utils.h"
 #include "model.h"
+#include "../config.h"
 
 namespace Generators {
 
@@ -13,19 +14,21 @@ std::optional<int32_t> ResolveFallbackTokenId(const std::string& model_type,
   // bot/eot/bor/eor fields. Provides backward compatibility for Foundry Local when
   // consuming older model packages that predate these config fields.
   //
-  // Model type  | Tag | Token string    | Token ID
-  // ------------|-----|-----------------|--------
-  // qwen2/qwen3| bot | <tool_call>     | 151657
-  // qwen2/qwen3| eot | </tool_call>    | 151658
-  // qwen2/qwen3| bor | <think>         | 151667
-  // qwen2/qwen3| eor | </think>        | 151668
-  // phi3        | bot | <|tool_call|>   | 200025
-  // phi3        | eot | <|/tool_call|>  | 200026
+  // Model type  | Tag            | Token string    | Token ID
+  // ------------|----------------|-----------------|--------
+  // qwen2/qwen3| bot_token_id   | <tool_call>     | 151657
+  // qwen2/qwen3| eot_token_id   | </tool_call>    | 151658
+  // qwen2/qwen3| bor_token_id   | <think>         | 151667
+  // qwen2/qwen3| eor_token_id   | </think>        | 151668
+  // phi3        | bot_token_id   | <|tool_call|>   | 200025
+  // phi3        | eot_token_id   | <|/tool_call|>  | 200026
+
+  using D = Config::Defaults;
   // clang-format off
-  static const std::unordered_map<std::string, std::unordered_map<std::string, int32_t>> fallback_map = {
-      {"qwen2", {{"bot", 151657}, {"eot", 151658}, {"bor", 151667}, {"eor", 151668}}},
-      {"qwen3", {{"bot", 151657}, {"eot", 151658}, {"bor", 151667}, {"eor", 151668}}},
-      {"phi3",  {{"bot", 200025}, {"eot", 200026}}},
+  static const std::unordered_map<std::string, std::unordered_map<std::string_view, int32_t>> fallback_map = {
+      {"qwen2", {{D::BotTokenIdName, 151657}, {D::EotTokenIdName, 151658}, {D::BorTokenIdName, 151667}, {D::EorTokenIdName, 151668}}},
+      {"qwen3", {{D::BotTokenIdName, 151657}, {D::EotTokenIdName, 151658}, {D::BorTokenIdName, 151667}, {D::EorTokenIdName, 151668}}},
+      {"phi3",  {{D::BotTokenIdName, 200025}, {D::EotTokenIdName, 200026}}},
   };
   // clang-format on
 
