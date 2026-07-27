@@ -57,9 +57,6 @@ struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor>, Exter
   bool is_static_{};
 };
 
-struct NamedTensors : std::unordered_map<std::string, std::shared_ptr<Tensor>> {
-  using Base = std::unordered_map<std::string, std::shared_ptr<Tensor>>;
-  using Base::Base;
-};
+using NamedTensors = std::unordered_map<std::string, std::shared_ptr<Tensor>>;
 
 }  // namespace Generators

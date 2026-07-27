@@ -132,8 +132,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
     auto result = std::make_unique<NamedTensors>();
-    const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
-    result->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel)));
+    result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
     return result;
   }
 
@@ -151,8 +150,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
   auto result = std::make_unique<NamedTensors>();
-  const std::string audio_features_name{Config::Defaults::AudioFeaturesName};
-  result->emplace(audio_features_name, std::make_shared<Tensor>(std::move(mel)));
+  result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
   return result;
 }
 
