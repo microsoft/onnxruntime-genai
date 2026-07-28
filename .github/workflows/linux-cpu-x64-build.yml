@@ -53,9 +53,6 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
-      - name: Install telemetry system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
-
       - name: Install Rust with rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

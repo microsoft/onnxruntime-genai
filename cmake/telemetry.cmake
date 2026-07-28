@@ -60,6 +60,12 @@ include(FetchContent)
 # The FetchContent source requires a few deterministic CMake adjustments for nested include paths,
 # self-contained static dependencies, and Apple portability. Apply them without external tools.
 
+# Linux packages must not depend on a system libcurl. Build an internal HTTP(S)-only curl with
+# mbedTLS before configuring 1DS so its CURL::libcurl reference resolves to the static target.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  include(${PROJECT_SOURCE_DIR}/cmake/telemetry/linux-http.cmake)
+endif()
+
 # The 1DS SDK reads these generic option() names from its own CMakeLists. Disable its tests and the
 # optional modules whose source may be absent from the release archive; genai uses the C++ API directly.
 set(BUILD_UNIT_TESTS OFF CACHE BOOL "Disable 1DS SDK unit tests" FORCE)
@@ -214,6 +220,10 @@ set(BUILD_SHARED_LIBS "${_ortgenai_build_shared_libs_saved}" CACHE BOOL "Restore
 
 add_library(onnxruntime-genai-telemetry INTERFACE)
 target_link_libraries(onnxruntime-genai-telemetry INTERFACE mat)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # curl is an implementation detail absorbed into the GenAI shared library, not a public GenAI API.
+  target_link_options(onnxruntime-genai-telemetry INTERFACE "LINKER:--exclude-libs,libcurl.a")
+endif()
 
 # `mat` already exports lib/include/public as a PUBLIC build-interface include, which covers the
 # LogManager / LogManagerProvider headers genai uses; also add include/mat so any transitive SDK headers

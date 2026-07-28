@@ -34,6 +34,13 @@ ortgenai_replace_required(
   [=[include_directories(${CMAKE_CURRENT_SOURCE_DIR})]=])
 
 ortgenai_replace_required(
+  "${root_cmake}"
+  [=[  find_package(CURL REQUIRED)]=]
+  [=[  if(NOT TARGET CURL::libcurl)
+    find_package(CURL REQUIRED)
+  endif()]=])
+
+ortgenai_replace_required(
   "${lib_cmake}"
   [=[if(NOT MATSDK_USE_VCPKG_DEPS)]=]
   [=[if(NOT MATSDK_USE_VCPKG_DEPS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")]=])
@@ -64,3 +71,33 @@ ortgenai_replace_required(
   "${SOURCE_DIR}/lib/system/EventProperties.cpp"
   [=[calloc(sizeof(evt_prop), size)]=]
   [=[calloc(size, sizeof(evt_prop))]=])
+
+ortgenai_replace_required(
+  "${SOURCE_DIR}/lib/http/HttpClient_Curl.hpp"
+  [=[        if (!m_sslCaInfo.empty()) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, m_sslCaInfo.c_str());
+        }]=]
+  [=[        if (!m_sslCaInfo.empty()) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, m_sslCaInfo.c_str());
+        } else {
+            static const char* const ca_paths[] = {
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                "/etc/ssl/ca-bundle.pem",
+                "/etc/ssl/cert.pem",
+            };
+            for (const char* ca_path : ca_paths) {
+                if (access(ca_path, R_OK) == 0) {
+                    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path);
+                    break;
+                }
+            }
+        }]=])
+
+ortgenai_replace_required(
+  "${SOURCE_DIR}/lib/http/HttpClient_Curl.hpp"
+  [=[        // HTTP/2 please, fallback to HTTP/1.1 if not supported
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);]=]
+  [=[        // The embedded Linux curl omits nghttp2 to keep the transport self-contained.
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);]=])
