@@ -376,6 +376,8 @@ double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
     return static_cast<double>(speculative.adaptive_k_bool);
   if (name == "adaptive_k_min")
     return static_cast<double>(speculative.adaptive_k_min);
+  if (name == "cooldown_bool")
+    return static_cast<double>(speculative.cooldown_bool);
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
 }
 

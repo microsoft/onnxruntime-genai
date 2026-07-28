@@ -1368,6 +1368,13 @@ struct Speculative_Element : JSON::Element {
             " and " + std::to_string(kMaxK) + ". Got: " +
             std::to_string(adaptive_k_min) + ".");
       v_.adaptive_k_min = adaptive_k_min;
+    } else if (name == "cooldown_bool") {
+      const int cooldown_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (cooldown_bool != 0 && cooldown_bool != 1)
+        throw std::runtime_error(
+            "speculative.cooldown_bool must be 0 or 1. Got: " +
+            std::to_string(cooldown_bool) + ".");
+      v_.cooldown_bool = cooldown_bool;
     } else {
       throw JSON::unknown_value_error{};
     }

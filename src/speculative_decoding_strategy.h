@@ -10,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <span>
+#include <stdexcept>
 #include <vector>
 #include "decoding_strategy.h"
 #include "smartptrs.h"
@@ -38,6 +39,7 @@ class AdaptiveKController {
   int GetK() const {
     return effective_k_;
   }
+  int MinimumK() const { return min_k_; }
   std::size_t Increases() const { return increases_; }
   std::size_t Decreases() const { return decreases_; }
   std::size_t Observations() const { return observations_; }
@@ -187,6 +189,54 @@ class AdaptiveKController {
   std::size_t probes_{};
 };
 
+class SpeculativeCooldownController {
+ public:
+  explicit SpeculativeCooldownController(bool enabled) : enabled_{enabled} {}
+
+  void RecordCompletedRound(int k, int minimum_k, int evaluated, int accepted) {
+    if (!enabled_ || evaluated <= 0)
+      return;
+    if (accepted > 0 || k != minimum_k) {
+      consecutive_zero_accept_rounds_ = 0;
+      return;
+    }
+
+    consecutive_zero_accept_rounds_++;
+    if (consecutive_zero_accept_rounds_ == kFailureThreshold) {
+      cooldown_remaining_ = 1;
+      consecutive_zero_accept_rounds_ = 0;
+      entries_++;
+    }
+  }
+
+  bool ShouldRunStandardStep() const { return cooldown_remaining_ > 0; }
+
+  void CompleteStandardStep() {
+    if (cooldown_remaining_ == 0)
+      throw std::runtime_error("Speculative cooldown completed without an active cooldown.");
+    cooldown_remaining_--;
+    steps_++;
+  }
+
+  void Reset() {
+    consecutive_zero_accept_rounds_ = 0;
+    cooldown_remaining_ = 0;
+  }
+
+  std::size_t Entries() const { return entries_; }
+  std::size_t Steps() const { return steps_; }
+  int Remaining() const { return cooldown_remaining_; }
+
+ private:
+  static constexpr int kFailureThreshold = 3;
+
+  bool enabled_;
+  int consecutive_zero_accept_rounds_{};
+  int cooldown_remaining_{};
+  std::size_t entries_{};
+  std::size_t steps_{};
+};
+
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
 // model verifies them in one pass, matching tokens are accepted, and the target is re-anchored
@@ -254,6 +304,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   virtual void ResetProposer() = 0;
 
+  virtual void PopulateProposerStats(SpeculativeStats& stats) const {}
+
   State& target_state_;
   const Model& target_model_;
 
@@ -271,6 +323,11 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   std::size_t tokens_discarded_{};
   std::size_t draft_runs_{};
   std::size_t target_runs_{};
+  std::size_t target_verify_runs_{};
+  std::size_t target_reconciliation_runs_{};
+  std::size_t full_accept_rounds_{};
+  std::size_t partial_accept_rounds_{};
+  std::size_t zero_accept_rounds_{};
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
@@ -300,6 +357,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void FinishRound();
   void DiscardPendingTokens();
   void ClearPendingExternalLogits();
+  void PrepareForCooldownStep(Generator& g);
 
   // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
@@ -331,6 +389,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   float active_round_target_ms_{};
 
   AdaptiveKController adaptive_k_;
+  SpeculativeCooldownController cooldown_;
+  std::size_t standard_fallback_steps_{};
 
   // K histogram for rounds that follow the standard geometric acceptance formula.
   std::array<std::size_t, 17> formula_k_counts_{};

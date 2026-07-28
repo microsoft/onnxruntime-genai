@@ -534,7 +534,8 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
 
 def _tiny_spec_generator(model_path, prompt, max_length, *,
                          max_draft_tokens=4, adaptive_k_bool=True,
-                         adaptive_k_min=2, do_sample=False, random_seed=0):
+                         adaptive_k_min=2, cooldown_bool=False,
+                         do_sample=False, random_seed=0):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     params.set_search_options(
@@ -546,6 +547,7 @@ def _tiny_spec_generator(model_path, prompt, max_length, *,
         max_draft_tokens=max_draft_tokens,
         adaptive_k_bool=adaptive_k_bool,
         adaptive_k_min=adaptive_k_min,
+        cooldown_bool=cooldown_bool,
     )
     generator = og.Generator(model, params)
     generator.append_tokens(np.array([prompt], dtype=np.int32))
@@ -559,6 +561,45 @@ def _generate_steps(generator, count):
 
 
 class TestSpeculativeGeneration:
+    def test_shared_cooldown_reconciles_draft_after_one_standard_step(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "base_cooldown",
+            "llama",
+            context_length=32,
+            draft_switch_at=0,
+        )
+        prompt = [1]
+        generator = _tiny_spec_generator(
+            path,
+            prompt,
+            max_length=7,
+            max_draft_tokens=2,
+            adaptive_k_bool=False,
+            cooldown_bool=True,
+        )
+
+        _generate_steps(generator, 3)
+        before_fallback = generator.get_speculative_stats()
+        assert before_fallback["rounds"] == 3
+        assert before_fallback["draft_tokens_accepted"] == 0
+        assert before_fallback["cooldown_entries"] == 1
+        assert before_fallback["cooldown_remaining"] == 1
+
+        generator.generate_next_token()
+        after_fallback = generator.get_speculative_stats()
+        assert after_fallback["rounds"] == 3
+        assert after_fallback["cooldown_steps"] == 1
+        assert after_fallback["cooldown_remaining"] == 0
+        assert after_fallback["standard_fallback_steps"] == 1
+
+        while not generator.is_done():
+            generator.generate_next_token()
+        actual = list(int(token) for token in generator.get_sequence(0))
+        expected, _ = _greedy(path, prompt, max_length=7)
+        assert actual == expected
+        assert generator.get_speculative_stats()["rounds"] == 5
+
     def test_adaptive_k_option_round_trips_as_shared_speculative_option(
             self, tmp_path):
         path = _make_tiny_draft_spec_model(
@@ -568,13 +609,16 @@ class TestSpeculativeGeneration:
 
         assert params.get_speculative_options()["adaptive_k_bool"] is False
         assert params.get_speculative_options()["adaptive_k_min"] == 2
+        assert params.get_speculative_options()["cooldown_bool"] is False
         params.set_speculative_options(
-            max_draft_tokens=6, adaptive_k_bool=True, adaptive_k_min=3)
+            max_draft_tokens=6, adaptive_k_bool=True, adaptive_k_min=3,
+            cooldown_bool=True)
         options = params.get_speculative_options()
 
         assert options["max_draft_tokens"] == 6
         assert options["adaptive_k_bool"] is True
         assert options["adaptive_k_min"] == 3
+        assert options["cooldown_bool"] is True
 
     def test_non_adaptive_mode_uses_fixed_max_draft_tokens_not_adaptive_floor(
             self, tmp_path):
@@ -1044,6 +1088,33 @@ class TestSpeculativeStatsContract:
             s["tokens_emitted"] + s["tokens_discarded"] + s["tokens_buffered"])
         assert s["draft_tokens_accepted"] <= s["draft_tokens_evaluated"]
         assert s["draft_tokens_evaluated"] <= s["draft_tokens_proposed"]
+        assert (
+            s["full_accept_rounds"] +
+            s["partial_accept_rounds"] +
+            s["zero_accept_rounds"]
+        ) <= s["completed_rounds"]
+        assert s["target_forward_passes"] == (
+            s["target_verify_forward_passes"] +
+            s["target_reanchor_forward_passes"] +
+            s["target_reconciliation_forward_passes"]
+        )
+        assert s["total_target_ms"] == pytest.approx(
+            s["total_target_verify_ms"] +
+            s["total_target_reanchor_ms"],
+            rel=1e-6,
+            abs=1e-4,
+        )
+        for key in (
+                "ngram_lookup_hits",
+                "ngram_lookup_misses",
+                "ngram_lookup_tokens_proposed",
+                "ngram_chained_tokens_proposed",
+                "ngram_grammar_candidate_rejections",
+                "ngram_history_syncs",
+                "ngram_history_tokens_synced"):
+            assert s[key] == 0
+        assert s["total_ngram_history_sync_ms"] == 0.0
+        assert s["total_ngram_lookup_ms"] == 0.0
         if s["draft_tokens_evaluated"]:
             assert s["acceptance_rate"] == pytest.approx(
                 s["draft_tokens_accepted"] / s["draft_tokens_evaluated"], abs=1e-6)

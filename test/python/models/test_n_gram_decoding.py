@@ -33,6 +33,7 @@ def qwen3_model_path(request):
 def _generator(model_path, prompt, max_length, *, ngram_size=0,
                max_draft_tokens=4, ngram_chained_lookup_bool=False,
                adaptive_k_bool=False, adaptive_k_min=2,
+               cooldown_bool=False,
                **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
@@ -46,6 +47,7 @@ def _generator(model_path, prompt, max_length, *, ngram_size=0,
             ngram_chained_lookup_bool=ngram_chained_lookup_bool,
             adaptive_k_bool=adaptive_k_bool,
             adaptive_k_min=adaptive_k_min,
+            cooldown_bool=cooldown_bool,
         )
     generator = og.Generator(model, params)
     generator.append_tokens(np.array([prompt], dtype=np.int32))
@@ -58,9 +60,16 @@ def _finish(generator):
     return [int(token) for token in generator.get_sequence(0)]
 
 
+def _generate_steps(generator, count):
+    for _ in range(count):
+        assert not generator.is_done()
+        generator.generate_next_token()
+
+
 def _generate(model_path, prompt, max_length, *, ngram_size=0,
               max_draft_tokens=4, ngram_chained_lookup_bool=False,
               adaptive_k_bool=False, adaptive_k_min=2,
+              cooldown_bool=False,
               **search_options):
     generator = _generator(
         model_path,
@@ -71,6 +80,7 @@ def _generate(model_path, prompt, max_length, *, ngram_size=0,
         ngram_chained_lookup_bool=ngram_chained_lookup_bool,
         adaptive_k_bool=adaptive_k_bool,
         adaptive_k_min=adaptive_k_min,
+        cooldown_bool=cooldown_bool,
         **search_options,
     )
     sequence = _finish(generator)
@@ -195,6 +205,28 @@ def _assert_stats_consistent(stats):
         stats["tokens_buffered"]
     )
     assert 0.0 <= stats["acceptance_rate"] <= 1.0
+    assert (
+        stats["full_accept_rounds"] +
+        stats["partial_accept_rounds"] +
+        stats["zero_accept_rounds"]
+    ) <= stats["completed_rounds"]
+    assert stats["target_forward_passes"] == (
+        stats["target_verify_forward_passes"] +
+        stats["target_reanchor_forward_passes"] +
+        stats["target_reconciliation_forward_passes"]
+    )
+    assert stats["total_target_ms"] == pytest.approx(
+        stats["total_target_verify_ms"] +
+        stats["total_target_reanchor_ms"],
+        rel=1e-6,
+        abs=1e-4,
+    )
+    assert stats["ngram_chained_tokens_proposed"] <= \
+        stats["ngram_lookup_tokens_proposed"]
+    assert stats["ngram_lookup_tokens_proposed"] <= \
+        stats["draft_tokens_proposed"]
+    assert stats["total_ngram_history_sync_ms"] >= 0.0
+    assert stats["total_ngram_lookup_ms"] >= 0.0
 
 
 def _invalid_guard_params(model, guard):
@@ -217,6 +249,101 @@ def _invalid_guard_params(model, guard):
 
 
 class TestNGramControlledSemantics:
+    def test_observability_distinguishes_lookup_miss_from_round(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_observability_miss",
+            _transition_logits({1: 2}),
+        )
+        prompt = [1, 2, 3, 4]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 1,
+            ngram_size=3,
+            max_draft_tokens=2,
+        )
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["rounds"] == 0
+        assert stats["ngram_lookup_hits"] == 0
+        assert stats["ngram_lookup_misses"] == 1
+        assert stats["ngram_lookup_tokens_proposed"] == 0
+        assert stats["standard_fallback_steps"] == 1
+        assert stats["ngram_history_syncs"] == 1
+        assert stats["ngram_history_tokens_synced"] == len(prompt)
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_shared_cooldown_skips_one_step_after_three_zero_accept_rounds(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_cooldown",
+            _transition_logits({1: 2, 2: 3, 3: 1}),
+        )
+        prompt = [1, 4, 2, 4, 3, 4, 1]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 5,
+            ngram_size=2,
+            max_draft_tokens=2,
+            cooldown_bool=True,
+        )
+
+        _generate_steps(generator, 3)
+        before_fallback = generator.get_speculative_stats()
+        assert before_fallback["rounds"] == 3
+        assert before_fallback["draft_tokens_accepted"] == 0
+        assert before_fallback["cooldown_entries"] == 1
+        assert before_fallback["cooldown_steps"] == 0
+        assert before_fallback["cooldown_remaining"] == 1
+
+        generator.generate_next_token()
+        after_fallback = generator.get_speculative_stats()
+        assert after_fallback["rounds"] == 3
+        assert after_fallback["cooldown_steps"] == 1
+        assert after_fallback["cooldown_remaining"] == 0
+        assert after_fallback["standard_fallback_steps"] == 1
+
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, prompt, len(prompt) + 5)
+        assert actual == expected
+        assert generator.get_speculative_stats()["rounds"] == 4
+
+    def test_disabled_cooldown_preserves_continuous_speculation(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_cooldown_disabled",
+            _transition_logits({1: 2, 2: 3, 3: 1}),
+        )
+        prompt = [1, 4, 2, 4, 3, 4, 1]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 5,
+            ngram_size=2,
+            max_draft_tokens=2,
+        )
+
+        _generate_steps(generator, 3)
+        before_fourth_attempt = generator.get_speculative_stats()
+        assert before_fourth_attempt["rounds"] == 3
+        assert before_fourth_attempt["draft_tokens_accepted"] == 0
+        assert before_fourth_attempt["cooldown_entries"] == 0
+        assert before_fourth_attempt["cooldown_remaining"] == 0
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        assert stats["rounds"] == 4
+        assert stats["cooldown_entries"] == 0
+        assert stats["cooldown_steps"] == 0
+        assert stats["cooldown_remaining"] == 0
+        assert stats["standard_fallback_steps"] == 0
+
     def test_chained_lookup_crosses_occurrences_and_fills_target_batch(
             self, tmp_path):
         model_path = _make_tiny_ngram_model(
@@ -250,6 +377,18 @@ class TestNGramControlledSemantics:
         assert chained_stats["bonus_tokens"] == 1
         assert chained_stats["target_forward_passes"] == 1
         assert chained_stats["draft_forward_passes"] == 0
+        assert contiguous_stats["ngram_lookup_hits"] == 1
+        assert contiguous_stats["ngram_lookup_misses"] == 0
+        assert contiguous_stats["ngram_lookup_tokens_proposed"] == 3
+        assert contiguous_stats["ngram_chained_tokens_proposed"] == 0
+        assert chained_stats["ngram_lookup_hits"] == 1
+        assert chained_stats["ngram_lookup_misses"] == 0
+        assert chained_stats["ngram_lookup_tokens_proposed"] == 3
+        assert chained_stats["ngram_chained_tokens_proposed"] == 2
+        assert chained_stats["ngram_history_syncs"] == 1
+        assert chained_stats["ngram_history_tokens_synced"] == len(prompt)
+        assert chained_stats["target_verify_forward_passes"] == 1
+        assert chained_stats["target_reanchor_forward_passes"] == 0
         _assert_stats_consistent(contiguous_stats)
         _assert_stats_consistent(chained_stats)
 
@@ -822,6 +961,9 @@ class TestNGramControlledSemantics:
         assert stats["tokens_emitted"] == 3
         assert stats["target_forward_passes"] == 1
         assert stats["draft_forward_passes"] == 0
+        assert stats["full_accept_rounds"] == 1
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 0
         _assert_stats_consistent(stats)
 
     def test_first_proposal_rejection_stops_verification(self, tmp_path):
@@ -841,6 +983,9 @@ class TestNGramControlledSemantics:
         assert stats["draft_tokens_accepted"] == 0
         assert stats["correction_tokens"] == 1
         assert stats["bonus_tokens"] == 0
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 1
         _assert_stats_consistent(stats)
 
     def test_partial_acceptance_commits_prefix_then_correction(self, tmp_path):
@@ -857,6 +1002,9 @@ class TestNGramControlledSemantics:
         assert stats["draft_tokens_accepted"] == 1
         assert stats["correction_tokens"] == 1
         assert stats["bonus_tokens"] == 0
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 1
+        assert stats["zero_accept_rounds"] == 0
         _assert_stats_consistent(stats)
 
     def test_max_length_discards_precomputed_bonus(self, tmp_path):
@@ -1158,17 +1306,20 @@ class TestNGramDecoding:
         model = og.Model(qwen3_model_path)
         params = og.GeneratorParams(model)
         assert params.get_speculative_options()["ngram_chained_lookup_bool"] is False
+        assert params.get_speculative_options()["cooldown_bool"] is False
         params.set_speculative_options(
             ngram_size=4,
             max_draft_tokens=8,
             ngram_chained_lookup_bool=True,
             adaptive_k_bool=True,
+            cooldown_bool=True,
         )
         options = params.get_speculative_options()
         assert options["ngram_size"] == 4
         assert options["max_draft_tokens"] == 8
         assert options["ngram_chained_lookup_bool"] is True
         assert options["adaptive_k_bool"] is True
+        assert options["cooldown_bool"] is True
 
         with pytest.raises(Exception, match="ngram_size"):
             params.set_speculative_options(ngram_size=1)
@@ -1186,6 +1337,10 @@ class TestNGramDecoding:
             params.set_speculative_options(adaptive_k_bool=2)
         with pytest.raises(Exception, match="adaptive_k_bool"):
             params.set_speculative_options(adaptive_k_bool=0.5)
+        with pytest.raises(Exception, match="cooldown_bool"):
+            params.set_speculative_options(cooldown_bool=2)
+        with pytest.raises(Exception, match="cooldown_bool"):
+            params.set_speculative_options(cooldown_bool=0.5)
 
     def test_chained_lookup_requires_ngram_decoding(self, qwen3_model_path):
         model = og.Model(qwen3_model_path)
@@ -2262,6 +2417,12 @@ class TestNGramGuidance:
 
         assert stats["rounds"] == 1
         assert 1 <= stats["draft_tokens_proposed"] <= 8
+        assert stats["ngram_lookup_hits"] == 1
+        assert stats["ngram_lookup_misses"] == 0
+        assert stats["ngram_lookup_tokens_proposed"] >= 1
+        assert stats["ngram_chained_tokens_proposed"] == (
+            stats["ngram_lookup_tokens_proposed"] - 1)
+        assert stats["ngram_grammar_candidate_rejections"] == 1
         assert actual_token == int(regular.get_sequence(0)[len(prompt)])
         assert re.fullmatch(
             r"[0-9]+",

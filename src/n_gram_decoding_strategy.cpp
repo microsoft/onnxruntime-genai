@@ -3,6 +3,7 @@
 #include "n_gram_decoding_strategy.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +15,7 @@
 #include "openvino/interface.h"
 #include "qnn/interface.h"
 #include "search.h"
+#include "speculative_stats.h"
 
 namespace Generators {
 
@@ -71,27 +73,59 @@ NGramDecodingStrategy::NGramDecodingStrategy(Generator& g)
           g.search_->params_->speculative.ngram_chained_lookup_bool != 0} {}
 
 void NGramDecodingStrategy::Sync(Generator& g) {
+  using clock = std::chrono::steady_clock;
+  using ms_f = std::chrono::duration<float, std::milli>;
+
   auto committed = g.search_->GetSequence(0);
   const size_t indexed_length = lookup_.HistorySize();
 
   if (committed.size() < indexed_length) {
+    const auto sync_start = clock::now();
     lookup_.Reset(committed.CopyDeviceToCpu());
+    RecordHistorySync(committed.size(), ms_f(clock::now() - sync_start).count());
     return;
   }
   if (committed.size() == indexed_length)
     return;
 
   auto suffix = committed.subspan(indexed_length, committed.size() - indexed_length);
+  const auto sync_start = clock::now();
   lookup_.Append(suffix.CopyDeviceToCpu());
+  RecordHistorySync(suffix.size(), ms_f(clock::now() - sync_start).count());
+}
+
+void NGramDecodingStrategy::RecordHistorySync(size_t token_count, float elapsed_ms) {
+  history_syncs_++;
+  history_tokens_synced_ += token_count;
+  total_history_sync_ms_ += elapsed_ms;
+}
+
+void NGramDecodingStrategy::RecordLookup(std::span<const int32_t> candidates,
+                                         size_t lookup_tokens_proposed,
+                                         float elapsed_ms) {
+  if (candidates.empty())
+    lookup_misses_++;
+  else
+    lookup_hits_++;
+  lookup_tokens_proposed_ += lookup_tokens_proposed;
+  if (chained_lookup_ && lookup_tokens_proposed > 1)
+    chained_tokens_proposed_ += lookup_tokens_proposed - 1;
+  total_lookup_ms_ += elapsed_ms;
 }
 
 SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
     Generator& g, int K, int seed_length) {
+  using clock = std::chrono::steady_clock;
+  using ms_f = std::chrono::duration<float, std::milli>;
+
   (void)seed_length;
   Sync(g);
   Proposal proposal{ProposalMode::kDeterministic};
   if (!g.guidance_logits_processor_) {
+    const auto lookup_start = clock::now();
     proposal.tokens = lookup_.Propose(static_cast<size_t>(K), chained_lookup_);
+    RecordLookup(proposal.tokens, proposal.tokens.size(),
+                 ms_f(clock::now() - lookup_start).count());
     return proposal;
   }
 
@@ -107,7 +141,10 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
     return proposal;
   }
 
+  const auto lookup_start = clock::now();
   auto candidates = lookup_.Propose(static_cast<size_t>(K), chained_lookup_);
+  const float lookup_ms = ms_f(clock::now() - lookup_start).count();
+  size_t lookup_tokens_proposed = 0;
   const int vocab_size = params.config.model.vocab_size;
   auto grammar = g.guidance_logits_processor_->Clone();
   auto mask_buffer = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
@@ -118,10 +155,13 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
     grammar->ProcessLogits(mask_buffer);
     const auto masked = mask_buffer.CopyDeviceToCpu();
     if (masked[static_cast<size_t>(candidate)] ==
-        std::numeric_limits<float>::lowest())
+        std::numeric_limits<float>::lowest()) {
+      grammar_candidate_rejections_++;
       break;
+    }
 
     proposal.tokens.push_back(candidate);
+    lookup_tokens_proposed++;
     const auto& eos_ids = params.config.model.eos_token_id;
     if (std::find(eos_ids.begin(), eos_ids.end(), candidate) != eos_ids.end())
       break;
@@ -134,6 +174,7 @@ SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
       break;
     }
   }
+  RecordLookup(candidates, lookup_tokens_proposed, lookup_ms);
   return proposal;
 }
 
@@ -157,8 +198,12 @@ void NGramDecodingStrategy::ReconcileProposer(Generator& g,
   (void)g;
   (void)floor;
   (void)committed_length;
-  (void)record_stats;
+  using clock = std::chrono::steady_clock;
+  using ms_f = std::chrono::duration<float, std::milli>;
+  const auto sync_start = clock::now();
   lookup_.Reset(committed);
+  if (record_stats)
+    RecordHistorySync(committed.size(), ms_f(clock::now() - sync_start).count());
 }
 
 void NGramDecodingStrategy::FinalizeGuidanceProposer(
@@ -174,6 +219,18 @@ void NGramDecodingStrategy::FinalizeGuidanceProposer(
 
 void NGramDecodingStrategy::ResetProposer() {
   lookup_.Reset();
+}
+
+void NGramDecodingStrategy::PopulateProposerStats(SpeculativeStats& stats) const {
+  stats.ngram_lookup_hits = lookup_hits_;
+  stats.ngram_lookup_misses = lookup_misses_;
+  stats.ngram_lookup_tokens_proposed = lookup_tokens_proposed_;
+  stats.ngram_chained_tokens_proposed = chained_tokens_proposed_;
+  stats.ngram_grammar_candidate_rejections = grammar_candidate_rejections_;
+  stats.ngram_history_syncs = history_syncs_;
+  stats.ngram_history_tokens_synced = history_tokens_synced_;
+  stats.total_ngram_history_sync_ms = total_history_sync_ms_;
+  stats.total_ngram_lookup_ms = total_lookup_ms_;
 }
 
 }  // namespace Generators

@@ -713,6 +713,40 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->adaptive_k_observations;
   else if (key == "adaptive_k_probes")
     *value = stats->adaptive_k_probes;
+  else if (key == "cooldown_entries")
+    *value = stats->cooldown_entries;
+  else if (key == "cooldown_steps")
+    *value = stats->cooldown_steps;
+  else if (key == "cooldown_remaining")
+    *value = stats->cooldown_remaining;
+  else if (key == "standard_fallback_steps")
+    *value = stats->standard_fallback_steps;
+  else if (key == "full_accept_rounds")
+    *value = stats->full_accept_rounds;
+  else if (key == "partial_accept_rounds")
+    *value = stats->partial_accept_rounds;
+  else if (key == "zero_accept_rounds")
+    *value = stats->zero_accept_rounds;
+  else if (key == "target_verify_forward_passes")
+    *value = stats->target_verify_forward_passes;
+  else if (key == "target_reanchor_forward_passes")
+    *value = stats->target_reanchor_forward_passes;
+  else if (key == "target_reconciliation_forward_passes")
+    *value = stats->target_reconciliation_forward_passes;
+  else if (key == "ngram_lookup_hits")
+    *value = stats->ngram_lookup_hits;
+  else if (key == "ngram_lookup_misses")
+    *value = stats->ngram_lookup_misses;
+  else if (key == "ngram_lookup_tokens_proposed")
+    *value = stats->ngram_lookup_tokens_proposed;
+  else if (key == "ngram_chained_tokens_proposed")
+    *value = stats->ngram_chained_tokens_proposed;
+  else if (key == "ngram_grammar_candidate_rejections")
+    *value = stats->ngram_grammar_candidate_rejections;
+  else if (key == "ngram_history_syncs")
+    *value = stats->ngram_history_syncs;
+  else if (key == "ngram_history_tokens_synced")
+    *value = stats->ngram_history_tokens_synced;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;
@@ -732,6 +766,14 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     *value = stats->total_target_ms;
   else if (key == "total_reconciliation_ms")
     *value = stats->total_reconciliation_ms;
+  else if (key == "total_target_verify_ms")
+    *value = stats->total_target_verify_ms;
+  else if (key == "total_target_reanchor_ms")
+    *value = stats->total_target_reanchor_ms;
+  else if (key == "total_ngram_history_sync_ms")
+    *value = stats->total_ngram_history_sync_ms;
+  else if (key == "total_ngram_lookup_ms")
+    *value = stats->total_ngram_lookup_ms;
   else if (key == "avg_draft_ms_per_token")
     *value = stats->avg_draft_ms_per_token;
   else if (key == "acceptance_rate")

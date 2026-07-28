@@ -84,7 +84,8 @@ SpeculativeDecodingStrategy::SpeculativeDecodingStrategy(State& target_state,
       target_model_{target_model},
       adaptive_k_{target_state.params_->speculative.max_draft_tokens,
                   target_state.params_->speculative.adaptive_k_min,
-                  target_state.params_->speculative.adaptive_k_bool != 0} {}
+                  target_state.params_->speculative.adaptive_k_bool != 0},
+      cooldown_{target_state.params_->speculative.cooldown_bool != 0} {}
 
 std::deque<int32_t> SpeculativeDecodingStrategy::CreateGuidanceFFQueue() const {
   return {ff_carry_.begin(), ff_carry_.end()};
@@ -109,6 +110,20 @@ void SpeculativeDecodingStrategy::Step(Generator& g) {
   }
 
   if (pending_.empty()) {
+    if (cooldown_.ShouldRunStandardStep() && ff_carry_.empty()) {
+      PrepareForCooldownStep(g);
+      if (!g.computed_logits_) {
+        auto next_tokens = g.search_->GetNextTokens();
+        if (g.last_action_ == Generator::Action::rewound)
+          g.search_->AppendTokens(next_tokens);
+        g.ComputeLogits(next_tokens);
+      }
+      RunStandardDecodingStep(g);
+      cooldown_.CompleteStandardStep();
+      standard_fallback_steps_++;
+      return;
+    }
+
     // Fresh logits already present after prefill/ComputeLogits or when fold left a token
     // to start verify (pending_anchor_token_). After RewindToLength -> stale, so replay
     // the boundary token like StandardDecodingStrategy - ComputeLogits -> Run refreshes both the
@@ -139,6 +154,7 @@ void SpeculativeDecodingStrategy::Reset() {
   guidance_round_ = false;
   ff_carry_.clear();
   adaptive_k_.Reset();
+  cooldown_.Reset();
   ResetProposer();
 }
 
@@ -243,6 +259,33 @@ void SpeculativeDecodingStrategy::ClearPendingExternalLogits() {
   cached_direct_tokens_ = 0;
 }
 
+void SpeculativeDecodingStrategy::PrepareForCooldownStep(Generator& g) {
+  if (!round_dirty_)
+    return;
+  if (!pending_anchor_token_)
+    throw std::runtime_error(
+        "Speculative cooldown cannot reconcile a dirty round without a pending anchor token.");
+
+  using clock = std::chrono::steady_clock;
+  using ms_f = std::chrono::duration<float, std::milli>;
+  const auto& params = *g.search_->params_;
+  auto anchor = params.p_device->Allocate<int32_t>(1);
+  anchor.CpuSpan()[0] = *pending_anchor_token_;
+  anchor.CopyCpuToDevice();
+
+  const auto target_start = clock::now();
+  auto target_logits =
+      target_state_.Run(g.search_->GetSequenceLength(), anchor, {});
+  const float reanchor_ms = ms_f(clock::now() - target_start).count();
+  target_runs_++;
+  reanchor_runs_++;
+  total_reanchor_ms_ += reanchor_ms;
+  g.SetLogits(target_logits);
+
+  pending_anchor_token_.reset();
+  round_dirty_ = false;
+}
+
 void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted, size_t queued,
                                              bool formula_supported,
                                              bool filled_proposal_budget,
@@ -283,6 +326,17 @@ void SpeculativeDecodingStrategy::FinishRound() {
     interrupted_rounds_++;
   } else {
     completed_rounds_++;
+    if (active_round_evaluated_ > 0) {
+      if (active_round_accepted_ == 0)
+        zero_accept_rounds_++;
+      else if (active_round_accepted_ == active_round_evaluated_)
+        full_accept_rounds_++;
+      else
+        partial_accept_rounds_++;
+    }
+    cooldown_.RecordCompletedRound(
+        active_round_k_, adaptive_k_.MinimumK(),
+        active_round_evaluated_, active_round_accepted_);
     adaptive_k_.RecordCompletedRound(
         active_round_k_, active_round_evaluated_, active_round_accepted_,
         active_round_emitted_, active_round_filled_proposal_budget_,
@@ -331,8 +385,10 @@ DeviceSpan<float> SpeculativeDecodingStrategy::ReplayCommittedTail(Generator& g,
   replay.CopyCpuToDevice();
 
   auto target_logits = target_state_.Run(committed_length, replay, {});
-  if (record_stats)
+  if (record_stats) {
     target_runs_++;
+    target_reconciliation_runs_++;
+  }
   const auto reconciliation_end = clock::now();
   if (record_stats)
     total_reconciliation_ms_ += ms_f(reconciliation_end - reconciliation_start).count();
@@ -402,13 +458,18 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       auto anchor = params.p_device->Allocate<int32_t>(1);
       anchor.CpuSpan()[0] = *pending_anchor_token_;
       anchor.CopyCpuToDevice();
+      const auto reanchor_start = clock::now();
       g.SetLogits(target_state_.Run(seed_length, anchor, {}));
+      const float reanchor_ms = ms_f(clock::now() - reanchor_start).count();
       target_runs_++;
+      reanchor_runs_++;
+      total_reanchor_ms_ += reanchor_ms;
       pending_anchor_token_.reset();
       round_dirty_ = false;
     }
     total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
     RunStandardDecodingStep(g);
+    standard_fallback_steps_++;
     return;
   }
 
@@ -477,6 +538,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   auto t_target_start = clock::now();
   target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
+  target_verify_runs_++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
@@ -567,6 +629,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       const auto single_target_start = clock::now();
       auto lgt = target_state_.Run(seed_length + i + 1, single_buf, {});
       target_runs_++;
+      target_verify_runs_++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
       auto cpu = lgt.CopyDeviceToCpu();
@@ -882,6 +945,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   auto t_target_start = clock::now();
   target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
+  target_verify_runs_++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
@@ -919,6 +983,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       const auto single_target_start = clock::now();
       auto lgt = target_state_.Run(seed_length + i + 1, single, {});
       target_runs_++;
+      target_verify_runs_++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
       auto cpu = lgt.CopyDeviceToCpu();
@@ -1141,10 +1206,11 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
     single.CopyCpuToDevice();
     target_logits = target_state_.Run(seed + p + 1, single, {});
     target_runs_++;
+    reanchor_runs_++;
   }
   const auto target_end = clock::now();
   const float finalize_target_ms = ms_f(target_end - target_start).count();
-  total_target_ms_ += finalize_target_ms;
+  total_reanchor_ms_ += finalize_target_ms;
   return target_logits;
 }
 
@@ -1179,10 +1245,22 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
   s.adaptive_k_observations = adaptive_k_.Observations();
   s.adaptive_k_probes = adaptive_k_.Probes();
   s.adaptive_k_throughput = adaptive_k_.CurrentThroughput();
+  s.cooldown_entries = cooldown_.Entries();
+  s.cooldown_steps = cooldown_.Steps();
+  s.cooldown_remaining = static_cast<size_t>(cooldown_.Remaining());
+  s.standard_fallback_steps = standard_fallback_steps_;
+  s.full_accept_rounds = full_accept_rounds_;
+  s.partial_accept_rounds = partial_accept_rounds_;
+  s.zero_accept_rounds = zero_accept_rounds_;
+  s.target_verify_forward_passes = target_verify_runs_;
+  s.target_reanchor_forward_passes = reanchor_runs_;
+  s.target_reconciliation_forward_passes = target_reconciliation_runs_;
   s.formula_supported = (rounds_ > 0 && formula_rounds_ == rounds_) ? 1 : 0;
   s.total_draft_ms = total_propose_ms_;
   s.total_target_ms = total_target_ms_ + total_reanchor_ms_;
   s.total_reconciliation_ms = total_reconciliation_ms_;
+  s.total_target_verify_ms = total_target_ms_;
+  s.total_target_reanchor_ms = total_reanchor_ms_;
 
   if (draft_proposed_ > 0) {
     s.avg_draft_ms_per_token = total_propose_ms_ / static_cast<float>(draft_proposed_);
@@ -1233,7 +1311,7 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
       s.observed_speedup = s.mean_emitted_tokens_per_round / denominator;
     }
   }
-
+  PopulateProposerStats(s);
   return s;
 }
 

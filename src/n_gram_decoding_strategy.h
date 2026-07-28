@@ -73,12 +73,26 @@ struct NGramDecodingStrategy final : SpeculativeDecodingStrategy {
                                 int proposal_length,
                                 std::span<const int32_t> committed) override;
   void ResetProposer() override;
+  void PopulateProposerStats(SpeculativeStats& stats) const override;
 
  private:
   void Sync(Generator& g);
+  void RecordHistorySync(size_t token_count, float elapsed_ms);
+  void RecordLookup(std::span<const int32_t> candidates,
+                    size_t lookup_tokens_proposed,
+                    float elapsed_ms);
 
   NGramLookup lookup_;
   bool chained_lookup_;
+  size_t lookup_hits_{};
+  size_t lookup_misses_{};
+  size_t lookup_tokens_proposed_{};
+  size_t chained_tokens_proposed_{};
+  size_t grammar_candidate_rejections_{};
+  size_t history_syncs_{};
+  size_t history_tokens_synced_{};
+  float total_history_sync_ms_{};
+  float total_lookup_ms_{};
 };
 
 }  // namespace Generators

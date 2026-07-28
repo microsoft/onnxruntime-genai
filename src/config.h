@@ -436,6 +436,7 @@ struct Config {
     int ngram_chained_lookup_bool{};  // 1 refills the proposal by repeatedly looking up synthetic context.
     int adaptive_k_bool{};    // 0 uses max_draft_tokens every round; 1 adapts up to the hard limit.
     int adaptive_k_min{2};    // Starting width and floor when adaptive_k_bool is enabled.
+    int cooldown_bool{};      // 1 skips one speculative attempt after three zero-accept rounds.
   } speculative;
 
   struct Engine {

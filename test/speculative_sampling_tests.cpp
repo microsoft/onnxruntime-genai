@@ -195,6 +195,75 @@ TEST(AdaptiveKControllerTest, ResetClearsLearnedRatesButPreservesCumulativeCount
   EXPECT_FLOAT_EQ(controller.CurrentThroughput(), 0.0f);
 }
 
+TEST(SpeculativeCooldownControllerTest, DisabledNeverEntersCooldown) {
+  SpeculativeCooldownController controller{/*enabled=*/false};
+
+  for (int round = 0; round < 6; round++)
+    controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+  EXPECT_EQ(controller.Steps(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, ThreeZeroAcceptRoundsAtMinimumSkipOneStep) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/2, /*accepted=*/0);
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  ASSERT_TRUE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 1u);
+  EXPECT_EQ(controller.Remaining(), 1);
+
+  controller.CompleteStandardStep();
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Steps(), 1u);
+  EXPECT_EQ(controller.Remaining(), 0);
+}
+
+TEST(SpeculativeCooldownControllerTest, UsefulRoundResetsFailureStreak) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/2, /*accepted=*/1);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, AboveMinimumAndForcedOnlyRoundsDoNotAccumulate) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/3, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/3, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/0, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, ResetClearsPendingPolicyButPreservesCounts) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+  for (int round = 0; round < 3; round++)
+    controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  ASSERT_TRUE(controller.ShouldRunStandardStep());
+
+  controller.Reset();
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Remaining(), 0);
+  EXPECT_EQ(controller.Entries(), 1u);
+  EXPECT_EQ(controller.Steps(), 0u);
+}
+
 TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
   // These intentionally inconsistent buffers prove that mode, not storage shape, selects behavior.
   // Runtime proposal validation rejects such inconsistencies before verification.
