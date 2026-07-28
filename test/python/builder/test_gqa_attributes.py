@@ -29,6 +29,7 @@ class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
     make_group_query_attention = Model.make_group_query_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
+    get_kv_cache_scale_names = Model.get_kv_cache_scale_names
 
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
@@ -95,8 +96,8 @@ def test_quantized_gqa_emits_scale_inputs_and_attributes():
 
     node = model.nodes[-1]
     assert node["inputs"][12:14] == [
-        "/model/kv_cache_scales/k_scale.3",
-        "/model/kv_cache_scales/v_scale.3",
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
     ]
     assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
     assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"

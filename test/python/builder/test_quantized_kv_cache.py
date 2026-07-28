@@ -190,10 +190,9 @@ def test_quantized_kv_cache_init_rejects_unsupported_ep(ep):
 
 
 def test_kv_cache_quant_types_constant_matches_builder_validation():
-    # `check_extra_options` and the builder's own re-validation both read the constant from
-    # `builders.quant_config`, so they cannot drift apart.
-    assert builder_module.KV_CACHE_QUANT_TYPES == base_module.KV_CACHE_QUANT_TYPES
-    assert set(base_module.KV_CACHE_QUANT_TYPES) == {
+    # `check_extra_options` in builder.py is the single place that validates the option and
+    # reads this constant from `builders.quant_config`, which is the source of truth.
+    assert set(builder_module.KV_CACHE_QUANT_TYPES) == {
         "none",
         "int8_per_tensor",
         "int8_per_channel",
@@ -302,10 +301,10 @@ def test_per_tensor_scale_initializers_are_scalar_per_layer(tmp_path):
 
     # One k_scale and one v_scale per layer.
     assert set(captured) == {
-        "/model/kv_cache_scales/k_scale.0",
-        "/model/kv_cache_scales/v_scale.0",
-        "/model/kv_cache_scales/k_scale.1",
-        "/model/kv_cache_scales/v_scale.1",
+        "model.layers.0.attn.k_scale",
+        "model.layers.0.attn.v_scale",
+        "model.layers.1.attn.k_scale",
+        "model.layers.1.attn.v_scale",
     }
     for arr in captured.values():
         assert arr.size == 1
@@ -374,10 +373,10 @@ def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):
 
     model.make_kv_cache_scale_initializers()
 
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/k_scale.0"], 0.1)
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/k_scale.1"], 0.2)
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/v_scale.0"], 0.3)
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/v_scale.1"], 0.4)
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], 0.1)
+    np.testing.assert_allclose(captured["model.layers.1.attn.k_scale"], 0.2)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 0.3)
+    np.testing.assert_allclose(captured["model.layers.1.attn.v_scale"], 0.4)
 
 
 def test_calibrated_per_channel_scales_are_loaded_from_file(tmp_path):
@@ -398,8 +397,8 @@ def test_calibrated_per_channel_scales_are_loaded_from_file(tmp_path):
 
     model.make_kv_cache_scale_initializers()
 
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/k_scale.0"], k_vec)
-    np.testing.assert_allclose(captured["/model/kv_cache_scales/v_scale.0"], v_vec)
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], k_vec)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], v_vec)
 
 
 def test_scale_file_with_wrong_number_of_layers_is_rejected(tmp_path):
@@ -491,8 +490,8 @@ def test_quantized_gqa_appends_per_layer_scale_inputs():
     model.make_group_query_attention("/gqa", layer_id=3, q_path="q", k_path="k", v_path="v")
 
     inputs = model.nodes[-1]["inputs"]
-    assert inputs[_GQA_BASE_INPUT_COUNT] == "/model/kv_cache_scales/k_scale.3"
-    assert inputs[_GQA_BASE_INPUT_COUNT + 1] == "/model/kv_cache_scales/v_scale.3"
+    assert inputs[_GQA_BASE_INPUT_COUNT] == "model.layers.3.attn.k_scale"
+    assert inputs[_GQA_BASE_INPUT_COUNT + 1] == "model.layers.3.attn.v_scale"
 
 
 def test_quantized_gqa_sets_quant_attributes():
@@ -529,8 +528,8 @@ def test_quantized_gqa_scales_precede_qk_norm_weights_without_placeholders():
     inputs = model.nodes[-1]["inputs"]
     # Quantized path uses the real scale inputs (no empty placeholders) directly
     # followed by the q/k norm weights.
-    assert inputs[_GQA_BASE_INPUT_COUNT] == "/model/kv_cache_scales/k_scale.1"
-    assert inputs[_GQA_BASE_INPUT_COUNT + 1] == "/model/kv_cache_scales/v_scale.1"
+    assert inputs[_GQA_BASE_INPUT_COUNT] == "model.layers.1.attn.k_scale"
+    assert inputs[_GQA_BASE_INPUT_COUNT + 1] == "model.layers.1.attn.v_scale"
     assert inputs[_GQA_BASE_INPUT_COUNT + 2] == "q_norm"
     assert inputs[_GQA_BASE_INPUT_COUNT + 3] == "k_norm"
 

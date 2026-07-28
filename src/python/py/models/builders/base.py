@@ -33,7 +33,7 @@ from transformers import (
 )
 
 from .cuda_quantizer import CudaQuantizer
-from .quant_config import KV_CACHE_QUANT_TYPES, QuantConfig, desugar_algo_config, resolve_dtype
+from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
@@ -282,12 +282,9 @@ class Model:
         }
         self.make_attention_init(config)
 
-        kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
-        self.kv_cache_quant_type = str(kv_cache_quant_type).strip().lower()
-        if self.kv_cache_quant_type not in KV_CACHE_QUANT_TYPES:
-            raise ValueError(
-                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, got '{kv_cache_quant_type}'"
-            )
+        # `kv_cache_quant_type` is validated and normalized in builder.py (`check_extra_options`),
+        # which always runs before the model is constructed, so read the value directly here.
+        self.kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
         if self.kv_cache_quant_type != "none":
             self.make_quantized_kv_cache_init()
 
@@ -600,6 +597,15 @@ class Model:
 
         self.past_present_share_buffer = self.ep == "cuda"
 
+    def get_kv_cache_scale_names(self, layer_id):
+        # Convention-based initializer names for the per-layer KV cache quantization scales,
+        # matching the `model.layers.{layer_id}.attn.*` naming used by other attention
+        # initializers (like `get_qk_norm_weight_names`).
+        return (
+            f"model.layers.{layer_id}.attn.k_scale",
+            f"model.layers.{layer_id}.attn.v_scale",
+        )
+
     def make_kv_cache_scale_initializers(self):
         per_channel = self.kv_quant_type == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
@@ -640,12 +646,9 @@ class Model:
             return scale
 
         for layer_id in range(self.num_layers):
-            self.make_initializer(
-                make_scale(k_scales_per_layer, layer_id), f"/model/kv_cache_scales/k_scale.{layer_id}"
-            )
-            self.make_initializer(
-                make_scale(v_scales_per_layer, layer_id), f"/model/kv_cache_scales/v_scale.{layer_id}"
-            )
+            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
+            self.make_initializer(make_scale(k_scales_per_layer, layer_id), k_scale_name)
+            self.make_initializer(make_scale(v_scales_per_layer, layer_id), v_scale_name)
 
     def make_lm_head_init(self, config):
         pass
@@ -2840,10 +2843,11 @@ class Model:
         if self.kv_cache_quant_type != "none":
             if layer_id is None:
                 raise ValueError("layer_id is required for quantized KV cache.")
+            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
             inputs.extend(
                 [
-                    f"/model/kv_cache_scales/k_scale.{layer_id}",
-                    f"/model/kv_cache_scales/v_scale.{layer_id}",
+                    k_scale_name,
+                    v_scale_name,
                 ]
             )
         q_norm_weight = kwargs.get("q_norm_weight", "")
