@@ -32,6 +32,7 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
+#include "decoding_strategy.h"
 #include "logging.h"
 #include "runtime_settings.h"
 #include "speculative_stats.h"
@@ -47,12 +48,6 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
-
-}  // namespace Generators
-
-#include "decoding_strategy.h"
-
-namespace Generators {
 
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;

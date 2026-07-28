@@ -73,6 +73,7 @@ struct OgaNamedTensors : Generators::NamedTensors, OgaAbstract {};
 struct OgaResult : Generators::Result, OgaAbstract {};
 struct OgaRuntimeSettings : Generators::RuntimeSettings, OgaAbstract {};
 struct OgaSequences : Generators::TokenSequences, OgaAbstract {};
+struct OgaSpeculativeStats : Generators::SpeculativeStats, OgaAbstract {};
 struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
@@ -665,19 +666,65 @@ const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* gen
   return generator->GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats* out_stats) {
+OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(
+    const OgaGenerator* generator, OgaSpeculativeStats** out) {
   OGA_TRY
-  auto stats = generator->GetSpeculativeStats();
-  out_stats->rounds = stats.rounds;
-  out_stats->draft_tokens_proposed = stats.draft_tokens_proposed;
-  out_stats->draft_tokens_accepted = stats.draft_tokens_accepted;
-  out_stats->correction_tokens = stats.correction_tokens;
-  out_stats->bonus_tokens = stats.bonus_tokens;
-  out_stats->avg_draft_ms_per_token = stats.avg_draft_ms_per_token;
-  out_stats->avg_target_ms_per_token = stats.avg_target_ms_per_token;
-  out_stats->acceptance_rate = stats.acceptance_rate;
-  out_stats->mean_accepted_tokens = stats.mean_accepted_tokens;
-  out_stats->effective_speedup = stats.effective_speedup;
+  if (!out)
+    throw std::invalid_argument("out must not be null.");
+  *out = ReturnUnique<OgaSpeculativeStats>(
+      std::make_unique<Generators::SpeculativeStats>(generator->GetSpeculativeStats()));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* stats) {
+  delete static_cast<Generators::SpeculativeStats*>(stats);
+}
+
+OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
+    const OgaSpeculativeStats* stats, const char* name, uint64_t* value) {
+  OGA_TRY
+  if (!stats || !name || !value)
+    throw std::invalid_argument("stats, name, and value must not be null.");
+
+  const std::string_view key{name};
+  if (key == "rounds")
+    *value = stats->rounds;
+  else if (key == "draft_tokens_proposed")
+    *value = stats->draft_tokens_proposed;
+  else if (key == "draft_tokens_accepted")
+    *value = stats->draft_tokens_accepted;
+  else if (key == "correction_tokens")
+    *value = stats->correction_tokens;
+  else if (key == "bonus_tokens")
+    *value = stats->bonus_tokens;
+  else
+    throw std::runtime_error(
+        std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
+    const OgaSpeculativeStats* stats, const char* name, double* value) {
+  OGA_TRY
+  if (!stats || !name || !value)
+    throw std::invalid_argument("stats, name, and value must not be null.");
+
+  const std::string_view key{name};
+  if (key == "avg_draft_ms_per_token")
+    *value = stats->avg_draft_ms_per_token;
+  else if (key == "avg_target_ms_per_token")
+    *value = stats->avg_target_ms_per_token;
+  else if (key == "acceptance_rate")
+    *value = stats->acceptance_rate;
+  else if (key == "mean_accepted_tokens")
+    *value = stats->mean_accepted_tokens;
+  else if (key == "effective_speedup")
+    *value = stats->effective_speedup;
+  else
+    throw std::runtime_error(
+        std::string(name) + " is an invalid name for OgaSpeculativeStatsGetNumber.");
   return nullptr;
   OGA_CATCH
 }

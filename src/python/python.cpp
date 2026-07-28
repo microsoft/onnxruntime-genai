@@ -311,16 +311,12 @@ struct PyGenerator {
   pybind11::dict GetSpeculativeStats() {
     auto stats = generator_->GetSpeculativeStats();
     pybind11::dict d;
-    d["rounds"] = stats.rounds;
-    d["draft_tokens_proposed"] = stats.draft_tokens_proposed;
-    d["draft_tokens_accepted"] = stats.draft_tokens_accepted;
-    d["correction_tokens"] = stats.correction_tokens;
-    d["bonus_tokens"] = stats.bonus_tokens;
-    d["avg_draft_ms_per_token"] = stats.avg_draft_ms_per_token;
-    d["avg_target_ms_per_token"] = stats.avg_target_ms_per_token;
-    d["acceptance_rate"] = stats.acceptance_rate;
-    d["mean_accepted_tokens"] = stats.mean_accepted_tokens;
-    d["effective_speedup"] = stats.effective_speedup;
+    for (const char* key : {"rounds", "draft_tokens_proposed", "draft_tokens_accepted",
+                            "correction_tokens", "bonus_tokens"})
+      d[key] = stats->GetCount(key);
+    for (const char* key : {"avg_draft_ms_per_token", "avg_target_ms_per_token",
+                            "acceptance_rate", "mean_accepted_tokens", "effective_speedup"})
+      d[key] = stats->GetNumber(key);
     return d;
   }
 

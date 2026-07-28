@@ -1031,6 +1031,13 @@ bool IsCacheNeeded(const Model& model) {
 
 }  // namespace
 
+bool UsesNonRewindableWindowedKeyValueCache(
+    const Model& model, const Config::Model::Decoder& decoder) {
+  return model.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
+         decoder.sliding_window &&
+         decoder.sliding_window->slide_key_value_cache;
+}
+
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
   // For OpenVINO and QNN Stateful models, they do not contain exposed past/present KV tensors.
   // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
@@ -1051,9 +1058,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
-      state.model_.config_->model.decoder.sliding_window &&
-      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+  if (UsesNonRewindableWindowedKeyValueCache(
+          state.model_, state.model_.config_->model.decoder)) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }
 

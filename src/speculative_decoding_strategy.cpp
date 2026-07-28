@@ -267,7 +267,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
         final_token = dist(rng_);
       }
-      corrections_++;
+      stats_.correction_tokens++;
       break;
     }
   }
@@ -281,7 +281,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       std::discrete_distribution<int> dist(target_dists[K - 1].begin(), target_dists[K - 1].end());
       final_token = dist(rng_);
     }
-    bonuses_++;
+    stats_.bonus_tokens++;
   }
 
   // Queue the committed tokens (n_direct accepted + 1 correction/bonus) for DrainOne to emit one
@@ -298,9 +298,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   reanchor_pending_ = true;
 
   // Stats - once per round, not per drained token.
-  rounds_++;
-  draft_proposed_ += static_cast<size_t>(K);
-  draft_accepted_ += static_cast<size_t>(n_direct);
+  stats_.rounds++;
+  stats_.draft_tokens_proposed += static_cast<size_t>(K);
+  stats_.draft_tokens_accepted += static_cast<size_t>(n_direct);
   total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
   total_target_ms_ += ms_f(t_target_end - t_target_start).count();
 }
@@ -406,22 +406,18 @@ void SpeculativeDecodingStrategy::EmitToken(Generator& g, int32_t tok) {
 }
 
 SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
-  SpeculativeStats s{};
-  s.rounds = rounds_;
-  s.draft_tokens_proposed = draft_proposed_;
-  s.draft_tokens_accepted = draft_accepted_;
-  s.correction_tokens = corrections_;
-  s.bonus_tokens = bonuses_;
-  if (draft_proposed_ > 0) {
-    s.avg_draft_ms_per_token = total_propose_ms_ / static_cast<float>(draft_proposed_);
-    s.avg_target_ms_per_token = total_target_ms_ / static_cast<float>(draft_proposed_);
+  SpeculativeStats s = stats_;
+  if (s.draft_tokens_proposed > 0) {
+    s.avg_draft_ms_per_token = total_propose_ms_ / static_cast<float>(s.draft_tokens_proposed);
+    s.avg_target_ms_per_token = total_target_ms_ / static_cast<float>(s.draft_tokens_proposed);
     s.acceptance_rate =
-        static_cast<float>(draft_accepted_) / static_cast<float>(draft_proposed_);
+        static_cast<float>(s.draft_tokens_accepted) / static_cast<float>(s.draft_tokens_proposed);
   }
-  const std::size_t committed = draft_accepted_ + corrections_ + bonuses_;
-  if (rounds_ > 0) {
+  const std::size_t committed =
+      s.draft_tokens_accepted + s.correction_tokens + s.bonus_tokens;
+  if (s.rounds > 0) {
     s.mean_accepted_tokens =
-        static_cast<float>(committed) / static_cast<float>(rounds_);
+        static_cast<float>(committed) / static_cast<float>(s.rounds);
   }
   if (reanchor_runs_ > 0 && committed > 0) {
     // Speedup = E[tok/round] / (1 + k*(T_draft/T_target) + x), mapped to measured

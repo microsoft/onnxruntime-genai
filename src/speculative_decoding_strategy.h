@@ -9,11 +9,11 @@
 #include "decoding_strategy.h"
 #include "smartptrs.h"
 #include "speculative_sampling.h"
+#include "speculative_stats.h"
 
 namespace Generators {
 
 struct Generator;
-struct SpeculativeStats;
 
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
@@ -50,12 +50,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
                        int32_t final_token,
                        int seed_length) = 0;
 
-  // Stats accumulators.
-  std::size_t rounds_{};
-  std::size_t draft_proposed_{};
-  std::size_t draft_accepted_{};
-  std::size_t corrections_{};
-  std::size_t bonuses_{};
+  SpeculativeStats stats_{};
+
+  // Timings used to derive averages.
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
