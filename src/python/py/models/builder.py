@@ -87,140 +87,6 @@ def apply_deprecated_extra_option_aliases(kv_pairs):
         del kv_pairs[old_name]
 
 
-def check_extra_options(kv_pairs, precision, execution_provider):
-    """
-    Check key-value pairs and set values correctly
-    """
-    apply_deprecated_extra_option_aliases(kv_pairs)
-
-    bools = [
-        "is_symmetric",
-        "exclude_embeds",
-        "exclude_lm_head",
-        "include_hidden_states",
-        "enable_cuda_graph",
-        "enable_webgpu_graph",
-        "use_8bits_moe",
-        "use_qdq",
-        "use_webgpu_fp32",
-        "use_cuda_bf16",
-        "shared_embeddings",
-        "hf_remote",
-        "disable_qkv_fusion",
-        "fuse_qk_norm_gqa",
-        "prune_lm_head",
-    ]
-    for key in bools:
-        if key in kv_pairs:
-            if kv_pairs[key] in {"false", "False", "0"}:
-                kv_pairs[key] = False
-            elif kv_pairs[key] in {"true", "True", "1"}:
-                kv_pairs[key] = True
-            else:
-                raise ValueError(f"{key} must be false/False/0 or true/True/1.")
-
-    if "hf_token" in kv_pairs:
-        kv_pairs["hf_token"] = parse_hf_token(kv_pairs["hf_token"])
-
-    if "op_types_to_quantize" in kv_pairs:
-        op_types_to_quantize = ()
-        for op_type in kv_pairs["op_types_to_quantize"].split("/"):
-            op_types_to_quantize += (op_type,)
-        kv_pairs["op_types_to_quantize"] = op_types_to_quantize
-
-    if "nodes_to_exclude" in kv_pairs:
-        kv_pairs["nodes_to_exclude"] = kv_pairs["nodes_to_exclude"].split(",")
-
-    for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
-        if key in kv_pairs:
-            kv_pairs[key] = int(kv_pairs[key])
-
-    if kv_pairs.get("qmoe_weights_prepacked", -1) not in (-1, 0, 1):
-        raise ValueError(f"qmoe_weights_prepacked must be -1, 0, or 1, got {kv_pairs['qmoe_weights_prepacked']}.")
-
-    if kv_pairs.get("matmulnbits_weights_prepacked", 0) not in (0, 1, 2):
-        raise ValueError(
-            f"matmulnbits_weights_prepacked must be 0, 1, or 2, got {kv_pairs['matmulnbits_weights_prepacked']}."
-        )
-
-    # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
-    # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4"}
-
-    # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
-    if "use_8bits_moe" in kv_pairs:
-        print("WARNING: 'use_8bits_moe' is deprecated. Use 'moe_quant_type=int8' (or 'moe_quant_type=int4') instead.")
-        if "moe_quant_type" not in kv_pairs:
-            kv_pairs["moe_quant_type"] = "int8" if kv_pairs["use_8bits_moe"] else "int4"
-
-    if "moe_quant_type" in kv_pairs:
-        moe_quant_type = kv_pairs["moe_quant_type"]
-        if moe_quant_type not in supported_moe_quant_types:
-            raise ValueError(
-                f"moe_quant_type must be one of {sorted(supported_moe_quant_types)}, got '{moe_quant_type}'."
-            )
-        if moe_quant_type == "mxfp4":
-            if execution_provider != "cuda":
-                raise ValueError(
-                    f"moe_quant_type=mxfp4 is only supported on the CUDA EP, got ep='{execution_provider}'."
-                )
-            if not (precision == "int4" and kv_pairs.get("is_symmetric", True)):
-                raise ValueError(
-                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the int4 build "
-                    "precision is what exports the quantized QMoE op, and mxfp4 only sets the MoE expert weights to "
-                    "the FP4 encoding."
-                )
-
-    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
-        # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
-        # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
-        raise ValueError(
-            "Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once."
-        )
-
-    if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
-        print(
-            "WARNING: enable_webgpu_graph is only supported with WebGPU execution provider. Disabling enable_webgpu_graph."
-        )
-        kv_pairs["enable_webgpu_graph"] = False
-
-    if precision == "int8" and kv_pairs.get("use_qdq", False):
-        # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
-        raise NotImplementedError(
-            "int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default)."
-        )
-
-    if "kv_cache_quant_type" in kv_pairs:
-        quant_type = kv_pairs["kv_cache_quant_type"].lower()
-        if quant_type not in KV_CACHE_QUANT_TYPES:
-            raise ValueError(
-                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
-                f"got '{kv_pairs['kv_cache_quant_type']}'"
-            )
-        if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
-            raise ValueError(
-                "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
-                f"Got execution_provider='{execution_provider}'."
-            )
-        kv_pairs["kv_cache_quant_type"] = quant_type
-
-
-def parse_extra_options(kv_items, precision, execution_provider):
-    """
-    Parse key-value pairs that are separated by '='
-    """
-    kv_pairs = {}
-
-    if kv_items:
-        for kv_str in kv_items:
-            kv = kv_str.split("=")
-            kv_pairs[kv[0].strip()] = kv[1].strip()
-
-    print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs, precision, execution_provider)
-    return kv_pairs
-
-
 def parse_hf_token(hf_token):
     """
     Returns the authentication token needed for Hugging Face.
@@ -376,6 +242,20 @@ def check_extra_options(
     if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
+
+    if "kv_cache_quant_type" in extra_options:
+        quant_type = extra_options["kv_cache_quant_type"].lower()
+        if quant_type not in KV_CACHE_QUANT_TYPES:
+            raise ValueError(
+                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
+                f"got '{extra_options['kv_cache_quant_type']}'"
+            )
+        if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
+            raise ValueError(
+                "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
+                f"Got execution_provider='{execution_provider}'."
+            )
+        extra_options["kv_cache_quant_type"] = quant_type
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)

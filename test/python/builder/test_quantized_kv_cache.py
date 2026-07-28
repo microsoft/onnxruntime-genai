@@ -73,6 +73,17 @@ builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 
 
+def _check_extra_options(extra_options, precision, execution_provider):
+    # The CLI-level `check_extra_options` loads the Hugging Face config; stub it out
+    # so these validation-only tests need no model download.
+    builder_module.get_hf_details = lambda *args, **kwargs: {
+        "hf_config": types.SimpleNamespace(tie_word_embeddings=True)
+    }
+    builder_module.check_extra_options(
+        "dummy-model", "", "", precision, execution_provider, "", extra_options
+    )
+
+
 # ===========================================================================
 # check_extra_options: kv_cache_quant_type validation
 # ===========================================================================
@@ -92,39 +103,39 @@ Model = base_module.Model
 )
 def test_valid_kv_cache_quant_types_are_accepted(quant_type):
     kv = {"kv_cache_quant_type": quant_type}
-    builder_module.check_extra_options(kv, "fp16", "cuda")
+    _check_extra_options(kv, "fp16", "cuda")
     assert kv["kv_cache_quant_type"] == quant_type
 
 
 def test_invalid_kv_cache_quant_type_is_rejected():
     with pytest.raises(ValueError, match="kv_cache_quant_type must be one of"):
-        builder_module.check_extra_options({"kv_cache_quant_type": "int3_per_tensor"}, "fp16", "cuda")
+        _check_extra_options({"kv_cache_quant_type": "int3_per_tensor"}, "fp16", "cuda")
 
 
 def test_kv_cache_quant_type_is_lowercased():
     kv = {"kv_cache_quant_type": "INT8_Per_Tensor"}
-    builder_module.check_extra_options(kv, "fp16", "cuda")
+    _check_extra_options(kv, "fp16", "cuda")
     assert kv["kv_cache_quant_type"] == "int8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["cpu", "cuda"])
 def test_quantized_kv_cache_allowed_on_cpu_and_cuda(execution_provider):
     kv = {"kv_cache_quant_type": "fp8_per_tensor"}
-    builder_module.check_extra_options(kv, "fp16", execution_provider)
+    _check_extra_options(kv, "fp16", execution_provider)
     assert kv["kv_cache_quant_type"] == "fp8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "rocm"])
 def test_quantized_kv_cache_rejected_on_unsupported_ep(execution_provider):
     with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
-        builder_module.check_extra_options({"kv_cache_quant_type": "int8_per_tensor"}, "fp16", execution_provider)
+        _check_extra_options({"kv_cache_quant_type": "int8_per_tensor"}, "fp16", execution_provider)
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "cpu", "cuda"])
 def test_none_kv_cache_quant_type_allowed_on_any_ep(execution_provider):
     # `none` is a no-op and must not be restricted to the CPU/CUDA EPs.
     kv = {"kv_cache_quant_type": "none"}
-    builder_module.check_extra_options(kv, "fp16", execution_provider)
+    _check_extra_options(kv, "fp16", execution_provider)
     assert kv["kv_cache_quant_type"] == "none"
 
 
