@@ -57,6 +57,76 @@ def test_telemetry_execution_provider_normalizes_trt_rtx():
     assert builder_module._normalize_execution_provider_name("cuda") == "cuda"
 
 
+def test_telemetry_extra_options_exclude_hugging_face_context():
+    sanitized = builder_module._sanitize_extra_options(
+        {
+            "batch_size": 4,
+            "hf_details": {"hf_config": "internal"},
+            "hf_token": "secret",
+        }
+    )
+
+    assert sanitized == {"batch_size": "4"}
+
+
+def test_cli_parse_failure_emits_model_build_failure(monkeypatch):
+    args = types.SimpleNamespace(
+        cache_dir="cache",
+        disable_telemetry=False,
+        execution_provider="cuda",
+        extra_options=None,
+        input=r"C:\Users\alice\models\model",
+        model_name=None,
+        output="output",
+        precision="fp16",
+    )
+    captured = {}
+    times = iter((10.0, 10.25))
+
+    def fail_parse(*_args):
+        raise ValueError("bad")
+
+    monkeypatch.setattr(builder_module, "parse_extra_options", fail_parse)
+    monkeypatch.setattr(builder_module, "_emit_model_build_telemetry", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(builder_module.time, "perf_counter", lambda: next(times))
+
+    with pytest.raises(ValueError, match="bad"):
+        builder_module._run_from_args(args)
+
+    assert captured["success"] is False
+    assert captured["duration_ms"] == 250
+    assert captured["fallback_model_name"] == args.input
+    assert captured["extra_options"] == {}
+
+
+def test_cli_model_build_duration_starts_before_parsing(monkeypatch):
+    args = types.SimpleNamespace(
+        cache_dir="cache",
+        disable_telemetry=False,
+        execution_provider="cuda",
+        extra_options=None,
+        input="",
+        model_name="microsoft/model",
+        output="output",
+        precision="fp16",
+    )
+    captured = {}
+
+    monkeypatch.setattr(builder_module, "parse_extra_options", lambda *_args: {"config_only": True})
+
+    def record_create(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(builder_module, "_create_model_with_telemetry", record_create)
+    monkeypatch.setattr(builder_module.time, "perf_counter", lambda: 42.0)
+
+    builder_module._run_from_args(args)
+
+    assert captured["args"][6] == 42.0
+    assert captured["kwargs"] == {"config_only": True}
+
+
 def test_telemetry_fallback_restores_source_path(monkeypatch):
     telemetry_stub = types.ModuleType("telemetry")
 
@@ -120,6 +190,37 @@ def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatc
 
     assert captured["model_name"] == "[path]"
     assert captured["execution_provider"] == "trt-rtx"
+
+
+def test_minimal_failure_telemetry_accepts_missing_model_identifier(monkeypatch):
+    telemetry_stub = types.ModuleType("telemetry")
+    captured = {}
+
+    class RecordingTelemetry:
+        accepts_detailed_events = True
+
+        def log_model_build(self, **kwargs):
+            captured.update(kwargs)
+
+    telemetry_stub.GenAITelemetry = RecordingTelemetry
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
+    monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
+
+    builder_module._emit_model_build_telemetry(
+        action_name="create_model",
+        duration_ms=1.0,
+        success=False,
+        config=None,
+        onnx_model=None,
+        precision="fp16",
+        execution_provider="cpu",
+        output_dir="",
+        extra_options={},
+        fallback_model_name=None,
+    )
+
+    assert captured["model_name"] == ""
 
 
 def test_failed_build_ignores_existing_output_artifacts(monkeypatch, tmp_path):

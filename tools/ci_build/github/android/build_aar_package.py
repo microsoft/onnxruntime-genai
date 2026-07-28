@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).parents[4]
 BUILD_PY = REPO_ROOT / "build.py"
 JAVA_ROOT = REPO_ROOT / "src" / "java"
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
-import util  # REPO_ROOT/tools/python/util noqa: E402
+import util  # noqa: E402
 
 # Default to only build 64-bit ABIs. TBD if we need to support any 32-bit ABIs.
 # DEFAULT_BUILD_ABIS = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]

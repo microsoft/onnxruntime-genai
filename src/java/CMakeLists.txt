@@ -1,6 +1,55 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+if(NOT DEFINED REPO_ROOT)
+  # ---------------------------------------------------------------------------
+  # Standalone (incremental) SDK build.
+  #
+  # Configured directly (cmake -S src/java) and linked against a prebuilt core via
+  # find_package(onnxruntime-genai). build.py drives this through
+  # `--sdk java --prebuilt_genai_home <prefix> --ort_home <ort>`.
+  # ---------------------------------------------------------------------------
+  cmake_minimum_required(VERSION 3.26)
+  project(onnxruntime_genai_java LANGUAGES C CXX)
+
+  get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+  set(SRC_ROOT ${REPO_ROOT}/src)
+
+  find_package(onnxruntime-genai CONFIG REQUIRED)
+
+  if(NOT DEFINED ORT_HOME)
+    message(FATAL_ERROR "ORT_HOME must be set (-DORT_HOME=...) for a standalone java SDK build.")
+  endif()
+  # Desktop ORT layout: headers under <ORT_HOME>/include and libs under
+  # <ORT_HOME>/lib. Android/iOS use different ORT package layouts (see
+  # cmake/ortlib.cmake) and are not yet supported by the standalone SDK build.
+  set(ORT_HEADER_DIR ${ORT_HOME}/include)
+  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+
+  include(${REPO_ROOT}/cmake/target_platform.cmake)
+
+  # Apply the same MSVC security hardening as the top-level CMakeLists.txt.
+  include(${REPO_ROOT}/cmake/msvc_security.cmake)
+
+  if(NOT TARGET onnxruntime-genai)
+    add_library(onnxruntime-genai ALIAS onnxruntime-genai::onnxruntime-genai)
+  endif()
+
+  get_filename_component(_genai_install_lib_dir "${onnxruntime-genai_DIR}/../.." ABSOLUTE)
+  if(WIN32)
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.dll")
+  elseif(APPLE)
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.dylib")
+  else()
+    file(GLOB ortgenai_embed_libs "${_genai_install_lib_dir}/*genai*.so")
+  endif()
+
+  # Tests are driven separately in the incremental packaging flow.
+  if(NOT DEFINED ENABLE_TESTS)
+    set(ENABLE_TESTS OFF)
+  endif()
+endif()
+
 set(JAVA_AWT_LIBRARY NotNeeded)
 set(JAVA_AWT_INCLUDE_PATH NotNeeded)
 include(FindJava)
@@ -64,6 +113,12 @@ file(GLOB genai4j_native_src
 add_library(onnxruntime-genai-jni SHARED ${genai4j_native_src})
 set_property(TARGET onnxruntime-genai-jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai-jni onnxruntime-genai4j)
+if(MSVC)
+  # /sdl: additional SDL security checks for the JNI native library.
+  # Global hardening (/GS /guard:cf /DYNAMICBASE /CETCOMPAT /Qspectre) is applied
+  # project-wide by cmake/msvc_security.cmake.
+  target_compile_options(onnxruntime-genai-jni PRIVATE "/sdl")
+endif()
 # the JNI headers are generated in the genai4j target
 target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
                                                            ${JAVA_SRC_ROOT}/build/headers

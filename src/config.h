@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
+#include "filesystem.h"
 #include "provider_options.h"
 
 #include <functional>
@@ -85,6 +86,14 @@ struct Config {
     static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
     static constexpr std::string_view JoinerLogitsName = "outputs";
+
+    // Tool-calling and reasoning token ID config field names.
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    static constexpr std::string_view BotTokenIdName = "bot_token_id";
+    static constexpr std::string_view EotTokenIdName = "eot_token_id";
+    static constexpr std::string_view BorTokenIdName = "bor_token_id";
+    static constexpr std::string_view EorTokenIdName = "eor_token_id";
   };
 
   fs::path config_path;   // Path of the config directory
@@ -144,6 +153,15 @@ struct Config {
     int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
+
+    // Tool-calling and reasoning token IDs.
+    // Follows the bos/eos/pad naming convention:
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    std::optional<int> bot_token_id;
+    std::optional<int> eot_token_id;
+    std::optional<int> bor_token_id;
+    std::optional<int> eor_token_id;
 
     int vocab_size{};
     int context_length{};
@@ -427,7 +445,7 @@ struct Config {
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
     bool early_stopping{true};         // Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
-    int no_repeat_ngram_size{};        // Unused param
+    int no_repeat_ngram_size{};        // If > 0, no n-gram of this size may repeat in the generated sequence. 0 disables.
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
@@ -467,6 +485,9 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
+std::string_view NormalizeProviderName(std::string_view name);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 

@@ -684,6 +684,34 @@ OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer,
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
   sequences->emplace_back(tokenizer->Encode(str));

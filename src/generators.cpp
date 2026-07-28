@@ -5,7 +5,6 @@
 
 #include "generators.h"
 #include <cstring>
-#include <cstdlib>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -288,9 +287,9 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
     return reinterpret_cast<decltype(&GetInterface)>(
-        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
+        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str(), Ort::api);
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }
@@ -512,14 +511,10 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
-  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
-  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-                                          model_->p_device_->GetType() == DeviceType::DML;
-
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
-  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
+  if (params.BatchBeamSize() == 1 && model_->p_device_->SupportsPhi3RopeRewind(*model_->config_)) {
     if (model_type == "phi3" || model_type == "phimoe")
       phi3_rope_threshold_ = 4097;
     else if (model_type == "phi3small")
@@ -789,6 +784,7 @@ void Generator::GenerateNextToken() {
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search.no_repeat_ngram_size);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");

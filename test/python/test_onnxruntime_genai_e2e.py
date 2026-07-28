@@ -40,6 +40,32 @@ def run_model(model_path: str | bytes | os.PathLike):
         assert generator.get_sequence(i) is not None
 
 
+def run_graph_capture_model(model_path: str | bytes | os.PathLike):
+    """Run a graph-capture model for validation.
+
+    Graph-capture models have special compilation to use CUDA/DML/WebGPU
+    graph capture optimization. This method validates that they load and
+    generate output correctly.
+    """
+    model = og.Model(model_path)
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=50)
+
+    generator = og.Generator(model, params)
+    generator.append_tokens([input_ids])
+    while not generator.is_done():
+        generator.generate_next_token()
+
+    output = generator.get_sequence(0)
+    assert output is not None
+    assert len(output) > len(input_ids), "Graph-capture model should generate at least one new token"
+
+
 def run_whisper():
     log.debug("Running Whisper Python E2E Test")
 
@@ -57,8 +83,15 @@ def run_whisper():
     for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
         built_model = os.path.join(cwd, "..", "models", f"whisper-tiny-{precision}-{execution_provider}")
-        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision,
-                       device=execution_provider, one_layer=False, enable_graph_capture=False)
+        download_model(
+            model_name="openai/whisper-tiny",
+            input_path="",
+            output_path=built_model,
+            precision=precision,
+            device=execution_provider,
+            one_layer=False,
+            enable_graph_capture=False,
+        )
 
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
@@ -98,10 +131,13 @@ def run_tool_calling():
     user_prompt = "What is the weather in Redmond, WA?"
     response_format = "lark_grammar"
 
-    for (model_name, tool_call_start, tool_call_end) in tool_call_models:
-        for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
+    for model_name, tool_call_start, tool_call_end in tool_call_models:
+        for precision, execution_provider in [
+            ("int4", "cpu")
+        ]:  # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
             model_path = os.path.join(cwd, "..", "models", model_name, precision, execution_provider)
-            if not os.path.exists(model_path): continue
+            if not os.path.exists(model_path):
+                continue
 
             # Run special_tokens.py to mark tool call token ids as special
             command = [
@@ -144,7 +180,16 @@ def run_tool_calling():
 
             # Run model_qa.cpp for inference
             command = [
-                os.path.join(cwd, "..", "..", "examples", "c", "build", f"{'Release' if sys.platform.startswith('win') else ''}", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                os.path.join(
+                    cwd,
+                    "..",
+                    "..",
+                    "examples",
+                    "c",
+                    "build",
+                    f"{'Release' if sys.platform.startswith('win') else ''}",
+                    f"model_qa{'.exe' if sys.platform.startswith('win') else ''}",
+                ),
                 "-m",
                 model_path,
                 "-e",
@@ -234,8 +279,17 @@ def get_args():
         help="List of model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
     )
 
+    parser.add_argument(
+        "-g",
+        "--graph-capture-models",
+        type=str,
+        default="[]",
+        help="List of graph-capture model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
+    )
+
     args = parser.parse_args()
     args.models = json.loads(args.models)
+    args.graph_capture_models = json.loads(args.graph_capture_models)
     return args
 
 
@@ -247,7 +301,16 @@ if __name__ == "__main__":
             run_model(model_path)
         except Exception as e:
             log.error(e)
-            log.error(f"Failed to run {model_path}", exc_info=True)
+            log.exception(f"Failed to run {model_path}")
+
+    # Run graph-capture models with pytest for proper marker filtering
+    for model_path in args.graph_capture_models:
+        try:
+            log.info(f"Running graph-capture model {model_path}")
+            run_graph_capture_model(model_path)
+        except Exception as e:
+            log.error(e)
+            log.exception(f"Failed to run graph-capture model {model_path}")
 
     # Run Whisper E2E tests
     run_whisper()
