@@ -30,8 +30,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: true
-# We are using the same manylinux repo as the one used in the packaging build
-      - name: Checkout ManyLinux repo
+      - name: Checkout ManyLinux repo  # We are using the same manylinux repo as the one used in the packaging build
         uses: actions/checkout@v5
         with:
           repository: pypa/manylinux
@@ -112,7 +111,6 @@ jobs:
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8  \
             --context tools/ci_build/github/linux/docker/manylinux  \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-            --container-registry ghcr.io/microsoft/onnxruntime-genai \
             --manylinux-src manylinux \
             --multiple_repos \
             --repository onnxruntimecudabuildx64

@@ -19,6 +19,7 @@ namespace Generators {
 struct Search;
 struct Sequences;
 struct GeneratorParams;
+struct Config;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -108,6 +109,7 @@ struct DeviceInterface {
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
@@ -144,6 +146,8 @@ struct DeviceInterface {
   // the user did not provide one.
   virtual void ShapeInitSessionProviderOptions(ProviderOptions& /*init_options*/,
                                                const ProviderOptions* /*user_options*/) const {}
+
+  virtual bool SupportsPhi3RopeRewind(const Config& /*config*/) const { return true; }
 
   virtual void* GetCudaStream() {
     assert(false);

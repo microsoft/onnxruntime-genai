@@ -9,40 +9,28 @@ parameters:
 # pipeline so the checker doesn't have to parse YAML itself.
 - name: pr_models
   type: object
-  default: []
 - name: all_models
   type: object
-  default: []
 - name: build_windows_x64
   type: boolean
-  default: true
 - name: build_linux_x64
   type: boolean
-  default: true
 - name: windows_x64_cpu
   type: boolean
-  default: true
 - name: windows_x64_cuda
   type: boolean
-  default: true
 - name: windows_x64_webgpu
   type: boolean
-  default: true
 - name: linux_x64_cpu
   type: boolean
-  default: true
 - name: linux_x64_cuda
   type: boolean
-  default: true
 - name: build_macos_arm64
   type: boolean
-  default: true
 - name: macos_arm64_cpu
   type: boolean
-  default: true
 - name: macos_arm64_webgpu
   type: boolean
-  default: true
 
 stages:
 # Fail fast if the pipeline's pr_models / all_models defaults have drifted

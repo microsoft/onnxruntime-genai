@@ -11,7 +11,7 @@ Verifies that the C++ Mistral3ImageProcessor produces the correct
 dimensions, matching the HuggingFace Pixtral token convention:
 
     For each row of patches:
-        [IMG] × patch_cols
+        [IMG] x patch_cols
         [IMG_BREAK]  (between rows)
     [IMG_END]  (after the last row)
 
@@ -22,6 +22,11 @@ Run with:
     python -m pytest test/python/test_mistral3_tokens.py -v
 """
 
+import importlib
+import importlib.util
+from pathlib import Path
+
+import numpy as np
 import pytest
 
 # Fake special-token IDs used only for unit-testing the counting/sequence
@@ -39,12 +44,7 @@ EFFECTIVE_PATCH = PATCH_SIZE * SPATIAL_MERGE_SIZE  # 28
 
 
 def _has_genai() -> bool:
-    try:
-        import onnxruntime_genai
-
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("onnxruntime_genai") is not None
 
 
 def build_image_token_sequence(patch_rows: int, patch_cols: int) -> list[int]:
@@ -77,23 +77,23 @@ class TestBuildImageTokenSequence:
     """Tests for the token sequence builder."""
 
     def test_single_patch(self):
-        """1×1 grid produces [IMG][IMG_END]."""
+        """1x1 grid produces [IMG][IMG_END]."""
         seq = build_image_token_sequence(1, 1)
         assert seq == [IMG_TOKEN_ID, IMG_END_TOKEN_ID]
 
     def test_single_row(self):
-        """1×3 grid produces [IMG][IMG][IMG][IMG_END] (no breaks)."""
+        """1x3 grid produces [IMG][IMG][IMG][IMG_END] (no breaks)."""
         seq = build_image_token_sequence(1, 3)
         assert seq == [IMG_TOKEN_ID] * 3 + [IMG_END_TOKEN_ID]
 
     def test_two_rows(self):
-        """2×2 grid produces [IMG][IMG][IMG_BREAK][IMG][IMG][IMG_END]."""
+        """2x2 grid produces [IMG][IMG][IMG_BREAK][IMG][IMG][IMG_END]."""
         seq = build_image_token_sequence(2, 2)
-        expected = [IMG_TOKEN_ID, IMG_TOKEN_ID, IMG_BREAK_TOKEN_ID] + [IMG_TOKEN_ID, IMG_TOKEN_ID, IMG_END_TOKEN_ID]
+        expected = [IMG_TOKEN_ID, IMG_TOKEN_ID, IMG_BREAK_TOKEN_ID, IMG_TOKEN_ID, IMG_TOKEN_ID, IMG_END_TOKEN_ID]
         assert seq == expected
 
     def test_three_rows(self):
-        """3×2 grid has 2 breaks and 1 end."""
+        """3x2 grid has 2 breaks and 1 end."""
         seq = build_image_token_sequence(3, 2)
         assert seq.count(IMG_TOKEN_ID) == 6
         assert seq.count(IMG_BREAK_TOKEN_ID) == 2
@@ -123,27 +123,27 @@ class TestPatchGridComputation:
     """Tests for patch grid dimension calculation."""
 
     def test_fish_jpg_dimensions(self):
-        """fish.jpg resized to 728×1288 → 26×46 grid."""
+        """fish.jpg resized to 728x1288 -> 26x46 grid."""
         rows, cols = compute_patch_grid(728, 1288)
         assert rows == 26
         assert cols == 46
         assert rows * cols == 1196
 
     def test_small_square(self):
-        """224×224 → 8×8 grid (64 patches)."""
+        """224x224 -> 8x8 grid (64 patches)."""
         rows, cols = compute_patch_grid(224, 224)
         assert rows == 8
         assert cols == 8
         assert rows * cols == 64
 
     def test_minimum_size(self):
-        """28×28 (smallest valid) → 1×1 grid."""
+        """28x28 (smallest valid) -> 1x1 grid."""
         rows, cols = compute_patch_grid(28, 28)
         assert rows == 1
         assert cols == 1
 
     def test_non_square(self):
-        """588×896 → 21×32 grid."""
+        """588x896 -> 21x32 grid."""
         rows, cols = compute_patch_grid(588, 896)
         assert rows == 21
         assert cols == 32
@@ -160,7 +160,7 @@ class TestTokenExpansionIntegration:
     """Integration tests combining grid computation with token expansion."""
 
     def test_fish_jpg_full_sequence(self):
-        """fish.jpg (728×1288) produces correct full token sequence."""
+        """fish.jpg (728x1288) produces correct full token sequence."""
         rows, cols = compute_patch_grid(728, 1288)
         seq = build_image_token_sequence(rows, cols)
         assert len(seq) == 1196 + 26  # 1196 IMG + 25 BREAK + 1 END
@@ -169,7 +169,7 @@ class TestTokenExpansionIntegration:
         assert seq.count(IMG_END_TOKEN_ID) == 1
 
     def test_224x224_full_sequence(self):
-        """224×224 produces 64 IMG + 7 BREAK + 1 END = 72 tokens."""
+        """224x224 produces 64 IMG + 7 BREAK + 1 END = 72 tokens."""
         rows, cols = compute_patch_grid(224, 224)
         seq = build_image_token_sequence(rows, cols)
         assert len(seq) == 72
@@ -182,7 +182,7 @@ class TestTokenExpansionIntegration:
         for h, w in [(224, 224), (728, 1288), (588, 896), (28, 28)]:
             rows, cols = compute_patch_grid(h, w)
             seq = build_image_token_sequence(rows, cols)
-            assert 0 not in seq, f"Zero token found for {h}×{w}"
+            assert 0 not in seq, f"Zero token found for {h}x{w}"
 
     @pytest.mark.skipif(not _has_genai(), reason="onnxruntime_genai not installed")
     def test_genai_processor_token_counts(self, test_data_path):
@@ -191,10 +191,6 @@ class TestTokenExpansionIntegration:
         Requires onnxruntime_genai, the pre-exported Mistral3 model under
         test_data_path/mistral3, and a test image.
         """
-        from pathlib import Path
-
-        import numpy as np
-
         model_path = Path(test_data_path) / "mistral3"
         image_path = Path(test_data_path) / "images" / "australia.jpg"
         if not (model_path / "genai_config.json").is_file():
@@ -202,7 +198,7 @@ class TestTokenExpansionIntegration:
         if not image_path.is_file():
             pytest.skip(f"Test image not found at {image_path}")
 
-        import onnxruntime_genai as og
+        og = importlib.import_module("onnxruntime_genai")
 
         model = og.Model(str(model_path))
         processor = model.create_multimodal_processor()
@@ -253,8 +249,8 @@ class TestMultiImageTokenExpansion:
 
     def test_two_images_different_sizes(self):
         """Two images with different resolutions produce different token counts."""
-        rows1, cols1 = compute_patch_grid(224, 224)  # 8×8 = 64 patches
-        rows2, cols2 = compute_patch_grid(448, 224)  # 16×8 = 128 patches
+        rows1, cols1 = compute_patch_grid(224, 224)  # 8x8 = 64 patches
+        rows2, cols2 = compute_patch_grid(448, 224)  # 16x8 = 128 patches
 
         seq1 = build_image_token_sequence(rows1, cols1)
         seq2 = build_image_token_sequence(rows2, cols2)

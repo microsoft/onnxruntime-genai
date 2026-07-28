@@ -7,4 +7,4 @@ sympy
 pytest
 onnx
 onnx_ir>=0.1.3
-transformers<5.0.0
+transformers>=5.0.0

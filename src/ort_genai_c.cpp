@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
@@ -18,6 +20,9 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "telemetry/model_telemetry.h"
+#include "telemetry/telemetry.h"
+#include "dll_load_error.h"
 
 namespace Generators {
 
@@ -103,7 +108,16 @@ extern "C" {
   }
 
 void OGA_API_CALL OgaShutdown() {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().Shutdown();
+  }
   Generators::Shutdown();
+}
+
+void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().SetEnabled(enabled);
+  }
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -170,10 +184,16 @@ size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
 }
 
 size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return 0;
+  }
   return (*p)[sequence].size();
 }
 
 const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, size_t sequence) {
+  if (sequence >= p->size()) {
+    return nullptr;
+  }
   return (*p)[sequence].data();
 }
 
@@ -236,7 +256,8 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
+  auto model = Generators::CreateModelWithTelemetry(
+      [&] { return Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings); });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -362,8 +383,10 @@ OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(Oga
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto config_copy = std::make_unique<Generators::Config>(*config);
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  auto model = Generators::CreateModelWithTelemetry([&] {
+    auto config_copy = std::make_unique<Generators::Config>(*config);
+    return Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -707,6 +730,34 @@ OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer,
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
   sequences->emplace_back(tokenizer->Encode(str));
@@ -789,9 +840,19 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
+  if (shape_dims_count > 0 && shape_dims == nullptr)
+    throw std::runtime_error("shape_dims must not be null when shape_dims_count is non-zero");
   auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
-  for (size_t i = 0; i < shape_dims_count; i++)
-    byte_count *= shape_dims[i];
+  for (size_t i = 0; i < shape_dims_count; i++) {
+    if (shape_dims[i] < 0)
+      throw std::runtime_error("shape dimension must be non-negative");
+    if (static_cast<uint64_t>(shape_dims[i]) > std::numeric_limits<size_t>::max())
+      throw std::runtime_error("shape dimension exceeds size_t range");
+    const size_t dim = static_cast<size_t>(shape_dims[i]);
+    if (dim != 0 && byte_count > std::numeric_limits<size_t>::max() / dim)
+      throw std::runtime_error("tensor byte count overflow");
+    byte_count *= dim;
+  }
   std::unique_ptr<OrtValue> ort_tensor;
   if (data)
     ort_tensor = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);
@@ -1039,6 +1100,7 @@ OgaResult* OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name) {
 OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, const char* adapter_name) {
   OGA_TRY
   generator->state_->SetActiveAdapter(adapters, adapter_name);
+  generator->LogAdapterActivated();
   return nullptr;
   OGA_CATCH
 }
@@ -1159,9 +1221,31 @@ void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete stat
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4297: this extern "C" entry point is assumed non-throwing under /EHc, but it intentionally
+// throws to report a registration failure to the caller -- exactly as the ORT registration call it
+// wraps already does (that throw is simply not visible to the compiler because it is in another
+// translation unit). The exception propagates and is caught by callers normally.
+#pragma warning(disable : 4297)
+#endif
 void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
+  // Pre-flight the provider library before registering it. A failed ORT registration (e.g. a
+  // hardware EP whose native runtime cannot initialize because the GPU was removed or disabled) can
+  // leave ONNX Runtime with a half-registered library that crashes at environment teardown. By
+  // verifying the library and its native dependencies load first, a broken EP fails cleanly here
+  // with a descriptive error instead of destabilizing the process (see CanLoadLibrary).
+  if (!CanLoadLibrary(library_path))
+    throw std::runtime_error("Failed to register execution provider library '" + std::string(registration_name) +
+                             "'. " + DetermineLoadLibraryError(library_path) +
+                             " The required hardware or driver may be unavailable (for example, a GPU that has been "
+                             "removed or disabled).");
+
   Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
 }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
