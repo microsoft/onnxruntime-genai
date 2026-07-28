@@ -292,7 +292,7 @@ class Model:
             "unidirectional": False,                         # Whether every token can only attend to previous tokens
             "use_matmul_in_attn": False,                     # Use MatMuls with attention (instead of separate MatMul ops)
             # Attributes for PagedAttention op:
-            "block_size": None,                              # KV cache block size (set when use_paged_attention is enabled)
+            "paged_block_size": None,                        # KV cache block size (set when use_paged_attention is enabled)
         }
         self.make_attention_init(config)
 
@@ -454,8 +454,9 @@ class Model:
         if self.exclude_lm_head:
             del self.output_names["logits"]
 
-    def hidden_state_shape(self, last_dim, seq_dim="sequence_length"):
+    def hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
         """Return a standard 3D shape or a packed 2D paged-attention shape."""
+        last_dim = self.hidden_size if last_dim is None else last_dim
         if self.use_paged_attention:
             return ["num_tokens", last_dim]
         return ["batch_size", seq_dim, last_dim]
@@ -573,7 +574,7 @@ class Model:
                     f"execution provider with FP16 or BF16 precision, not ({self.ep}, {self.io_dtype})."
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
-            self.attention_attrs["block_size"] = block_size
+            self.attention_attrs["paged_block_size"] = block_size
             if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
                 raise ValueError(
                     "paged_block_size must evenly divide original_max_position_embeddings "
@@ -877,7 +878,7 @@ class Model:
         if self.use_paged_attention:
             genai_config["engine"] = {
                 "dynamic_batching": {
-                    "block_size": self.attention_attrs["block_size"],
+                    "block_size": self.attention_attrs["paged_block_size"],
                     "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
                     "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
                 },
@@ -1536,7 +1537,7 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim, seq_dim))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
 
         return name
 
@@ -1597,7 +1598,7 @@ class Model:
             K=in_features,
             N=out_features,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(out_features, seq_dim))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
 
         return name
 
@@ -1677,7 +1678,11 @@ class Model:
         self.make_node(
             "MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name
         )
-        self.make_value(matmul_output, self.io_dtype, shape=self.hidden_state_shape(matmul.out_features, seq_dim))
+        self.make_value(
+            matmul_output,
+            self.io_dtype,
+            shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=matmul.out_features),
+        )
 
         return matmul_name
 
@@ -1717,7 +1722,7 @@ class Model:
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
         add_inputs = [f"{matmul_name}/output_0", lora_B]
-        add_shape = self.hidden_state_shape(last_dim, seq_dim)
+        add_shape = self.hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim)
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
 
         return add_name
@@ -1803,7 +1808,7 @@ class Model:
 
         add_bias_inputs = [root_input, bias]
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        shape = self.hidden_state_shape(add.shape[0], seq_dim)
+        shape = self.hidden_state_shape(seq_dim=seq_dim, last_dim=add.shape[0])
 
         if kwargs.get("logits", False):
             output = "logits"
@@ -1884,7 +1889,7 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
-        self.make_value(gather_output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+        self.make_value(gather_output, self.io_dtype, shape=self.hidden_state_shape())
 
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
@@ -1895,7 +1900,7 @@ class Model:
             ]
             mul_output = f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape())
 
             layernorm_attrs_value = mul_output
         else:
@@ -1908,7 +1913,7 @@ class Model:
                 cast_name,
                 layernorm_attrs_value,
                 ir.DataType.FLOAT,
-                shape=self.hidden_state_shape(self.hidden_size),
+                shape=self.hidden_state_shape(),
             )
             layernorm_attrs_value = f"{cast_name}/output_0"
 
@@ -1966,9 +1971,9 @@ class Model:
         )
         if not use_hidden_states_as_output:
             # Add shape only if not graph output
-            self.make_value(outputs[0], new_io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+            self.make_value(outputs[0], new_io_dtype, shape=self.hidden_state_shape())
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+            self.make_value(outputs[3], new_io_dtype, shape=self.hidden_state_shape())
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -2384,7 +2389,7 @@ class Model:
 
         # max_num_blocks (block_table dim 1) x block_size approximates the max representable
         # context length. block_size is a build-time constant (matches the engine's block_size).
-        block_size = self.attention_attrs["block_size"]
+        block_size = self.attention_attrs["paged_block_size"]
         mul_name = f"{basename}/Mul"
         mul_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
         self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=None)
@@ -3591,7 +3596,10 @@ class Model:
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(
-            mul_name, mul_inputs, dtype=self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
+            mul_name,
+            mul_inputs,
+            dtype=self.io_dtype,
+            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         # Make output MatMul node
@@ -3690,7 +3698,7 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape())
 
     def make_fp8e8m0_initializer(self, scales_uint8, name):
         """Register a FLOAT8E8M0 initializer from raw ue8m0 code bytes (uint8).
@@ -3836,7 +3844,7 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape())
 
     def make_qmoe_weights(self, weights):
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
@@ -4093,7 +4101,9 @@ class Model:
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
         self.make_value(
-            act_output, dtype=self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
+            act_output,
+            dtype=self.io_dtype,
+            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
@@ -4102,7 +4112,7 @@ class Model:
             mul_act_name,
             mul_act_inputs,
             dtype=self.io_dtype,
-            shape=self.hidden_state_shape(self.intermediate_size),
+            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         return mul_act_name
@@ -4123,7 +4133,7 @@ class Model:
         else:
             self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
 
         return gelu_name
 
@@ -4131,7 +4141,7 @@ class Model:
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size))
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
         return relu_name
 
     def make_relu_squared(self, layer_id, root_input, activation):
@@ -4141,7 +4151,9 @@ class Model:
         pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/[2]"]
         self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
         self.make_value(
-            f"{pow_name}/output_0", self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
+            f"{pow_name}/output_0",
+            self.io_dtype,
+            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
         )
         return pow_name
 
@@ -4214,7 +4226,11 @@ class Model:
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_value(
+                mul_output,
+                self.io_dtype,
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
             lm_name = mul_name
 
         if mask_exists:
@@ -4226,23 +4242,41 @@ class Model:
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(to_torch_dtype(self.io_dtype)).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node("Where", inputs=where_inputs, outputs=[where_output], name=where_name)
-            self.make_value(where_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_value(
+                where_output,
+                self.io_dtype,
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
             lm_name = where_name
 
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
             div_name = f"{basename}/softcap/Div"
             div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
-            self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_div(
+                div_name,
+                div_inputs,
+                dtype=self.io_dtype,
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
 
             tanh_name = f"{basename}/softcap/Tanh"
-            self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_tanh(
+                tanh_name,
+                f"{div_name}/output_0",
+                dtype=self.io_dtype,
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
 
             mul_name = f"{basename}/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_value(
+                mul_output,
+                self.io_dtype,
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
             lm_name = mul_name
 
         if cast_exists:
@@ -4250,7 +4284,11 @@ class Model:
             cast_name = f"{basename}/Cast"
             cast_output = "logits"
             self.make_node("Cast", inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types["logits"])
-            self.make_value(cast_output, self.output_types["logits"], shape=self.hidden_state_shape(self.vocab_size, seq_dim))
+            self.make_value(
+                cast_output,
+                self.output_types["logits"],
+                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+            )
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:

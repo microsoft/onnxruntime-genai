@@ -323,13 +323,15 @@ def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
 def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
     model = Model.__new__(Model)
     model.use_paged_attention = False
-    assert model.hidden_state_shape(64) == ["batch_size", "sequence_length", 64]
+    model.hidden_size = 64
+    assert model.hidden_state_shape() == ["batch_size", "sequence_length", 64]
 
 
 def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     model = Model.__new__(Model)
     model.use_paged_attention = True
-    assert model.hidden_state_shape(64) == ["num_tokens", 64]
+    model.hidden_size = 64
+    assert model.hidden_state_shape() == ["num_tokens", 64]
 
 
 def test_paged_attention_uses_flat_hidden_states_output_shape():
