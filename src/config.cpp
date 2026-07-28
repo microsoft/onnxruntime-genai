@@ -7,6 +7,7 @@
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -1719,34 +1720,74 @@ fs::path Config::ResolvePath(std::string_view value) const {
 // Validates every config-driven filename/path field after parsing so downstream code
 // (model/processor/adapter loading) can rely on paths being safe. Centralising the checks
 // here keeps individual model families free of path-validation calls.
-static void ValidateModelPaths(const Config& config) {
-  const auto& m = config.model;
-  Config::ValidatePath(m.encoder.filename, "model.encoder.filename");
-  Config::ValidatePath(m.embedding.filename, "model.embedding.filename");
+namespace {
 
-  Config::ValidatePath(m.vision.filename, "model.vision.filename");
-  Config::ValidatePath(m.vision.config_filename, "model.vision.config_filename");
-  if (m.vision.adapter_filename.has_value()) {
-    Config::ValidatePath(*m.vision.adapter_filename, "model.vision.adapter_filename");
+// Validates that a config-specified filename/path stays inside the model directory.
+// Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
+// or contains a ".." path traversal component. Empty paths are allowed (no-op). The
+// optional context label is prepended to error messages so callers can identify which
+// config field caused the failure.
+void ValidateConfigPath(const std::string& path, std::string_view context = {}) {
+  if (path.empty()) return;
+
+  auto make_error = [&](const std::string& msg) -> std::string {
+    return context.empty() ? msg : (std::string{context} + ": " + msg);
+  };
+
+  // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
+  if (path[0] == '/' || path[0] == '\\') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
   }
-  for (const auto& stage : m.vision.pipeline) {
-    Config::ValidatePath(stage.filename, "model.vision.pipeline.filename");
+#ifdef _WIN32
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
   }
+#endif
 
-  Config::ValidatePath(m.speech.filename, "model.speech.filename");
-  Config::ValidatePath(m.speech.config_filename, "model.speech.config_filename");
-  if (m.speech.adapter_filename.has_value()) {
-    Config::ValidatePath(*m.speech.adapter_filename, "model.speech.adapter_filename");
-  }
-
-  Config::ValidatePath(m.joiner.filename, "model.joiner.filename");
-  Config::ValidatePath(m.vad.filename, "model.vad.filename");
-
-  Config::ValidatePath(m.decoder.filename, "model.decoder.filename");
-  for (const auto& stage : m.decoder.pipeline) {
-    Config::ValidatePath(stage.filename, "model.decoder.pipeline.filename");
+  // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
+  std::string component;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == '/' || path[i] == '\\') {
+      if (component == "..") {
+        throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
+      }
+      component.clear();
+    } else {
+      component += path[i];
+    }
   }
 }
+
+void ValidateModelPaths(const Config& config) {
+  const auto& m = config.model;
+  ValidateConfigPath(m.encoder.filename, "model.encoder.filename");
+  ValidateConfigPath(m.embedding.filename, "model.embedding.filename");
+
+  ValidateConfigPath(m.vision.filename, "model.vision.filename");
+  ValidateConfigPath(m.vision.config_filename, "model.vision.config_filename");
+  if (m.vision.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.vision.adapter_filename, "model.vision.adapter_filename");
+  }
+  for (const auto& stage : m.vision.pipeline) {
+    ValidateConfigPath(stage.filename, "model.vision.pipeline.filename");
+  }
+
+  ValidateConfigPath(m.speech.filename, "model.speech.filename");
+  ValidateConfigPath(m.speech.config_filename, "model.speech.config_filename");
+  if (m.speech.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.speech.adapter_filename, "model.speech.adapter_filename");
+  }
+
+  ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
+  ValidateConfigPath(m.vad.filename, "model.vad.filename");
+
+  ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
+  for (const auto& stage : m.decoder.pipeline) {
+    ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
+  }
+}
+
+}  // namespace
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
