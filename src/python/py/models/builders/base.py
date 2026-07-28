@@ -99,6 +99,9 @@ class Model:
         self.hf_remote = extra_options.get("hf_remote", False)
         self.extra_options = extra_options
 
+        # Build packed, variable-length inputs for the continuous-batching engine.
+        self.use_paged_attention = extra_options.get("use_paged_attention", False)
+
         # States for building the model
         self.graph = ir.Graph(
             inputs=(),
@@ -405,10 +408,28 @@ class Model:
         else:
             del self.input_names["inputs_embeds"]
 
+        if self.use_paged_attention:
+            self.input_shapes["input_ids"] = ["token_count"]
+            self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            if "attention_mask" in self.input_names:
+                del self.input_names["attention_mask"]
+            for name in ["block_table", "cumulative_sequence_length", "past_seqlens"]:
+                self.input_names[name] = name
+                self.input_types[name] = ir.DataType.INT32
+            self.input_shapes["block_table"] = ["batch_size", "max_num_blocks"]
+            self.input_shapes["cumulative_sequence_length"] = ["batch_size + 1"]
+            self.input_shapes["past_seqlens"] = ["batch_size"]
+
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
+
+        if self.use_paged_attention:
+            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
@@ -423,6 +444,12 @@ class Model:
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
+
+    def hidden_state_shape(self, last_dim, seq_dim="sequence_length"):
+        """Return a standard 3D shape or a packed 2D paged-attention shape."""
+        if getattr(self, "use_paged_attention", False):
+            return ["num_tokens", last_dim]
+        return ["batch_size", seq_dim, last_dim]
 
     def get_rope_parameters(self, config):
         """Return the RoPE parameters mapping from the model config.
@@ -525,6 +552,41 @@ class Model:
     def make_attention_init(self, config):
         self.q_size = self.num_attn_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
+
+        if self.use_paged_attention:
+            valid_paged_configurations = {
+                ("cuda", ir.DataType.FLOAT16),
+                ("cuda", ir.DataType.BFLOAT16),
+            }
+            if (self.ep, self.io_dtype) not in valid_paged_configurations:
+                raise NotImplementedError(
+                    "PagedAttention (use_paged_attention=true) is currently only supported for the CUDA "
+                    f"execution provider with FP16 or BF16 precision, not ({self.ep}, {self.io_dtype})."
+                )
+            block_size = int(self.extra_options.get("paged_block_size", 256))
+            if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
+                raise ValueError(
+                    "paged_block_size must evenly divide original_max_position_embeddings "
+                    "for models that use short and long rotary caches."
+                )
+            self.attention_attrs["op_type"] = "PagedAttention"
+            print("PagedAttention is used in this model.")
+
+            # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
+            self.attention_attrs["use_packed_matmul"] = (
+                not self.matmul_attrs["use_lora"]
+                and not self.attention_attrs["q_norm"]
+                and not self.attention_attrs["k_norm"]
+                and not self.extra_options.get("disable_qkv_fusion", False)
+            )
+
+            # PagedAttention fuses the rotary embeddings, so `position_ids` is not needed as an input.
+            self.attention_attrs["use_rope_in_attn"] = True
+            if "position_ids" in self.input_names:
+                del self.input_names["position_ids"]
+
+            self.past_present_share_buffer = True
+            return
 
         if self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
@@ -719,6 +781,10 @@ class Model:
             inputs["attention_mask"] = self.input_names["attention_mask"]
         if "position_ids" in self.input_names:
             inputs["position_ids"] = self.input_names["position_ids"]
+        if self.use_paged_attention:
+            inputs["block_table"] = self.input_names["block_table"]
+            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_length"]
+            inputs["past_sequence_lengths"] = self.input_names["past_seqlens"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -800,6 +866,16 @@ class Model:
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
+
+        if self.use_paged_attention:
+            block_size = int(self.extra_options.get("paged_block_size", 256))
+            genai_config["engine"] = {
+                "dynamic_batching": {
+                    "block_size": block_size,
+                    "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
+                    "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
+                },
+            }
 
         self.update_genai_config(genai_config)
 
@@ -1454,7 +1530,7 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, last_dim])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim, seq_dim))
 
         return name
 
@@ -1515,7 +1591,7 @@ class Model:
             K=in_features,
             N=out_features,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(out_features, seq_dim))
 
         return name
 
@@ -1595,7 +1671,7 @@ class Model:
         self.make_node(
             "MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name
         )
-        self.make_value(matmul_output, self.io_dtype, shape=["batch_size", seq_dim, matmul.out_features])
+        self.make_value(matmul_output, self.io_dtype, shape=self.hidden_state_shape(matmul.out_features, seq_dim))
 
         return matmul_name
 
@@ -1635,7 +1711,7 @@ class Model:
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
         add_inputs = [f"{matmul_name}/output_0", lora_B]
-        add_shape = ["batch_size", seq_dim, last_dim]
+        add_shape = self.hidden_state_shape(last_dim, seq_dim)
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
 
         return add_name
@@ -1721,7 +1797,7 @@ class Model:
 
         add_bias_inputs = [root_input, bias]
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        shape = ["batch_size", seq_dim, add.shape[0]]
+        shape = self.hidden_state_shape(add.shape[0], seq_dim)
 
         if kwargs.get("logits", False):
             output = "logits"
@@ -1802,7 +1878,7 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
-        self.make_value(gather_output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(gather_output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
 
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
@@ -1813,7 +1889,7 @@ class Model:
             ]
             mul_output = f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
 
             layernorm_attrs_value = mul_output
         else:
@@ -1826,7 +1902,7 @@ class Model:
                 cast_name,
                 layernorm_attrs_value,
                 ir.DataType.FLOAT,
-                shape=["batch_size", "sequence_length", self.hidden_size],
+                shape=self.hidden_state_shape(self.hidden_size),
             )
             layernorm_attrs_value = f"{cast_name}/output_0"
 
@@ -1884,9 +1960,9 @@ class Model:
         )
         if not use_hidden_states_as_output:
             # Add shape only if not graph output
-            self.make_value(outputs[0], new_io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+            self.make_value(outputs[0], new_io_dtype, shape=self.hidden_state_shape(self.hidden_size))
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+            self.make_value(outputs[3], new_io_dtype, shape=self.hidden_state_shape(self.hidden_size))
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -2184,11 +2260,19 @@ class Model:
         # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
         #                             (idx=1)
         #
+        # Or for PagedAttention (no attention_mask input):
+        #
+        # block_table --> Shape --> Gather --> Multiply --> Greater --> If --> (cos_cache, sin_cache)
+        #                          (idx=1)    (x block_size)
+        #
 
         basename = "/model/rope_caches_subgraph"
         gather_name = ""
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        elif self.attention_attrs["op_type"] == "PagedAttention":
+            self.make_paged_rotary_multi_cache_subgraph()
+            gather_name = "/model/context_length_subgraph/Multiply"
         else:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
 
@@ -2276,6 +2360,33 @@ class Model:
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
+    def make_paged_rotary_multi_cache_subgraph(self):
+        # PagedAttention has no `attention_mask` input to derive the current sequence length from,
+        # so approximate the effective context length from the block table:
+        #
+        #   block_table --> Shape --> Gather(idx=1) --> Multiply(x block_size) --> (context length)
+        #
+        # The result feeds the Greater node that selects the short vs. long rotary cache.
+        basename = "/model/context_length_subgraph"
+        shape_name = f"{basename}/Shape"
+        shape_output = f"{shape_name}/output_0"
+        self.make_shape(shape_name, "block_table", shape=[2])
+
+        gather_name = f"{basename}/Gather"
+        gather_output = f"{gather_name}/output_0"
+        self.make_node(
+            "Gather", inputs=[shape_output, "/model/constants/INT64/1"], outputs=[gather_output], name=gather_name
+        )
+        self.make_value(gather_output, ir.DataType.INT64, shape=None)
+
+        # max_num_blocks (block_table dim 1) x block_size approximates the max representable
+        # context length. block_size is a build-time constant (matches the engine's block_size).
+        block_size = int(self.extra_options.get("paged_block_size", 256))
+        multiply_name = f"{basename}/Multiply"
+        multiply_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
+        self.make_node("Mul", inputs=multiply_inputs, outputs=[f"{multiply_name}/output_0"], name=multiply_name)
+        self.make_value(f"{multiply_name}/output_0", ir.DataType.INT64, shape=None)
+
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
         #
@@ -2324,17 +2435,18 @@ class Model:
             shape=["batch_size", "sequence_length * num_attention_heads", self.head_size],
         )
 
-        # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
+        # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD.
+        # PagedAttention consumes 2D [num_tokens, q_size] queries, so collapse to 2D on the paged path.
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
         q_reshape_2_inputs = [
             q_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.q_size}]",
+            f"/model/constants/INT64/[-1, {self.q_size}]" if self.use_paged_attention else f"/model/constants/INT64/[0, -1, {self.q_size}]",
         ]
         self.make_reshape(
             q_reshape_2_name,
             q_reshape_2_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.q_size],
+            shape=["num_tokens", self.q_size] if self.use_paged_attention else ["batch_size", "sequence_length", self.q_size],
         )
 
         # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
@@ -2377,17 +2489,18 @@ class Model:
             shape=["batch_size", "sequence_length * num_key_value_heads", self.head_size],
         )
 
-        # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
+        # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD.
+        # PagedAttention consumes 2D [num_tokens, kv_size] keys, so collapse to 2D on the paged path.
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
         k_reshape_2_inputs = [
             k_layernorm_output,
-            f"/model/constants/INT64/[0, -1, {self.kv_size}]",
+            f"/model/constants/INT64/[-1, {self.kv_size}]" if self.use_paged_attention else f"/model/constants/INT64/[0, -1, {self.kv_size}]",
         ]
         self.make_reshape(
             k_reshape_2_name,
             k_reshape_2_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.kv_size],
+            shape=["num_tokens", self.kv_size] if self.use_paged_attention else ["batch_size", "sequence_length", self.kv_size],
         )
 
         # Update q_path and k_path now
@@ -2668,6 +2781,14 @@ class Model:
                 total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0",
                 **kwargs,
             )
+        elif op_type == "PagedAttention":
+            self.make_paged_attention(
+                name,
+                cumulative_sequence_length="cumulative_sequence_length",
+                past_seqlens="past_seqlens",
+                block_table="block_table",
+                **kwargs,
+            )
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -2860,6 +2981,37 @@ class Model:
             do_rotary=self.attention_attrs["use_rope_in_attn"],
             rotary_interleaved=self.rope_attrs["interleaved"],
         )
+
+    def make_paged_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs.get("past_k", ""),
+            kwargs.get("past_v", ""),
+            kwargs["cumulative_sequence_length"],
+            kwargs["past_seqlens"],
+            kwargs["block_table"],
+            kwargs.get("cos_cache", ""),
+            kwargs.get("sin_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        self.make_node(
+            "PagedAttention",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            num_heads=self.num_attn_heads,
+            kv_num_heads=self.num_kv_heads,
+            scale=self.attention_attrs["scale"],
+            local_window_size=self.window_size,
+            softcap=self.attention_attrs["softcap"],
+            do_rotary=self.attention_attrs["use_rope_in_attn"],
+            rotary_interleaved=self.rope_attrs["interleaved"],
+        )
+        self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -3437,7 +3589,7 @@ class Model:
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(
-            mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+            mul_name, mul_inputs, dtype=self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
         )
 
         # Make output MatMul node
@@ -3536,7 +3688,7 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
 
     def make_fp8e8m0_initializer(self, scales_uint8, name):
         """Register a FLOAT8E8M0 initializer from raw ue8m0 code bytes (uint8).
@@ -3682,7 +3834,7 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.hidden_size))
 
     def make_qmoe_weights(self, weights):
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
@@ -3939,7 +4091,7 @@ class Model:
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
         self.make_value(
-            act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+            act_output, dtype=self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
         )
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
@@ -3948,7 +4100,7 @@ class Model:
             mul_act_name,
             mul_act_inputs,
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            shape=self.hidden_state_shape(self.intermediate_size),
         )
 
         return mul_act_name
@@ -3969,7 +4121,7 @@ class Model:
         else:
             self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size))
 
         return gelu_name
 
@@ -3977,7 +4129,7 @@ class Model:
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size))
         return relu_name
 
     def make_relu_squared(self, layer_id, root_input, activation):
@@ -3987,7 +4139,7 @@ class Model:
         pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/[2]"]
         self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
         self.make_value(
-            f"{pow_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+            f"{pow_name}/output_0", self.io_dtype, shape=self.hidden_state_shape(self.intermediate_size)
         )
         return pow_name
 
@@ -4060,7 +4212,7 @@ class Model:
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
             lm_name = mul_name
 
         if mask_exists:
@@ -4072,23 +4224,23 @@ class Model:
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(to_torch_dtype(self.io_dtype)).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node("Where", inputs=where_inputs, outputs=[where_output], name=where_name)
-            self.make_value(where_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_value(where_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
             lm_name = where_name
 
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
             div_name = f"{basename}/softcap/Div"
             div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
-            self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
 
             tanh_name = f"{basename}/softcap/Tanh"
-            self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
 
             mul_name = f"{basename}/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape(self.vocab_size, seq_dim))
             lm_name = mul_name
 
         if cast_exists:
@@ -4096,7 +4248,7 @@ class Model:
             cast_name = f"{basename}/Cast"
             cast_output = "logits"
             self.make_node("Cast", inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types["logits"])
-            self.make_value(cast_output, self.output_types["logits"], shape=["batch_size", seq_dim, self.vocab_size])
+            self.make_value(cast_output, self.output_types["logits"], shape=self.hidden_state_shape(self.vocab_size, seq_dim))
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:

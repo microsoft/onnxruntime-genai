@@ -318,3 +318,52 @@ def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
             precision="int4",
             tie_word_embeddings=None,
         )
+
+
+def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
+    model = Model.__new__(Model)
+    assert model.hidden_state_shape(64) == ["batch_size", "sequence_length", 64]
+
+
+def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    assert model.hidden_state_shape(64) == ["num_tokens", 64]
+
+
+@pytest.mark.parametrize(
+    "extra_options, error",
+    [
+        ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "1.1"}, "gpu_utilization_factor"),
+    ],
+)
+def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_options, error):
+    with pytest.raises(ValueError, match=error):
+        _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+
+
+def test_paged_attention_normalizes_engine_options(monkeypatch):
+    extra_options = {
+        "use_paged_attention": "true",
+        "paged_block_size": "128",
+        "gpu_utilization_factor": "0.75",
+        "max_batch_size": "32",
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["paged_block_size"] == 128
+    assert extra_options["gpu_utilization_factor"] == 0.75
+    assert extra_options["max_batch_size"] == 32
+
+
+@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head", "prune_lm_head"])
+def test_paged_attention_rejects_incompatible_graph_interfaces(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", option: "true"},
+            precision="bf16",
+            execution_provider="cuda",
+        )

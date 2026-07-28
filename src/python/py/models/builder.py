@@ -165,6 +165,7 @@ def check_extra_options(
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
         "prune_lm_head",
+        "use_paged_attention",
     ]
 
     for key in bools:
@@ -175,6 +176,34 @@ def check_extra_options(
                 extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+
+    if extra_options.get("use_paged_attention", False):
+        incompatible_options = [
+            key
+            for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head")
+            if extra_options.get(key, False)
+        ]
+        if incompatible_options:
+            raise ValueError(
+                "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
+            )
+
+        for key, default in (("paged_block_size", 256), ("max_batch_size", 100)):
+            try:
+                value = int(extra_options.get(key, default))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{key} must be a positive integer.") from e
+            if value <= 0:
+                raise ValueError(f"{key} must be a positive integer.")
+            extra_options[key] = value
+
+        try:
+            gpu_utilization_factor = float(extra_options.get("gpu_utilization_factor", 0.6))
+        except (TypeError, ValueError) as e:
+            raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.") from e
+        if not 0 < gpu_utilization_factor <= 1:
+            raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
+        extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
     if "hf_token" in extra_options:
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
@@ -657,6 +686,20 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
+                    Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
+                    flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
+                    [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
+                    `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_length`, and `past_seqlens`
+                    metadata inputs. An `engine` section (block_size, gpu_utilization_factor, max_batch_size) is added to
+                    genai_config.json. Currently only supported for the CUDA execution provider with fp16 or bf16 precision.
+                    Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
+                paged_block_size = Paged KV-cache block size used when use_paged_attention is set. Default is 256.
+                    Must be a positive integer. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
+                    Must be greater than 0 and at most 1.
+                max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
+                    Must be a positive integer.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
