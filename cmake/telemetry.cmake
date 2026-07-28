@@ -75,6 +75,22 @@ set(BUILD_SANITIZER OFF CACHE BOOL "Disable 1DS sanitizer module" FORCE)
 set(BUILD_OBJC_WRAPPER OFF CACHE BOOL "Disable 1DS ObjC wrapper" FORCE)
 set(BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
 
+# The SDK uses MAC_ARCH instead of CMAKE_OSX_ARCHITECTURES and otherwise forces every macOS object
+# to be universal. When the caller requests one architecture, map it into the SDK variable so its
+# static archives contain matching thin objects, then remove the temporary mapping afterward.
+set(_ortgenai_mac_arch_inferred OFF)
+if(APPLE
+   AND NOT (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+   AND NOT MAC_ARCH
+   AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _ortgenai_macos_arch_count)
+  if(_ortgenai_macos_arch_count EQUAL 1)
+    set(MAC_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+    set(_ortgenai_mac_arch_inferred ON)
+  endif()
+  unset(_ortgenai_macos_arch_count)
+endif()
+
 # The 1DS project does not infer its iOS source selection on the normal FetchContent path.
 if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
   if(NOT PLATFORM_NAME OR NOT IPHONEOS_DEPLOYMENT_TARGET OR NOT IOS_ARCH)
@@ -122,6 +138,11 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
+if(_ortgenai_mac_arch_inferred)
+  unset(MAC_ARCH)
+endif()
+unset(_ortgenai_mac_arch_inferred)
+
 if(ANDROID)
   set(ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR
     "${cpp_client_telemetry_SOURCE_DIR}/lib/android_build/maesdk/src/main/java")
@@ -184,11 +205,14 @@ if(WIN32)
   endif()
 endif()
 
-# Vendored sqlite is third-party C code and emits unavoidable narrowing warnings under the Apple
-# warning policy. Keep those warnings enabled for GenAI sources while preventing -Werror failures here.
-if(APPLE AND TARGET sqlite3_bundled)
-  target_compile_options(sqlite3_bundled PRIVATE -Wno-shorten-64-to-32)
-  target_compile_options(mat PRIVATE -Wno-shorten-64-to-32)
+# Vendored 1DS dependencies emit unavoidable narrowing warnings under the Apple warning policy.
+# Suppress them only for third-party targets so GenAI sources retain the warning.
+if(APPLE)
+  foreach(_ortgenai_apple_telemetry_target sqlite3_bundled zlib_bundled mat)
+    if(TARGET ${_ortgenai_apple_telemetry_target})
+      target_compile_options(${_ortgenai_apple_telemetry_target} PRIVATE -Wno-shorten-64-to-32)
+    endif()
+  endforeach()
 endif()
 if(TARGET sqlite3_bundled)
   target_compile_options(sqlite3_bundled PRIVATE
