@@ -21,17 +21,15 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 std::shared_ptr<Request> Engine::Step() {
-  if (!HasPendingRequests()) {
-    return nullptr;
-  }
+  // An EOS-only batch may complete without adding anything to ready_requests_.
+  while (HasPendingRequests()) {
+    if (!ready_requests_.empty()) {
+      auto request = ready_requests_.front();
+      ready_requests_.pop();
+      return request;
+    }
 
-  if (!ready_requests_.empty()) {
-    auto request = ready_requests_.front();
-    ready_requests_.pop();
-    return request;
-  }
-
-  if (auto scheduled_requests = scheduler_->Schedule()) {
+    auto scheduled_requests = scheduler_->Schedule();
     model_executor_->Decode(scheduled_requests);
     scheduled_requests.GenerateNextTokens();
 
@@ -42,13 +40,7 @@ std::shared_ptr<Request> Engine::Step() {
     }
   }
 
-  if (ready_requests_.empty()) {
-    throw std::runtime_error("Expected at least one request to be ready, but none were found.");
-  }
-
-  auto request = ready_requests_.front();
-  ready_requests_.pop();
-  return request;
+  return nullptr;
 }
 
 bool Engine::HasPendingRequests() const {
