@@ -100,7 +100,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\webgpu\torch\requirements.txt
           python -m pip install -r test\python\webgpu\ort\requirements.txt
-          python -m pip install --force-reinstall --no-deps (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the Java tests
         run: |
