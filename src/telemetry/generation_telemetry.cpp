@@ -31,7 +31,9 @@ GenerationTelemetry::GenerationTelemetry(uint32_t session_id, bool is_transducer
       generator_id_{g_next_generator_id.fetch_add(1)},
       is_transducer_{is_transducer},
       input_modality_{is_transducer ? "audio" : "text"},
-      start_time_{std::chrono::steady_clock::now()} {}
+      start_time_{std::chrono::steady_clock::now()},
+      steady_clock_anchor_{start_time_},
+      system_clock_anchor_{std::chrono::system_clock::now()} {}
 
 GenerationTelemetry::~GenerationTelemetry() {
   Finish();
@@ -85,8 +87,6 @@ void GenerationTelemetry::OnTokenGenerated(int64_t active_token_count) {
     if (!first_token_logged_) {
       first_token_time_ = now;
       first_token_logged_ = true;
-      generate_start_logged_ = GenAiTelemetry::Instance().LogGenerateStart(
-          session_id_, generator_id_, prompt_tokens_, input_modality_);
     }
   } else if (!track_telemetry && !generation_abandoned_) {
     generation_abandoned_ = true;
@@ -117,16 +117,21 @@ void GenerationTelemetry::CloseRequestBoundary() {
 }
 
 void GenerationTelemetry::Finish() {
-  if (generated_tokens_ > 0 && generate_start_logged_ && !GenAiTelemetry::IsDestroyed()) {
+  if (generated_tokens_ > 0 && first_token_logged_ && !GenAiTelemetry::IsDestroyed()) {
     const auto total_time_ms =
         std::chrono::duration<double, std::milli>(last_token_time_ - start_time_).count();
-    double time_to_first_token_ms = 0.0;
-    if (first_token_logged_) {
-      time_to_first_token_ms =
-          std::chrono::duration<double, std::milli>(first_token_time_ - start_time_).count();
-    }
+    const auto time_to_first_token_ms =
+        std::chrono::duration<double, std::milli>(first_token_time_ - start_time_).count();
     const double tokens_per_second =
         total_time_ms > 0 ? generated_tokens_ * 1000.0 / total_time_ms : 0.0;
+    const auto first_token_wall_time =
+        system_clock_anchor_ +
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            first_token_time_ - steady_clock_anchor_);
+    const auto last_token_wall_time =
+        system_clock_anchor_ +
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            last_token_time_ - steady_clock_anchor_);
 
     GenerateEndInfo info{};
     info.total_tokens = prompt_tokens_ + generated_tokens_;
@@ -136,7 +141,14 @@ void GenerationTelemetry::Finish() {
     info.time_to_first_token_ms = time_to_first_token_ms;
     info.total_time_ms = total_time_ms;
     info.tokens_per_second = tokens_per_second;
-    GenAiTelemetry::Instance().LogGenerateEnd(session_id_, generator_id_, info);
+    GenAiTelemetry::Instance().LogGeneration(
+        session_id_, generator_id_, prompt_tokens_, input_modality_, info,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            first_token_wall_time.time_since_epoch())
+            .count(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            last_token_wall_time.time_since_epoch())
+            .count());
   }
   Reset();
 }
@@ -147,10 +159,11 @@ void GenerationTelemetry::Reset() {
   rewind_count_ = 0;
   rewound_tokens_ = 0;
   first_token_logged_ = false;
-  generate_start_logged_ = false;
   start_time_ = std::chrono::steady_clock::now();
   first_token_time_ = {};
   last_token_time_ = {};
+  steady_clock_anchor_ = start_time_;
+  system_clock_anchor_ = std::chrono::system_clock::now();
   input_modality_ = is_transducer_ ? "audio" : "text";
   append_tracking_ = false;
 }

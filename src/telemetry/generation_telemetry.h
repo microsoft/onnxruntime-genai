@@ -57,7 +57,6 @@ class GenerationTelemetry {
   int64_t rewind_count_{0};
   int64_t rewound_tokens_{0};
   bool first_token_logged_{false};
-  bool generate_start_logged_{false};
   bool generation_abandoned_{false};
   bool append_tracking_suppressed_{false};
   bool append_tracking_{false};
@@ -67,6 +66,8 @@ class GenerationTelemetry {
   std::chrono::steady_clock::time_point first_token_time_;
   std::chrono::steady_clock::time_point last_token_time_;
   std::chrono::steady_clock::time_point append_start_time_;
+  std::chrono::steady_clock::time_point steady_clock_anchor_;
+  std::chrono::system_clock::time_point system_clock_anchor_;
 #else
   class AppendTrackingSuppression {};
 

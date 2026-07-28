@@ -95,14 +95,13 @@ class GenAiTelemetry {
                           int top_k, float top_p, float temperature,
                           bool do_sample, bool use_graph_capture, bool has_guidance);
 
-  // GenerateStart/End: Paired events tracing inference lifecycle.
+  // GenerateStart/End: Paired events tracing inference lifecycle. They are emitted together after
+  // generation leaves the token-critical path, with timestamps captured at the first and last token.
   // input_modality is the modality actually used for this request (grouped):
   // text / vision / audio / multimodal.
-  // Returns true only when the event was accepted by the live logger.
-  bool LogGenerateStart(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
-                        const std::string& input_modality);
-  void LogGenerateEnd(uint32_t session_id, uint32_t generator_id,
-                      const GenerateEndInfo& info);
+  void LogGeneration(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
+                     const std::string& input_modality, const GenerateEndInfo& info,
+                     int64_t start_timestamp_ms, int64_t end_timestamp_ms);
 
   // AdapterActivated: Emitted when a LoRA adapter is activated for a generator.
   // The adapter name is NOT sent (it may be sensitive); only correlation ids, so
