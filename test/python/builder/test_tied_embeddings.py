@@ -299,6 +299,7 @@ def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
 
 def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
+    model.use_paged_attention = False
     model.extra_options = {"algo_config": algo_config}
     model.algo_config_name = algo_config
     model.matmul_block_size = 32
@@ -404,6 +405,7 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
 
 def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
     model = Model.__new__(Model)
+    model.use_paged_attention = False
     model.hidden_size = 64
     model.vocab_size = 32000
     model.io_dtype = ir.DataType.FLOAT16
@@ -489,6 +491,7 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
 
 def _make_minimal_model_for_int4_matmul():
     model = Model.__new__(Model)
+    model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
     model.quant_attrs = {"accuracy_level": 0, "is_symmetric": True}
     model.matmul_block_size = 32

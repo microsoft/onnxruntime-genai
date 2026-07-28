@@ -94,8 +94,8 @@ def test_paged_attention_preserves_sliding_window_size():
         q_path="q",
         k_path="k",
         v_path="v",
-        cumulative_sequence_length="cumulative_sequence_length",
-        past_seqlens="past_seqlens",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
         block_table="block_table",
     )
 

@@ -142,6 +142,9 @@ class Model:
             "inputs_embeds": "inputs_embeds",
             "past_key_values.key": [f"past_key_values.{i}.key" for i in range(self.num_layers)],
             "past_key_values.value": [f"past_key_values.{i}.value" for i in range(self.num_layers)],
+            "block_table": "block_table",                                                                        # For paged attention models
+            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
+            "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                      # For standard models
@@ -150,6 +153,9 @@ class Model:
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "block_table": ir.DataType.INT32,                                                                    # For paged attention models
+            "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
+            "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -158,6 +164,9 @@ class Model:
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
+            "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
+            "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
         }
         self.make_inputs_init()
 
@@ -282,6 +291,8 @@ class Model:
             "mask_filter_value": -10000.0,                   # Masking value to use in attention mask
             "unidirectional": False,                         # Whether every token can only attend to previous tokens
             "use_matmul_in_attn": False,                     # Use MatMuls with attention (instead of separate MatMul ops)
+            # Attributes for PagedAttention op:
+            "block_size": None,                              # KV cache block size (set when use_paged_attention is enabled)
         }
         self.make_attention_init(config)
 
@@ -414,12 +425,9 @@ class Model:
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
-            for name in ["block_table", "cumulative_sequence_length", "past_seqlens"]:
-                self.input_names[name] = name
-                self.input_types[name] = ir.DataType.INT32
-            self.input_shapes["block_table"] = ["batch_size", "max_num_blocks"]
-            self.input_shapes["cumulative_sequence_length"] = ["batch_size + 1"]
-            self.input_shapes["past_seqlens"] = ["batch_size"]
+        else:
+            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths"]:
+                del self.input_names[name]
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
@@ -429,6 +437,7 @@ class Model:
         if self.use_paged_attention:
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
             self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
@@ -447,7 +456,7 @@ class Model:
 
     def hidden_state_shape(self, last_dim, seq_dim="sequence_length"):
         """Return a standard 3D shape or a packed 2D paged-attention shape."""
-        if getattr(self, "use_paged_attention", False):
+        if self.use_paged_attention:
             return ["num_tokens", last_dim]
         return ["batch_size", seq_dim, last_dim]
 
@@ -564,6 +573,7 @@ class Model:
                     f"execution provider with FP16 or BF16 precision, not ({self.ep}, {self.io_dtype})."
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
+            self.attention_attrs["block_size"] = block_size
             if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
                 raise ValueError(
                     "paged_block_size must evenly divide original_max_position_embeddings "
@@ -585,10 +595,7 @@ class Model:
             if "position_ids" in self.input_names:
                 del self.input_names["position_ids"]
 
-            self.past_present_share_buffer = True
-            return
-
-        if self.is_gqa_supported():
+        elif self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")
@@ -615,7 +622,7 @@ class Model:
             self.attention_attrs["use_matmul_in_attn"] = True
             print("Attention (packed) is used in this model.")
 
-        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+        self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_lm_head_init(self, config):
         pass
@@ -783,8 +790,8 @@ class Model:
             inputs["position_ids"] = self.input_names["position_ids"]
         if self.use_paged_attention:
             inputs["block_table"] = self.input_names["block_table"]
-            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_length"]
-            inputs["past_sequence_lengths"] = self.input_names["past_seqlens"]
+            inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
+            inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -868,10 +875,9 @@ class Model:
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         if self.use_paged_attention:
-            block_size = int(self.extra_options.get("paged_block_size", 256))
             genai_config["engine"] = {
                 "dynamic_batching": {
-                    "block_size": block_size,
+                    "block_size": self.attention_attrs["block_size"],
                     "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
                     "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
                 },
@@ -2272,7 +2278,7 @@ class Model:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
         elif self.attention_attrs["op_type"] == "PagedAttention":
             self.make_paged_rotary_multi_cache_subgraph()
-            gather_name = "/model/context_length_subgraph/Multiply"
+            gather_name = "/model/context_length_subgraph/Mul"
         else:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
 
@@ -2374,18 +2380,14 @@ class Model:
 
         gather_name = f"{basename}/Gather"
         gather_output = f"{gather_name}/output_0"
-        self.make_node(
-            "Gather", inputs=[shape_output, "/model/constants/INT64/1"], outputs=[gather_output], name=gather_name
-        )
-        self.make_value(gather_output, ir.DataType.INT64, shape=None)
+        self.make_gather(gather_name, [shape_output, "/model/constants/INT64/1"], dtype=ir.DataType.INT64, shape=None, axis=0)
 
         # max_num_blocks (block_table dim 1) x block_size approximates the max representable
         # context length. block_size is a build-time constant (matches the engine's block_size).
-        block_size = int(self.extra_options.get("paged_block_size", 256))
-        multiply_name = f"{basename}/Multiply"
-        multiply_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
-        self.make_node("Mul", inputs=multiply_inputs, outputs=[f"{multiply_name}/output_0"], name=multiply_name)
-        self.make_value(f"{multiply_name}/output_0", ir.DataType.INT64, shape=None)
+        block_size = self.attention_attrs["block_size"]
+        mul_name = f"{basename}/Mul"
+        mul_inputs = [gather_output, f"/model/constants/INT64/{block_size}"]
+        self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=None)
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
@@ -2784,9 +2786,9 @@ class Model:
         elif op_type == "PagedAttention":
             self.make_paged_attention(
                 name,
-                cumulative_sequence_length="cumulative_sequence_length",
-                past_seqlens="past_seqlens",
-                block_table="block_table",
+                cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
+                past_sequence_lengths=self.input_names["past_sequence_lengths"],
+                block_table=self.input_names["block_table"],
                 **kwargs,
             )
         else:
@@ -2989,8 +2991,8 @@ class Model:
             kwargs["v_path"],
             kwargs.get("past_k", ""),
             kwargs.get("past_v", ""),
-            kwargs["cumulative_sequence_length"],
-            kwargs["past_seqlens"],
+            kwargs["cumulative_sequence_lengths"],
+            kwargs["past_sequence_lengths"],
             kwargs["block_table"],
             kwargs.get("cos_cache", ""),
             kwargs.get("sin_cache", ""),

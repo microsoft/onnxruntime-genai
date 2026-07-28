@@ -188,22 +188,30 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key, default in (("paged_block_size", 256), ("max_batch_size", 100)):
+        for key in ("paged_block_size", "max_batch_size"):
+            if key not in extra_options:
+                continue
             try:
-                value = int(extra_options.get(key, default))
+                value = int(extra_options[key])
             except (TypeError, ValueError) as e:
                 raise ValueError(f"{key} must be a positive integer.") from e
             if value <= 0:
                 raise ValueError(f"{key} must be a positive integer.")
             extra_options[key] = value
 
-        try:
-            gpu_utilization_factor = float(extra_options.get("gpu_utilization_factor", 0.6))
-        except (TypeError, ValueError) as e:
-            raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.") from e
-        if not 0 < gpu_utilization_factor <= 1:
-            raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
-        extra_options["gpu_utilization_factor"] = gpu_utilization_factor
+        if "paged_block_size" in extra_options and extra_options["paged_block_size"] % 256 != 0:
+            raise ValueError("paged_block_size must be a multiple of 256.")
+        if extra_options.get("max_batch_size", 1) > 256:
+            raise ValueError("max_batch_size must be at most 256.")
+
+        if "gpu_utilization_factor" in extra_options:
+            try:
+                gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
+            except (TypeError, ValueError) as e:
+                raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.") from e
+            if not 0 < gpu_utilization_factor <= 1:
+                raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
+            extra_options["gpu_utilization_factor"] = gpu_utilization_factor
 
     if "hf_token" in extra_options:
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
@@ -690,16 +698,17 @@ def get_args():
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
                     [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
-                    `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_length`, and `past_seqlens`
-                    metadata inputs. An `engine` section (block_size, gpu_utilization_factor, max_batch_size) is added to
-                    genai_config.json. Currently only supported for the CUDA execution provider with fp16 or bf16 precision.
-                    Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
-                paged_block_size = Paged KV-cache block size used when use_paged_attention is set. Default is 256.
-                    Must be a positive integer. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                    `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
+                    `past_sequence_lengths` metadata inputs. An `engine` section (block_size, gpu_utilization_factor,
+                    max_batch_size) is added to genai_config.json. Currently only supported for the CUDA execution
+                    provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
+                paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
+                    Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
+                    Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
-                    Must be a positive integer.
+                    Must be a positive integer no greater than 256.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.

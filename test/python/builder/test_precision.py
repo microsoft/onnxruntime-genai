@@ -322,6 +322,7 @@ def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
 
 def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
     model = Model.__new__(Model)
+    model.use_paged_attention = False
     assert model.hidden_state_shape(64) == ["batch_size", "sequence_length", 64]
 
 
@@ -331,11 +332,36 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     assert model.hidden_state_shape(64) == ["num_tokens", 64]
 
 
+def test_paged_attention_uses_flat_hidden_states_output_shape():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 64
+    model.vocab_size = 128
+    model.num_kv_heads = 4
+    model.head_size = 16
+    model.extra_options = {"include_hidden_states": True}
+    model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
+    model.output_types = {"logits": ir.DataType.FLOAT16}
+    model.output_shapes = {
+        "hidden_states": ["batch_size", "sequence_length", model.hidden_size],
+        "logits": ["batch_size", "sequence_length", model.vocab_size],
+        "present.key": [],
+        "present.value": [],
+    }
+
+    model.make_outputs_init()
+
+    assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
+
+
 @pytest.mark.parametrize(
     "extra_options, error",
     [
         ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "paged_block_size": "128"}, "paged_block_size"),
         ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "1.1"}, "gpu_utilization_factor"),
     ],
@@ -348,12 +374,12 @@ def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_optio
 def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",
-        "paged_block_size": "128",
+        "paged_block_size": "512",
         "gpu_utilization_factor": "0.75",
         "max_batch_size": "32",
     }
     _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
-    assert extra_options["paged_block_size"] == 128
+    assert extra_options["paged_block_size"] == 512
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
 
