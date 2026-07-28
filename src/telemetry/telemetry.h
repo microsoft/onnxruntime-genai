@@ -95,8 +95,8 @@ class GenAiTelemetry {
                           int top_k, float top_p, float temperature,
                           bool do_sample, bool use_graph_capture, bool has_guidance);
 
-  // GenerateStart/End: Paired events tracing inference lifecycle. They are emitted together after
-  // generation leaves the token-critical path, with timestamps captured at the first and last token.
+  // GenerateStart/End are emitted together when request telemetry is finalized. Explicit timestamps
+  // preserve the first- and last-token times without logging in GenerateNextToken().
   // input_modality is the modality actually used for this request (grouped):
   // text / vision / audio / multimodal.
   void LogGeneration(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,

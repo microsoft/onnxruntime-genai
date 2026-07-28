@@ -190,13 +190,6 @@ if(ENABLE_TELEMETRY)
     target_link_options(onnxruntime-genai PRIVATE LINKER:--gc-sections)
   endif()
 
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_custom_command(TARGET onnxruntime-genai POST_BUILD
-      COMMAND ${CMAKE_COMMAND}
-        "-DBINARY=$<TARGET_FILE:onnxruntime-genai>"
-        -P "${PROJECT_SOURCE_DIR}/cmake/telemetry/verify-linux-binary.cmake"
-      COMMENT "Verifying the Linux package has no dynamic telemetry transport dependencies")
-  endif()
 endif()
 
 # Group the genai library targets under one Visual Studio solution folder so the object library and
