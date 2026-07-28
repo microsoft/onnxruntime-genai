@@ -175,6 +175,12 @@ def _parse_args():
         "--use_guidance", action="store_true", help="Whether to add guidance support. Default is False."
     )
 
+    parser.add_argument(
+        "--no_telemetry",
+        action="store_true",
+        help="Disable telemetry. Telemetry is enabled by default on supported platforms.",
+    )
+
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -626,6 +632,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
         f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
+        f"-DENABLE_TELEMETRY={'OFF' if args.no_telemetry or util.is_aix() or args.macos == 'Catalyst' else 'ON'}",
     ]
 
     if args.ort_home:

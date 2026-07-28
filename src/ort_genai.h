@@ -917,6 +917,10 @@ inline int GetCurrentGpuDeviceId() {
   return device_id;
 }
 
+inline void SetTelemetryEnabled(bool enabled) {
+  OgaSetTelemetryEnabled(enabled);
+}
+
 }  // namespace Oga
 
 struct OgaStreamingProcessor : OgaAbstract {
