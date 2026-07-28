@@ -409,7 +409,7 @@ class Model:
             del self.input_names["inputs_embeds"]
 
         if self.use_paged_attention:
-            self.input_shapes["input_ids"] = ["token_count"]
+            self.input_shapes["input_ids"] = ["num_tokens"]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
