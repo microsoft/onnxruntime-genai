@@ -647,7 +647,7 @@ def encode_prompt(tokenizer, prompt, chat=True, think=False):
 # ---------------------------------------------------------------------------
 
 def run_once(og, model, ids, max_new, mode, speculative, K, seed,
-             adaptive_k=False, adaptive_k_min=2):
+             adaptive_k=False, adaptive_k_min=2, cooldown=False):
     import numpy as np
     p = og.GeneratorParams(model)
     # past_present_share_buffer and min_length are inherited from each model's genai_config
@@ -668,6 +668,8 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed,
                 adaptive_k_bool=True,
                 adaptive_k_min=adaptive_k_min,
             )
+        if cooldown:
+            speculative_options["cooldown_bool"] = True
         p.set_speculative_options(**speculative_options)
 
     g = og.Generator(model, p)
@@ -695,7 +697,7 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed,
 
 
 CSV_COLUMNS = [
-    "mode", "K", "adaptive_k", "adaptive_k_min", "effective_k",
+    "mode", "K", "cooldown", "adaptive_k", "adaptive_k_min", "effective_k",
     "adaptive_k_increases", "adaptive_k_decreases", "adaptive_k_observations",
     "adaptive_k_probes", "adaptive_k_throughput",
     "task", "subcategory", "question_id", "prompt_id", "rep", "decoder",
@@ -704,6 +706,12 @@ CSV_COLUMNS = [
     "speedup_decode", "speedup_e2e",
     "acceptance_rate", "rounds", "draft_proposed", "draft_accepted",
     "corrections", "bonuses", "mean_accepted_tokens",
+    "target_forward_passes", "target_verify_forward_passes",
+    "target_reanchor_forward_passes", "target_reconciliation_forward_passes",
+    "cooldown_entries", "cooldown_steps", "cooldown_remaining",
+    "standard_fallback_steps", "full_accept_rounds", "partial_accept_rounds",
+    "zero_accept_rounds", "total_target_ms", "total_reconciliation_ms",
+    "total_target_verify_ms", "total_target_reanchor_ms",
     "avg_draft_ms_per_token", "avg_target_ms_per_token", "effective_speedup",
     "greedy_match",
     "peak_gpu_mem_gib", "peak_cpu_mem_gib",
@@ -730,6 +738,8 @@ def main():
                     help="adapt K from --adaptive-k-min to the native limit instead of sweeping --k")
     ap.add_argument("--adaptive-k-min", type=int, default=2,
                     help="starting K and floor when --adaptive-k is enabled")
+    ap.add_argument("--cooldown", action="store_true",
+                    help="temporarily use standard decoding after repeated zero-accept rounds")
     # ---- fixed run configuration (NOT swept) ----
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="new tokens to generate per prompt (fixed)")
@@ -858,7 +868,8 @@ def main():
     og = _import_og(args.build_root, use_installed=args.use_installed)
     print(f"onnxruntime_genai: {og.__file__}")
     print(f"prompts={len(prompt_items)}  tasks={dict(task_counts)}  modes={modes}  "
-          f"K={ks}  max_new={max_new}  chat={chat}  think={think}  seed={args.seed}")
+          f"K={ks}  cooldown={args.cooldown}  max_new={max_new}  "
+          f"chat={chat}  think={think}  seed={args.seed}")
     if args.adaptive_k:
         print(f"adaptive K enabled: start/floor={args.adaptive_k_min}, "
               "native maximum=16; --k sweep ignored")
@@ -946,7 +957,7 @@ def main():
                 base_e2e.append(e2e_tps)
                 base_tail = r["tail"]
                 rows.append(dict(
-                    mode=mode, K="", adaptive_k="", adaptive_k_min="", effective_k="",
+                    mode=mode, K="", cooldown="", adaptive_k="", adaptive_k_min="", effective_k="",
                     adaptive_k_increases="", adaptive_k_decreases="",
                     adaptive_k_observations="", adaptive_k_probes="",
                     adaptive_k_throughput="",
@@ -993,7 +1004,8 @@ def main():
         for _ in range(args.warmup):
             run_once(
                 og, spec_model, encoded[0], 16, "greedy", True,
-                runtime_ks[ks[0]], args.seed, args.adaptive_k, args.adaptive_k_min
+                runtime_ks[ks[0]], args.seed, args.adaptive_k, args.adaptive_k_min,
+                args.cooldown
             )
 
     for mode in modes:
@@ -1007,7 +1019,7 @@ def main():
                 for rep in range(args.reps):
                     r = run_once(
                         og, spec_model, ids, max_new, mode, True, runtime_k, args.seed,
-                        args.adaptive_k, args.adaptive_k_min
+                        args.adaptive_k, args.adaptive_k_min, args.cooldown
                     )
                     st = r["stats"] or {}
                     dec_tps = r["new_tokens"] / r["decode_s"] if r["decode_s"] else 0.0
@@ -1021,7 +1033,8 @@ def main():
                         match = round(sum(1 for a, c in zip(base_tail[:n], r["tail"][:n])
                                           if a == c) / n, 4) if n else ""
                     rows.append(dict(
-                        mode=mode, K=K, adaptive_k=args.adaptive_k,
+                        mode=mode, K=K, cooldown=args.cooldown,
+                        adaptive_k=args.adaptive_k,
                         adaptive_k_min=args.adaptive_k_min if args.adaptive_k else "",
                         effective_k=st.get("effective_k", runtime_k),
                         adaptive_k_increases=st.get("adaptive_k_increases", 0),
@@ -1046,6 +1059,27 @@ def main():
                         corrections=st.get("correction_tokens", ""),
                         bonuses=st.get("bonus_tokens", ""),
                         mean_accepted_tokens=round(st.get("mean_accepted_tokens", 0.0), 3),
+                        target_forward_passes=st.get("target_forward_passes", 0),
+                        target_verify_forward_passes=st.get(
+                            "target_verify_forward_passes", 0),
+                        target_reanchor_forward_passes=st.get(
+                            "target_reanchor_forward_passes", 0),
+                        target_reconciliation_forward_passes=st.get(
+                            "target_reconciliation_forward_passes", 0),
+                        cooldown_entries=st.get("cooldown_entries", 0),
+                        cooldown_steps=st.get("cooldown_steps", 0),
+                        cooldown_remaining=st.get("cooldown_remaining", 0),
+                        standard_fallback_steps=st.get("standard_fallback_steps", 0),
+                        full_accept_rounds=st.get("full_accept_rounds", 0),
+                        partial_accept_rounds=st.get("partial_accept_rounds", 0),
+                        zero_accept_rounds=st.get("zero_accept_rounds", 0),
+                        total_target_ms=round(st.get("total_target_ms", 0.0), 4),
+                        total_reconciliation_ms=round(
+                            st.get("total_reconciliation_ms", 0.0), 4),
+                        total_target_verify_ms=round(
+                            st.get("total_target_verify_ms", 0.0), 4),
+                        total_target_reanchor_ms=round(
+                            st.get("total_target_reanchor_ms", 0.0), 4),
                         avg_draft_ms_per_token=round(st.get("avg_draft_ms_per_token", 0.0), 4),
                         avg_target_ms_per_token=round(st.get("avg_target_ms_per_token", 0.0), 4),
                         effective_speedup=round(st.get("effective_speedup", 0.0), 3),
@@ -1058,6 +1092,26 @@ def main():
                 print(f"[{done}/{total_cfgs}] {mode} {it['task']}/{it['question_id']} "
                       f"spec K={K}: {s_dec_med:.1f} tok/s  speedup x{sp:.2f}  "
                       f"accept={acc:.0%}", flush=True)
+                print(
+                    f"    target: verify={last.get('target_verify_forward_passes', 0)} "
+                    f"reanchor={last.get('target_reanchor_forward_passes', 0)} "
+                    f"reconcile={last.get('target_reconciliation_forward_passes', 0)} "
+                    f"timing={last.get('total_target_verify_ms', 0.0):.1f}/"
+                    f"{last.get('total_target_reanchor_ms', 0.0):.1f}/"
+                    f"{last.get('total_reconciliation_ms', 0.0):.1f}ms",
+                    flush=True,
+                )
+                if args.cooldown:
+                    print(
+                        f"    cooldown: entries={last.get('cooldown_entries', 0)} "
+                        f"steps={last.get('cooldown_steps', 0)} "
+                        f"fallback={last.get('standard_fallback_steps', 0)} "
+                        f"remaining={last.get('cooldown_remaining', 0)} "
+                        f"accept_rounds={last.get('full_accept_rounds', 0)}/"
+                        f"{last.get('partial_accept_rounds', 0)}/"
+                        f"{last.get('zero_accept_rounds', 0)}",
+                        flush=True,
+                    )
                 if args.adaptive_k:
                     print(
                         f"    adaptive K: start={args.adaptive_k_min} "
@@ -1081,7 +1135,7 @@ def main():
         run_ctx=dict(target=tgt_label, draft=dft_label, provider=provider_label,
                      device=device_label, n_prompts=len(prompt_items),
                      reps=args.reps, max_new=max_new, adaptive_k=args.adaptive_k,
-                     adaptive_k_min=args.adaptive_k_min),
+                     adaptive_k_min=args.adaptive_k_min, cooldown=args.cooldown),
         mem_baseline=mem_baseline, mem_spec=mem_spec)
 
 
@@ -1163,6 +1217,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         if run_ctx.get("adaptive_k"):
             print(f"adaptive K: enabled, start/floor={run_ctx['adaptive_k_min']}, "
                   "native maximum=16")
+        print(f"cooldown: {'enabled' if run_ctx.get('cooldown') else 'disabled'}")
 
     # ---- headline BEST config (highest geomean speedup across all mode x K) ----
     best = max((kv for kv in geo.items() if kv[1] is not None),
@@ -1226,6 +1281,26 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                     f"observations={sum(r['adaptive_k_observations'] for r in selected)} "
                     f"throughput_p50="
                     f"{statistics.median(r['adaptive_k_throughput'] for r in selected):.4f} tok/ms"
+                )
+            print(
+                f"    target: verify={sum(r['target_verify_forward_passes'] for r in selected)} "
+                f"passes/{sum(r['total_target_verify_ms'] for r in selected):.1f}ms "
+                f"reanchor={sum(r['target_reanchor_forward_passes'] for r in selected)} "
+                f"passes/{sum(r['total_target_reanchor_ms'] for r in selected):.1f}ms "
+                f"reconcile={sum(r['target_reconciliation_forward_passes'] for r in selected)} "
+                f"passes/{sum(r['total_reconciliation_ms'] for r in selected):.1f}ms"
+            )
+            print(
+                f"    round outcomes: full={sum(r['full_accept_rounds'] for r in selected)} "
+                f"partial={sum(r['partial_accept_rounds'] for r in selected)} "
+                f"zero={sum(r['zero_accept_rounds'] for r in selected)}"
+            )
+            if selected[0]["cooldown"]:
+                print(
+                    f"    cooldown: entries={sum(r['cooldown_entries'] for r in selected)} "
+                    f"steps={sum(r['cooldown_steps'] for r in selected)} "
+                    f"fallback={sum(r['standard_fallback_steps'] for r in selected)} "
+                    f"remaining={sum(r['cooldown_remaining'] for r in selected)}"
                 )
 
     def sp_cell(sp):

@@ -374,6 +374,7 @@ def run_once(
     adaptive_k=False,
     adaptive_k_min=2,
     chained_lookup=False,
+    cooldown=False,
 ):
     """Run one generation and return timing, output, and native stats."""
     import numpy as np
@@ -406,6 +407,8 @@ def run_once(
             )
         if chained_lookup:
             speculative_options["ngram_chained_lookup_bool"] = True
+        if cooldown:
+            speculative_options["cooldown_bool"] = True
         params.set_speculative_options(**speculative_options)
 
     generator = og.Generator(model, params)
@@ -485,6 +488,7 @@ CSV_COLUMNS = [
     "ngram_size",
     "K",
     "chained_lookup",
+    "cooldown",
     "adaptive_k",
     "adaptive_k_min",
     "effective_k",
@@ -516,9 +520,31 @@ CSV_COLUMNS = [
     "bonuses",
     "draft_forward_passes",
     "target_forward_passes",
+    "target_verify_forward_passes",
+    "target_reanchor_forward_passes",
+    "target_reconciliation_forward_passes",
     "target_passes_per_token",
+    "cooldown_entries",
+    "cooldown_steps",
+    "cooldown_remaining",
+    "standard_fallback_steps",
+    "full_accept_rounds",
+    "partial_accept_rounds",
+    "zero_accept_rounds",
+    "ngram_lookup_hits",
+    "ngram_lookup_misses",
+    "ngram_lookup_tokens_proposed",
+    "ngram_chained_tokens_proposed",
+    "ngram_grammar_candidate_rejections",
+    "ngram_history_syncs",
+    "ngram_history_tokens_synced",
     "total_draft_ms",
     "total_target_ms",
+    "total_reconciliation_ms",
+    "total_target_verify_ms",
+    "total_target_reanchor_ms",
+    "total_ngram_history_sync_ms",
+    "total_ngram_lookup_ms",
     "observed_speedup_estimate",
     "peak_process_rss_gib",
 ]
@@ -621,7 +647,8 @@ def print_detailed_run(item, rep, baseline, row):
     print(
         f"  {item['task']}/{item['question_id']} mode={row['mode']}{seed_text} "
         f"{format_config(row['ngram_size'], row['K'])} "
-        f"chained_lookup={'on' if row['chained_lookup'] else 'off'} rep={rep + 1}"
+        f"chained_lookup={'on' if row['chained_lookup'] else 'off'} "
+        f"cooldown={'on' if row['cooldown'] else 'off'} rep={rep + 1}"
     )
     print(
         f"    speed: decode={row['speedup_decode']:.2f}x "
@@ -649,6 +676,35 @@ def print_detailed_run(item, rep, baseline, row):
         f"emitted/round={row['mean_emitted_tokens_per_round']:.2f} "
         f"target_passes/token={row['target_passes_per_token']:.3f}"
     )
+    print(
+        f"    target: verify={row['target_verify_forward_passes']} "
+        f"reanchor={row['target_reanchor_forward_passes']} "
+        f"reconcile={row['target_reconciliation_forward_passes']} "
+        f"timing={row['total_target_verify_ms']:.1f}/"
+        f"{row['total_target_reanchor_ms']:.1f}/"
+        f"{row['total_reconciliation_ms']:.1f}ms"
+    )
+    print(
+        f"    n-gram: hits={row['ngram_lookup_hits']} "
+        f"misses={row['ngram_lookup_misses']} "
+        f"lookup_tokens={row['ngram_lookup_tokens_proposed']} "
+        f"chained_tokens={row['ngram_chained_tokens_proposed']} "
+        f"grammar_rejections={row['ngram_grammar_candidate_rejections']} "
+        f"lookup={row['total_ngram_lookup_ms']:.1f}ms "
+        f"history_sync={row['ngram_history_syncs']}/"
+        f"{row['ngram_history_tokens_synced']} tokens/"
+        f"{row['total_ngram_history_sync_ms']:.1f}ms"
+    )
+    if row["cooldown"]:
+        print(
+            f"    cooldown: entries={row['cooldown_entries']} "
+            f"steps={row['cooldown_steps']} "
+            f"fallback={row['standard_fallback_steps']} "
+            f"remaining={row['cooldown_remaining']} "
+            f"accept_rounds={row['full_accept_rounds']}/"
+            f"{row['partial_accept_rounds']}/{row['zero_accept_rounds']} "
+            "(full/partial/zero)"
+        )
     if row["adaptive_k"]:
         print(
             f"    adaptive K: start={row['adaptive_k_min']} "
@@ -774,6 +830,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
         f"device={context['device'] or '-'}  prompts={context['prompts']}  "
         f"mode={context['mode']}  seed={seed_label}  "
         f"chained_lookup={'on' if context.get('chained_lookup', False) else 'off'}  "
+        f"cooldown={'on' if context.get('cooldown', False) else 'off'}  "
         f"reps={context['reps']}  max_new={context['max_new']}  "
         f"peak_process_rss={context['peak_rss']:.2f} GiB"
     )
@@ -907,6 +964,44 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                 f"target={sum(row['total_target_ms'] for row in selected):.1f}ms; "
                 f"mismatch_first_diff_p50={first_diff}; {counts}"
             )
+            print(
+                f"    target breakdown: verify="
+                f"{sum(row['target_verify_forward_passes'] for row in selected)} passes/"
+                f"{sum(row['total_target_verify_ms'] for row in selected):.1f}ms "
+                f"reanchor={sum(row['target_reanchor_forward_passes'] for row in selected)} passes/"
+                f"{sum(row['total_target_reanchor_ms'] for row in selected):.1f}ms "
+                f"reconcile="
+                f"{sum(row['target_reconciliation_forward_passes'] for row in selected)} passes/"
+                f"{sum(row['total_reconciliation_ms'] for row in selected):.1f}ms"
+            )
+            lookup_hits = sum(row["ngram_lookup_hits"] for row in selected)
+            lookup_misses = sum(row["ngram_lookup_misses"] for row in selected)
+            lookup_total = lookup_hits + lookup_misses
+            print(
+                f"    n-gram lookup: hits={lookup_hits} misses={lookup_misses} "
+                f"hit_rate={lookup_hits / lookup_total if lookup_total else 0.0:.1%} "
+                f"proposed={sum(row['ngram_lookup_tokens_proposed'] for row in selected)} "
+                f"chained={sum(row['ngram_chained_tokens_proposed'] for row in selected)} "
+                f"grammar_rejections="
+                f"{sum(row['ngram_grammar_candidate_rejections'] for row in selected)} "
+                f"lookup={sum(row['total_ngram_lookup_ms'] for row in selected):.1f}ms "
+                f"history_sync={sum(row['ngram_history_syncs'] for row in selected)}/"
+                f"{sum(row['ngram_history_tokens_synced'] for row in selected)} tokens/"
+                f"{sum(row['total_ngram_history_sync_ms'] for row in selected):.1f}ms"
+            )
+            print(
+                f"    round outcomes: full="
+                f"{sum(row['full_accept_rounds'] for row in selected)} "
+                f"partial={sum(row['partial_accept_rounds'] for row in selected)} "
+                f"zero={sum(row['zero_accept_rounds'] for row in selected)}"
+            )
+            if selected[0]["cooldown"]:
+                print(
+                    f"    cooldown: entries={sum(row['cooldown_entries'] for row in selected)} "
+                    f"steps={sum(row['cooldown_steps'] for row in selected)} "
+                    f"fallback={sum(row['standard_fallback_steps'] for row in selected)} "
+                    f"remaining={sum(row['cooldown_remaining'] for row in selected)}"
+                )
             if selected[0]["adaptive_k"]:
                 print(
                     f"    adaptive K: start={selected[0]['adaptive_k_min']} "
@@ -1069,6 +1164,11 @@ def main():
         "--chained-lookup",
         action="store_true",
         help="refill n-gram proposals by repeatedly looking up synthetic context",
+    )
+    parser.add_argument(
+        "--cooldown",
+        action="store_true",
+        help="temporarily use standard decoding after repeated zero-accept rounds",
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--reps", type=int, default=1,
@@ -1379,7 +1479,7 @@ def main():
     print(
         f"suites={suites}  prompts={len(prompt_items)}  ngram_sizes={ngram_sizes}  "
         f"K={draft_lengths}  modes={modes}  sampling_seeds={sampling_seeds}  "
-        f"chained_lookup={args.chained_lookup}  "
+        f"chained_lookup={args.chained_lookup}  cooldown={args.cooldown}  "
         f"max_new={args.max_new_tokens}  reps={args.reps}"
     )
     if args.adaptive_k:
@@ -1435,6 +1535,8 @@ def main():
             )
         if args.chained_lookup:
             probe_options["ngram_chained_lookup_bool"] = True
+        if args.cooldown:
+            probe_options["cooldown_bool"] = True
         probe.set_speculative_options(**probe_options)
         del probe
     except Exception as error:
@@ -1643,6 +1745,7 @@ def main():
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
                             chained_lookup=args.chained_lookup,
+                            cooldown=args.cooldown,
                         )
 
                 for prompt_index, (item, token_ids) in enumerate(
@@ -1668,6 +1771,7 @@ def main():
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
                             chained_lookup=args.chained_lookup,
+                            cooldown=args.cooldown,
                         )
                         if reference_ngram_tail is None:
                             reference_ngram_tail = result["tail"]
@@ -1758,6 +1862,7 @@ def main():
                             "ngram_size": ngram_size,
                             "K": max_draft_tokens,
                             "chained_lookup": args.chained_lookup,
+                            "cooldown": args.cooldown,
                             "adaptive_k": args.adaptive_k,
                             "adaptive_k_min": (
                                 args.adaptive_k_min if args.adaptive_k else ""
@@ -1817,14 +1922,76 @@ def main():
                                 stats.get("draft_forward_passes", 0)
                             ),
                             "target_forward_passes": target_passes,
+                            "target_verify_forward_passes": int(
+                                stats.get("target_verify_forward_passes", 0)
+                            ),
+                            "target_reanchor_forward_passes": int(
+                                stats.get("target_reanchor_forward_passes", 0)
+                            ),
+                            "target_reconciliation_forward_passes": int(
+                                stats.get("target_reconciliation_forward_passes", 0)
+                            ),
                             "target_passes_per_token": round(
                                 target_passes_per_token, 6
+                            ),
+                            "cooldown_entries": int(stats.get("cooldown_entries", 0)),
+                            "cooldown_steps": int(stats.get("cooldown_steps", 0)),
+                            "cooldown_remaining": int(
+                                stats.get("cooldown_remaining", 0)
+                            ),
+                            "standard_fallback_steps": int(
+                                stats.get("standard_fallback_steps", 0)
+                            ),
+                            "full_accept_rounds": int(
+                                stats.get("full_accept_rounds", 0)
+                            ),
+                            "partial_accept_rounds": int(
+                                stats.get("partial_accept_rounds", 0)
+                            ),
+                            "zero_accept_rounds": int(
+                                stats.get("zero_accept_rounds", 0)
+                            ),
+                            "ngram_lookup_hits": int(
+                                stats.get("ngram_lookup_hits", 0)
+                            ),
+                            "ngram_lookup_misses": int(
+                                stats.get("ngram_lookup_misses", 0)
+                            ),
+                            "ngram_lookup_tokens_proposed": int(
+                                stats.get("ngram_lookup_tokens_proposed", 0)
+                            ),
+                            "ngram_chained_tokens_proposed": int(
+                                stats.get("ngram_chained_tokens_proposed", 0)
+                            ),
+                            "ngram_grammar_candidate_rejections": int(
+                                stats.get("ngram_grammar_candidate_rejections", 0)
+                            ),
+                            "ngram_history_syncs": int(
+                                stats.get("ngram_history_syncs", 0)
+                            ),
+                            "ngram_history_tokens_synced": int(
+                                stats.get("ngram_history_tokens_synced", 0)
                             ),
                             "total_draft_ms": round(
                                 float(stats.get("total_draft_ms", 0.0)), 6
                             ),
                             "total_target_ms": round(
                                 float(stats.get("total_target_ms", 0.0)), 6
+                            ),
+                            "total_reconciliation_ms": round(
+                                float(stats.get("total_reconciliation_ms", 0.0)), 6
+                            ),
+                            "total_target_verify_ms": round(
+                                float(stats.get("total_target_verify_ms", 0.0)), 6
+                            ),
+                            "total_target_reanchor_ms": round(
+                                float(stats.get("total_target_reanchor_ms", 0.0)), 6
+                            ),
+                            "total_ngram_history_sync_ms": round(
+                                float(stats.get("total_ngram_history_sync_ms", 0.0)), 6
+                            ),
+                            "total_ngram_lookup_ms": round(
+                                float(stats.get("total_ngram_lookup_ms", 0.0)), 6
                             ),
                             "observed_speedup_estimate": round(
                                 float(stats.get("observed_speedup", 0.0)), 6
@@ -1858,6 +2025,7 @@ def main():
                             adaptive_k=args.adaptive_k,
                             adaptive_k_min=args.adaptive_k_min,
                             chained_lookup=args.chained_lookup,
+                            cooldown=args.cooldown,
                         )
                         if reproducibility_result["tail"] != reference_ngram_tail:
                             raise RuntimeError(
@@ -1881,6 +2049,27 @@ def main():
                             f"emitted/round={statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
                             f"target_passes/token={statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
                         )
+                        print(
+                            f"    target: verify={sum(row['target_verify_forward_passes'] for row in prompt_rows)} "
+                            f"reanchor={sum(row['target_reanchor_forward_passes'] for row in prompt_rows)} "
+                            f"reconcile={sum(row['target_reconciliation_forward_passes'] for row in prompt_rows)}"
+                        )
+                        print(
+                            f"    n-gram: hits={sum(row['ngram_lookup_hits'] for row in prompt_rows)} "
+                            f"misses={sum(row['ngram_lookup_misses'] for row in prompt_rows)} "
+                            f"lookup_tokens={sum(row['ngram_lookup_tokens_proposed'] for row in prompt_rows)} "
+                            f"chained_tokens={sum(row['ngram_chained_tokens_proposed'] for row in prompt_rows)} "
+                            f"lookup_ms={sum(row['total_ngram_lookup_ms'] for row in prompt_rows):.1f}"
+                        )
+                        if args.cooldown:
+                            print(
+                                f"    cooldown: entries={sum(row['cooldown_entries'] for row in prompt_rows)} "
+                                f"steps={sum(row['cooldown_steps'] for row in prompt_rows)} "
+                                f"fallback={sum(row['standard_fallback_steps'] for row in prompt_rows)} "
+                                f"accept_rounds={sum(row['full_accept_rounds'] for row in prompt_rows)}/"
+                                f"{sum(row['partial_accept_rounds'] for row in prompt_rows)}/"
+                                f"{sum(row['zero_accept_rounds'] for row in prompt_rows)}"
+                            )
                         if args.adaptive_k:
                             print(
                                 f"    adaptive K: start={args.adaptive_k_min} "
@@ -1945,6 +2134,7 @@ def main():
             "reps": args.reps,
             "max_new": args.max_new_tokens,
             "chained_lookup": args.chained_lookup,
+            "cooldown": args.cooldown,
             "peak_rss": monitor.peak_rss_gib,
         },
     )
