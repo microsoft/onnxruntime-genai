@@ -14,6 +14,7 @@
 // cycle.
 
 #include <cstring>
+
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -21,6 +22,7 @@
 
 #include "ort_genai.h"
 #include "generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
+#include "telemetry/telemetry.h"
 #if USE_DML
 #include "dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface
 #endif
@@ -28,6 +30,7 @@
 #include <gtest/gtest.h>
 
 #include "ep_registration.h"
+#include "telemetry_test_environment.h"
 #include "test_utils.h"
 
 // Plugin EPs discovered at startup (WinML packages by default, plus any --ep_dir). Registered on
@@ -145,6 +148,7 @@ TEST(ReInitTests, ShutdownReInitCycle) {
     }
 
     OgaShutdown();  // full teardown: env + all created device interfaces + add-on libraries
+    EXPECT_FALSE(Generators::GenAiTelemetry::IsDestroyed());
   }
 }
 
@@ -205,6 +209,9 @@ TEST(ReInitTests, DmlInterfaceNotCachedAcrossReload) {
 #endif  // USE_DML
 
 int main(int argc, char** argv) {
+  // Suppress telemetry before any Oga call, including across each re-initialization cycle.
+  Generators::test::SuppressTelemetryForTests();
+
   ::testing::InitGoogleTest(&argc, argv);
 
   // --ep_dir <dir>: also register plugin EP libraries found under <dir> (recursive).

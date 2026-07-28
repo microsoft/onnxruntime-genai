@@ -155,6 +155,10 @@ pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_pa
 See the [Discussions](https://github.com/microsoft/onnxruntime-genai/discussions) to request new features and up-vote existing requests.
 
 
+## Data/Telemetry
+
+This project may collect usage data and send it to Microsoft to help improve our products and services. See the [privacy statement](docs/Privacy.md) for details.
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a

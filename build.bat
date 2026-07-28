@@ -5,4 +5,5 @@
 setlocal
 
 rem Requires a Python install to be available in your PATH
+
 python "%~dp0\build.py" %*
