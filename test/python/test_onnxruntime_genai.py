@@ -51,6 +51,24 @@ def run_onnxruntime_genai_e2e_tests(
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_graph_capture_models(
+    cwd: str | bytes | os.PathLike,
+    log: logging.Logger,
+    graph_capture_model_paths: list[str | bytes | os.PathLike],
+):
+    log.debug("Running: ONNX Runtime GenAI Graph Capture E2E Tests")
+
+    command = [
+        sys.executable,
+        "test_onnxruntime_genai_e2e.py",
+        "--models",
+        json.dumps([]),  # Regular models not needed for graph-capture tests
+        "--graph-capture-models",
+        json.dumps(graph_capture_model_paths),
+    ]
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -89,27 +107,37 @@ def main():
         eps_to_build = args.eps
         log.info(f"Building models for explicitly specified EPs: {eps_to_build}")
     else:
-        # Auto-detect available EPs
-        eps_to_build = ["cpu"]  # CPU is always available
+        # Auto-detect available EPs. In CI, prefer accelerator EPs and avoid CPU model
+        # downloads when CUDA/DML/WebGPU is available.
+        eps_to_build = []
         if og.is_cuda_available():
             eps_to_build.append("cuda")
         if og.is_dml_available():
             eps_to_build.append("dml")
-        # Only build WebGPU models if the WebGPU EP plugin package is installed
+        # Only build WebGPU models if the WebGPU EP plugin package is installed.
         if is_webgpu_ep_available():
             eps_to_build.append("webgpu")
+        if not eps_to_build:
+            eps_to_build = ["cpu"]
         log.info(f"Auto-detected available EPs: {eps_to_build}")
 
     # Get INT4 ONNX models for specified/detected EPs
     output_paths = []
     for ep in eps_to_build:
-        output_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log)
+        output_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=False)
+
+    # Download graph-capture models for supported EPs (with device availability checks handled in is_model_excluded)
+    graph_capture_model_paths = []
+    for ep in eps_to_build:
+        graph_capture_model_paths += download_models(os.path.abspath(args.test_models), "int4", ep, log, enable_graph_capture=True)
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
 
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)
+        if graph_capture_model_paths:
+            run_graph_capture_models(os.path.abspath(args.cwd), log, graph_capture_model_paths)
 
     return 0
 

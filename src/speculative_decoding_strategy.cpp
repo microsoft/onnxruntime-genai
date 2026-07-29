@@ -260,11 +260,11 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   if (queued == 0)
     throw std::runtime_error("Speculative decoding produced a round with no output tokens.");
 
-  rounds_++;
-  draft_proposed_ += static_cast<size_t>(K);
-  draft_evaluated_ += static_cast<size_t>(evaluated);
-  draft_accepted_ += static_cast<size_t>(accepted);
-  tokens_queued_ += queued;
+  stats_.rounds++;
+  stats_.draft_tokens_proposed += static_cast<size_t>(K);
+  stats_.draft_tokens_evaluated += static_cast<size_t>(evaluated);
+  stats_.draft_tokens_accepted += static_cast<size_t>(accepted);
+  stats_.tokens_queued += queued;
   round_active_ = true;
   active_round_discarded_ = false;
 
@@ -281,16 +281,16 @@ void SpeculativeDecodingStrategy::FinishRound() {
     throw std::runtime_error("Speculative decoding settled a round while output tokens were still buffered.");
 
   if (active_round_discarded_)
-    interrupted_rounds_++;
+    stats_.interrupted_rounds++;
   else
-    completed_rounds_++;
+    stats_.completed_rounds++;
   round_active_ = false;
   active_round_discarded_ = false;
 }
 
 void SpeculativeDecodingStrategy::DiscardPendingTokens() {
   if (!pending_.empty()) {
-    tokens_discarded_ += pending_.size();
+    stats_.tokens_discarded += pending_.size();
     active_round_discarded_ = true;
     pending_.clear();
   }
@@ -322,13 +322,13 @@ DeviceSpan<float> SpeculativeDecodingStrategy::ReplayCommittedTail(Generator& g,
   const auto reconciliation_start = clock::now();
   auto draft_logits = spec_state->draft_state().Run(committed_length, replay, {});
   if (record_stats)
-    draft_runs_++;
+    stats_.draft_forward_passes++;
   auto draft_cpu = draft_logits.CopyDeviceToCpu();
   spec_state->assign_draft_pending_logits(draft_cpu.data(), static_cast<size_t>(vocab_size));
 
   auto target_logits = spec_state->target_state().Run(committed_length, replay, {});
   if (record_stats)
-    target_runs_++;
+    stats_.target_forward_passes++;
   const auto reconciliation_end = clock::now();
   if (record_stats)
     total_reconciliation_ms_ += ms_f(reconciliation_end - reconciliation_start).count();
@@ -477,7 +477,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
 
   auto t_target_start = clock::now();
   spec_state->target_state().Run(seed_length + K, target_input, {});
-  target_runs_++;
+  stats_.target_forward_passes++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
@@ -563,7 +563,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       single_buf.CopyCpuToDevice();
       const auto single_target_start = clock::now();
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single_buf, {});
-      target_runs_++;
+      stats_.target_forward_passes++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
       auto cpu = lgt.CopyDeviceToCpu();
@@ -622,7 +622,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
         final_token = dist(rng_);
       }
-      corrections_++;
+      stats_.correction_tokens++;
       break;
     }
   }
@@ -635,7 +635,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
       final_token = dist(rng_);
     }
-    bonuses_++;
+    stats_.bonus_tokens++;
   }
 
   // Queue the committed tokens (n_direct accepted + 1 correction/bonus) for DrainOne to emit one
@@ -677,9 +677,9 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   const int32_t tok = pending_.front();
   pending_.pop_front();
   if (EmitToken(g, tok)) {
-    tokens_emitted_++;
+    stats_.tokens_emitted++;
   } else {
-    tokens_discarded_++;
+    stats_.tokens_discarded++;
     active_round_discarded_ = true;
   }
   g.computed_logits_ = false;
@@ -772,7 +772,7 @@ void SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
     const int next_len = saved_seed_length_ + saved_n_direct_ + 1;
     auto t_target_start = clock::now();
     auto target_lgt = spec_state->target_state().Run(next_len, single_buf, {});
-    target_runs_++;
+    stats_.target_forward_passes++;
     auto t_target_end = clock::now();
     // One single-token target run, which is exactly the baseline cost per token (T_target).
     // We track it separately from the K-token verify for the speedup formula in GetStats.
@@ -838,7 +838,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
 
   auto t_target_start = clock::now();
   spec_state->target_state().Run(seed_length + K, target_input, {});
-  target_runs_++;
+  stats_.target_forward_passes++;
   auto t_target_end = clock::now();
   float verify_ms = ms_f(t_target_end - t_target_start).count();
 
@@ -876,7 +876,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       single.CopyCpuToDevice();
       const auto single_target_start = clock::now();
       auto lgt = spec_state->target_state().Run(seed_length + i + 1, single, {});
-      target_runs_++;
+      stats_.target_forward_passes++;
       const auto single_target_end = clock::now();
       verify_ms += ms_f(single_target_end - single_target_start).count();
       auto cpu = lgt.CopyDeviceToCpu();
@@ -944,7 +944,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         rejected = true;
         if (i == 0) {
           committed.push_back(ttok);
-          corrections_++;
+          stats_.correction_tokens++;
           if (!IsEosToken(eos_ids, ttok))
             for (int32_t fwd : CommitGuidanceToken(proc, ttok)) committed.push_back(fwd);
         }
@@ -976,7 +976,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
         const int32_t ctok = static_cast<int32_t>(dist(rng_));
         committed.push_back(ctok);
-        corrections_++;
+        stats_.correction_tokens++;
         if (!IsEosToken(eos_ids, ctok))
           for (int32_t fwd : CommitGuidanceToken(proc, ctok)) committed.push_back(fwd);
         break;
@@ -1036,7 +1036,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
     single.CpuSpan()[0] = saved_committed_[static_cast<size_t>(p)];
     single.CopyCpuToDevice();
     draft_logits = spec_state->draft_state().Run(seed + p + 1, single, {});
-    draft_runs_++;
+    stats_.draft_forward_passes++;
   }
   auto dcpu = draft_logits.CopyDeviceToCpu();
   spec_state->assign_draft_pending_logits(dcpu.data(), static_cast<size_t>(vocab_size));
@@ -1064,7 +1064,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::FinalizeGuidanceRound(Generator& 
     single.CpuSpan()[0] = saved_committed_[static_cast<size_t>(p)];
     single.CopyCpuToDevice();
     target_logits = spec_state->target_state().Run(seed + p + 1, single, {});
-    target_runs_++;
+    stats_.target_forward_passes++;
   }
   const auto target_end = clock::now();
   total_target_ms_ += ms_f(target_end - target_start).count();
@@ -1080,43 +1080,32 @@ bool SpeculativeDecodingStrategy::EmitToken(Generator& g, int32_t tok) {
 }
 
 SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
-  SpeculativeStats s{};
-  s.rounds = rounds_;
-  s.completed_rounds = completed_rounds_;
-  s.interrupted_rounds = interrupted_rounds_;
+  SpeculativeStats s = stats_;
   s.active_rounds = round_active_ ? 1 : 0;
-  s.draft_tokens_proposed = draft_proposed_;
-  s.draft_tokens_evaluated = draft_evaluated_;
-  s.draft_tokens_accepted = draft_accepted_;
-  s.correction_tokens = corrections_;
-  s.bonus_tokens = bonuses_;
-  s.tokens_queued = tokens_queued_;
-  s.tokens_emitted = tokens_emitted_;
-  s.tokens_discarded = tokens_discarded_;
   s.tokens_buffered = pending_.size();
-  s.draft_forward_passes = draft_runs_;
-  s.target_forward_passes = target_runs_;
-  s.formula_supported = (rounds_ > 0 && formula_rounds_ == rounds_) ? 1 : 0;
+  s.formula_supported = (s.rounds > 0 && formula_rounds_ == s.rounds) ? 1 : 0;
   s.total_draft_ms = total_propose_ms_;
   s.total_target_ms = total_target_ms_ + total_reanchor_ms_;
   s.total_reconciliation_ms = total_reconciliation_ms_;
 
-  if (draft_proposed_ > 0) {
-    s.avg_draft_ms_per_token = total_propose_ms_ / static_cast<float>(draft_proposed_);
+  if (s.draft_tokens_proposed > 0) {
+    s.avg_draft_ms_per_token =
+        total_propose_ms_ / static_cast<float>(s.draft_tokens_proposed);
   }
-  if (draft_evaluated_ > 0) {
+  if (s.draft_tokens_evaluated > 0) {
     s.acceptance_rate =
-        static_cast<float>(draft_accepted_) / static_cast<float>(draft_evaluated_);
+        static_cast<float>(s.draft_tokens_accepted) /
+        static_cast<float>(s.draft_tokens_evaluated);
   }
-  if (rounds_ > 0) {
+  if (s.rounds > 0) {
     s.avg_draft_tokens_per_round =
-        static_cast<float>(draft_proposed_) / static_cast<float>(rounds_);
+        static_cast<float>(s.draft_tokens_proposed) / static_cast<float>(s.rounds);
     s.mean_emitted_tokens_per_round =
-        static_cast<float>(tokens_emitted_) / static_cast<float>(rounds_);
-    s.avg_target_ms_per_round = s.total_target_ms / static_cast<float>(rounds_);
+        static_cast<float>(s.tokens_emitted) / static_cast<float>(s.rounds);
+    s.avg_target_ms_per_round = s.total_target_ms / static_cast<float>(s.rounds);
   }
 
-  if (s.formula_supported && formula_rounds_ > 0 && draft_evaluated_ > 0) {
+  if (s.formula_supported && formula_rounds_ > 0 && s.draft_tokens_evaluated > 0) {
     float expected_total = 0.0f;
     for (size_t k = 1; k < formula_k_counts_.size(); k++) {
       if (formula_k_counts_[k] == 0)
@@ -1137,7 +1126,7 @@ SpeculativeStats SpeculativeDecodingStrategy::GetStats() const {
         total_reanchor_ms_ / static_cast<float>(reanchor_runs_);
   }
 
-  if (s.formula_supported && s.target_baseline_ms_per_token > 0.0f && rounds_ > 0) {
+  if (s.formula_supported && s.target_baseline_ms_per_token > 0.0f && s.rounds > 0) {
     s.target_overhead_ratio =
         s.avg_target_ms_per_round / s.target_baseline_ms_per_token - 1.0f;
     const float denominator =

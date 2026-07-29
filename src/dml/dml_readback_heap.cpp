@@ -7,6 +7,17 @@
 #include "dml_readback_heap.h"
 #include "dml_execution_context.h"
 
+static size_t ComputeTotalReadbackSize(std::span<const size_t> sizes) {
+  // Batched readback heap sizing must not wrap at the former uint32_t boundary.
+  size_t total_size = 0;
+  for (auto size : sizes) {
+    THROW_HR_IF(E_INVALIDARG, size > std::numeric_limits<size_t>::max() - total_size);
+    total_size += size;
+  }
+
+  return total_size;
+}
+
 static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t size) {
   ComPtr<ID3D12Resource> readback_heap;
   auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
@@ -93,26 +104,23 @@ void DmlReadbackHeap::ReadbackFromGpu(
 
 void DmlReadbackHeap::ReadbackFromGpu(
     std::span<void*> dst,
-    std::span<const uint32_t> dst_sizes,
+    std::span<const size_t> dst_sizes,
     std::span<ID3D12Resource*> src,
     D3D12_RESOURCE_STATES src_state) {
-  assert(dst.size() == src.size());
-  assert(dst_sizes.size() == src.size());
+  THROW_HR_IF(E_INVALIDARG, dst.size() != src.size());
+  THROW_HR_IF(E_INVALIDARG, dst_sizes.size() != src.size());
 
   if (dst.empty()) {
     return;
   }
 
-  uint32_t total_size = 0;
-  for (auto size : dst_sizes) {
-    total_size += size;
-  }
-
+  const size_t total_size = ComputeTotalReadbackSize(dst_sizes);
   EnsureReadbackHeap(total_size);
 
   // Copy from the source resource into the readback heap
-  uint32_t offset = 0;
-  for (uint32_t i = 0; i < dst.size(); ++i) {
+  size_t offset = 0;
+  for (size_t i = 0; i < dst.size(); ++i) {
+    THROW_HR_IF(E_INVALIDARG, src[i] == nullptr);
     execution_context_->CopyBufferRegion(
         readback_heap_.Get(),
         offset,
@@ -134,9 +142,10 @@ void DmlReadbackHeap::ReadbackFromGpu(
   void* readback_heap_data = nullptr;
   THROW_IF_FAILED(readback_heap_->Map(0, nullptr, &readback_heap_data));
 
-  // Copy from the source resource into the readback heap
+  // Copy from the readback heap into the destination buffers.
   offset = 0;
-  for (uint32_t i = 0; i < dst.size(); ++i) {
+  for (size_t i = 0; i < dst.size(); ++i) {
+    THROW_HR_IF(E_INVALIDARG, dst[i] == nullptr);
     memcpy(dst[i], static_cast<uint8_t*>(readback_heap_data) + offset, dst_sizes[i]);
     offset += dst_sizes[i];
   }

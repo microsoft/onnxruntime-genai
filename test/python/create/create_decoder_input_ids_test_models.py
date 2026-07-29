@@ -28,11 +28,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # ONNX initializer helpers
 # ---------------------------------------------------------------------------
 
+
 def _logits_weight() -> onnx.TensorProto:
     """Zero weight matrix for logit projection: [HIDDEN_SIZE, VOCAB_SIZE]."""
-    return numpy_helper.from_array(
-        np.zeros((HIDDEN_SIZE, VOCAB_SIZE), dtype=np.float32), name="logits_weight"
-    )
+    return numpy_helper.from_array(np.zeros((HIDDEN_SIZE, VOCAB_SIZE), dtype=np.float32), name="logits_weight")
 
 
 def _kv_pad_constant() -> onnx.TensorProto:
@@ -45,14 +44,13 @@ def _kv_pad_constant() -> onnx.TensorProto:
     This makes present.key.shape[2] == past.key.shape[2] + 1 each step,
     which satisfies ORT-GenAI's KV-cache shape validation.
     """
-    return numpy_helper.from_array(
-        np.array([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.int64), name="kv_pad"
-    )
+    return numpy_helper.from_array(np.array([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.int64), name="kv_pad")
 
 
 # ---------------------------------------------------------------------------
 # Shared decoder building block
 # ---------------------------------------------------------------------------
+
 
 def _kv_inputs() -> list:
     """KV cache inputs shared by both decoder variants."""
@@ -104,6 +102,7 @@ def _build_decoder_graph(extra_graph_inputs: list) -> tuple:
 # Decoder model factories
 # ---------------------------------------------------------------------------
 
+
 def make_decoder_no_input_ids() -> onnx.ModelProto:
     """Decoder that does NOT declare input_ids (Mistral3-like).
 
@@ -112,13 +111,9 @@ def make_decoder_no_input_ids() -> onnx.ModelProto:
     Outputs: logits [batch, seq, VOCAB_SIZE]
              present.{i}.key/value  (KV cache grown +1 via Pad)
     """
-    inputs_embeds = helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE]
-    )
+    inputs_embeds = helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE])
     nodes, initializers, outputs = _build_decoder_graph([])
-    graph = helper.make_graph(
-        nodes, "decoder", [inputs_embeds] + _kv_inputs(), outputs, initializers
-    )
+    graph = helper.make_graph(nodes, "decoder", [inputs_embeds, *_kv_inputs()], outputs, initializers)
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
 
@@ -131,22 +126,17 @@ def make_decoder_with_input_ids() -> onnx.ModelProto:
     Outputs: logits [batch, seq, VOCAB_SIZE]
              present.{i}.key/value  (KV cache grown +1 via Pad)
     """
-    input_ids = helper.make_tensor_value_info(
-        "input_ids", TensorProto.INT32, ["batch", "seq"]
-    )
-    inputs_embeds = helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE]
-    )
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT32, ["batch", "seq"])
+    inputs_embeds = helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE])
     nodes, initializers, outputs = _build_decoder_graph(["input_ids"])
-    graph = helper.make_graph(
-        nodes, "decoder", [input_ids, inputs_embeds] + _kv_inputs(), outputs, initializers
-    )
+    graph = helper.make_graph(nodes, "decoder", [input_ids, inputs_embeds, *_kv_inputs()], outputs, initializers)
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
 
 # ---------------------------------------------------------------------------
 # Embedding and vision model factories (shared by both variants)
 # ---------------------------------------------------------------------------
+
 
 def make_embedding_model() -> onnx.ModelProto:
     """Embedding model: converts input_ids → inputs_embeds.
@@ -159,16 +149,10 @@ def make_embedding_model() -> onnx.ModelProto:
                             for text-only generation)
     Outputs: inputs_embeds  [batch, seq, HIDDEN_SIZE]  (fixed zero initializer)
     """
-    embeds_init = numpy_helper.from_array(
-        np.zeros((1, 1, HIDDEN_SIZE), dtype=np.float32), name="inputs_embeds"
-    )
+    embeds_init = numpy_helper.from_array(np.zeros((1, 1, HIDDEN_SIZE), dtype=np.float32), name="inputs_embeds")
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT32, ["batch", "seq"])
-    image_features = helper.make_tensor_value_info(
-        "image_features", TensorProto.FLOAT, ["num_tokens", HIDDEN_SIZE]
-    )
-    embeds_out = helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE]
-    )
+    image_features = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", HIDDEN_SIZE])
+    embeds_out = helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE])
     graph = helper.make_graph([], "embedding", [input_ids, image_features], [embeds_out], [embeds_init])
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
@@ -180,9 +164,7 @@ def make_vision_model() -> onnx.ModelProto:
              image_sizes  [num_images, 2]
     Outputs: image_features [num_tokens, HIDDEN_SIZE]  (fixed zero initializer)
     """
-    feat_init = numpy_helper.from_array(
-        np.zeros((1, HIDDEN_SIZE), dtype=np.float32), name="image_features"
-    )
+    feat_init = numpy_helper.from_array(np.zeros((1, HIDDEN_SIZE), dtype=np.float32), name="image_features")
     pixel_values = helper.make_tensor_value_info(
         "pixel_values", TensorProto.FLOAT, ["num_images", "max_crops", 3, "height", "width"]
     )
@@ -195,6 +177,7 @@ def make_vision_model() -> onnx.ModelProto:
 # ---------------------------------------------------------------------------
 # Config and tokenizer helpers
 # ---------------------------------------------------------------------------
+
 
 def make_genai_config(decoder_filename: str) -> dict:
     """genai_config.json for a phi3v-type multimodal model with tiny dimensions."""
@@ -270,8 +253,24 @@ def make_tokenizer_json() -> dict:
         "truncation": None,
         "padding": None,
         "added_tokens": [
-            {"id": 0, "content": "<unk>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
-            {"id": 1, "content": "<s>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
+            {
+                "id": 0,
+                "content": "<unk>",
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": True,
+            },
+            {
+                "id": 1,
+                "content": "<s>",
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": True,
+            },
         ],
         "normalizer": None,
         "pre_tokenizer": None,
@@ -304,6 +303,7 @@ def make_tokenizer_config() -> dict:
 # ---------------------------------------------------------------------------
 # Directory creation
 # ---------------------------------------------------------------------------
+
 
 def create_model_dir(output_dir: str, decoder_model: onnx.ModelProto, decoder_filename: str) -> None:
     os.makedirs(output_dir, exist_ok=True)

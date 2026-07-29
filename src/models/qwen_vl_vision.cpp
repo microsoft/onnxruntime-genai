@@ -25,10 +25,16 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
-      window_size_(window_size > 0
-                       ? window_size
-                       : patch_size * spatial_merge_size * 2),
+      window_size_(0),
       env_(env) {
+  if (spatial_merge_size_ <= 0)
+    throw std::runtime_error("spatial_merge_size must be > 0, got " + std::to_string(spatial_merge_size_));
+  if (patch_size_ <= 0)
+    throw std::runtime_error("patch_size must be > 0, got " + std::to_string(patch_size_));
+  // Compute window_size_ after validating inputs to avoid signed overflow in the initializer list
+  window_size_ = window_size > 0 ? window_size : patch_size_ * spatial_merge_size_ * 2;
+  if (window_size_ <= 0)
+    throw std::runtime_error("window_size must be > 0, got " + std::to_string(window_size_));
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)
   auto toOrtPath = [](const std::string& s) -> std::basic_string<ORTCHAR_T> {
     return std::basic_string<ORTCHAR_T>(s.begin(), s.end());
@@ -117,6 +123,9 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     throw std::runtime_error(
         "Vision pipeline: patch_embed hidden dimension unknown - check patch_embed model output shape");
   }
+  if (num_patches > INT64_MAX / hidden_dim_) {
+    throw std::runtime_error("Vision pipeline: num_patches * hidden_dim overflow");
+  }
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim_};
   pe_out_buf_.resize(static_cast<size_t>(num_patches * hidden_dim_));
   auto pe_out_tensor = CreateTensor(pe_out_buf_.data(), pe_out_buf_.size(), pe_out_shape);
@@ -204,6 +213,9 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   if (merged_hidden_ <= 0) {
     throw std::runtime_error(
         "Vision pipeline: patch_merger hidden dimension unknown - check patch_merger model output shape");
+  }
+  if (merged_seq_len > 0 && merged_seq_len > INT64_MAX / merged_hidden_) {
+    throw std::runtime_error("Vision pipeline: merged_seq_len * merged_hidden overflow");
   }
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden_};
   merger_out_buf_.resize(static_cast<size_t>(merged_seq_len * merged_hidden_));

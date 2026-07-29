@@ -160,12 +160,18 @@ def _make_tiny_draft_spec_model(
 # ---------------------------------------------------------------------------
 
 class TestSpeculativeConfigGuards:
-    def test_combined_kv_committed_gpt2_fixture(self, test_data_path):
+    def test_combined_kv_committed_gpt2_fixture(self, test_data_path, tmp_path):
         """The committed gpt2 speculative fixture uses the legacy combined-KV graph,
         which DecoderOnly_Model cannot bind. Must be rejected cleanly (not crash)."""
-        path = os.path.join(test_data_path, "hf-internal-testing", "tiny-random-gpt2-speculative")
-        if not os.path.exists(os.path.join(path, "genai_config.json")):
+        source_path = os.path.join(test_data_path, "hf-internal-testing", "tiny-random-gpt2-speculative")
+        config_path = os.path.join(source_path, "genai_config.json")
+        if not os.path.exists(config_path):
             pytest.skip("tiny-random-gpt2-speculative fixture not found")
+        with open(config_path) as f:
+            config = json.load(f)
+        config["model"]["decoder"]["filename"] = "model.onnx"
+        config["model"]["draft"]["filename"] = "model.onnx"
+        path = _write_config(tmp_path / "combined_kv_fixture", config)
         with pytest.raises(Exception, match="separate key/value KV-cache format"):
             og.Model(path)
 
@@ -185,7 +191,7 @@ class TestSpeculativeConfigGuards:
     def test_sliding_window_kv_cache(self, tmp_path):
         decoder = _decoder_block(sliding_window={"window_size": 16, "slide_key_value_cache": True})
         path = _write_config(tmp_path / "sliding", _spec_config(decoder=decoder))
-        with pytest.raises(Exception, match="sliding-window KV cache"):
+        with pytest.raises(Exception, match="physically sliding KV caches"):
             og.Model(path)
 
     def test_lfm2_hybrid_layer_types(self, tmp_path):
@@ -243,11 +249,11 @@ def _build_self_spec(source_dir: str, dest_dir: Path, max_draft_tokens: int = 4)
     with open(os.path.join(source_dir, "genai_config.json")) as f:
         src = json.load(f)
     decoder = copy.deepcopy(src["model"]["decoder"])
-    # onnxruntime-genai resolves the ONNX filename relative to the config directory, so
-    # express it as a path from the wrapper dir to the real model.onnx. External weights
-    # (model.onnx.data) then load from the source dir alongside the resolved model.onnx.
     model_abs = os.path.join(source_dir, decoder["filename"])
-    decoder["filename"] = os.path.relpath(model_abs, os.path.abspath(dest_dir))
+    decoder["filename"] = os.path.basename(model_abs)
+    model_link = dest_dir / decoder["filename"]
+    if not model_link.exists():
+        os.link(model_abs, model_link)
     model = {
         "type": "speculative",
         "vocab_size": src["model"]["vocab_size"],
@@ -408,12 +414,13 @@ def _find_two_distinct_models(test_data_path: str):
     return found[-1], found[0]
 
 
-def _decoder_from(source_dir: str, dest_dir: Path) -> dict:
+def _decoder_from(source_dir: str, dest_dir: Path, local_filename: str) -> tuple[dict, dict]:
     with open(os.path.join(source_dir, "genai_config.json")) as f:
         src = json.load(f)
     decoder = copy.deepcopy(src["model"]["decoder"])
     model_abs = os.path.join(os.path.abspath(source_dir), decoder["filename"])
-    decoder["filename"] = os.path.relpath(model_abs, os.path.abspath(dest_dir))
+    decoder["filename"] = local_filename
+    os.link(model_abs, dest_dir / local_filename)
     return decoder, src
 
 
@@ -421,8 +428,8 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
     """Wrap a distinct target + draft model pair as a speculative model."""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    decoder, src = _decoder_from(target_dir, dest_dir)
-    draft, _ = _decoder_from(draft_dir, dest_dir)
+    decoder, src = _decoder_from(target_dir, dest_dir, "target.onnx")
+    draft, _ = _decoder_from(draft_dir, dest_dir, "draft.onnx")
     model = {
         "type": "speculative",
         "vocab_size": src["model"]["vocab_size"],
@@ -995,11 +1002,16 @@ class TestSpeculativeStateGuards:
         with pytest.raises(Exception, match="num_beams"):
             og.Generator(model, self._params(model, do_sample=False, num_beams=2))
 
-    # Note: guidance now supports greedy, sampling, AND repetition_penalty / min_length
-    # (see TestSpeculativeGuidance), so none of those combinations fail fast anymore.
+    def test_no_repeat_ngram_size(self, decoder_only_model_path, tmp_path):
+        model = og.Model(_build_self_spec(decoder_only_model_path, tmp_path / "g_no_repeat", 4))
+        with pytest.raises(Exception, match="no_repeat_ngram_size"):
+            og.Generator(model, self._params(model, do_sample=False, no_repeat_ngram_size=3))
+
+    # Guidance, repetition_penalty, and min_length are supported in v1.
     @pytest.mark.parametrize("bad", [
         {"batch_size": 2},
         {"num_beams": 2},
+        {"no_repeat_ngram_size": 3},
     ])
     def test_unsupported_config_fails_fast_without_corrupting_model(
             self, decoder_only_model_path, tmp_path, bad):

@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include <array>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -12,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include "ort_genai.h"
+#include "telemetry_test_environment.h"
 
 // Global variable to store custom model base path
 std::string g_custom_model_path;
@@ -82,6 +82,11 @@ void RegisterEpLibrariesFromDirectory(const fs::path& ep_dir) {
 
 int main(int argc, char** argv) {
   std::cout << "Generators Utility Library" << std::endl;
+
+  // Fully suppress telemetry for the unit-test process before any Oga call (and therefore the
+  // telemetry provider) runs, so local non-CI test runs never spin up the 1DS uploader, write a
+  // device id, or emit events. Read by GenAiTelemetry::Initialize (shared name with ONNX Runtime).
+  Generators::test::SuppressTelemetryForTests();
 
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();

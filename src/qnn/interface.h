@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#pragma once
+
+#include <memory>
+
 namespace Generators {
 
 struct Config;
@@ -8,7 +12,8 @@ struct DeviceInterface;
 enum struct DeviceType;
 struct Model;
 
-DeviceInterface* GetQNNInterface(DeviceType device_type);
+// Creates a fresh QNN DeviceInterface instance. Ownership is taken by OrtGlobals.
+std::unique_ptr<DeviceInterface> CreateQNNInterface(DeviceType device_type);
 
 bool IsQNNStatefulModel(const Model& model);
 

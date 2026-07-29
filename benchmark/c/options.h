@@ -23,6 +23,17 @@ struct Options {
   bool verbose{};
   bool reuse_generator{};
   bool use_random_tokens{};
+
+  // Optional ORT profiling for the "middle" benchmark iteration only.
+  // Selected iteration index (0-based) = num_iterations / 2
+  //   n=1 -> 0 (1st), n=2 -> 1 (2nd), n=3 -> 1 (2nd), n=4 -> 2 (3rd), ...
+  // When true, profiling is toggled on around that phase only.
+  // ORT writes the resulting JSON to "<prefix>_<timestamp>.json":
+  //   prefill phase    -> prefix "prefill_profile"
+  //   generation phase -> prefix "generation_profile"
+  // (one file per Run(): one for prefill, one per generated token for generation).
+  bool profile_prefill{};
+  bool profile_generation{};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);

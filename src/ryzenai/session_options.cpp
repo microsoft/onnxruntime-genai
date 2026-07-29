@@ -12,7 +12,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          bool /*disable_graph_capture*/) {
   auto device = GetDeviceInterface(DeviceType::RyzenAI);
   session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
-  GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
+  static_cast<RyzenAIInterface*>(device)->SetupProvider(session_options, provider_options.options);
 
   return device;
 }

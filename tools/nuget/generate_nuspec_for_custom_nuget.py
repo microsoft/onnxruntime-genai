@@ -19,9 +19,7 @@ def generate_files(lines, args):
     }
 
     avoid_keywords = {"pdb"}
-    # The onnxruntime-genai-cuda.dll is shipped through a separate mechanism, so it is
-    # historically excluded from this package. On win-arm64 we currently include it.
-    # TODO: Remove the win-arm64 exception once the CUDA dll is shipped separately for win-arm64.
+    # The CUDA library is shipped through a separate mechanism and is excluded from this package.
     cuda_keyword = "onnxruntime-genai-cuda"
     processed_includes = set()
     for platform, platform_dir in platform_map.items():
@@ -31,7 +29,7 @@ def generate_files(lines, args):
             file_name = os.path.basename(file)
             if any(keyword in file_name for keyword in avoid_keywords):
                 continue
-            if cuda_keyword in file_name and platform != "win-arm64":
+            if cuda_keyword in file_name:
                 continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
@@ -67,9 +65,7 @@ def parse_arguments():
     )
 
     parser.add_argument("--package_name", required=True, help="Name of the custom package.")
-    parser.add_argument("--ort_package_name", required=True, help="Corresponding ORT custom package name.")
     parser.add_argument("--package_version", required=True, help="ORT GenAI package version. Eg: 1.0.0")
-    parser.add_argument("--ort_package_version", required=True, help="Corresponding ORT package version.")
     parser.add_argument("--nuspec_path", required=True, help="Nuspec output file path.")
     parser.add_argument("--root_dir", required=True, help="ORT GenAI repository root directory.")
     parser.add_argument(
@@ -85,6 +81,10 @@ def parse_arguments():
 
     args = parser.parse_args()
     args.sdk_info = ""
+    # The custom (.Foundry) package carries no ONNX Runtime dependency; empty ORT
+    # package name/version makes generate_dependencies() omit the ORT <dependency>.
+    args.ort_package_name = ""
+    args.ort_package_version = ""
 
     return args
 

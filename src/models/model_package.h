@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "../filesystem.h"
@@ -9,13 +10,17 @@
 
 namespace Generators {
 
-// True when `path` is a directory containing a top-level manifest.json.
+// True when `path` is a model package directory: it has a top-level manifest.json and no
+// top-level genai_config.json (a flat model directory keeps genai_config.json at its root).
 bool IsModelPackage(const fs::path& path);
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
 struct PackageLoadResult {
   fs::path package_root;
   fs::path variant_dir;
+  // The opened package context, kept alive so genai_config path references (e.g. "sha256:"
+  // shared-asset refs) can be resolved on demand through ORT's package resolver.
+  std::shared_ptr<OrtModelPackageContext> context;
 };
 
 // Opens a package and selects the variant for its single component. When `explicit_ep` is

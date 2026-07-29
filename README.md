@@ -155,11 +155,17 @@ pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_pa
 See the [Discussions](https://github.com/microsoft/onnxruntime-genai/discussions) to request new features and up-vote existing requests.
 
 
+## Data/Telemetry
+
+This project may collect usage data and send it to Microsoft to help improve our products and services. See the [privacy statement](docs/Privacy.md) for details.
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
 Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
 the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for how to build, test, and lint the library from source.
 
 When you submit a pull request, a CLA bot will automatically determine whether you need to provide
 a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions

@@ -10,11 +10,11 @@
 #include "decoding_strategy.h"
 #include "smartptrs.h"
 #include "speculative_sampling.h"
+#include "speculative_stats.h"
 
 namespace Generators {
 
 struct Generator;
-struct SpeculativeStats;
 
 // SpeculativeDecodingStrategy
 // Base class for speculative decoding: a small draft model proposes K tokens, the big target
@@ -54,20 +54,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
                        int32_t final_token,
                        int seed_length) = 0;
 
-  // Stats accumulators.
-  std::size_t rounds_{};
-  std::size_t completed_rounds_{};
-  std::size_t interrupted_rounds_{};
-  std::size_t draft_proposed_{};
-  std::size_t draft_evaluated_{};
-  std::size_t draft_accepted_{};
-  std::size_t corrections_{};
-  std::size_t bonuses_{};
-  std::size_t tokens_queued_{};
-  std::size_t tokens_emitted_{};
-  std::size_t tokens_discarded_{};
-  std::size_t draft_runs_{};
-  std::size_t target_runs_{};
+  SpeculativeStats stats_{};
+
+  // Timings used to derive averages.
   float total_propose_ms_{};
   float total_target_ms_{};
   float total_reanchor_ms_{};
@@ -161,7 +150,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // True when the round just run was a guidance round.
   bool guidance_round_{false};
 
-  // Re-anchor fold: instead of giving the round's committed token its own target forward, 
+  // Re-anchor fold: instead of giving the round's committed token its own target forward,
   // we tack it onto the front of the next round's verify batch. Saves
   // one full target run per round.
   // pending_anchor_token_ = the token waiting to ride the next verify (empty = none waiting).
@@ -169,7 +158,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   bool is_multiple_tokens_{false};
   std::optional<int32_t> pending_anchor_token_{};
 
-  // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits. 
+  // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits.
   std::unique_ptr<OrtValue> verify_logits_fp32_;
 };
 
