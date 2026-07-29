@@ -109,6 +109,8 @@ steps:
 
           if [ "${{ parameters.ep }}" = "cuda" ]; then
             echo "$WHL" | grep -q "cuda" || { echo "ASSERT FAIL: CUDA wheel name missing cuda"; exit 1; }
+            CUDA_LIBS=$($PY -c "import sys, zipfile; print('\n'.join(name for name in zipfile.ZipFile(sys.argv[1]).namelist() if name.rsplit('/', 1)[-1].startswith(('libcuda', 'libcublas', 'libcudnn', 'libcufft', 'libcurand', 'libnvJitLink', 'libnvrtc', 'libnvinfer', 'libnvonnxparser'))))" "$WHL")
+            test -z "$CUDA_LIBS" || { echo "ASSERT FAIL: CUDA runtime libraries found in $WHL:"; echo "$CUDA_LIBS"; exit 1; }
             echo "ASSERT OK: CUDA wheel produced for ${v}"
           else
             # The wheel declares onnxruntime>=<python_dependency_version>; install
