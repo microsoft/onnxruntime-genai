@@ -3,6 +3,8 @@
 
 #include "cache_manager.h"
 
+#include <numeric>
+
 namespace Generators {
 
 namespace {
@@ -35,6 +37,14 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
           model->config_->model.decoder.num_hidden_layers *
           dtype_size *
           num_caches_per_layer);
+}
+
+// Slots reserved for a request but not yet written to.
+size_t EmptySlots(const std::vector<std::shared_ptr<Block>>& blocks) {
+  return std::accumulate(blocks.begin(), blocks.end(), size_t{0},
+                         [](size_t sum, const std::shared_ptr<Block>& block) {
+                           return sum + block->EmptySlots();
+                         });
 }
 
 }  // namespace
@@ -79,7 +89,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
-  return block_pool_->AvailableBlocks() > block_pool_->BlocksNeeded(request->UnprocessedTokens().size());
+  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(request->UnprocessedTokens().size());
 }
 
 void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
@@ -87,8 +97,12 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
     throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
 
-  auto allocated_blocks = block_pool_->AllocateBlocks(request->UnprocessedTokens().size());
-  block_tables_.emplace_back(BlockTable{request, std::move(allocated_blocks)});
+  // Reserve the blocks the unprocessed tokens will need, but leave their slots empty. The slots
+  // are marked used in AppendTokens() once the tokens are actually written to the cache. Marking
+  // them here too would count the same tokens twice and force the pool to be sized at roughly
+  // twice the capacity it can actually use.
+  auto reserved_blocks = block_pool_->ReserveBlocks(request->UnprocessedTokens().size());
+  block_tables_.emplace_back(BlockTable{request, std::move(reserved_blocks)});
 }
 
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
@@ -101,8 +115,8 @@ bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const
   }
 
   const size_t num_required_slots = request->UnprocessedTokens().size();
-  const size_t num_slots_available = block_table_it->blocks.back()->EmptySlots() +
-                                     block_pool_->AvailableBlocks() * block_table_it->blocks.back()->Capacity();
+  const size_t num_slots_available = EmptySlots(block_table_it->blocks) +
+                                     block_pool_->AvailableBlocks() * block_pool_->BlockSize();
 
   return num_slots_available >= num_required_slots;
 }
@@ -119,16 +133,23 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
   assert(block_table_it != block_tables_.end());
 
   size_t num_slots = request->UnprocessedTokens().size();
-  if (!block_table_it->blocks.back()->IsFull()) {
-    for (size_t i = 0; i < std::min(num_slots, block_table_it->blocks.back()->EmptySlots()); ++i) {
-      block_table_it->blocks.back()->AddSlot();
+
+  // Consume the slots already reserved for this request before asking the pool for more.
+  for (auto& block : block_table_it->blocks) {
+    while (num_slots > 0 && !block->IsFull()) {
+      block->AddSlot();
       --num_slots;
+    }
+    if (num_slots == 0) {
+      break;
     }
   }
 
-  auto allocated_blocks = block_pool_->AllocateBlocks(num_slots);
-  std::move(allocated_blocks.begin(), allocated_blocks.end(),
-            std::back_inserter(block_table_it->blocks));
+  if (num_slots > 0) {
+    auto allocated_blocks = block_pool_->AllocateBlocks(num_slots);
+    std::move(allocated_blocks.begin(), allocated_blocks.end(),
+              std::back_inserter(block_table_it->blocks));
+  }
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
