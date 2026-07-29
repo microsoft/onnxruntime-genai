@@ -94,7 +94,7 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "target and draft must be plain decoder-only LLMs.");
 
   // The inner states are constructed directly as DecoderOnly_Model, which requires the modern
-  // separate key/value KV-cache format (past_key_names/past_value_names). 
+  // separate key/value KV-cache format (past_key_names/past_value_names).
   auto uses_combined_kv = [](const Config::Model::Decoder& d) {
     return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
   };
@@ -146,7 +146,7 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
         "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
         std::to_string(params.search.num_beams) + ".");
 
-  // No support for repetition_penalty and min_length; 
+  // No support for repetition_penalty and min_length;
   // needs cross-position bookkeeping that isn't implemented yet.
   if (params.search.repetition_penalty != 1.0f)
     throw std::runtime_error(

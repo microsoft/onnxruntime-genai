@@ -457,7 +457,7 @@ struct Config {
   } search;
 
   struct Speculative {
-    int max_draft_tokens{4}; // Number of tokens the draft proposes per round.
+    int max_draft_tokens{4};  // Number of tokens the draft proposes per round.
   } speculative;
 
   struct Engine {

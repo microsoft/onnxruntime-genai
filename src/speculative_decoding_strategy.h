@@ -85,7 +85,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   int saved_K_{};
   bool reanchor_pending_{false};
 
-  // Re-anchor fold: instead of giving the round's committed token its own target forward, 
+  // Re-anchor fold: instead of giving the round's committed token its own target forward,
   // we tack it onto the front of the next round's verify batch. Saves
   // one full target run per round.
   // pending_anchor_token_ = the token waiting to ride the next verify (empty = none waiting).
@@ -96,7 +96,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Reusable one-hot logit row used to commit a single token.
   DeviceSpan<float> onehot_buf_;
 
-  // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits. 
+  // Reusable fp32 scratch for the verify-logits cast (fp16/bf16 -> fp32), mirroring Logits.
   std::unique_ptr<OrtValue> verify_logits_fp32_;
 };
 

@@ -32,7 +32,7 @@ static std::vector<float> LogitsToDistribution(std::span<const float> logits, bo
 // and buffers its tokens; every call then hands out one buffered token (DrainOne).
 void SpeculativeDecodingStrategy::Step(Generator& g) {
   if (pending_.empty()) {
-    // A new round needs a starting point: either fresh logits or a token left over from the 
+    // A new round needs a starting point: either fresh logits or a token left over from the
     // fold to feed into this round's verify.
     if (!g.computed_logits_ && !pending_anchor_token_.has_value())
       throw std::runtime_error(

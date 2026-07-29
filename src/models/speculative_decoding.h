@@ -63,4 +63,3 @@ struct SpeculativeDecodingState : State {
 };
 
 }  // namespace Generators
-

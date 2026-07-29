@@ -24,7 +24,7 @@ static SpeculativeDecodingState& RequireSpeculativeState(Generator& g) {
 
 BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g) : spec_state_{RequireSpeculativeState(g)} {}
 
-// Propose K draft tokens. 
+// Propose K draft tokens.
 // Greedy: argmax, probs empty.
 // Sampling: token i drawn from draft's truncated dist q_i (saved in probs[i] for the skeleton's min(1, p_i/q_i) test). d_0 reuses
 // draft_pending_probs_, so only d_1..d_{K-1} run -> ~N*(K-1) passes, not N*K.
@@ -45,7 +45,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   proposal.tokens.resize(K);
   if (!greedy)
     // greedy-match leaves probs empty
-    proposal.probs.resize(K);  
+    proposal.probs.resize(K);
 
   auto argmax = [](std::span<const float> v) {
     return static_cast<int32_t>(std::max_element(v.begin(), v.end()) - v.begin());
