@@ -28,6 +28,7 @@ Model = base_module.Model
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
     make_group_query_attention = Model.make_group_query_attention
+    make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
     get_kv_cache_scale_names = Model.get_kv_cache_scale_names
 
@@ -84,6 +85,23 @@ def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():
     )
 
     assert model.nodes[-1]["attributes"]["qk_norm_epsilon"] == 1e-6
+
+
+def test_paged_attention_preserves_sliding_window_size():
+    model = _FakeGQAModel("cuda")
+    model.window_size = 4096
+
+    model.make_paged_attention(
+        "/paged",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
 
 
 def test_quantized_gqa_emits_scale_inputs_and_attributes():

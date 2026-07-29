@@ -7,12 +7,17 @@ namespace Generators {
 
 namespace {
 
+ONNXTensorElementDataType KeyValueCacheType(std::shared_ptr<Model> model) {
+  const auto key_name = ComposeKeyValueName(model->config_->model.decoder.inputs.past_key_names, 0);
+  return model->session_info_.GetInputDataType(key_name);
+}
+
 size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
   if (model->config_->engine.dynamic_batching->num_blocks.has_value()) {
     return *model->config_->engine.dynamic_batching->num_blocks;
   }
 
-  const auto dtype_size = Ort::SizeOf(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+  const auto dtype_size = Ort::SizeOf(KeyValueCacheType(model));
 
   size_t free_bytes, total_bytes;
   model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
@@ -41,7 +46,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
                                                    static_cast<int64_t>(model->config_->engine.dynamic_batching->block_size),
                                                    static_cast<int64_t>(model->config_->model.decoder.num_key_value_heads),
                                                    static_cast<int64_t>(model->config_->model.decoder.head_size)};
-  const auto dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  const auto dtype = KeyValueCacheType(model);
   for (size_t i = 0; i < model->config_->model.decoder.num_hidden_layers; ++i) {
     cache_.push_back(LayerCache{
         OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),      // Key cache

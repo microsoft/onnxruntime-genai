@@ -1335,13 +1335,25 @@ struct DynamicBatching_Element : JSON::Element {
       v_ = Config::Engine::DynamicBatching{};
 
     if (name == "block_size") {
-      v_->block_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("block_size must be > 0");
+      v_->block_size = static_cast<size_t>(parsed_value);
     } else if (name == "num_blocks") {
-      v_->num_blocks = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("num_blocks must be > 0");
+      v_->num_blocks = static_cast<size_t>(parsed_value);
     } else if (name == "gpu_utilization_factor") {
-      v_->gpu_utilization_factor = static_cast<float>(JSON::Get<double>(value));
+      const auto parsed_value = JSON::Get<double>(value);
+      if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
+        throw std::out_of_range("gpu_utilization_factor must be > 0 and <= 1");
+      v_->gpu_utilization_factor = static_cast<float>(parsed_value);
     } else if (name == "max_batch_size") {
-      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_batch_size must be > 0");
+      v_->max_batch_size = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
