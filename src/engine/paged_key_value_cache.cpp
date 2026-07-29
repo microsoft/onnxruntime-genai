@@ -58,6 +58,24 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     });
   }
   block_pool_ = std::make_unique<BlockPool>(model->config_->engine.dynamic_batching->block_size, num_blocks);
+
+  graph_capture_ = IsGraphCaptureEnabled(model->config_->model.decoder.session_options);
+  if (graph_capture_) {
+    const size_t block_size = model->config_->engine.dynamic_batching->block_size;
+    max_block_table_rows_ = model->config_->engine.dynamic_batching->max_batch_size;
+    // A sequence can never need more blocks than the model's context window, and it can never use
+    // more than the pool holds. The buffer is allocated once at that ceiling; individual steps view
+    // a smaller [rows, columns] window of it.
+    max_block_table_columns_ = std::min<size_t>(
+        (static_cast<size_t>(model->config_->model.context_length) + block_size - 1) / block_size,
+        num_blocks);
+    max_block_table_columns_ = std::max<size_t>(max_block_table_columns_, 1);
+    block_tables_tensor_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+    block_tables_tensor_->CreateTensor(
+        std::vector<int64_t>{static_cast<int64_t>(max_block_table_rows_),
+                             static_cast<int64_t>(max_block_table_columns_)},
+        /*make_static=*/true);
+  }
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
@@ -158,8 +176,32 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   }
 
   std::vector<int64_t> shape = {static_cast<int64_t>(requests.size()), static_cast<int64_t>(max_blocks)};
-  block_tables_value_ = OrtValue::CreateTensor(model_->allocator_cpu_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-  auto* block_table_data = block_tables_value_->GetTensorMutableData<int32_t>();
+  int32_t* block_table_data = nullptr;
+  DeviceSpan<int32_t> device_span;
+  if (graph_capture_) {
+    // Round the column count up to a power of two so that a run producing steadily longer sequences
+    // settles on a handful of distinct shapes instead of a new one every time a block is appended.
+    // Each distinct shape is captured under its own annotation id.
+    size_t columns = 8;
+    while (columns < max_blocks) {
+      columns *= 2;
+    }
+    block_table_columns_ = std::min(columns, max_block_table_columns_);
+    if (max_blocks > block_table_columns_ || requests.size() > max_block_table_rows_) {
+      throw std::runtime_error("Block table exceeds the capacity reserved for graph capture.");
+    }
+    max_blocks = block_table_columns_;
+    shape[1] = static_cast<int64_t>(max_blocks);
+    // Re-creating the view keeps the same underlying buffer, so the address baked into a captured
+    // graph stays valid while the shape tracks the current bucket.
+    block_tables_tensor_->CreateTensor(shape, /*make_static=*/true);
+    device_span = block_tables_tensor_->GetDeviceSpan<int32_t>();
+    block_table_data = device_span.CpuSpan().data();
+  } else {
+    block_table_columns_ = max_blocks;
+    block_tables_value_ = OrtValue::CreateTensor(model_->allocator_cpu_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    block_table_data = block_tables_value_->GetTensorMutableData<int32_t>();
+  }
 
   constexpr int32_t block_tables_pad_value = -1;
 
@@ -175,6 +217,11 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
     for (size_t j = block_table.blocks.size(); j < max_blocks; ++j) {
       block_table_data[index * max_blocks + j] = block_tables_pad_value;
     }
+  }
+
+  if (graph_capture_) {
+    device_span.CopyCpuToDevice();
+    return {block_tables_tensor_->GetOrtTensor(), model_->config_->model.decoder.inputs.block_table.c_str()};
   }
 
   return {block_tables_value_.get(), model_->config_->model.decoder.inputs.block_table.c_str()};

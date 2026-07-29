@@ -145,6 +145,7 @@ class Model:
             "block_table": "block_table",                                                                        # For paged attention models
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
+            "attention_metadata": "attention_metadata",                                                          # For paged attention models
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                      # For standard models
@@ -156,6 +157,7 @@ class Model:
             "block_table": ir.DataType.INT32,                                                                    # For paged attention models
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
+            "attention_metadata": ir.DataType.INT32,                                                              # For paged attention models
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -167,6 +169,7 @@ class Model:
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
+            "attention_metadata": [2],                                                                          # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
@@ -432,7 +435,7 @@ class Model:
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
         else:
-            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths"]:
+            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths", "attention_metadata"]:
                 del self.input_names[name]
 
     def make_outputs_init(self):
@@ -901,6 +904,7 @@ class Model:
             inputs["block_table"] = self.input_names["block_table"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
+            inputs["attention_metadata"] = self.input_names["attention_metadata"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -2902,6 +2906,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=self.input_names["block_table"],
+                attention_metadata=self.input_names["attention_metadata"],
                 **kwargs,
             )
         else:
@@ -3148,9 +3153,13 @@ class Model:
             k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
 
         # Optional trailing inputs of PagedAttention, in schema order:
-        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale
+        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
+        #   16: attention_metadata
         # The scheduler-provided slot_mapping is not used here; slots are derived from
         # past_seqlens / cumulative_sequence_length / block_table by the op.
+        # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
+        # can select a backend and size its launch without a device-to-host readback of the sequence
+        # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
         optional_inputs = [
             "",  # slot_mapping
             kwargs.get("sinks", ""),  # head_sink
@@ -3158,6 +3167,7 @@ class Model:
             k_norm_weight,
             k_scale_name,
             v_scale_name,
+            kwargs.get("attention_metadata", ""),
         ]
         while optional_inputs and not optional_inputs[-1]:
             optional_inputs.pop()
