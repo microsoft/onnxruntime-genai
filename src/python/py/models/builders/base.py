@@ -169,7 +169,7 @@ class Model:
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
-            "attention_metadata": [2],                                                                          # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "attention_metadata": [2],                                                                           # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
