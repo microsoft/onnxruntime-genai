@@ -426,10 +426,35 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
+  //
+  // Two execution providers can hold a KV cache that is smaller than max_length for sliding-window
+  // layers. NvTensorRtRtx owns eviction inside the EP, so it gets exactly the window. CUDA relies on
+  // GroupQueryAttention's sliding_window_cache=1, which evicts by compaction and therefore needs
+  // slack above the window: enough to cover a whole prefill chunk, and enough to amortize the
+  // compaction launches over many decode steps.
+  const DeviceType device_type = state_.model_.p_device_->GetType();
+  const bool device_supports_windowed_kv_cache =
+      device_type == DeviceType::NvTensorRtRtx ||  // EP-native window cache
+      device_type == DeviceType::CUDA;             // GQA sliding_window_cache=1
+  const bool needs_cache_slack = device_type != DeviceType::NvTensorRtRtx;
+  if (device_supports_windowed_kv_cache && model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0 &&
+      // Beam reordering across a compacted cache is correct in principle but untested.
+      state_.params_->search.num_beams == 1) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     const int max_length = state_.params_->search.max_length;
+
+    int windowed_cache_size = std::min(max_length, sliding_window_size);
+    if (needs_cache_slack) {
+      const auto& chunk_size_opt = model_.config_->search.chunk_size;
+      const int chunk_size = chunk_size_opt.has_value() ? static_cast<int>(*chunk_size_opt) : 0;
+      const int slack = std::max(chunk_size - 1, model_.config_->model.decoder.sliding_window->cache_slack);
+      windowed_cache_size = std::min(max_length, sliding_window_size + slack);
+      // Only a cache smaller than max_length ever evicts, and only then is RewindTo restricted.
+      if (windowed_cache_size < max_length) {
+        windowed_cache_size_ = windowed_cache_size;
+      }
+    }
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
@@ -459,14 +484,14 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
-          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+          layer_shapes_[it->second][2] = windowed_cache_size;
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;
     } else {
       // Uniform sliding window allocation (backward compatibility)
-      shape_[2] = std::min(max_length, sliding_window_size);
+      shape_[2] = windowed_cache_size;
     }
   } else if (past_present_share_buffer_) {
     // For fixed kv-cache models the cache size comes from the model graph,
@@ -548,6 +573,8 @@ void DefaultKeyValueCache::Add() {
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  current_length_ = total_length;
+
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -593,6 +620,18 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
+    // Sliding-window layers hold only the most recent windowed_cache_size_ positions, anchored at
+    // cache index 0. Once anything has been evicted, position i no longer lives at cache offset i,
+    // so a rewind would silently read misaligned keys. Refuse instead of returning wrong logits.
+    if (windowed_cache_size_ > 0 && static_cast<int>(index) < current_length_ &&
+        current_length_ > windowed_cache_size_) {
+      throw std::runtime_error(
+          "Cannot rewind to " + std::to_string(index) + ": the sliding-window KV cache holds only the last " +
+          std::to_string(windowed_cache_size_) + " of " + std::to_string(current_length_) +
+          " positions, so the tokens needed at that point have already been evicted. Increase "
+          "model.decoder.sliding_window.cache_slack in genai_config.json to keep more positions "
+          "resident, or rewind before the cache fills.");
+    }
     return;
   } else if (shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");

@@ -53,6 +53,11 @@ class Model:
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
+        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
+        # evicts inside the EP, cuda evicts inside GroupQueryAttention (sliding_window_cache=1).
+        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda"}
+        # Positions kept beyond the window, to cover a prefill chunk and amortize cache compaction.
+        self.window_kv_cache_slack = 256
         self.intermediate_size = config.ffn_hidden_size if hasattr(config, "ffn_hidden_size") else config.intermediate_size
         self.hidden_size = config.hidden_size
         self.num_kv_heads = (
@@ -952,7 +957,7 @@ class Model:
             },
         }
 
-        if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
+        if self.ep in self.eps_with_windowed_kv_cache and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
             layer_idxs = [
                 layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)
@@ -963,6 +968,9 @@ class Model:
                 "slide_key_value_cache": False,
                 "slide_inputs": False,
                 "layers": layer_idxs,
+                # Positions kept beyond the window so the runtime can size the cache reproducibly.
+                # Unused by trt-rtx, whose EP evicts internally.
+                "cache_slack": self.window_kv_cache_slack,
             }
 
         if self.ep != "cpu":
@@ -1004,9 +1012,14 @@ class Model:
     def make_key_value_cache_shape(self, layer_id, shape):
         """
         Modifies KV cache shape dimension names for models with alternating attention patterns.
-        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
+        Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
+        unify them with the full-attention layers, whose cache is allocated at max_length.
         """
-        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+        if (
+            self.ep in self.eps_with_windowed_kv_cache
+            and hasattr(self, "is_local")
+            and self.is_local(layer_id)
+        ):
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
@@ -3010,6 +3023,10 @@ class Model:
         }
         if q_norm_weight:
             attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+        if self.window_size is not None and self.window_size > 0 and self.ep == "cuda":
+            # The past/present buffers of this layer are window-sized rather than max_length-sized,
+            # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
+            attributes["sliding_window_cache"] = 1
         if self.kv_cache_quant_type != "none":
             attributes.update(
                 {

@@ -354,6 +354,10 @@ struct Config {
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
         bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
         std::vector<int> layers;           // Layer indices that use sliding window attention (for models with alternating patterns)
+        // Extra key-value cache positions allocated beyond window_size on execution providers that
+        // own eviction themselves (CUDA GroupQueryAttention with sliding_window_cache=1). The slack
+        // amortizes cache compaction and doubles as the RewindTo budget.
+        int cache_slack{256};
       };
       std::optional<SlidingWindow> sliding_window;
 
