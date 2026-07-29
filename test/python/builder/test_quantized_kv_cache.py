@@ -79,9 +79,7 @@ def _check_extra_options(extra_options, precision, execution_provider):
     builder_module.get_hf_details = lambda *args, **kwargs: {
         "hf_config": types.SimpleNamespace(tie_word_embeddings=True)
     }
-    builder_module.check_extra_options(
-        "dummy-model", "", "", precision, execution_provider, "", extra_options
-    )
+    builder_module.check_extra_options("dummy-model", "", "", precision, execution_provider, "", extra_options)
 
 
 # ===========================================================================
@@ -152,6 +150,7 @@ def _make_kv_model(
     num_kv_heads=2,
     num_layers=3,
     extra_options=None,
+    use_paged_attention=False,
 ):
     model = Model.__new__(Model)
     model.ep = ep
@@ -161,6 +160,7 @@ def _make_kv_model(
     model.kv_cache_quant_type = kv_cache_quant_type
     model.extra_options = extra_options if extra_options is not None else {}
     model.attention_attrs = {"op_type": op_type}
+    model.use_paged_attention = use_paged_attention
     model.input_types = {}
     model.output_types = {}
     model.input_shapes = {
@@ -174,9 +174,37 @@ def _make_kv_model(
     return model
 
 
-def test_quantized_kv_cache_requires_group_query_attention():
+def test_quantized_kv_cache_requires_group_query_or_paged_attention():
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", op_type="MultiHeadAttention")
-    with pytest.raises(ValueError, match="requires GroupQueryAttention"):
+    with pytest.raises(ValueError, match="requires GroupQueryAttention or PagedAttention"):
+        model.make_quantized_kv_cache_init()
+
+
+@pytest.mark.parametrize("quant_type", ["int8_per_tensor", "int8_per_channel", "fp8_per_tensor", "fp8_per_channel"])
+def test_paged_attention_accepts_int8_and_fp8_kv_cache(quant_type):
+    model = _make_kv_model(
+        kv_cache_quant_type=quant_type,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+    )
+    model.make_quantized_kv_cache_init()
+
+    expected_dtype = ir.DataType.FLOAT8E4M3FN if quant_type.startswith("fp8") else ir.DataType.INT8
+    assert model.input_types["past_key_values.key"] == expected_dtype
+    assert model.output_types["present.value"] == expected_dtype
+
+
+@pytest.mark.parametrize("quant_type", ["int4_per_tensor", "int4_per_channel"])
+def test_paged_attention_rejects_int4_kv_cache(quant_type):
+    # PagedAttention's T_CACHE constraint has no sub-byte member, so int4 caches are not exportable.
+    model = _make_kv_model(
+        kv_cache_quant_type=quant_type,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+    )
+    with pytest.raises(ValueError, match="only supports int8 and fp8"):
         model.make_quantized_kv_cache_init()
 
 

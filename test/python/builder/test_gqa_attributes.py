@@ -103,6 +103,7 @@ def test_paged_attention_preserves_sliding_window_size():
 
     assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
 
+
 def test_quantized_gqa_emits_scale_inputs_and_attributes():
     model = _FakeGQAModel("cuda")
     model.kv_cache_quant_type = "int4_per_channel"
