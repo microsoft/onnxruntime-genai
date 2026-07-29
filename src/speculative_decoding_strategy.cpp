@@ -844,7 +844,10 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       committed.push_back(f);
       verify_prefix++;
       if (penalty_processor.IsActive()) dist_prefix.push_back(f);
-      if (IsEosToken(eos_ids, f)) { eos_hit = true; break; }
+      if (IsEosToken(eos_ids, f)) {
+        eos_hit = true;
+        break;
+      }
       continue;
     }
 
@@ -865,7 +868,10 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         verify_prefix++;
         n_direct++;
         if (penalty_processor.IsActive()) dist_prefix.push_back(proposal.tokens[i]);
-        if (IsEosToken(eos_ids, proposal.tokens[i])) { eos_hit = true; break; }
+        if (IsEosToken(eos_ids, proposal.tokens[i])) {
+          eos_hit = true;
+          break;
+        }
         for (int32_t fwd : CommitGuidanceToken(proc, proposal.tokens[i])) pending_forced.push_back(fwd);
       } else {
         // Reject - only commit a correction at the first position, where pos0 is a single-token
@@ -890,7 +896,10 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         verify_prefix++;
         n_direct++;
         if (penalty_processor.IsActive()) dist_prefix.push_back(dtok);
-        if (IsEosToken(eos_ids, dtok)) { eos_hit = true; break; }
+        if (IsEosToken(eos_ids, dtok)) {
+          eos_hit = true;
+          break;
+        }
         for (int32_t fwd : CommitGuidanceToken(proc, dtok)) pending_forced.push_back(fwd);
       } else {
         rejected = true;

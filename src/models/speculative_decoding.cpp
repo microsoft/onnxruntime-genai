@@ -169,8 +169,8 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
 void SpeculativeDecodingState::RewindTo(size_t index) {
   target_state_->RewindTo(index);
   draft_state_->RewindTo(index);
-  // draft_pending_logits_ is stale after a rewind and must not seed the next proposal. 
-  // Invalidate it -> refresh it. Check draft_pending_valid_ and throws if it is 
+  // draft_pending_logits_ is stale after a rewind and must not seed the next proposal.
+  // Invalidate it -> refresh it. Check draft_pending_valid_ and throws if it is
   // ever consumed while stale.
   draft_pending_valid_ = false;
 }

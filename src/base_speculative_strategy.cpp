@@ -109,7 +109,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     // Walk the clone forward over K positions. At each free position the draft
     // predicts a grammar-masked token; committing it may force a span of fast-forward tokens, which
     // we inject straight into the proposal (counted in K) so the target verifies them in the same
-    // batched pass. Anything past K carries to the next round. 
+    // batched pass. Anything past K carries to the next round.
     std::deque<int32_t> ff_queue(GuidanceFFCarry().begin(), GuidanceFFCarry().end());
     // logits for position 0
     std::vector<float> pending(spec_state_.draft_pending_logits().begin(),

@@ -349,8 +349,8 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  */
 - (BOOL)setSpeculativeNumber:(NSString*)key
-                doubleValue:(double)value
-                      error:(NSError**)error;
+                 doubleValue:(double)value
+                       error:(NSError**)error;
 
 /**
  * Get a numerical speculative decoding option.
@@ -359,7 +359,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The option value.
  */
 - (double)getSpeculativeNumber:(NSString*)key
-                        error:(NSError**)error;
+                         error:(NSError**)error;
 @end
 
 /**

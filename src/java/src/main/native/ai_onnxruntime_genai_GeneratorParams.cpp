@@ -66,7 +66,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_getSearchBool(JNIEnv* env, jobject thi
 
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setSpeculativeNumber(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                                jstring option_name, jdouble value) {
+                                                               jstring option_name, jdouble value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   CString name{env, option_name};
 
@@ -75,7 +75,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSpeculativeNumber(JNIEnv* env, jobj
 
 JNIEXPORT jdouble JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_getSpeculativeNumber(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                              jstring option_name) {
+                                                               jstring option_name) {
   const OgaGeneratorParams* generator_params = reinterpret_cast<const OgaGeneratorParams*>(native_handle);
   CString name{env, option_name};
   double value;
