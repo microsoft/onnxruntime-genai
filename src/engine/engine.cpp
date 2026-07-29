@@ -34,7 +34,7 @@ std::shared_ptr<Request> Engine::Step() {
     scheduled_requests.GenerateNextTokens();
 
     for (auto& request : scheduled_requests) {
-      if (request->HasUnseenTokens()) {
+      if (request->HasUnseenTokens() || request->IsDone()) {
         ready_requests_.push(request);
       }
     }
