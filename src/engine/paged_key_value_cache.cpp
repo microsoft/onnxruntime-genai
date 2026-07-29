@@ -47,6 +47,29 @@ size_t EmptySlots(const std::vector<std::shared_ptr<Block>>& blocks) {
                          });
 }
 
+size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
+  return std::accumulate(blocks.begin(), blocks.end(), size_t{0},
+                         [](size_t sum, const std::shared_ptr<Block>& block) {
+                           return sum + block->Size();
+                         });
+}
+
+// Number of KV slots the model will have addressed once the pending step has run, i.e. one per
+// token whose key and value live in the cache afterwards.
+//
+// This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes the
+// unprocessed tokens at absolute positions [past, past + unprocessed), so the cache must own
+// `past + unprocessed` slots. CurrentSequenceLength() already counts the unprocessed tokens for
+// a prefill request and excludes them for a generation request, hence the branch.
+//
+// Counting appended tokens instead leaves the cache exactly one slot short on every decode step.
+// That stays invisible while the last block still has room, and turns into an out-of-bounds
+// block-table entry the moment a sequence length lands on a block boundary.
+size_t RequiredSlots(const std::shared_ptr<Request>& request) {
+  const size_t sequence_length = request->CurrentSequenceLength();
+  return request->IsPrefill() ? sequence_length : sequence_length + request->UnprocessedTokens().size();
+}
+
 }  // namespace
 
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
@@ -89,7 +112,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
-  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(request->UnprocessedTokens().size());
+  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(RequiredSlots(request));
 }
 
 void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
@@ -97,11 +120,11 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
     throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
 
-  // Reserve the blocks the unprocessed tokens will need, but leave their slots empty. The slots
-  // are marked used in AppendTokens() once the tokens are actually written to the cache. Marking
-  // them here too would count the same tokens twice and force the pool to be sized at roughly
-  // twice the capacity it can actually use.
-  auto reserved_blocks = block_pool_->ReserveBlocks(request->UnprocessedTokens().size());
+  // Reserve the blocks the prompt will need, but leave their slots empty. The slots are marked
+  // used in AppendTokens() once the tokens are actually written to the cache. Marking them here
+  // too would count the prompt twice and force the pool to be sized at roughly twice the
+  // capacity it can actually use.
+  auto reserved_blocks = block_pool_->ReserveBlocks(RequiredSlots(request));
   block_tables_.emplace_back(BlockTable{request, std::move(reserved_blocks)});
 }
 
@@ -114,11 +137,16 @@ bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const
     throw std::runtime_error("Given request is not found in the cache.");
   }
 
-  const size_t num_required_slots = request->UnprocessedTokens().size();
+  const size_t required_slots = RequiredSlots(request);
+  const size_t used_slots = UsedSlots(block_table_it->blocks);
+  if (required_slots <= used_slots) {
+    return true;
+  }
+
   const size_t num_slots_available = EmptySlots(block_table_it->blocks) +
                                      block_pool_->AvailableBlocks() * block_pool_->BlockSize();
 
-  return num_slots_available >= num_required_slots;
+  return num_slots_available >= required_slots - used_slots;
 }
 
 void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
@@ -132,7 +160,12 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
                                            });
   assert(block_table_it != block_tables_.end());
 
-  size_t num_slots = request->UnprocessedTokens().size();
+  const size_t required_slots = RequiredSlots(request);
+  const size_t used_slots = UsedSlots(block_table_it->blocks);
+  if (required_slots <= used_slots) {
+    return;
+  }
+  size_t num_slots = required_slots - used_slots;
 
   // Consume the slots already reserved for this request before asking the pool for more.
   for (auto& block : block_table_it->blocks) {
