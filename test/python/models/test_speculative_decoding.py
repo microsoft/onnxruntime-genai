@@ -1305,10 +1305,7 @@ class TestSpeculativeExternalApis:
 
     def test_extra_input_reaches_both_children_and_adapter_reaches_target(
             self, decoder_only_model_path, tmp_path):
-        try:
-            import onnxruntime
-        except ImportError:
-            pytest.skip("onnxruntime is required to create an adapter fixture")
+        onnxruntime = pytest.importorskip("onnxruntime")
 
         controlled = _make_control_input_model(
             decoder_only_model_path, tmp_path / "controlled_model")
