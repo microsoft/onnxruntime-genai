@@ -150,6 +150,67 @@ TEST(SpeculativeSamplingTest, SamplingDistFromProbsMatchesLogits) {
   for (size_t i = 0; i < a.size(); ++i) EXPECT_NEAR(a[i], b[i], 1e-5f);
 }
 
+// TargetTokenSelection
+
+TEST(SpeculativeSamplingTest, TargetGreedySelectionAppliesMinLengthBeforeArgmax) {
+  std::array<float, 4> logits{1.0f, 2.0f, 8.0f, 3.0f};
+  std::array<int32_t, 1> eos_ids{2};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/1.0f, /*min_length=*/5, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/4, {}, /*greedy=*/true, /*top_k=*/0, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+
+  EXPECT_EQ(selection.greedy_token, 3);
+  EXPECT_TRUE(selection.indices.empty());
+  EXPECT_TRUE(selection.probs.empty());
+}
+
+TEST(SpeculativeSamplingTest, TargetSamplingAppliesRepetitionPenaltyBeforeTopK) {
+  std::array<float, 4> logits{6.0f, 5.0f, 4.0f, 1.0f};
+  std::array<int32_t, 1> prefix{0};
+  std::array<int32_t, 1> eos_ids{3};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/2.0f, /*min_length=*/0, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/1, prefix, /*greedy=*/false, /*top_k=*/2, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+
+  ASSERT_EQ(selection.indices.size(), 2u);
+  ASSERT_EQ(selection.probs.size(), 2u);
+  EXPECT_EQ(selection.indices[0], 1);
+  EXPECT_EQ(selection.indices[1], 2);
+  EXPECT_FLOAT_EQ(GetTargetTokenProbability(selection, 0), 0.0f);
+  EXPECT_GT(GetTargetTokenProbability(selection, 1),
+            GetTargetTokenProbability(selection, 2));
+}
+
+TEST(SpeculativeSamplingTest, TargetSamplingSelectionDensifiesSparseCategorical) {
+  std::array<float, 4> logits{1.0f, 4.0f, 3.0f, 2.0f};
+  std::array<int32_t, 1> eos_ids{3};
+  LogitsPenaltyProcessor penalties{
+      static_cast<int>(logits.size()), /*repetition_penalty=*/1.0f, /*min_length=*/0, eos_ids};
+  SampledCategorical sampled;
+  TargetTokenSelection selection;
+  std::vector<float> dense;
+
+  ComputeTargetTokenSelection(
+      logits, /*current_length=*/0, {}, /*greedy=*/false, /*top_k=*/2, /*top_p=*/0.0f,
+      /*temperature=*/1.0f, penalties, sampled, selection);
+  DensifyTargetTokenSelection(selection, static_cast<int>(logits.size()), dense);
+
+  EXPECT_FLOAT_EQ(dense[0], 0.0f);
+  EXPECT_GT(dense[1], dense[2]);
+  EXPECT_FLOAT_EQ(dense[3], 0.0f);
+  EXPECT_NEAR(std::accumulate(dense.begin(), dense.end(), 0.0f), 1.0f, 1e-6f);
+}
+
 // ---------------------------------------------------------------------------
 // Boundary settings for ComputeSampledCategorical. Standard decode (search.cpp's
 // SampleTop*) and speculative decoding both build their truncated distribution

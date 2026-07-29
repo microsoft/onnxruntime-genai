@@ -30,6 +30,46 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     std::vector<std::vector<float>> probs;
   };
 
+  struct RoundState {
+    enum class Phase {
+      kIdle,
+      kDraining,
+      kFinalizing,
+      kReconcilePending,
+    };
+
+    enum class Kind {
+      kStandard,
+      kGuidance,
+    };
+
+    // Normal: Idle/ReconcilePending -> Draining -> Finalizing -> Idle/ReconcilePending
+    // Interruption: Draining -> ReconcilePending -> Idle after committed tokens are replayed
+    bool IsActive() const { return phase == Phase::kDraining; }
+    bool NeedsReconciliation() const { return phase != Phase::kIdle; }
+
+    Phase phase{Phase::kIdle};
+    Kind kind{Kind::kStandard};
+    bool discarded{};
+
+    std::deque<int32_t> pending;
+    DeviceSpan<float> target_logits;
+    int target_logits_row0{};
+    int current_target_logits_row{-1};
+    int emitted_direct_tokens{};
+    int cached_direct_tokens{};
+
+    Proposal proposal;
+    int32_t final_token{};
+    int n_direct{};
+    int seed_length{};
+    int k{};
+
+    std::vector<int32_t> committed;
+    int verify_prefix{};
+    std::vector<float> last_row;
+  };
+
   // Sampling settings are read directly from the canonical config (search params) and the
   // Generator's sampling method inside Propose/RunRound.
 
@@ -82,10 +122,12 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   void DrainOne(Generator& g);
   void FinalizeRound(Generator& g);
   bool EmitToken(Generator& g, int32_t tok);
-  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported);
+  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported,
+                  RoundState::Kind kind);
   void FinishRound();
   void DiscardPendingTokens();
   void ClearPendingExternalLogits();
+  DeviceSpan<float> GetFloatVerifyLogits(OrtValue& logits, DeviceInterface& device);
 
   // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
@@ -103,52 +145,15 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   DeviceSpan<float> ReplayCommittedTail(Generator& g, int floor, bool record_stats = true);
   void PrepareForSetLogits(Generator& g, bool record_stats);
 
-  // Committed but not emitted tokens for the round.
-  std::deque<int32_t> pending_;
-  bool round_active_{};
-  bool active_round_discarded_{};
+  RoundState round_;
 
   // K histogram for rounds that follow the standard geometric acceptance formula.
   std::array<std::size_t, 17> formula_k_counts_{};
   std::size_t formula_rounds_{};
 
-  // Raw target rows corresponding to accepted tokens in pending_. These let get_logits inspect the
-  // next-token logits without discarding speculative lookahead or advancing RNG/model state.
-  DeviceSpan<float> pending_target_logits_;
-  int pending_target_logits_row0_{};
-  int current_target_logits_row_{-1};
-  int emitted_direct_tokens_{};
-  int cached_direct_tokens_{};
-
-  // Round context saved by RunRound.
-  Proposal saved_proposal_;
-  int32_t saved_final_token_{};
-  int saved_n_direct_{};
-  int saved_seed_length_{};
-  int saved_K_{};
-  bool reanchor_pending_{false};
-
-  // Guidance round context - the committed token set (accepted prefix + correction + fast-forward
-  // tokens), saved so FinalizeGuidanceRound can re-anchor the caches.
-  std::vector<int32_t> saved_committed_;
-
   // Grammar-forced tokens the round could not fit in its K budget, carried to the next round and
   // emitted first (the grammar is already advanced past them).
   std::deque<int32_t> ff_carry_;
-
-  // How many leading committed tokens were part of the target verify batch (so their KV is already
-  // built). FinalizeGuidanceRound only replays committed tokens past this point.
-  int saved_verify_prefix_{};
-
-  // The last verify row for the committed prefix, reused as the next round's pos0 when nothing needs
-  // replaying (avoids an extra target pass).
-  std::vector<float> saved_last_row_;
-
-  // Set while a round has left the inner KV caches out of sync with the committed sequence (mid round/deferred fold).
-  bool round_dirty_{false};
-
-  // True when the round just run was a guidance round.
-  bool guidance_round_{false};
 
   // Re-anchor fold: instead of giving the round's committed token its own target forward,
   // we tack it onto the front of the next round's verify batch. Saves

@@ -46,14 +46,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return value;
         }
 
-        public void SetSpeculativeNumber(string speculativeOption, double value)
+        public void SetSpeculativeNumber(string name, double value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(speculativeOption), value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(name), value));
         }
 
-        public double GetSpeculativeNumber(string speculativeOption)
+        public double GetSpeculativeNumber(string name)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(speculativeOption), out double value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(name), out double value));
             return value;
         }
 

@@ -132,12 +132,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSpeculativeNumber(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                           byte[] /* const char* */ speculativeOption,
+                                                                                           byte[] /* const char* */ name,
                                                                                            double value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSpeculativeNumber(IntPtr /* const OgaGeneratorParams* */ generatorParams,
-                                                                                           byte[] /* const char* */ speculativeOption,
+                                                                                           byte[] /* const char* */ name,
                                                                                            out double /* double* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

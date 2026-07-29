@@ -109,6 +109,12 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 };
 
 struct Generator : LeakChecked<Generator> {
+  enum class Action {
+    standard,   // Default, set in any other case
+    generated,  // Set after GenerateNextToken
+    rewound,    // Set after RewindToLength
+  };
+
   Generator(const Model& model, const GeneratorParams& params);
   ~Generator();
 
@@ -155,10 +161,7 @@ struct Generator : LeakChecked<Generator> {
   void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
-  enum Action { standard,   // Default, set in any other case
-                generated,  // Set after GenerateNextToken
-                rewound };  // Set after RewindToLength
-  Action last_action_{standard};
+  Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
