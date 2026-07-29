@@ -2970,6 +2970,52 @@ class Model:
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
 
+    def extend_with_optional_inputs(self, inputs, optional_inputs):
+        # ONNX lets trailing optional inputs be omitted entirely, so drop the unused ones at the
+        # end instead of emitting empty placeholders. Placeholders in the middle are kept because
+        # they reserve the position of the later inputs.
+        while optional_inputs and not optional_inputs[-1]:
+            optional_inputs.pop()
+        inputs.extend(optional_inputs)
+
+    def get_qk_norm_weight_inputs(self, **kwargs):
+        # Shared by GroupQueryAttention and PagedAttention: both fuse the Q/K RMSNorm and both
+        # require the pair to be provided together.
+        q_norm_weight = kwargs.get("q_norm_weight", "")
+        k_norm_weight = kwargs.get("k_norm_weight", "")
+        if bool(q_norm_weight) != bool(k_norm_weight):
+            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
+        return q_norm_weight, k_norm_weight
+
+    def get_kv_cache_scale_inputs(self, **kwargs):
+        # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
+        # initializer names, or empty placeholders when the KV cache is not quantized.
+        if self.kv_cache_quant_type == "none":
+            return "", ""
+        layer_id = kwargs.get("layer_id")
+        if layer_id is None:
+            raise ValueError("layer_id is required for quantized KV cache.")
+        return self.get_kv_cache_scale_names(layer_id)
+
+    def get_attention_op_attributes(self, **kwargs):
+        # Attributes shared by GroupQueryAttention and PagedAttention. Op-specific attributes
+        # (e.g. GQA's `kv_cache_bit_width`) are added by the caller.
+        attributes = {
+            "num_heads": self.num_attn_heads,
+            "kv_num_heads": self.num_kv_heads,
+            "scale": self.attention_attrs["scale"],
+            "local_window_size": self.window_size,
+            "softcap": self.attention_attrs["softcap"],
+            "do_rotary": self.attention_attrs["use_rope_in_attn"],
+            "rotary_interleaved": self.rope_attrs["interleaved"],
+        }
+        if kwargs.get("q_norm_weight", ""):
+            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+        if self.kv_cache_quant_type != "none":
+            attributes["k_quant_type"] = self.kv_quant_type
+            attributes["v_quant_type"] = self.kv_quant_type
+        return attributes
+
     def make_group_query_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
@@ -2985,57 +3031,28 @@ class Model:
             "",  # attention_bias
             kwargs.get("sinks", ""),
         ]
-        layer_id = kwargs.get("layer_id")
-        if self.kv_cache_quant_type != "none":
-            if layer_id is None:
-                raise ValueError("layer_id is required for quantized KV cache.")
-            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            inputs.extend(
-                [
-                    k_scale_name,
-                    v_scale_name,
-                ]
-            )
-        q_norm_weight = kwargs.get("q_norm_weight", "")
-        k_norm_weight = kwargs.get("k_norm_weight", "")
-        if bool(q_norm_weight) != bool(k_norm_weight):
-            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
-        if q_norm_weight:
-            if self.kv_cache_quant_type == "none":
-                inputs.extend(
-                    [
-                        "",  # k_scale
-                        "",  # v_scale
-                    ]
-                )
-            inputs.extend(
-                [
-                    q_norm_weight,
-                    k_norm_weight,
-                ]
-            )
+        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
+        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
+
+        # Optional trailing inputs of GroupQueryAttention, in schema order:
+        #   12: k_scale, 13: v_scale, 14: q_norm_weight, 15: k_norm_weight
+        self.extend_with_optional_inputs(
+            inputs,
+            [
+                k_scale_name,
+                v_scale_name,
+                q_norm_weight,
+                k_norm_weight,
+            ],
+        )
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        attributes = {
-            "num_heads": self.num_attn_heads,
-            "kv_num_heads": self.num_kv_heads,
-            "scale": self.attention_attrs["scale"],
-            "local_window_size": self.window_size,
-            "softcap": self.attention_attrs["softcap"],
-            "do_rotary": self.attention_attrs["use_rope_in_attn"],
-            "rotary_interleaved": self.rope_attrs["interleaved"],
-        }
-        if q_norm_weight:
-            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+        attributes = self.get_attention_op_attributes(**kwargs)
         if self.kv_cache_quant_type != "none":
-            attributes.update(
-                {
-                    "k_quant_type": self.kv_quant_type,
-                    "v_quant_type": self.kv_quant_type,
-                    "kv_cache_bit_width": self.kv_cache_bit_width,
-                }
-            )
+            # Unlike PagedAttention, GroupQueryAttention supports sub-byte (int4) caches, so the
+            # bit width cannot be derived from the cache element type alone.
+            attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -3140,17 +3157,8 @@ class Model:
             kwargs.get("sin_cache", ""),
         ]
 
-        q_norm_weight = kwargs.get("q_norm_weight", "")
-        k_norm_weight = kwargs.get("k_norm_weight", "")
-        if bool(q_norm_weight) != bool(k_norm_weight):
-            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
-
-        k_scale_name = v_scale_name = ""
-        if self.kv_cache_quant_type != "none":
-            layer_id = kwargs.get("layer_id")
-            if layer_id is None:
-                raise ValueError("layer_id is required for quantized KV cache.")
-            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
+        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
+        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
 
         # Optional trailing inputs of PagedAttention, in schema order:
         #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
@@ -3160,41 +3168,24 @@ class Model:
         # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
         # can select a backend and size its launch without a device-to-host readback of the sequence
         # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
-        optional_inputs = [
-            "",  # slot_mapping
-            kwargs.get("sinks", ""),  # head_sink
-            q_norm_weight,
-            k_norm_weight,
-            k_scale_name,
-            v_scale_name,
-            kwargs.get("attention_metadata", ""),
-        ]
-        while optional_inputs and not optional_inputs[-1]:
-            optional_inputs.pop()
-        inputs.extend(optional_inputs)
+        self.extend_with_optional_inputs(
+            inputs,
+            [
+                "",  # slot_mapping
+                kwargs.get("sinks", ""),  # head_sink
+                q_norm_weight,
+                k_norm_weight,
+                k_scale_name,
+                v_scale_name,
+                kwargs.get("attention_metadata", ""),
+            ],
+        )
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        attributes = {
-            "num_heads": self.num_attn_heads,
-            "kv_num_heads": self.num_kv_heads,
-            "scale": self.attention_attrs["scale"],
-            "local_window_size": self.window_size,
-            "softcap": self.attention_attrs["softcap"],
-            "do_rotary": self.attention_attrs["use_rope_in_attn"],
-            "rotary_interleaved": self.rope_attrs["interleaved"],
-        }
-        if q_norm_weight:
-            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
-        if self.kv_cache_quant_type != "none":
-            # PagedAttention derives the cache element type from the tensor itself, so only the
-            # quantization granularity has to be declared (there is no `kv_cache_bit_width` attribute).
-            attributes.update(
-                {
-                    "k_quant_type": self.kv_quant_type,
-                    "v_quant_type": self.kv_quant_type,
-                }
-            )
+        # PagedAttention derives the cache element type from the tensor itself, so unlike
+        # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
+        attributes = self.get_attention_op_attributes(**kwargs)
         self.make_node(
             "PagedAttention",
             inputs=inputs,

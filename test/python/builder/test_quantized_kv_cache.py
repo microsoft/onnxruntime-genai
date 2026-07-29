@@ -365,6 +365,66 @@ def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size(tmp_pa
 
     for arr in captured.values():
         assert arr.size == 2 * 16
+        # GroupQueryAttention only looks at the element count, so the scales stay flat.
+        assert arr.shape == (2 * 16,)
+
+
+def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
+    # PagedAttention validates the per-channel scale shape and requires (kv_num_heads, 1, head_size),
+    # unlike GroupQueryAttention which only checks the element count.
+    scale_size = 2 * 16
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [[0.1] * scale_size],
+                    "v_scales": [[0.2] * scale_size],
+                }
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_channel",
+        ep="cuda",
+        op_type="PagedAttention",
+        num_kv_heads=2,
+        head_size=16,
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+        use_paged_attention=True,
+    )
+    model.kv_quant_type = "PER_CHANNEL"
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    assert set(captured) == {"model.layers.0.attn.k_scale", "model.layers.0.attn.v_scale"}
+    for arr in captured.values():
+        assert arr.shape == (2, 1, 16)
+
+
+def test_paged_per_tensor_scale_initializers_stay_scalar(tmp_path):
+    # The canonical (kv_num_heads, 1, head_size) reshape must only apply to per-channel scales.
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        ep="cuda",
+        op_type="PagedAttention",
+        num_kv_heads=2,
+        head_size=16,
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+        use_paged_attention=True,
+    )
+    model.kv_quant_type = "PER_TENSOR"
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    for arr in captured.values():
+        assert arr.shape == (1,)
 
 
 def test_missing_scale_file_is_rejected():
