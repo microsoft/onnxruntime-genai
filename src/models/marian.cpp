@@ -88,6 +88,19 @@ void MarianInputIDs::Add() {
 }
 
 void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
+  // The tensor holds one token per batch*beam entry. The copy below is
+  // unchecked in release builds (DeviceSpan::CopyFrom only asserts) and always
+  // copies the destination's length, so a shorter source is read past its end
+  // and the tail fills with unrelated memory. That is then consumed as token
+  // ids by the decoder's embedding gather, which reads out of bounds.
+  // Validate explicitly so the caller gets a diagnosable error instead.
+  if (new_tokens.size() != static_cast<size_t>(shape_[0])) {
+    throw std::runtime_error(
+        "MarianInputIDs::Update: got " + std::to_string(new_tokens.size()) +
+        " token(s) but the input tensor holds " + std::to_string(shape_[0]) +
+        " (batch_size * num_beams). Marian does not support batch_size > 1.");
+  }
+
   value_->CreateTensor(shape_, state_.params_->use_graph_capture);
   state_.inputs_[input_index_] = value_->GetOrtTensor();
 
