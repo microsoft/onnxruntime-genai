@@ -282,6 +282,12 @@ class Model:
         }
         self.make_attention_init(config)
 
+        # `kv_cache_quant_type` is validated and normalized in builder.py (`check_extra_options`),
+        # which always runs before the model is constructed, so read the value directly here.
+        self.kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
+        if self.kv_cache_quant_type != "none":
+            self.make_quantized_kv_cache_init()
+
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
@@ -554,6 +560,95 @@ class Model:
             print("Attention (packed) is used in this model.")
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+
+    def make_quantized_kv_cache_init(self):
+        if self.attention_attrs["op_type"] != "GroupQueryAttention":
+            raise ValueError("Quantized KV cache requires GroupQueryAttention.")
+        if self.ep not in {"cpu", "cuda"}:
+            raise ValueError(
+                "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
+                f"Got execution_provider='{self.ep}'."
+            )
+
+        is_int4 = self.kv_cache_quant_type.startswith("int4")
+        is_fp8 = self.kv_cache_quant_type.startswith("fp8")
+        self.kv_cache_bit_width = 4 if is_int4 else 8
+        self.kv_quant_type = "PER_CHANNEL" if self.kv_cache_quant_type.endswith("per_channel") else "PER_TENSOR"
+
+        if is_fp8:
+            # FP8 E4M3: stored one byte per element (no bit-packing), kernel selects the fp8
+            # path from the cache element type; kv_cache_bit_width stays 8.
+            cache_dtype = ir.DataType.FLOAT8E4M3FN
+        elif is_int4:
+            cache_dtype = ir.DataType.UINT8
+        else:
+            cache_dtype = ir.DataType.INT8
+        self.input_types["past_key_values.key"] = cache_dtype
+        self.input_types["past_key_values.value"] = cache_dtype
+        self.output_types["present.key"] = cache_dtype
+        self.output_types["present.value"] = cache_dtype
+
+        if is_int4:
+            packed_head_size = (self.head_size + 1) // 2
+            self.input_shapes["past_key_values.key"][-1] = packed_head_size
+            self.input_shapes["past_key_values.value"][-1] = packed_head_size
+            self.output_shapes["present.key"][-1] = packed_head_size
+            self.output_shapes["present.value"][-1] = packed_head_size
+
+        self.past_present_share_buffer = self.ep == "cuda"
+
+    def get_kv_cache_scale_names(self, layer_id):
+        # Convention-based initializer names for the per-layer KV cache quantization scales,
+        # matching the `model.layers.{layer_id}.attn.*` naming used by other attention
+        # initializers (like `get_qk_norm_weight_names`).
+        return (
+            f"model.layers.{layer_id}.attn.k_scale",
+            f"model.layers.{layer_id}.attn.v_scale",
+        )
+
+    def make_kv_cache_scale_initializers(self):
+        per_channel = self.kv_quant_type == "PER_CHANNEL"
+        scale_size = self.num_kv_heads * self.head_size if per_channel else 1
+
+        # Calibrated per-layer scales are required and supplied via a JSON file:
+        #   {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}
+        # where each per-layer entry is a scalar (PER_TENSOR) or a length-scale_size
+        # vector (PER_CHANNEL).
+        scale_file = self.extra_options.get("kv_cache_scale_file", None)
+        if scale_file is None:
+            raise ValueError(
+                "Quantized KV cache requires calibrated scales; provide them via "
+                "extra_options['kv_cache_scale_file']."
+            )
+        with open(scale_file, encoding="utf-8") as file:
+            scale_data = json.load(file)
+        try:
+            k_scales_per_layer = scale_data["scales"]["k_scales"]
+            v_scales_per_layer = scale_data["scales"]["v_scales"]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "kv_cache_scale_file must contain scales.k_scales and scales.v_scales."
+            ) from error
+        if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
+            raise ValueError(
+                f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
+                f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
+            )
+
+        def make_scale(per_layer, layer_id):
+            scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
+            if scale.size != scale_size:
+                raise ValueError(
+                    f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}"
+                )
+            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
+            return scale
+
+        for layer_id in range(self.num_layers):
+            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
+            self.make_initializer(make_scale(k_scales_per_layer, layer_id), k_scale_name)
+            self.make_initializer(make_scale(v_scales_per_layer, layer_id), v_scale_name)
 
     def make_lm_head_init(self, config):
         pass
@@ -2744,15 +2839,31 @@ class Model:
             "",  # attention_bias
             kwargs.get("sinks", ""),
         ]
+        layer_id = kwargs.get("layer_id")
+        if self.kv_cache_quant_type != "none":
+            if layer_id is None:
+                raise ValueError("layer_id is required for quantized KV cache.")
+            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
+            inputs.extend(
+                [
+                    k_scale_name,
+                    v_scale_name,
+                ]
+            )
         q_norm_weight = kwargs.get("q_norm_weight", "")
         k_norm_weight = kwargs.get("k_norm_weight", "")
         if bool(q_norm_weight) != bool(k_norm_weight):
             raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
         if q_norm_weight:
+            if self.kv_cache_quant_type == "none":
+                inputs.extend(
+                    [
+                        "",  # k_scale
+                        "",  # v_scale
+                    ]
+                )
             inputs.extend(
                 [
-                    "",  # k_scale
-                    "",  # v_scale
                     q_norm_weight,
                     k_norm_weight,
                 ]
@@ -2771,6 +2882,14 @@ class Model:
         }
         if q_norm_weight:
             attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+        if self.kv_cache_quant_type != "none":
+            attributes.update(
+                {
+                    "k_quant_type": self.kv_quant_type,
+                    "v_quant_type": self.kv_quant_type,
+                    "kv_cache_bit_width": self.kv_cache_bit_width,
+                }
+            )
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -3140,6 +3259,7 @@ class Model:
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name,
+            layer_id=layer_id,
             root_input=root_input,
             q_path=self.attention_attrs["q_path"],
             k_path=self.attention_attrs["k_path"],
@@ -4185,6 +4305,9 @@ class Model:
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
+
+        if self.kv_cache_quant_type != "none":
+            self.make_kv_cache_scale_initializers()
 
         # Load weights of original model
         self.weights = self.load_weights(input_path)
