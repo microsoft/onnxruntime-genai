@@ -46,6 +46,9 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
+    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # real, dependency-free modules rather than the catch-all above.
+    builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
 
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
@@ -224,6 +227,32 @@ def test_int8_with_qdq_is_rejected(monkeypatch):
 def test_int4_with_qdq_is_allowed(monkeypatch):
     # QDQ is only rejected for int8; int4 still supports it.
     _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int4")
+
+
+@pytest.mark.parametrize(
+    "quant_type",
+    ["int8_per_tensor", "int8_per_channel", "int4_per_tensor", "int4_per_channel", "fp8_per_tensor", "fp8_per_channel"],
+)
+def test_kv_cache_quant_type_is_accepted_for_supported_providers(monkeypatch, quant_type):
+    options = {"kv_cache_quant_type": quant_type.upper()}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="cuda")
+
+    assert options["kv_cache_quant_type"] == quant_type
+
+
+def test_kv_cache_quant_type_rejects_unsupported_value(monkeypatch):
+    with pytest.raises(ValueError, match="kv_cache_quant_type must be one of"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_type": "int6_per_tensor"}, precision="fp16", execution_provider="cuda"
+        )
+
+
+def test_quantized_kv_cache_rejects_unsupported_provider(monkeypatch):
+    with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_type": "int8_per_tensor"}, precision="fp16", execution_provider="webgpu"
+        )
 
 
 # ---------------------------------------------------------------------------

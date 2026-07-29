@@ -19,3 +19,12 @@ onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;f
 # These two dependencies are for the optional constrained decoding feature (USE_GUIDANCE)
 llguidance;https://github.com/microsoft/llguidance.git;94fa39128ef184ffeda33845f6d333f332a34b4d
 corrosion;https://github.com/corrosion-rs/corrosion.git;b1fab721655c5c4b1b08a083d3cd29f163af75d0
+
+# 1DS SDK (cpp_client_telemetry) for the telemetry feature (ENABLE_TELEMETRY). Used only by
+# the FetchContent path in cmake/telemetry.cmake when no caller-supplied MSTelemetry package is available.
+cpp_client_telemetry;https://github.com/microsoft/cpp_client_telemetry/archive/refs/tags/v3.10.173.1.zip;d35a0f0595114304ed8c308e720671032f9586d1
+
+# Static HTTP transport used by 1DS on Linux. Release archives are pinned because the mbedTLS
+# release archive includes generated files and submodule content omitted from GitHub source archives.
+curl;https://github.com/curl/curl/releases/download/curl-8_21_0/curl-8.21.0.tar.xz;c3b4712175609f1e1662e716efd4fd48901e863d
+mbedtls;https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2;e892e98cff90cf7e0736c525bf357626a2513c4c

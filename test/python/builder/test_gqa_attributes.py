@@ -30,10 +30,12 @@ class _FakeGQAModel:
     make_group_query_attention = Model.make_group_query_attention
     make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
+    get_kv_cache_scale_names = Model.get_kv_cache_scale_names
 
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
+        self.kv_cache_quant_type = "none"
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
@@ -100,6 +102,24 @@ def test_paged_attention_preserves_sliding_window_size():
     )
 
     assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
+
+
+def test_quantized_gqa_emits_scale_inputs_and_attributes():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_quant_type = "int4_per_channel"
+    model.kv_quant_type = "PER_CHANNEL"
+    model.kv_cache_bit_width = 4
+
+    model.make_group_query_attention("/gqa", layer_id=3, q_path="q", k_path="k", v_path="v")
+
+    node = model.nodes[-1]
+    assert node["inputs"][12:14] == [
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
+    ]
+    assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["kv_cache_bit_width"] == 4
 
 
 def test_get_qk_norm_weight_names_follows_convention():

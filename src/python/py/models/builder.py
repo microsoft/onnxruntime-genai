@@ -52,6 +52,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
+from builders.quant_config import KV_CACHE_QUANT_TYPES
 from transformers import AutoConfig
 
 
@@ -278,6 +279,20 @@ def check_extra_options(
     if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
+
+    if "kv_cache_quant_type" in extra_options:
+        quant_type = extra_options["kv_cache_quant_type"].lower()
+        if quant_type not in KV_CACHE_QUANT_TYPES:
+            raise ValueError(
+                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
+                f"got '{extra_options['kv_cache_quant_type']}'"
+            )
+        if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
+            raise ValueError(
+                "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
+                f"Got execution_provider='{execution_provider}'."
+            )
+        extra_options["kv_cache_quant_type"] = quant_type
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
@@ -735,6 +750,13 @@ def get_args():
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
+                kv_cache_quant_type = Quantization scheme for the KV cache. Default is 'none' (no quantization).
+                    Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
+                    The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
+                    Quantized KV cache is only supported for the CPU and CUDA execution providers.
+                kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_type is enabled.
+                    Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}} with one entry per layer.
+                    Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

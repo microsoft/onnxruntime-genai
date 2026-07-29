@@ -42,6 +42,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
       - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
       - [Use FP4 Quantization in QMoE](#use-fp4-quantization-in-qmoe)
+      - [Quantize the KV Cache](#quantize-the-kv-cache)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
     - [LoRA Models](#lora-models)
@@ -559,6 +560,41 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source (MXFP4 QMoE on CUDA):
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+```
+
+##### Quantize the KV Cache
+
+This scenario is for when you want to quantize the KV cache via the `kv_cache_quant_type` option. Quantized KV cache is only supported for the CPU and CUDA execution providers. Supported values are:
+
+- `none` (default): no KV cache quantization.
+- `int8_per_tensor` / `int8_per_channel`: 8-bit integer KV cache.
+- `int4_per_tensor` / `int4_per_channel`: 4-bit integer KV cache.
+- `fp8_per_tensor` / `fp8_per_channel`: FP8 (float8e4m3fn) KV cache.
+
+The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
+
+The scales applied to the KV cache are supplied through a required calibration file:
+
+- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). This option is required when `kv_cache_quant_type` is enabled.
+
+The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
+
+```bash
+# 1. Build the baseline (no kv_cache_quant_type) used for calibration:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
+
+# 2. Calibrate the scales:
+python -m onnxruntime_genai.models.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
+```
+
+Then rebuild with the quantized KV cache:
+
+```bash
+# From wheel (int8 per-channel KV cache with calibrated scales):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+
+# From source (int8 per-channel KV cache with calibrated scales):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
 ```
 
 #### FP32 I/O for WebGPU EP
