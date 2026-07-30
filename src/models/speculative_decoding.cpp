@@ -47,21 +47,32 @@ bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
   return true;
 }
 
+int64_t GetLogitsVocabSize(const DecoderOnly_Model& model, const char* model_role) {
+  const auto& logits_name = model.config_->model.decoder.outputs.logits;
+  if (!model.session_info_.HasOutput(logits_name))
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' was not found in the ONNX model.");
+
+  const auto logits_shape = model.session_info_.GetOutputShape(logits_name);
+  if (logits_shape.empty())
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' must have at least one dimension.");
+
+  const int64_t vocab_size = logits_shape.back();
+  if (vocab_size <= 0)
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' must have a static positive vocabulary dimension.");
+
+  return vocab_size;
+}
+
 void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
                                    const DecoderOnly_Model& draft) {
-  const auto& target_logits_name = target.config_->model.decoder.outputs.logits;
-  const auto& draft_logits_name = draft.config_->model.decoder.outputs.logits;
-  if (!target.session_info_.HasOutput(target_logits_name) ||
-      !draft.session_info_.HasOutput(draft_logits_name))
-    return;
-  const auto target_logits_shape = target.session_info_.GetOutputShape(target_logits_name);
-  const auto draft_logits_shape = draft.session_info_.GetOutputShape(draft_logits_name);
-  if (target_logits_shape.empty() || draft_logits_shape.empty())
-    return;
-  int64_t target_vocab_size = target_logits_shape.back();
-  int64_t draft_vocab_size = draft_logits_shape.back();
-  if (target_vocab_size <= 0 || draft_vocab_size <= 0)
-    return;
+  const int64_t target_vocab_size = GetLogitsVocabSize(target, "Target");
+  const int64_t draft_vocab_size = GetLogitsVocabSize(draft, "Draft");
   if (target_vocab_size != draft_vocab_size)
     throw std::runtime_error(
         "Target and draft logit dimensions don't match. Target vocab: " +
@@ -94,18 +105,6 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "Speculative decoding does not support multimodal (vision/audio) models in this release; "
         "target and draft must be plain decoder-only LLMs.");
 
-  // The inner states are constructed directly as DecoderOnly_Model, which requires the modern
-  // separate key/value KV-cache format (past_key_names/past_value_names).
-  auto uses_combined_kv = [](const Config::Model::Decoder& d) {
-    return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
-  };
-  if (uses_combined_kv(config_->model.decoder) || uses_combined_kv(draft_config))
-    throw std::runtime_error(
-        "Speculative decoding requires decoder-only target and draft models that use the separate "
-        "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
-        "such as the original gpt2 graph (past_%d/present_%d) are not supported in this release.");
-
-  // Reject only windowed caches that discard KV history.
   if (UsesNonRewindableWindowedKeyValueCache(*this, config_->model.decoder) ||
       UsesNonRewindableWindowedKeyValueCache(*this, draft_config))
     throw std::runtime_error(
