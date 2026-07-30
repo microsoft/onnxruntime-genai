@@ -173,4 +173,8 @@
 + (void)shutdown {
   OgaShutdown();
 }
+
++ (void)setTelemetryEnabled:(BOOL)enabled {
+  OgaSetTelemetryEnabled(enabled);
+}
 @end

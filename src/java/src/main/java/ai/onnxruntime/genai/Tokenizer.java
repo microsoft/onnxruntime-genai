@@ -108,6 +108,62 @@ public class Tokenizer implements AutoCloseable {
   }
 
   /**
+   * Gets the BOT (beginning of tool call) token ID, or -1 if the model does not define one.
+   *
+   * @return The BOT token ID.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public int getBotTokenId() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerGetBotTokenId(nativeHandle);
+  }
+
+  /**
+   * Gets the EOT (end of tool call) token ID, or -1 if the model does not define one.
+   *
+   * @return The EOT token ID.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public int getEotTokenId() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerGetEotTokenId(nativeHandle);
+  }
+
+  /**
+   * Gets the BOR (beginning of reasoning) token ID, or -1 if the model does not define one.
+   *
+   * @return The BOR token ID.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public int getBorTokenId() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerGetBorTokenId(nativeHandle);
+  }
+
+  /**
+   * Gets the EOR (end of reasoning) token ID, or -1 if the model does not define one.
+   *
+   * @return The EOR token ID.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public int getEorTokenId() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerGetEorTokenId(nativeHandle);
+  }
+
+  /**
    * Gets the end of sentence token IDs.
    *
    * @return An array of EOS token IDs.
@@ -228,6 +284,14 @@ public class Tokenizer implements AutoCloseable {
   private native int tokenizerGetPadTokenId(long tokenizerHandle) throws GenAIException;
 
   private native int[] tokenizerGetEosTokenIds(long tokenizerHandle) throws GenAIException;
+
+  private native int tokenizerGetBotTokenId(long tokenizerHandle) throws GenAIException;
+
+  private native int tokenizerGetEotTokenId(long tokenizerHandle) throws GenAIException;
+
+  private native int tokenizerGetBorTokenId(long tokenizerHandle) throws GenAIException;
+
+  private native int tokenizerGetEorTokenId(long tokenizerHandle) throws GenAIException;
 
   private native int tokenizerToTokenId(long tokenizerHandle, String str) throws GenAIException;
 

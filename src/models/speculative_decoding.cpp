@@ -5,6 +5,7 @@
 #include "../softmax.h"
 #include "../speculative_sampling.h"
 #include "speculative_decoding.h"
+#include "kv_cache.h"
 #include "model_type.h"
 
 namespace Generators {
@@ -93,7 +94,7 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "target and draft must be plain decoder-only LLMs.");
 
   // The inner states are constructed directly as DecoderOnly_Model, which requires the modern
-  // separate key/value KV-cache format (past_key_names/past_value_names). 
+  // separate key/value KV-cache format (past_key_names/past_value_names).
   auto uses_combined_kv = [](const Config::Model::Decoder& d) {
     return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
   };
@@ -103,15 +104,12 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
         "such as the original gpt2 graph (past_%d/present_%d) are not supported in this release.");
 
-  // Sliding-window and LFM2 caches discard old K/V by design, so RewindTo throws.
-  // Speculative decoding rewinds on every rejection, so reject these up front (checked on both target and draft).
-  auto uses_sliding_kv = [](const Config::Model::Decoder& d) {
-    return d.sliding_window.has_value() && d.sliding_window->slide_key_value_cache;
-  };
-  if (uses_sliding_kv(config_->model.decoder) || uses_sliding_kv(config_->model.draft))
+  // Reject only windowed caches that discard KV history.
+  if (UsesNonRewindableWindowedKeyValueCache(*this, config_->model.decoder) ||
+      UsesNonRewindableWindowedKeyValueCache(*this, config_->model.draft))
     throw std::runtime_error(
-        "Speculative decoding does not support sliding-window KV cache models in this release; "
-        "rewind is impossible once the window slides.");
+        "Speculative decoding does not support physically sliding KV caches in this release; "
+        "WindowedKeyValueCache cannot rewind after discarding KV history.");
   if (!config_->model.decoder.layer_types.empty() || !config_->model.draft.layer_types.empty())
     throw std::runtime_error(
         "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
@@ -147,6 +145,11 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
     throw std::runtime_error(
         "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
         std::to_string(params.search.num_beams) + ".");
+  if (params.search.no_repeat_ngram_size != 0)
+    throw std::runtime_error(
+        "Speculative decoding does not support no_repeat_ngram_size != 0 in this release. Got "
+        "no_repeat_ngram_size=" +
+        std::to_string(params.search.no_repeat_ngram_size) + ".");
 }
 
 // Run() - prefill path (called via Generator::AppendTokens -> ComputeLogits).
@@ -166,8 +169,8 @@ DeviceSpan<float> SpeculativeDecodingState::Run(int total_length,
 void SpeculativeDecodingState::RewindTo(size_t index) {
   target_state_->RewindTo(index);
   draft_state_->RewindTo(index);
-  // draft_pending_logits_ is stale after a rewind and must not seed the next proposal. 
-  // Invalidate it -> refresh it. Check draft_pending_valid_ and throws if it is 
+  // draft_pending_logits_ is stale after a rewind and must not seed the next proposal.
+  // Invalidate it -> refresh it. Check draft_pending_valid_ and throws if it is
   // ever consumed while stale.
   draft_pending_valid_ = false;
 }

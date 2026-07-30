@@ -11,7 +11,7 @@ namespace Generators::DMLExecutionProvider {
 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
-                                         const Config& /*config*/,
+                                         const Config& config,
                                          bool disable_graph_capture) {
 #if USE_DML
   if (!GetDmlInterface()) {
@@ -38,7 +38,11 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // Non-decoder sessions (vision, speech, embedding) have control-flow nodes
   // that are incompatible with graph capture, so the caller sets
   // disable_graph_capture=true for those sessions.
-  if (!disable_graph_capture) {
+  //
+  // Graph capture can also be opted out per model via the provider option
+  // "enable_graph_capture": "0" — captured-command-list replay computes wrong
+  // logits on some D3D12 devices (see IsGraphCaptureEnabled in config.cpp).
+  if (IsGraphCaptureEnabled(config.model.decoder.session_options) && !disable_graph_capture) {
     session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
   }
 

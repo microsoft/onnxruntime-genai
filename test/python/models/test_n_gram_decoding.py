@@ -96,7 +96,8 @@ def _build_self_speculative_model(source_dir, dest_dir):
 
     decoder = copy.deepcopy(config["model"]["decoder"])
     model_path = os.path.join(source_dir, decoder["filename"])
-    decoder["filename"] = os.path.relpath(model_path, os.fspath(dest_dir))
+    decoder["filename"] = os.path.basename(model_path)
+    os.link(model_path, dest_dir / decoder["filename"])
     config["model"]["type"] = "speculative"
     config["model"]["decoder"] = decoder
     config["model"]["draft"] = copy.deepcopy(decoder)

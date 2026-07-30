@@ -29,6 +29,7 @@ void RunStandardDecodingStep(Generator& g) {
   auto& search = g.search_->params_->search;
   g.search_->ApplyMinLength(search.min_length);
   g.search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  g.search_->ApplyNoRepeatNgram(search.no_repeat_ngram_size);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -64,8 +65,12 @@ void StandardDecodingStrategy::Step(Generator& g) {
   // IDs and KV cache by rewinding and re-appending the sequence.
   if (g.phi3_rope_threshold_ != 0 && g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(g.GetSequence(0).CopyDeviceToCpu());
-    g.RewindToLength(0);
-    g.AppendTokens(current_seq);
+    {
+      [[maybe_unused]] auto suppress_telemetry_append_tracking =
+          g.generation_telemetry_.SuppressAppendTracking();
+      g.RewindToLength(0);
+      g.AppendTokens(current_seq);
+    }
   }
   RunStandardDecodingStep(g);
 }

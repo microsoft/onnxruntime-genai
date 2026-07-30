@@ -53,7 +53,7 @@ jobs:
       architecture: 'arm64'
 
   - bash: |
-      set -e -x
+      set -euo pipefail
       brew update --quiet
       brew install --quiet cmake gradle ccache jq
       # Temurin is distributed as a Homebrew cask, not a formula.

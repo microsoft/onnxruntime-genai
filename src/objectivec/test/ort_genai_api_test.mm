@@ -21,6 +21,11 @@ NS_ASSUME_NONNULL_BEGIN
   self.continueAfterFailure = NO;
 }
 
+- (void)testTelemetryControl {
+  [OGAGenerator setTelemetryEnabled:NO];
+  [OGAGenerator setTelemetryEnabled:YES];
+}
+
 + (void)tearDown {
   [OGAGenerator shutdown];
 }
@@ -40,7 +45,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(config, error);
 
@@ -78,7 +83,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(model, error);
 

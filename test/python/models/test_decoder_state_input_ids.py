@@ -24,9 +24,8 @@ import os
 from pathlib import Path
 
 import numpy as np
-import pytest
-
 import onnxruntime_genai as og
+import pytest
 
 
 def _run_text_generation(model_path: str) -> None:

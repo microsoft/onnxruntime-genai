@@ -453,6 +453,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return ToPython(t.GetEosTokenIds());
       })
       .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
+      .def_property_readonly("bot_token_id", &OgaTokenizer::GetBotTokenId)
+      .def_property_readonly("eot_token_id", &OgaTokenizer::GetEotTokenId)
+      .def_property_readonly("bor_token_id", &OgaTokenizer::GetBorTokenId)
+      .def_property_readonly("eor_token_id", &OgaTokenizer::GetEorTokenId)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;
@@ -748,10 +752,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
+  m.def("enable_telemetry_events", []() { OgaSetTelemetryEnabled(true); }, "Enable non-essential ONNX Runtime GenAI telemetry events.");
+  m.def("disable_telemetry_events", []() { OgaSetTelemetryEnabled(false); }, "Disable non-essential ONNX Runtime GenAI telemetry events.");
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
-  m.def("is_rocm_available", []() { return USE_ROCM != 0; });
   m.def("is_webgpu_available", []() { return true; });
   m.def("is_qnn_available", []() { return true; });
   m.def("is_openvino_available", []() { return true; });

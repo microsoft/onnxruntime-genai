@@ -1,9 +1,32 @@
 #include "sequences.h"
 #include <random>
+#include <stdexcept>
 #include "beam_search_scorer.h"
 #pragma once
 
 namespace Generators {
+
+template <typename T, typename Score>
+int32_t ArgMax(std::span<const T> values, Score score) {
+  if (values.empty())
+    throw std::runtime_error("ArgMax requires non-empty values");
+
+  int32_t best_index = 0;
+  auto best_score = score(values[0], size_t{0});
+  for (size_t i = 1; i < values.size(); ++i) {
+    auto current_score = score(values[i], i);
+    if (current_score > best_score) {
+      best_score = current_score;
+      best_index = static_cast<int32_t>(i);
+    }
+  }
+  return best_index;
+}
+
+template <typename T>
+int32_t ArgMax(std::span<const T> values) {
+  return ArgMax(values, [](T value, size_t) { return value; });
+}
 
 struct Search : LeakChecked<Search> {
   Search(const GeneratorParams& params) : params_{params.shared_from_this()}, sequences_{*params_} {}
@@ -32,6 +55,13 @@ struct Search : LeakChecked<Search> {
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
+  // This is inline because the standalone CUDA shared library does not compile search.cpp.
+  virtual void ApplyNoRepeatNgram(int ngram_size) {
+    if (ngram_size <= 0)
+      return;
+
+    throw std::runtime_error("no_repeat_ngram_size is only supported for CPU search");
+  }
 
   // Note: unlike CommitToken (commits an already-selected generated token and applies EOS, padding,
   // and max-length handling), AppendTokens ingests prompt/continuation tokens. It
@@ -56,6 +86,7 @@ struct Search_Cpu : Search {
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
+  void ApplyNoRepeatNgram(int ngram_size) override;
 
   std::span<float> GetScores(int batch_beam_index);
 
@@ -103,7 +134,6 @@ struct GreedySearch_Cpu : Search_Cpu {
   std::span<bool> eos_seen_;  // shape (batch_size)
   std::unique_ptr<bool[]> eos_seen_buffer_;
   int not_done_count_{params_->search.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
-
 };
 
 struct BeamSearch_Cpu : Search_Cpu {

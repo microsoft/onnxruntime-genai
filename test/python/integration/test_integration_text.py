@@ -73,8 +73,7 @@ def test_generates_text(device, model, model_path):
         pytest.skip(f"Execution provider '{device}' is not available in this build.")
     if (sys.platform, device, model) in _VRAM_CONSTRAINED_SKIPS:
         pytest.skip(
-            f"Model '{model}' on device '{device}' ({sys.platform}) "
-            "is skipped pending more VRAM on the test agent."
+            f"Model '{model}' on device '{device}' ({sys.platform}) is skipped pending more VRAM on the test agent."
         )
 
     config = og.Config(str(model_path))
@@ -96,7 +95,7 @@ def test_generates_text(device, model, model_path):
     while not generator.is_done():
         generator.generate_next_token()
 
-    new_tokens = generator.get_sequence(0)[len(input_tokens):]
+    new_tokens = generator.get_sequence(0)[len(input_tokens) :]
     assert len(new_tokens) > 0, "generator produced no new tokens"
     assert len(new_tokens) <= _MAX_NEW_TOKENS
 
@@ -105,7 +104,6 @@ def test_generates_text(device, model, model_path):
 
     if _EXPECTED_SUBSTRING not in text.lower():
         warnings.warn(
-            f"[{model}/{device}] expected '{_EXPECTED_SUBSTRING}' in completion of "
-            f"{_PROMPT!r}; got {text!r}",
+            f"[{model}/{device}] expected '{_EXPECTED_SUBSTRING}' in completion of {_PROMPT!r}; got {text!r}",
             stacklevel=2,
         )
