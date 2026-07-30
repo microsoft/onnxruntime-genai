@@ -19,6 +19,9 @@ env:
 
 jobs:
   linux-cuda-x64-build:
+    permissions:
+      contents: read
+      packages: write # needed for GHCR push
     env:
       PYTHON_EXECUTABLE: "/opt/python/cp312-cp312/bin/python3.12"
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
@@ -27,8 +30,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: true
-# We are using the same manylinux repo as the one used in the packaging build
-      - name: Checkout ManyLinux repo
+      - name: Checkout ManyLinux repo  # We are using the same manylinux repo as the one used in the packaging build
         uses: actions/checkout@v5
         with:
           repository: pypa/manylinux
@@ -102,12 +104,13 @@ jobs:
       - name: Get Docker Image
         run: |
           set -e -x
-          az login --identity --object-id b44538a9-6545-4353-907e-da46df88a2ab
+          az login --identity --object-id 161bbca8-9899-4f61-950c-4d556fbcf830
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          docker login --username "$GITHUB_ACTOR" --password '${{ secrets.GITHUB_TOKEN }}' ghcr.io
+
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.8  \
             --context tools/ci_build/github/linux/docker/manylinux  \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-            --container-registry onnxruntimebuildcache \
             --manylinux-src manylinux \
             --multiple_repos \
             --repository onnxruntimecudabuildx64
@@ -180,7 +183,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
-              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
+              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
       # TODO: Enable this by adding dotnet to the docker image
       # - name: Build the C# API and Run the C# Tests

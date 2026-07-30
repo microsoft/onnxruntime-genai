@@ -1,7 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
+#include "filesystem.h"
+#include "provider_options.h"
+
+#include <functional>
 
 namespace Generators {
 
@@ -67,6 +72,7 @@ struct Config {
     static constexpr std::string_view CacheLastChannelName = "cache_last_channel";
     static constexpr std::string_view CacheLastTimeName = "cache_last_time";
     static constexpr std::string_view CacheLastChannelLenName = "cache_last_channel_len";
+    static constexpr std::string_view LangIdName = "lang_id";
     static constexpr std::string_view EncoderOutputLengthsName = "encoded_lengths";
     static constexpr std::string_view CacheLastChannelNextName = "cache_last_channel_next";
     static constexpr std::string_view CacheLastTimeNextName = "cache_last_time_next";
@@ -80,22 +86,33 @@ struct Config {
     static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
     static constexpr std::string_view JoinerLogitsName = "outputs";
+
+    // Tool-calling and reasoning token ID config field names.
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    static constexpr std::string_view BotTokenIdName = "bot_token_id";
+    static constexpr std::string_view EotTokenIdName = "eot_token_id";
+    static constexpr std::string_view BorTokenIdName = "bor_token_id";
+    static constexpr std::string_view EorTokenIdName = "eor_token_id";
   };
 
-  fs::path config_path;  // Path of the config directory
+  fs::path config_path;   // Path of the config directory
+  fs::path package_root;  // Package root if loaded from a model package, otherwise empty.
 
-  using NamedString = std::pair<std::string, std::string>;
-  struct DeviceFilteringOptions {
-    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
-  };
+  // When loaded from a model package, resolves path-shaped genai_config.json values through
+  // ORT's package resolver: a "sha256:<hex>[/tail]" content-addressed shared-asset reference
+  // (honoring manifest overrides) or a plain relative path against base_dir. Empty for flat
+  // model directories. Captures the OrtModelPackageContext to keep it alive for resolution.
+  std::function<fs::path(const fs::path& base_dir, std::string_view value)> package_resolver;
 
-  struct ProviderOptions {
-    std::string name;
-    std::vector<NamedString> options;
-    std::optional<DeviceFilteringOptions> device_filtering_options;
-  };
+  // Resolves a path-like string from genai_config.json. Empty -> config_path. When loaded
+  // from a package, delegates to package_resolver (sha256: shared assets, relative paths);
+  // otherwise the value is joined with config_path.
+  fs::path ResolvePath(std::string_view value) const;
+
+  using NamedString = Generators::NamedString;
+  using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
+  using ProviderOptions = Generators::ProviderOptions;
 
   struct SessionOptions {
     std::optional<int> intra_op_num_threads;
@@ -122,6 +139,8 @@ struct Config {
   struct Model {
     std::string type;
 
+    std::string tokenizer_dir;  // Directory containing tokenizer files. Empty means alongside genai_config.json. Resolved via Config::ResolvePath.
+
     int pad_token_id{};             // The id of the padding token.
     std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
     int bos_token_id{};             // The id of the beginning-of-stream token.
@@ -135,6 +154,15 @@ struct Config {
     int video_token_id{};
     int vision_start_token_id{};
 
+    // Tool-calling and reasoning token IDs.
+    // Follows the bos/eos/pad naming convention:
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    std::optional<int> bot_token_id;
+    std::optional<int> eot_token_id;
+    std::optional<int> bor_token_id;
+    std::optional<int> eor_token_id;
+
     int vocab_size{};
     int context_length{};
 
@@ -145,6 +173,7 @@ struct Config {
     int win_length{};
     float preemph{};
     float log_eps{};
+    float norm_eps{};
     int subsampling_factor{};
     int left_context{};
     int conv_context{};
@@ -153,6 +182,11 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Parakeet TDT (Token-and-Duration Transducer) parameters
+    int left_context_samples{};
+    int right_context_samples{};
+    std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
     struct Encoder {
       std::string filename;
@@ -176,6 +210,7 @@ struct Config {
         std::string cache_last_channel{Defaults::CacheLastChannelName};
         std::string cache_last_time{Defaults::CacheLastTimeName};
         std::string cache_last_channel_len{Defaults::CacheLastChannelLenName};
+        std::string lang_id{Defaults::LangIdName};
       } inputs;
 
       struct Outputs {
@@ -203,6 +238,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
       } outputs;
     } embedding;
 
@@ -218,10 +254,11 @@ struct Config {
       // and these values are unused.
       int spatial_merge_size{2};
       float tokens_per_second{2.0f};
-      int patch_size{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
-      int window_size{0};  // Used by CalculateWindowIndex() in QNN pipeline only.
-                           // 0 = auto-compute as patch_size * spatial_merge_size * 2
-                           // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+      int num_visual_tokens{0};  // Fixed visual tokens per image; must be > 0 for videochat_flash_qwen
+      int patch_size{14};        // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+      int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
+                                 // 0 = auto-compute as patch_size * spatial_merge_size * 2
+                                 // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -346,6 +383,12 @@ struct Config {
         std::string targets;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Gemma4 per-layer inputs (e.g. per-layer embeddings from embedding model)
+        std::string per_layer_inputs;
+
+        // Parakeet TDT decoder (prediction network) extra inputs
+        std::string targets_length;
       } inputs;
 
       struct Outputs {
@@ -361,6 +404,9 @@ struct Config {
         std::string outputs;
         std::string lstm_hidden_state;
         std::string lstm_cell_state;
+
+        // Parakeet TDT decoder (prediction network) extra outputs
+        std::string outputs_length;
       } outputs;
 
       struct PipelineModel {
@@ -399,7 +445,7 @@ struct Config {
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
     bool early_stopping{true};         // Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
-    int no_repeat_ngram_size{};        // Unused param
+    int no_repeat_ngram_size{};        // If > 0, no n-gram of this size may repeat in the generated sequence. 0 disables.
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
@@ -437,6 +483,11 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+int SafeDoubleToInt(double x, std::string_view name);
+
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
+std::string_view NormalizeProviderName(std::string_view name);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 

@@ -1,15 +1,33 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "../generators.h"
 #include "model.h"
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../config_utils.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include <algorithm>
+#include <type_traits>
 
 namespace Generators {
+
+namespace {
+// KV cache tensors are copied/reordered as fixed-width elements. FLOAT8E4M3FN shares the
+// 1-byte width of uint8_t and is moved as raw bytes, but WrapTensor<uint8_t> asserts on the
+// tensor's element type, so wrap float8 tensors via ByteWrapTensor instead.
+template <typename T>
+DeviceSpan<T> WrapKvCacheTensor(DeviceInterface& device, OrtValue& value, ONNXTensorElementDataType type) {
+  if constexpr (std::is_same_v<T, uint8_t>) {
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+      return ByteWrapTensor(device, value);
+    }
+  }
+  return WrapTensor<T>(device, value);
+}
+}  // namespace
 
 CombinedKeyValueCache::CombinedKeyValueCache(State& state)
     : state_{state},
@@ -82,6 +100,10 @@ void CombinedKeyValueCache::RewindTo(size_t index) {
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    RewindPastTensorsTo<int8_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    RewindPastTensorsTo<uint8_t>(index);
   } else {
     RewindPastTensorsTo<Ort::Float16_t>(index);
   }
@@ -100,8 +122,8 @@ void CombinedKeyValueCache::RewindPastTensorsTo(size_t index) {
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
     std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-    auto present_span = WrapTensor<T>(Device(), present);
-    auto past_span = WrapTensor<T>(Device(), *past);
+    auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
+    auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
 
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
       auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -121,10 +143,10 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
   auto past_key_size = shape_[1] * block_size_per_beam;
 
   OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past);
-  auto present_span = WrapTensor<ScoreType>(Device(), present);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -143,12 +165,45 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
 void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    PickPastState<int8_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    PickPastState<uint8_t>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }
 }
 
 namespace {
+
+// Compute the compressed KV cache head dimension for quantized KV caches.
+// The quantizer packs each head into (1 + head_size / indices_per_word) u32 words: one fp32 scale followed by
+// head_size values quantized to 4 or 8 bits (4-bit: 8 values/u32, 8-bit: 4 values/u32).
+// The tensor dimension depends on the element type.
+// If kv_cache_quantization_bits is enabled with an invalid head_size (< 8 or non-power-of-2),
+// this throws instead of silently falling back.
+//
+// NOTE: this is the allocator side of a contract that ONNX shape inference cannot express
+// (it still reports the uncompressed head_size). The same formula lives in the WebGPU kernel
+// at onnxruntime/contrib_ops/webgpu/bert/turbo_quant_hadamard.h (see the "present-KV allocator
+// contract" comment) and must be kept in sync; the kernel validates the resulting buffer size
+// at runtime and fails with INVALID_ARGUMENT on a mismatch.
+int64_t ComputeQuantizedKvCacheHeadSize(int head_size, int kv_cache_quantization_bits, ONNXTensorElementDataType type) {
+  if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+    const bool is_power_of_two = head_size > 0 && (head_size & (head_size - 1)) == 0;
+    if (head_size < 8 || !is_power_of_two) {
+      throw std::runtime_error(
+          "KV cache quantization requires head_size to be a power of 2 and >= 8, but got head_size=" +
+          std::to_string(head_size) + ".");
+    }
+    // 4-bit packs 8 indices per u32; 8-bit packs 4 indices per u32. One extra u32 holds the scale.
+    const int indices_per_word = (kv_cache_quantization_bits == 8) ? 4 : 8;
+    const int compressed_u32_words = head_size / indices_per_word + 1;
+    const int bytes_per_element = static_cast<int>(Ort::SizeOf(type));
+    return static_cast<int64_t>(compressed_u32_words * (4 / bytes_per_element));  // 4 bytes per u32
+  }
+  return head_size;
+}
 
 // Auto-detect a fixed kv-cache shape from the model's past_key input shapes,
 // and, when detected, apply the implied configuration:
@@ -180,7 +235,8 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                                        const std::vector<std::string>& input_name_strings,
                                        int layer_count,
                                        const Config::Search& search,
-                                       bool& past_present_share_buffer) {
+                                       bool& past_present_share_buffer,
+                                       const char* cache_name) {
   if (layer_count <= 0) return 0;
 
   // input_name_strings stores [past_key.0, past_value.0, past_key.1, past_value.1, ...].
@@ -205,7 +261,7 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
   }
   past_present_share_buffer = true;
   if (g_log.enabled) {
-    Log("info", "DefaultKeyValueCache: auto-detected fixed kv-cache seq_len=" +
+    Log("info", std::string(cache_name) + ": auto-detected fixed kv-cache seq_len=" +
                     std::to_string(common_seq_len) +
                     "; allocating shared past/present buffer to that size.");
   }
@@ -226,7 +282,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0,
+             model_.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
@@ -279,27 +336,59 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+
+  // Detect KV cache quantization configuration from the active provider's options.
+  const int kv_cache_quantization_bits = GetKvCacheQuantizationBits(model_.config_->model.decoder.session_options,
+                                                                    to_string(model_.p_device_->GetType()));
+
+  // When KV cache quantization is enabled, compute the compressed KV cache head dimension.
+  if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+    shape_[3] = ComputeQuantizedKvCacheHeadSize(model_.config_->model.decoder.head_size, kv_cache_quantization_bits, type_);
+    if (g_log.enabled) {
+      Log("info", "DefaultKeyValueCache: KV cache quantization " + std::to_string(kv_cache_quantization_bits) +
+                      "-bit enabled, compressed kv_cache head_size=" + std::to_string(shape_[3]));
+    }
+  }
+
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  // Auto-detect per-layer head_dim from ONNX session input shapes.
-  // Models like Gemma 4 have dual head_dim: sliding-window layers use head_dim=256,
-  // full-attention layers use global_head_dim=512.
+  // Auto-detect per-layer KV cache shape from ONNX session input shapes.
+  // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
+  // (e.g. num_kv_heads=8, head_dim=256) while global/full-attention layers are MQA
+  // (num_kv_heads=1, head_dim=512). Both the KV-head count and the head_dim can vary
+  // per layer, so detect and store both. (Previously only head_dim was handled, which
+  // left global layers with the uniform num_kv_heads and broke prefill binding, e.g.
+  // "past_key_values.5.key index 1 Got 8 Expected 1".)
+  // When KV cache quantization is active, the ONNX model reports uncompressed head dimensions;
+  // we must apply compression before comparing/storing.
   {
-    bool has_varying_head_dim = false;
-    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[3]);
+    // Past KV inputs are [batch, num_kv_heads, seq, head_dim].
+    constexpr size_t kKvHeadsAxis = 1;
+    constexpr size_t kHeadDimAxis = 3;
+    std::vector<int64_t> per_layer_kv_heads(layer_count_, shape_[kKvHeadsAxis]);
+    std::vector<int64_t> per_layer_head_dim(layer_count_, shape_[kHeadDimAxis]);
+    // num_kv_heads and head_dim are static per-layer model properties known ahead of
+    // time, and shape_ already holds the config defaults (decoder.num_key_value_heads /
+    // .head_size), so a single flag suffices: set it if any layer's KV shape differs from
+    // those defaults. (The > 0 checks ignore any non-concrete dim, leaving that layer at
+    // the config default.)
+    bool has_per_layer_variation = false;
     for (int i = 0; i < layer_count_; ++i) {
-      auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
-      if (!input_shape.empty()) {
-        int64_t layer_head_dim = input_shape.back();
-        if (layer_head_dim > 0 && layer_head_dim != shape_[3]) {
-          has_varying_head_dim = true;
+      const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i * 2]);
+      if (input_shape.size() == 4) {
+        if (input_shape[kKvHeadsAxis] > 0) per_layer_kv_heads[i] = input_shape[kKvHeadsAxis];
+        if (input_shape[kHeadDimAxis] > 0) {
+          // The ONNX model reports uncompressed head dimensions; when KV cache quantization
+          // is active apply compression before comparing/storing (no-op when disabled).
+          per_layer_head_dim[i] =
+              ComputeQuantizedKvCacheHeadSize(static_cast<int>(input_shape[kHeadDimAxis]), kv_cache_quantization_bits, type_);
         }
-        if (layer_head_dim > 0) {
-          per_layer_head_dim[i] = layer_head_dim;
-        }
+        if (per_layer_kv_heads[i] != shape_[kKvHeadsAxis] ||
+            per_layer_head_dim[i] != shape_[kHeadDimAxis])
+          has_per_layer_variation = true;
       }
     }
-    if (has_varying_head_dim) {
+    if (has_per_layer_variation) {
       if (layer_shapes_.empty()) {
         layer_shapes_.resize(layer_count_);
         for (int i = 0; i < layer_count_; ++i) {
@@ -307,14 +396,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         }
       }
       for (int i = 0; i < layer_count_; ++i) {
-        layer_shapes_[i][3] = per_layer_head_dim[i];
+        layer_shapes_[i][kKvHeadsAxis] = per_layer_kv_heads[i];
+        layer_shapes_[i][kHeadDimAxis] = per_layer_head_dim[i];
       }
       if (g_log.enabled) {
-        Log("info", "DefaultKeyValueCache: Detected per-layer head_dim variation across " +
-                        std::to_string(layer_count_) + " KV cache layers");
+        Log("info",
+            "DefaultKeyValueCache: Detected per-layer KV shape variation "
+            "(num_kv_heads/head_dim) across " +
+                std::to_string(layer_count_) + " KV cache layers");
       }
 
-      // Create per-layer empty past tensors since head_dim varies across layers
+      // Create per-layer empty past tensors since the KV shape varies across layers
       empty_pasts_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
         std::array<int64_t, 4> empty_shape = layer_shapes_[i];
@@ -326,7 +418,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
       model_.session_info_, input_name_strings_, layer_count_,
-      state_.params_->search, past_present_share_buffer_);
+      state_.params_->search, past_present_share_buffer_, "DefaultKeyValueCache");
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
@@ -402,6 +494,17 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         // Per-layer allocation: use layer-specific shape
         // i/2 gives us the layer index since we have 2 tensors per layer
         tensor_shape = layer_shapes_[i / 2];
+      }
+
+      // Non-share-buffer caches start with a zero-length sequence dim; these
+      // tensors are placeholders (Update() reallocates presents_ at the real
+      // total_length before every Run), but the DML allocator rejects
+      // zero-sized buffers. Clamp the placeholder to one position so DML
+      // decoder sessions without past_present_share_buffer can be created.
+      // DML-only: on other EPs a zero-sized buffer needs no allocation, so
+      // clamping there would only add startup memory overhead.
+      if (Device().GetType() == DeviceType::DML) {
+        tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
       }
 
       presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
@@ -507,6 +610,10 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    RewindPastTensorsTo<int8_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    RewindPastTensorsTo<uint8_t>(index);
   } else {
     RewindPastTensorsTo<Ort::Float16_t>(index);
   }
@@ -544,8 +651,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -569,8 +676,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       OrtValue& present = *presents_[i];
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -601,10 +708,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), tensor_shape, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
-  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past_value, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present_value, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -619,6 +726,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    PickPastState<int8_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    PickPastState<uint8_t>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }
@@ -723,10 +834,43 @@ LFM2Cache::LFM2Cache(State& state)
     }
 
     kv_type_ = model_.session_info_.GetInputDataType(kv_input_name_strings_[0]);
-    kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
 
-    for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-      kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+    // Shared KV cache: same policy as DefaultKeyValueCache. Start from the genai
+    // search option, then let DetectAndConfigureFixedKvShape force share-buffer when
+    // the ONNX graph fixes the kv seq_len. The buffer is sized to that fixed dim when
+    // present, otherwise to search.max_length for symbolic graphs.
+    kv_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+    const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
+        model_.session_info_, kv_input_name_strings_, kv_layer_count_,
+        state_.params_->search, kv_share_buffer_, "LFM2Cache");
+    if (g_log.enabled && g_log.warning && state_.params_->search.past_present_share_buffer && !kv_share_buffer_) {
+      Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
+    } else if (g_log.enabled && !state_.params_->search.past_present_share_buffer && kv_share_buffer_) {
+      Log("info", "LFM2Cache: past_present_share_buffer was forced on due to a fixed kv-cache shape in the model graph.");
+    }
+
+    if (kv_share_buffer_) {
+      const int64_t seq_cap = fixed_kv_seq_len > 0
+                                  ? fixed_kv_seq_len
+                                  : static_cast<int64_t>(state_.params_->search.max_length);
+      if (seq_cap <= 0) {
+        throw std::runtime_error(
+            "LFM2Cache: past_present_share_buffer requires a fixed kv seq_len in the "
+            "model or search.max_length > 0 (set max_length or model.context_length "
+            "in genai_config.json).");
+      }
+      kv_shape_[2] = seq_cap;
+      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+        if (Device().GetType() != DeviceType::WEBGPU) {
+          ByteWrapTensor(Device(), *kv_presents_.back()).Zero();
+        }
+      }
+    } else {
+      kv_empty_past_ = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+      for (int i = 0; i < kv_layer_count_ * 2; ++i) {
+        kv_presents_.push_back(OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_));
+      }
     }
   }
 
@@ -765,10 +909,11 @@ LFM2Cache::LFM2Cache(State& state)
 }
 
 void LFM2Cache::Add() {
-  // Add KV cache inputs/outputs
+  // Add KV cache inputs/outputs. In shared-buffer mode past == present (same fixed
+  // buffer), so the input is bound to the present tensor and never changes.
   kv_input_index_ = state_.inputs_.size();
   for (int i = 0; i < kv_layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(kv_empty_past_.get());
+    state_.inputs_.push_back(kv_share_buffer_ ? kv_presents_[i].get() : kv_empty_past_.get());
     state_.input_names_.push_back(kv_input_name_strings_[i].c_str());
   }
   kv_output_index_ = state_.outputs_.size();
@@ -792,23 +937,28 @@ void LFM2Cache::Add() {
 
 void LFM2Cache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // --- Update KV cache (attention layers) ---
-  if (!kv_is_first_update_) {
-    for (int i = 0; i < kv_layer_count_ * 2; i++) {
-      if (beam_indices.empty()) {
-        kv_pasts_[i] = std::move(kv_presents_[i]);
-      } else {
-        PickPastState(beam_indices, i);
+  // In shared-buffer mode the past/present KV buffers are fixed and reused in place
+  // (the session writes new tokens into the same buffer), so there is nothing to
+  // grow or swap here. Only the dynamic/growing path needs updating.
+  if (!kv_share_buffer_) {
+    if (!kv_is_first_update_) {
+      for (int i = 0; i < kv_layer_count_ * 2; i++) {
+        if (beam_indices.empty()) {
+          kv_pasts_[i] = std::move(kv_presents_[i]);
+        } else {
+          PickPastState(beam_indices, i);
+        }
+        state_.inputs_[kv_input_index_ + i] = kv_pasts_[i].get();
       }
-      state_.inputs_[kv_input_index_ + i] = kv_pasts_[i].get();
     }
-  }
 
-  kv_shape_[2] = total_length;
-  for (int i = 0; i < kv_layer_count_ * 2; i++) {
-    kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
-    state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+    kv_shape_[2] = total_length;
+    for (int i = 0; i < kv_layer_count_ * 2; i++) {
+      kv_presents_[i] = OrtValue::CreateTensor(Allocator(), kv_shape_, kv_type_);
+      state_.outputs_[kv_output_index_ + i] = kv_presents_[i].get();
+    }
+    kv_is_first_update_ = false;
   }
-  kv_is_first_update_ = false;
 
   // --- Update conv state cache ---
   if (!conv_is_first_update_) {

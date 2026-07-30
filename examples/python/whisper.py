@@ -12,7 +12,7 @@ import onnxruntime_genai as og
 
 
 def _complete(text, state):
-    return (glob.glob(text + "*") + [None])[state]
+    return ([*glob.glob(text + "*"), None])[state]
 
 
 class Format:

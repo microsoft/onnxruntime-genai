@@ -108,10 +108,16 @@ jobs:
       - name: Build the C Examples
         run: |
           set -e -x
+          ORT_EXAMPLE_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native
+          if [ -f "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" ] && [ ! -e "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" ]; then
+            ln -s libonnxruntime.so "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" || \
+            cp "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1"
+          fi
+
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
             -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
-            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DORT_LIB_DIR=$ORT_EXAMPLE_LIB_DIR \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
             -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
           cmake --build examples/c/build --config Release
@@ -136,7 +142,7 @@ jobs:
       - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
-          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e
 
       - name: Build the C# API and Run the C# Tests
         run: |
@@ -155,8 +161,8 @@ jobs:
       - name: Test the C# LLM Example with Tool Calling
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
-          python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
-          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+          python3 test/python/special_tokens.py -p test/models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Run Q&A Example
         run: |

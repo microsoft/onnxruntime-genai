@@ -2,6 +2,7 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
+# Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
 import json
 import os
@@ -37,10 +38,10 @@ class LFM2Model(Model):
         self.conv_L_cache = config.conv_L_cache
         self.kv_layer_indices = [i for i, t in enumerate(self.layer_types) if t == "full_attention"]
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
     def make_inputs_and_outputs(self):
         # Replace the base class's all-layer KV lists with attention-layer-only lists,
@@ -274,9 +275,6 @@ class LFM2Model(Model):
         decoder["conv_cache_size"] = self.conv_L_cache
         decoder["inputs"]["past_conv_names"] = "past_conv.%d"
         decoder["outputs"]["present_conv_names"] = "present_conv.%d"
-
-        # Hybrid models don't support shared past/present buffer
-        genai_config["search"]["past_present_share_buffer"] = False
 
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)

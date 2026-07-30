@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import argparse
+import importlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -39,7 +40,8 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         # If use_winml is true, all winml execution providers will be queried and registered.
         # Please refer to https://pypi.org/project/windowsml/
         try:
-            import winml
+            winml = importlib.import_module("winml")
+
             for ep_name in winml.register_execution_providers():
                 print(f"Registered WinML execution provider: {ep_name}")
         except Exception as e:
@@ -50,13 +52,21 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         print(f"Registered {ep} from {ep_path} successfully!")
 
 
-def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_options: dict[str, int] = {}) -> og.Config:
+def get_config(
+    path: str,
+    ep: str,
+    ep_path: str | None,
+    ep_options: dict[str, str] | None = None,
+    search_options: dict[str, int] | None = None,
+) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it
 
     Args:
         path (str): Path to model folder containing GenAI config
         ep (str): Name of execution provider to set
+        ep_path (str | None): Path to an external execution provider library. If set, the
+            registered library is used and providers from the GenAI config are preserved.
         ep_options (dict[str, str]): Map of EP-specific option names and their values
         search_options (dict[str, int]): Map of search-specific option names and their values
     Returns:
@@ -65,8 +75,12 @@ def get_config(path: str, ep: str, ep_options: dict[str, str] = {}, search_optio
     # Create config with EP
     # - If follow_config, then use the default EP stored inside the GenAI config.
     # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
+    if search_options is None:
+        search_options = {}
+    if ep_options is None:
+        ep_options = {}
     config = og.Config(path)
-    if ep != "follow_config":
+    if not ep_path and ep != "follow_config":
         config.clear_providers()
         if ep != "cpu":
             print(f"Setting model to {ep}")
@@ -304,7 +318,7 @@ class ToolSchema:
     type: str
     properties: dict[str, Any]
     required: list[str]
-    additionalProperties: bool
+    additionalProperties: bool  # noqa: N815
 
 
 @dataclass
@@ -316,7 +330,7 @@ class JsonSchema:
     x_guidance: dict[str, Any]
     type: str
     items: dict[str, list[ToolSchema]]
-    minItems: int
+    minItems: int  # noqa: N815
 
 
 @dataclass
@@ -464,7 +478,7 @@ def get_guidance(
     response_format: str = "",
     filepath: str = "",
     tools_str: str = "",
-    tools: list[dict[str, Any] | Tool] = [],
+    tools: list[dict[str, Any] | Tool] | None = None,
     text_output: bool = True,
     tool_output: bool = False,
     tool_call_start: str = "",
@@ -485,6 +499,8 @@ def get_guidance(
     Returns:
         (str, str, str): (grammar type, grammar data, tools) as a tuple of strings
     """
+    if tools is None:
+        tools = []
     guidance_type, guidance_data = "", ""
 
     # Get list of tools from a range of sources (filepath, JSON-serialized string, in-memory)
@@ -499,10 +515,12 @@ def get_guidance(
             try:
                 tool_defs = json.loads(tools_str)
                 tools = to_tool(tool_defs)
-            except json.JSONDecodeError:
-                raise ValueError("Invalid JSON format for tools list. Format must be a JSON-serialized string.")
+            except json.JSONDecodeError as err:
+                raise ValueError(
+                    "Invalid JSON format for tools list. Format must be a JSON-serialized string."
+                ) from err
         elif len(tools) > 0:
-            if type(tools[0]) != Tool:
+            if not isinstance(tools[0], Tool):
                 tools = to_tool(tools)
         else:
             raise ValueError(
@@ -553,15 +571,15 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
     # is registered with ONNX Runtime. It must match the name ONNX Runtime is expecting,
     # not the genai canonical ep name.
     all_eps = [
-        "follow_config",                   # Follow whatever EP is specified in the GenAI config
-        "cpu",                             # CPU EP
-        "cuda",                            # GenAI canonical name for CUDA EP
-        "CUDAExecutionProvider",           # CUDA EP
+        "follow_config",  # Follow whatever EP is specified in the GenAI config
+        "cpu",  # CPU EP
+        "cuda",  # GenAI canonical name for CUDA EP
+        "CUDAExecutionProvider",  # CUDA EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
-        "OpenVINOExecutionProvider",       # Intel IHV EP
-        "QNNExecutionProvider",            # Qualcomm IHV EP
-        "VitisAIExecutionProvider",        # AMD IHV EP
-        "WebGpuExecutionProvider",         # WebGPU EP
+        "OpenVINOExecutionProvider",  # Intel IHV EP
+        "QNNExecutionProvider",  # Qualcomm IHV EP
+        "VitisAIExecutionProvider",  # AMD IHV EP
+        "WebGpuExecutionProvider",  # WebGPU EP
     ]
 
     ep_group = parser.add_argument_group("Execution Providers")
@@ -652,7 +670,7 @@ def get_guidance_args(parser: argparse.ArgumentParser) -> None:
         "--tools_file",
         type=str,
         default="",
-        help="Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json",
+        help="Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json",
     )
     guidance.add_argument(
         "-text", "--text_output", action="store_true", default=False, help="Produce a text response in the output"

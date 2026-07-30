@@ -1,0 +1,92 @@
+parameters:
+- name: os
+  type: string
+  values: [windows, linux, macos]
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: ort_version
+  type: string
+- name: ort_home
+  type: string
+
+steps:
+- ${{ if eq(parameters.os, 'windows') }}:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      if ('${{ parameters.ep }}' -eq 'cuda' -and '${{ parameters.arch }}' -ne 'arm64') {
+        $pkgName = 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
+        $hdrSrc = 'buildTransitive/native/include'
+      } else {
+        $pkgName = 'Microsoft.ML.OnnxRuntime'
+        $hdrSrc = 'build/native/include'
+      }
+      $url = "$(lotusOrtContentBase)/$pkgName/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+      Write-Host "Downloading $pkgName ${{ parameters.ort_version }} from Lotus"
+      $zip = "$(Agent.TempDirectory)/ort.zip"
+      $extracted = "$(Agent.TempDirectory)/ort_extracted"
+      Remove-Item -Recurse -Force $extracted -ErrorAction SilentlyContinue
+      Invoke-WebRequest -Uri $url -OutFile $zip -ErrorAction Stop `
+        -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+      Expand-Archive -Path $zip -DestinationPath $extracted -Force
+      New-Item -ItemType Directory -Force -Path "${{ parameters.ort_home }}/include","${{ parameters.ort_home }}/lib" | Out-Null
+      $platform = 'win-${{ parameters.arch }}'
+      Copy-Item "$extracted/$hdrSrc/*" "${{ parameters.ort_home }}/include/" -Recurse -Force
+      Copy-Item "$extracted/runtimes/$platform/native/*" "${{ parameters.ort_home }}/lib/" -Recurse -Force
+      Write-Host 'ORT layout:'; Get-ChildItem '${{ parameters.ort_home }}' -Recurse | Select-Object -ExpandProperty FullName
+    displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+- ${{ if eq(parameters.os, 'linux') }}:
+  - bash: |
+      set -e
+      if [ '${{ parameters.ep }}' = 'cuda' ]; then
+        pkg_name='Microsoft.ML.OnnxRuntime.Gpu.Linux'
+        hdr_src='buildTransitive/native/include'
+      else
+        pkg_name='Microsoft.ML.OnnxRuntime'
+        hdr_src='build/native/include'
+      fi
+      url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+      echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
+      mkdir -p '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
+      curl --fail --retry 5 --retry-all-errors -L \
+        -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+        -o ort.zip "$url"
+      unzip -o ort.zip -d ort_extracted >/dev/null
+      if [ '${{ parameters.arch }}' = 'arm64' ]; then
+        lib_platform='linux-arm64'
+      else
+        lib_platform='linux-x64'
+      fi
+      cp -r "ort_extracted/${hdr_src}/"* '${{ parameters.ort_home }}/include/'
+      cp -r "ort_extracted/runtimes/${lib_platform}/native/"* '${{ parameters.ort_home }}/lib/'
+      echo "ORT layout:"; ls -la '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
+    displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+- ${{ if eq(parameters.os, 'macos') }}:
+  - bash: |
+      set -e
+      pkg_name='Microsoft.ML.OnnxRuntime'
+      url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+      echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
+      mkdir -p '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
+      curl --fail --retry 5 --retry-all-errors -L \
+        -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+        -o ort.zip "$url"
+      unzip -o ort.zip -d ort_extracted >/dev/null
+      cp -r ort_extracted/build/native/include/* '${{ parameters.ort_home }}/include/'
+      cp -r ort_extracted/runtimes/osx-arm64/native/* '${{ parameters.ort_home }}/lib/'
+      echo "ORT layout:"; ls -la '${{ parameters.ort_home }}/include' '${{ parameters.ort_home }}/lib'
+    displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+    workingDirectory: '$(Build.SourcesDirectory)'
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

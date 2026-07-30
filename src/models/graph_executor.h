@@ -8,6 +8,7 @@
 #include <string>
 #include <functional>
 #include "onnxruntime_api.h"
+#include "model.h"
 
 namespace Generators {
 
@@ -27,6 +28,7 @@ struct TensorSpec {
 
 // Parameters for executing a graph model
 struct ExecutionParams {
+  DeviceType device_type;
   std::string execution_provider_name;  // e.g., "WebGPU", "CUDA", "DML"
   const OrtMemoryInfo* memory_info;     // Memory info for creating tensors
   std::vector<TensorSpec> inputs;
@@ -36,8 +38,8 @@ struct ExecutionParams {
   std::vector<const char*> session_config_keys;
   std::vector<const char*> session_config_values;
 
-  ExecutionParams(const std::string& ep_name, const OrtMemoryInfo* mem_info)
-      : execution_provider_name(ep_name), memory_info(mem_info) {}
+  ExecutionParams(DeviceType dev_type, const std::string& ep_name, const OrtMemoryInfo* mem_info)
+      : device_type(dev_type), execution_provider_name(ep_name), memory_info(mem_info) {}
 };
 
 // Namespace for graph execution utilities
@@ -62,6 +64,7 @@ void ExecuteCastOp(
     ONNXTensorElementDataType input_type,
     ONNXTensorElementDataType output_type,
     size_t element_count,
+    DeviceType device_type,
     const std::string& execution_provider_name,
     const OrtMemoryInfo* memory_info,
     const std::vector<const char*>& session_config_keys = {},

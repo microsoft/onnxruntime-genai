@@ -87,6 +87,23 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 ScheduledRequests DynamicBatchScheduler::Schedule() {
+  auto allocated_requests = cache_manager_->AllocatedRequests();
+  std::vector<std::shared_ptr<Request>> completed_requests;
+  std::copy_if(allocated_requests.begin(), allocated_requests.end(),
+               std::back_inserter(completed_requests),
+               [](const std::shared_ptr<Request>& request) {
+                 return request->status_ == RequestStatus::Completed;
+               });
+  if (!completed_requests.empty()) {
+    cache_manager_->Deallocate(completed_requests);
+    requests_pool_.erase(
+        std::remove_if(requests_pool_.begin(), requests_pool_.end(),
+                       [](const std::shared_ptr<Request>& request) {
+                         return request->status_ == RequestStatus::Completed;
+                       }),
+        requests_pool_.end());
+  }
+
   std::vector<std::shared_ptr<Request>> requests_to_schedule;
   for (auto& request : requests_pool_) {
     if (request->status_ == RequestStatus::Assigned) {

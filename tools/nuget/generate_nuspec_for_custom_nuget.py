@@ -18,7 +18,9 @@ def generate_files(lines, args):
         "linux-arm64": args.linux_arm64,
     }
 
-    avoid_keywords = {"pdb", "onnxruntime-genai-cuda.dll", "onnxruntime-genai-cuda.lib"}
+    avoid_keywords = {"pdb"}
+    # The CUDA library is shipped through a separate mechanism and is excluded from this package.
+    cuda_keyword = "onnxruntime-genai-cuda"
     processed_includes = set()
     for platform, platform_dir in platform_map.items():
         for file in glob.glob(os.path.join(platform_dir, "lib", "*")):
@@ -26,6 +28,8 @@ def generate_files(lines, args):
                 continue
             file_name = os.path.basename(file)
             if any(keyword in file_name for keyword in avoid_keywords):
+                continue
+            if cuda_keyword in file_name:
                 continue
 
             files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
@@ -61,9 +65,7 @@ def parse_arguments():
     )
 
     parser.add_argument("--package_name", required=True, help="Name of the custom package.")
-    parser.add_argument("--ort_package_name", required=True, help="Corresponding ORT custom package name.")
     parser.add_argument("--package_version", required=True, help="ORT GenAI package version. Eg: 1.0.0")
-    parser.add_argument("--ort_package_version", required=True, help="Corresponding ORT package version.")
     parser.add_argument("--nuspec_path", required=True, help="Nuspec output file path.")
     parser.add_argument("--root_dir", required=True, help="ORT GenAI repository root directory.")
     parser.add_argument(
@@ -79,6 +81,10 @@ def parse_arguments():
 
     args = parser.parse_args()
     args.sdk_info = ""
+    # The custom (.Foundry) package carries no ONNX Runtime dependency; empty ORT
+    # package name/version makes generate_dependencies() omit the ORT <dependency>.
+    args.ort_package_name = ""
+    args.ort_package_version = ""
 
     return args
 

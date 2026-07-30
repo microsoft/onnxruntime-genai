@@ -88,9 +88,40 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
  */
 
 /**
- * \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ * \brief Shuts down the GenAI library and releases all GenAI-owned ONNX Runtime globals.
+ *
+ * \warning Callers SHOULD invoke OgaShutdown() before process exit. If it is not called, GenAI's globals are destroyed
+ *          at static-destruction time in undefined order, which may crash.
+ *
+ * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
+ *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
+ *
+ * \note Lifetime contract: no OgaModel / OgaGenerator / OgaTokenizer / OgaTensor / OgaEngine / OgaRequest, or any
+ *       object that holds device memory, may outlive OgaShutdown(). The caller MUST destroy every such object before
+ *       calling OgaShutdown(). Calling OgaShutdown() with such objects still alive is undefined behavior (typically a
+ *       crash when the buffer is freed through a now-invalid allocator).
+ *
+ * \note Re-initialization: OgaShutdown() is a full teardown -- it destroys GenAI's ONNX Runtime environment and unloads
+ *       GenAI's add-on libraries. GenAI may be used again after OgaShutdown(); the next GenAI call re-initializes with a
+ *       fresh environment.
+ *
+ * \note If a host registered execution provider libraries directly on its own OrtEnv reference, it should unregister
+ *       them (on that reference) and release the reference after OgaShutdown(), once all GenAI usage is finished.
  */
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
+
+/**
+ * \brief Enable or disable non-essential telemetry event collection.
+ *
+ * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or by setting
+ * ORT_DISABLE_TELEMETRY=1 before initialization. The environment variable prevents the uploader,
+ * events, and persistent device identifier from being created for the process lifetime. Runtime
+ * controls suppress new detailed model, generation, adapter, and error telemetry; the process
+ * information event may still be emitted.
+ *
+ * \param[in] enabled true to enable telemetry, false to disable.
+ */
+OGA_EXPORT void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled);
 
 /**
  * \param[in] result OgaResult that contains the error message.
@@ -165,7 +196,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSe
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
- * \return The number of tokens in the sequence at the given index
+ * \return The number of tokens in the sequence at the given index. Returns 0 if
+ *         sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* sequences, size_t sequence_index);
 
@@ -175,6 +207,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \param[in] sequences OgaSequences to use.
  * \param[in] sequence_index index of the sequence to use.
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
+ *         Returns nullptr if sequence_index is out of bounds (i.e. >= OgaSequencesCount(sequences)).
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 
@@ -237,6 +270,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
  * \return OgaResult containing the error message if the creation of the config failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
+
+/**
+ * \brief Creates an OgaConfig from a model package directory, using the supplied execution
+ *        provider to select a variant.
+ *
+ * `config_path` must refer to a model package; passing a flat directory returns an error.
+ * When the package declares exactly one execution provider across its variants, `ep` may
+ * be null or empty (the EP is auto-detected). Otherwise `ep` selects which variant is
+ * loaded.
+ *
+ * To load a model with an explicit EP, pass the resulting OgaConfig to
+ * OgaCreateModelFromConfig. OgaCreateModel does not accept an ep argument because the
+ * config carries everything needed.
+ *
+ * \param[in] config_path Path to the model package, encoded in UTF-8.
+ * \param[in] ep Execution provider name, or null/empty for auto-detection.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out);
 
 /**
  * \brief Clear the list of providers in the given config
@@ -433,8 +486,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorP
 /**
  * \brief Sets the guidance type and data for the Generator params
  * \param[in] params The generator params to set the guidance on
- * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
- * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar.
+ * \param[in] data The input string, which is the guidance data.
  * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
@@ -554,7 +607,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
 
 /**
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
- *        and continue generating from that point.
+ *        and continue generating from that point. Rewinding is not supported with beam search.
  * \param[in] generator The generator to rewind to the given length.
  * \param[in] new_length The desired length in tokens after rewinding.
  * \return OgaResult containing the error message if the rewinding failed.
@@ -687,6 +740,38 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer
  * \return OgaResult containing the error message if returning the PAD token id fails.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the BOT (beginning of tool call) token id. Returns an error if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOT token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the EOT (end of tool call) token id. Returns an error if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The EOT token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the BOR (beginning of reasoning) token id. Returns an error if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The BOR token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * \brief Return the EOR (end of reasoning) token id. Returns an error if the model does not define one.
+ * \param[in] tokenizer The tokenizer to read from
+ * \param[out] token_id The EOR token id
+ * \return OgaResult containing the error message if the call fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences

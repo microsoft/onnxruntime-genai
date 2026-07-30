@@ -25,10 +25,16 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     : vision_attn_session_options_(vision_attn_session_options),
       spatial_merge_size_(spatial_merge_size),
       patch_size_(patch_size),
-      window_size_(window_size > 0
-                       ? window_size
-                       : patch_size * spatial_merge_size * 2),
+      window_size_(0),
       env_(env) {
+  if (spatial_merge_size_ <= 0)
+    throw std::runtime_error("spatial_merge_size must be > 0, got " + std::to_string(spatial_merge_size_));
+  if (patch_size_ <= 0)
+    throw std::runtime_error("patch_size must be > 0, got " + std::to_string(patch_size_));
+  // Compute window_size_ after validating inputs to avoid signed overflow in the initializer list
+  window_size_ = window_size > 0 ? window_size : patch_size_ * spatial_merge_size_ * 2;
+  if (window_size_ <= 0)
+    throw std::runtime_error("window_size must be > 0, got " + std::to_string(window_size_));
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)
   auto toOrtPath = [](const std::string& s) -> std::basic_string<ORTCHAR_T> {
     return std::basic_string<ORTCHAR_T>(s.begin(), s.end());
@@ -116,6 +122,9 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   if (hidden_dim_ <= 0) {
     throw std::runtime_error(
         "Vision pipeline: patch_embed hidden dimension unknown - check patch_embed model output shape");
+  }
+  if (num_patches > INT64_MAX / hidden_dim_) {
+    throw std::runtime_error("Vision pipeline: num_patches * hidden_dim overflow");
   }
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim_};
   pe_out_buf_.resize(static_cast<size_t>(num_patches * hidden_dim_));
@@ -205,6 +214,9 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     throw std::runtime_error(
         "Vision pipeline: patch_merger hidden dimension unknown - check patch_merger model output shape");
   }
+  if (merged_seq_len > 0 && merged_seq_len > INT64_MAX / merged_hidden_) {
+    throw std::runtime_error("Vision pipeline: merged_seq_len * merged_hidden overflow");
+  }
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden_};
   merger_out_buf_.resize(static_cast<size_t>(merged_seq_len * merged_hidden_));
   auto merger_out_tensor = CreateTensor(merger_out_buf_.data(), merger_out_buf_.size(), merger_shape);
@@ -249,6 +261,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
 // Matches HuggingFace transformers implementation:
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L367
 std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w) {
+  ValidateWindowIndexParams(grid_t, grid_h, grid_w, spatial_merge_size_, patch_size_, window_size_);
+
   // Calculate LLM grid dimensions after spatial merging
   int64_t llm_grid_h = grid_h / spatial_merge_size_;
   int64_t llm_grid_w = grid_w / spatial_merge_size_;
@@ -260,21 +274,26 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
   int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
   int64_t pad_w = (vit_merger_window_size - (llm_grid_w % vit_merger_window_size)) % vit_merger_window_size;
 
-  int64_t num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
-  int64_t num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
+  int64_t padded_h = llm_grid_h + pad_h;
+  int64_t padded_w = llm_grid_w + pad_w;
+
+  int64_t alloc_size = grid_t * padded_h * padded_w;
+
+  int64_t num_windows_h = padded_h / vit_merger_window_size;
+  int64_t num_windows_w = padded_w / vit_merger_window_size;
 
   std::vector<int64_t> window_index;
   window_index.reserve(grid_t * llm_grid_h * llm_grid_w);
 
   // Create initial index grid
-  std::vector<int64_t> index(grid_t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w), -100);
+  std::vector<int64_t> index(alloc_size, -100);
 
   // Fill non-padded positions with sequential indices
   for (int64_t t = 0; t < grid_t; ++t) {
     for (int64_t h = 0; h < llm_grid_h; ++h) {
       for (int64_t w = 0; w < llm_grid_w; ++w) {
         int64_t idx = t * llm_grid_h * llm_grid_w + h * llm_grid_w + w;
-        int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+        int64_t padded_idx = t * padded_h * padded_w + h * padded_w + w;
         index[padded_idx] = idx;
       }
     }
@@ -290,7 +309,7 @@ std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, in
           for (int64_t pw = 0; pw < vit_merger_window_size; ++pw) {
             int64_t h = wh * vit_merger_window_size + ph;
             int64_t w = ww * vit_merger_window_size + pw;
-            int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+            int64_t padded_idx = t * padded_h * padded_w + h * padded_w + w;
 
             // Only add non-padded indices
             if (index[padded_idx] != -100) {

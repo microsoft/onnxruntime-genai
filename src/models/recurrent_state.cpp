@@ -88,21 +88,34 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  pasts_.resize(num_layers * 2);
+  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+
+  if (state_.params_->use_graph_capture && !share_buffers_) {
+    throw std::runtime_error(
+        "Graph capture requires past/present buffer sharing for models with recurrent state. "
+        "Ensure past_present_share_buffer=true in genai_config.json and num_beams=1 "
+        "(beam search disables buffer sharing).");
+  }
+
+  if (!share_buffers_) {
+    pasts_.resize(num_layers * 2);
+  }
   presents_.reserve(num_layers * 2);
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
 
   for (int i = 0; i < num_layers; ++i) {
-    pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
-    pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
-
+    if (!share_buffers_) {
+      pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
+      pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
+    }
     presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
     presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
   }
 
-  // Zero-initialize past and present states
-  ZeroStates(pasts_);
+  if (!share_buffers_) {
+    ZeroStates(pasts_);
+  }
   ZeroStates(presents_);
 }
 
@@ -114,46 +127,23 @@ void RecurrentState::Add() {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    state_.inputs_.push_back(pasts_[i].get());
+    // Shared buffers: alias input=output for stable addresses (required for graph capture).
+    // Separate buffers: use distinct past/present allocations with per-step pointer swap.
+    state_.inputs_.push_back(share_buffers_ ? presents_[i].get() : pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
   }
-
-  // Cache byte spans for the graph-capture copy path. These tensors are
-  // fixed-shape and never reallocated, so the spans remain valid for the
-  // entire generation lifetime.
-  if (state_.params_->use_graph_capture) {
-    auto& device = *model_.p_device_kvcache_;
-    past_byte_spans_.reserve(num_layers * 2);
-    present_byte_spans_.reserve(num_layers * 2);
-    for (int i = 0; i < num_layers * 2; ++i) {
-      past_byte_spans_.push_back(ByteWrapTensor(device, *pasts_[i]));
-      present_byte_spans_.push_back(ByteWrapTensor(device, *presents_[i]));
-    }
-  }
 }
 
 void RecurrentState::Update() {
-  if (layer_indices_.empty()) return;
+  if (layer_indices_.empty() || share_buffers_) return;
 
   const int num_layers = static_cast<int>(layer_indices_.size());
-
-  if (state_.params_->use_graph_capture) {
-    // When graph capture is enabled, we must not swap pointers because the
-    // graph has captured the original memory addresses. Instead, copy
-    // present→past in-place so the pointers remain stable. Uses cached byte
-    // spans to avoid recomputing tensor metadata each step.
-    for (int i = 0; i < num_layers * 2; ++i) {
-      past_byte_spans_[i].CopyFrom(present_byte_spans_[i]);
-    }
-    // No need to rebind state_.inputs_/outputs_ — pointers are unchanged.
-  } else {
-    for (int i = 0; i < num_layers * 2; ++i) {
-      std::swap(pasts_[i], presents_[i]);
-      state_.inputs_[input_index_ + i] = pasts_[i].get();
-      state_.outputs_[output_index_ + i] = presents_[i].get();
-    }
+  for (int i = 0; i < num_layers * 2; ++i) {
+    std::swap(pasts_[i], presents_[i]);
+    state_.inputs_[input_index_ + i] = pasts_[i].get();
+    state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 }
 
@@ -161,25 +151,22 @@ void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
-    // Recurrent states cannot be partially rewound — they are compressed summaries
-    // with no per-position history. Non-zero rewind is a no-op; the state remains unchanged.
-    if (g_log.enabled)
-      Log("warning", "RecurrentState::RewindTo(" + std::to_string(index) +
-                         ") is a no-op. Recurrent states cannot be partially rewound.");
-    return;
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) +
+        ") is not supported. Recurrent states cannot be partially rewound.");
   }
-
-  const int num_layers = static_cast<int>(layer_indices_.size());
-
-  // Zero existing buffers in-place instead of reallocating, to preserve
-  // device pointers and avoid invalidating captured graphs.
-  ZeroStates(pasts_);
-  ZeroStates(presents_);
-
-  // Re-bind state pointers (swap may have changed which OrtValue is past vs present)
-  for (int i = 0; i < num_layers * 2; ++i) {
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
-    state_.outputs_[output_index_ + i] = presents_[i].get();
+  if (share_buffers_) {
+    // Shared buffers: zero in place, addresses stay stable.
+    ZeroStates(presents_);
+  } else {
+    // Zero and rebind all state buffers.
+    ZeroStates(pasts_);
+    ZeroStates(presents_);
+    const int num_layers = static_cast<int>(layer_indices_.size());
+    for (int i = 0; i < num_layers * 2; ++i) {
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
   }
 }
 

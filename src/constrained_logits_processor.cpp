@@ -50,10 +50,11 @@ void GuidanceLogitsProcessor::InitializeLlgTokenizer() {
     return static_cast<unsigned long>(output_ids.size());
   };
 
-  // Find the path to the tokenizer.json file
-  auto tokenizer_path = params_->config.config_path.string();
-  fs::path tokenizer_path_fs(tokenizer_path);
-  fs::path json_path(tokenizer_path_fs / kDefaultVocabFile);
+  // Find the path to the tokenizer.json file. Mirrors Tokenizer::Tokenizer so that the
+  // constrained logits processor reads tokenizer.json from the same directory the tokenizer
+  // itself was constructed against.
+  const fs::path tokenizer_dir = params_->config.ResolvePath(params_->config.model.tokenizer_dir);
+  fs::path json_path(tokenizer_dir / kDefaultVocabFile);
 
   // Read the tokenizer.json file
   std::ifstream json_file(json_path.string());

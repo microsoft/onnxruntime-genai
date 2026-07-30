@@ -130,6 +130,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                    StringUtils.ToUtf8(adapterName)));
         }
 
+        /// <summary>
+        /// Sets a runtime option on the generator (e.g., "lang_id" for multilingual Nemotron ASR).
+        /// </summary>
+        /// <param name="key">The runtime option name.</param>
+        /// <param name="value">The runtime option value.</param>
+        public void SetRuntimeOption(string key, string value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetRuntimeOption(_generatorHandle,
+                                                                             StringUtils.ToUtf8(key),
+                                                                             StringUtils.ToUtf8(value)));
+        }
+
         ~Generator()
         {
             Dispose(false);

@@ -417,6 +417,7 @@
     {
       "name": "windows_arm64_winml_relwithdebinfo",
       "inherits": [
+        "windows_arm64_cuda_relwithdebinfo",
         "windows_arm64_directml_relwithdebinfo"
       ],
       "displayName": "windows arm64 winml relwithdebinfo",
@@ -434,6 +435,58 @@
       "displayName": "windows arm64 directml release",
       "binaryDir": "${sourceDir}/build/directml/win-arm64",
       "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_cuda_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_cuda_default"
+      ],
+      "displayName": "windows arm64 cuda release",
+      "binaryDir": "${sourceDir}/build/cuda/win-arm64",
+      "architecture": "arm64",
+      "cacheVariables": {
+        "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_arm64_cuda_debug",
+      "inherits": [
+        "windows_debug_default",
+        "windows_cuda_default"
+      ],
+      "displayName": "windows arm64 cuda debug",
+      "binaryDir": "${sourceDir}/build/cuda/win-arm64",
+      "architecture": "arm64",
+      "cacheVariables": {
+        "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_arm64_cuda_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cuda_default"
+      ],
+      "displayName": "windows arm64 cuda relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/cuda/win-arm64",
+      "architecture": "arm64",
+      "cacheVariables": {
+        "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_arm64_cuda_minsizerel",
+      "inherits": [
+        "windows_minsizerel_default",
+        "windows_cuda_default"
+      ],
+      "displayName": "windows arm64 cuda minsizerel",
+      "binaryDir": "${sourceDir}/build/cuda/win-arm64",
+      "architecture": "arm64",
+      "cacheVariables": {
+        "USE_CUDA": "ON"
+      }
     }
   ]
 }

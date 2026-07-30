@@ -34,7 +34,7 @@ def parse_args():
 
     parser.add_argument(
         "--container-registry",
-        help="The Azure container registry name. If not provided, no container registry will be used.",
+        help="Container registry host and, optionally, qualifiers. If not provided, no container registry will be used.",
     )
     parser.add_argument("--repository", required=True, help="The image repository name.")
 
@@ -64,9 +64,7 @@ def main():
         log.info("No container registry will be used")
 
     full_image_name = (
-        f"{args.container_registry}.azurecr.io/{args.repository}:latest"
-        if use_container_registry
-        else f"{args.repository}:latest"
+        f"{args.container_registry}/{args.repository}:latest" if use_container_registry else f"{args.repository}:latest"
     )
 
     log.info(f"Image: {full_image_name}")

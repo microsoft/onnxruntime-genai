@@ -58,6 +58,14 @@ namespace {
     << "    --reuse_generator\n"
     << "      Reuse a single generator via RewindTo(0) instead of creating a new one per\n"
     << "      iteration. Disabled by default.\n"
+    << "    --profile_prefill\n"
+    << "      Enable ORT profiling for the prefill phase on the middle benchmark iteration.\n"
+    << "      Writes 'prefill_profile_<timestamp>.json'. Disabled by default.\n"
+    << "    --profile_generation\n"
+    << "      Enable ORT profiling for the token generation phase on the middle benchmark\n"
+    << "      iteration. Writes 'generation_profile_<timestamp>.json' (one file per generated\n"
+    << "      token). Disabled by default.\n"
+    << "      Middle iteration index (0-based) = num_iterations / 2.\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
     << "    -h,--help\n"
@@ -153,6 +161,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.reuse_generator = true;
       } else if (arg == "--use_random_tokens") {
         opts.use_random_tokens = true;
+      } else if (arg == "--profile_prefill") {
+        opts.profile_prefill = true;
+      } else if (arg == "--profile_generation") {
+        opts.profile_generation = true;
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
       } else if (arg == "-h" || arg == "--help") {
