@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "device_info.h"
+#include "sha256.h"
 
 // The platform device-info implementation is only needed when telemetry is
 // compiled in. Guarding the whole translation unit keeps default (OFF) builds
@@ -61,21 +62,6 @@
 namespace Generators {
 
 namespace {
-
-constexpr char kDeviceIdHashSalt[] = "onnxruntime-genai:";
-
-// FNV-1a 64-bit hash -> fixed-width hex. Stable across platforms and runs
-// (unlike std::hash), so the derived device id stays consistent over time.
-std::string Fnv1aHex(const std::string& input) {
-  uint64_t h = 14695981039346656037ULL;
-  for (unsigned char c : input) {
-    h ^= c;
-    h *= 1099511628211ULL;
-  }
-  char buf[17];
-  std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
-  return std::string(buf);
-}
 
 // Generate a random v4 UUID string.
 std::string GenerateUuidV4() {
@@ -842,9 +828,9 @@ const DeviceInfo& GetDeviceInfo() {
     if (UsePlatformDeviceId()) {
       id_status = DeviceIdStatus::Platform;
     } else {
-      // "c:" prefix marks a custom device id; the value is a stable hash of a
-      // locally-generated UUID plus a product salt (no hardware identifier is ever sent).
-      di.device_id = "c:" + Fnv1aHex(std::string{kDeviceIdHashSalt} + GetOrCreatePersistentDeviceId(id_status));
+      // Every Microsoft AI developer tool reads the same UUID and derives the same upload identifier.
+      // The raw UUID is never transmitted.
+      di.device_id = "c:" + TelemetryInternal::Sha256::HashStringHex(GetOrCreatePersistentDeviceId(id_status));
     }
     di.device_id_status = DeviceIdStatusString(id_status);
     di.os_architecture = GetOsArchitecture();
