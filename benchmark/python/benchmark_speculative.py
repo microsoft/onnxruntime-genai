@@ -39,10 +39,12 @@ import argparse
 import atexit
 import copy
 import csv
+import filecmp
 import gc
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -155,12 +157,74 @@ def _import_og(build_root: str, use_installed: bool = False):
     else:
         pyd = "(installed wheel)"
     import onnxruntime_genai as og  # noqa: E402
-    if not hasattr(og.GeneratorParams, "set_speculative_options"):
+    required_methods = (
+        (og.GeneratorParams, "set_speculative_options"),
+        (og.GeneratorParams, "get_speculative_options"),
+        (og.Generator, "get_speculative_stats"),
+    )
+    missing = [name for owner, name in required_methods if not hasattr(owner, name)]
+    if missing:
         raise RuntimeError(
-            "Imported onnxruntime_genai lacks the speculative API. Install a wheel "
+            "Imported onnxruntime_genai lacks the current speculative API "
+            f"({', '.join(missing)} missing). Install a wheel "
             "built from the speculative-decoding branch (or build locally). "
             f"Loaded from: {og.__file__}")
     return og
+
+
+REQUIRED_SPECULATIVE_STATS = frozenset({
+    "rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+    "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
+    "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
+    "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+    "target_forward_passes", "effective_k", "adaptive_k_increases",
+    "adaptive_k_decreases", "adaptive_k_observations", "adaptive_k_probes",
+    "cooldown_entries", "cooldown_steps", "cooldown_remaining",
+    "standard_fallback_steps", "full_accept_rounds", "partial_accept_rounds",
+    "zero_accept_rounds", "target_verify_forward_passes",
+    "target_reanchor_forward_passes", "target_reconciliation_forward_passes",
+    "ngram_lookup_hits", "ngram_lookup_misses", "ngram_lookup_tokens_proposed",
+    "ngram_chained_tokens_proposed", "ngram_grammar_candidate_rejections",
+    "ngram_history_syncs", "ngram_history_tokens_synced", "formula_supported",
+    "total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+    "total_target_verify_ms", "total_target_reanchor_ms",
+    "total_ngram_history_sync_ms", "total_ngram_lookup_ms",
+    "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
+    "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+    "avg_target_ms_per_round", "target_baseline_ms_per_token",
+    "target_overhead_ratio", "estimated_speedup", "observed_speedup",
+    "adaptive_k_throughput",
+})
+
+
+def validate_speculative_stats(stats):
+    """Reject stale wheels instead of silently recording missing metrics as zero."""
+    missing = sorted(REQUIRED_SPECULATIVE_STATS - set(stats))
+    if missing:
+        raise RuntimeError(
+            "The loaded onnxruntime-genai wheel exposes an incomplete speculative "
+            f"statistics contract. Missing: {', '.join(missing)}")
+
+
+def verify_speculative_options(params, expected):
+    """Confirm the wheel accepted every requested speculative option."""
+    actual = dict(params.get_speculative_options())
+    missing = sorted(set(expected) - set(actual))
+    if missing:
+        raise RuntimeError(
+            "The loaded onnxruntime-genai wheel did not expose requested speculative "
+            f"options: {', '.join(missing)}")
+    mismatched = []
+    for name, value in expected.items():
+        actual_value = actual[name]
+        matches = bool(actual_value) == value if isinstance(value, bool) \
+            else int(actual_value) == value
+        if not matches:
+            mismatched.append(f"{name}={actual_value!r} (expected {value!r})")
+    if mismatched:
+        raise RuntimeError(
+            "The loaded onnxruntime-genai wheel did not retain requested speculative "
+            f"options: {', '.join(mismatched)}")
 
 
 class _Tee:
@@ -294,22 +358,169 @@ def resolve_model_arg(models_root: str, value: str, model_prefix: str,
 # Speculative config composition (target + draft -> one speculative config dir).
 # ---------------------------------------------------------------------------
 
-def _graph_capture_option(provider: str | None) -> str | None:
-    """The provider_options key that turns graph capture ON for this EP, or None.
+_PATH_OPTION_NAMES = {
+    "backend_path",
+    "cache_dir",
+    "config_file",
+    "config_path",
+    "context_cache_path",
+    "context_file_path",
+    "custom_ops_library",
+    "ep_context_file_path",
+    "library_path",
+    "load_config",
+}
 
-    Graph capture (CUDA graph on CUDA / TensorRT-RTX, capture on WebGPU) pins the KV cache to a
-    single shared past/present buffer. Speculative decoding rewinds the target KV on every
-    rejection, which is impossible under a shared buffer, so graph capture must be disabled for the
-    speculative phase. genai reads these exact keys in IsGraphCaptureEnabled (config.cpp).
-    """
-    if not provider:
-        return None
-    norm = provider.replace("ExecutionProvider", "").lower()
-    if norm in ("nvtensorrtrtx", "cuda"):
-        return "enable_cuda_graph"
-    if norm == "webgpu":
-        return "enableGraphCapture"
-    return None
+
+def _safe_relative_path(path: str, context: str) -> str:
+    """Normalize a config path while enforcing the native path-confinement rules."""
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{context} must be a non-empty relative path")
+    normalized = path.replace("\\", "/")
+    if (normalized.startswith("/") or normalized.startswith("//")
+            or re.match(r"^[A-Za-z]:", normalized)):
+        raise ValueError(f"{context} must be relative to its model directory: {path}")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(f"{context} must not contain '..': {path}")
+    if not parts:
+        raise ValueError(f"{context} does not identify a file: {path}")
+    return "/".join(parts)
+
+
+def _link_or_copy_file(source: str, destination: str) -> str:
+    """Stage one file, preferring a zero-copy hard link on the same volume."""
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    if os.path.lexists(destination):
+        try:
+            if os.path.samefile(source, destination):
+                return "existing"
+        except OSError:
+            pass
+        if (os.path.isfile(destination)
+                and os.path.getsize(source) == os.path.getsize(destination)
+                and filecmp.cmp(source, destination, shallow=False)):
+            return "existing"
+        raise FileExistsError(
+            f"Cannot merge model assets with different contents: {destination}")
+    try:
+        os.link(source, destination)
+        return "linked"
+    except OSError:
+        shutil.copy2(source, destination)
+        return "copied"
+
+
+def _stage_tree(source_dir: str, destination_dir: str) -> dict[str, int]:
+    """Stage a complete model tree so ONNX external data remains beside its graph."""
+    counts = {"linked": 0, "copied": 0, "existing": 0}
+    for root, directories, files in os.walk(source_dir, followlinks=False):
+        for name in directories:
+            source = os.path.join(root, name)
+            if os.path.islink(source):
+                raise RuntimeError(
+                    f"Model staging does not follow directory symlinks: {source}")
+        relative_root = os.path.relpath(root, source_dir)
+        destination_root = (
+            destination_dir if relative_root == "."
+            else os.path.join(destination_dir, relative_root)
+        )
+        os.makedirs(destination_root, exist_ok=True)
+        for name in files:
+            result = _link_or_copy_file(
+                os.path.join(root, name),
+                os.path.join(destination_root, name),
+            )
+            counts[result] += 1
+    return counts
+
+
+def _is_path_option(name: str) -> bool:
+    name = name.lower()
+    return (
+        name in _PATH_OPTION_NAMES
+        or name.endswith(("_dir", "_file", "_filename", "_library", "_path"))
+    )
+
+
+def _provider_asset_paths(session_options, source_dir: str):
+    """Find relative provider-option paths that need to remain config-relative."""
+    assets = {}
+
+    def visit(value, name=""):
+        if isinstance(value, dict):
+            for child_name, child_value in value.items():
+                visit(child_value, child_name)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, name)
+        elif isinstance(value, str) and _is_path_option(name):
+            stripped = value.strip()
+            if not stripped or stripped.startswith(("{", "[")):
+                return
+            if (stripped.startswith(("/", "\\"))
+                    or re.match(r"^[A-Za-z]:", stripped)):
+                print(f"[warn] leaving absolute provider option {name}={value!r} unchanged")
+                return
+            relative = _safe_relative_path(stripped, f"provider option {name}")
+            source = os.path.join(source_dir, *relative.split("/"))
+            if os.path.exists(source) or name.lower().endswith("_dir"):
+                assets[relative] = source
+
+    visit(session_options)
+    return assets
+
+
+def _stage_provider_assets(decoder, source_dir: str, out_dir: str) -> None:
+    for relative, source in _provider_asset_paths(
+            decoder.get("session_options", {}), source_dir).items():
+        destination = os.path.join(out_dir, *relative.split("/"))
+        if os.path.isdir(source):
+            _stage_tree(source, destination)
+        elif os.path.isfile(source):
+            _link_or_copy_file(source, destination)
+        else:
+            os.makedirs(destination, exist_ok=True)
+
+
+def _normalized_provider_options(decoder):
+    result = []
+    for item in decoder.get("session_options", {}).get("provider_options", []):
+        for name, options in item.items():
+            provider = name.lower()
+            suffix = "executionprovider"
+            if provider.endswith(suffix):
+                provider = provider[:-len(suffix)]
+            device_filter = options.get("device_filtering_options")
+            ordered_options = [
+                (option_name, option_value)
+                for option_name, option_value in options.items()
+                if option_name != "device_filtering_options"
+            ]
+            result.append({
+                "name": provider,
+                "options": ordered_options,
+                "device_filtering_options": device_filter,
+            })
+    return result
+
+
+def _prefix_decoder_paths(decoder, prefix: str, context: str) -> None:
+    """Rewrite every decoder graph path below its staged model-tree prefix."""
+    path_count = 0
+    if decoder.get("filename"):
+        filename = _safe_relative_path(
+            decoder["filename"], f"{context}.filename")
+        decoder["filename"] = f"{prefix}/{filename}"
+        path_count += 1
+    for index, stage in enumerate(decoder.get("pipeline", [])):
+        if stage.get("filename"):
+            filename = _safe_relative_path(
+                stage["filename"], f"{context}.pipeline[{index}].filename")
+            stage["filename"] = f"{prefix}/{filename}"
+            path_count += 1
+    if not path_count:
+        raise ValueError(f"{context} does not define a decoder filename or pipeline")
 
 
 def build_spec_config(target_path: str, draft_path: str, out_dir: str,
@@ -326,17 +537,18 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     with open(os.path.join(draft_path, "genai_config.json")) as f:
         draft_cfg = json.load(f)
 
+    no_repeat_ngram_size = cfg.get("search", {}).get("no_repeat_ngram_size", 0)
+    if no_repeat_ngram_size:
+        raise ValueError(
+            "Draft-model speculative decoding does not support "
+            f"search.no_repeat_ngram_size={no_repeat_ngram_size}. Use a target model "
+            "configuration with no_repeat_ngram_size set to 0 so the standard and "
+            "speculative runs remain comparable.")
+
     cfg["model"]["type"] = "speculative"
-    # onnxruntime-genai resolves `filename` relative to the config dir (absolute
-    # paths are not honored), so express each model path relative to out_dir. The
-    # onnx filename is read from each config (FL models aren't always model.onnx);
-    # external weights (e.g. model.onnx.data) load alongside it.
-    out_abs = os.path.abspath(out_dir)
-    tgt_onnx = os.path.abspath(os.path.join(target_path, cfg["model"]["decoder"]["filename"]))
-    dft_onnx = os.path.abspath(os.path.join(draft_path, draft_cfg["model"]["decoder"]["filename"]))
-    cfg["model"]["decoder"]["filename"] = os.path.relpath(tgt_onnx, out_abs)
+    _prefix_decoder_paths(cfg["model"]["decoder"], "target", "target model.decoder")
     draft_block = copy.deepcopy(draft_cfg["model"]["decoder"])
-    draft_block["filename"] = os.path.relpath(dft_onnx, out_abs)
+    _prefix_decoder_paths(draft_block, "draft", "draft model.decoder")
     cfg["model"]["draft"] = draft_block
     # `speculative` is a sibling of `model`/`search` (placement-sensitive parser).
     # K is overridden per-run via set_speculative_options, so this default is moot.
@@ -353,8 +565,6 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
     # dropping them forces a fresh compile of the dynamic-shape ONNX, which the NPU compiler
     # rejects ("to_shape was called on a dynamic shape").
     if provider:
-        gc_key = _graph_capture_option(provider)
-
         def _merge_provider_options(block_name: str) -> None:
             session_options = cfg["model"][block_name].setdefault("session_options", {})
             po_list = session_options.setdefault("provider_options", [])
@@ -380,19 +590,6 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
                 entry["device_filtering_options"] = {"hardware_device_type": device.upper()}
         _merge_provider_options("decoder")
         _merge_provider_options("draft")
-        # Speculative rewind needs the shared KV buffer OFF, which is incompatible with graph capture
-        # (genai throws "Graph capture is not supported with past_present_share_buffer set to false",
-        # or, if the buffer were forced on, rewind silently no-ops and acceptance collapses). Disable
-        # graph capture ROBUSTLY: zero the key on EVERY provider_options entry in both blocks. A
-        # case-sensitive name match is not reliable here -- the stock config key (e.g. "NvTensorRtRtx")
-        # can differ in casing from the CLI provider ("NvTensorRTRTXExecutionProvider"), so a targeted
-        # match could miss the stock entry and leave enable_cuda_graph=1 in place.
-        if gc_key:
-            for block_name in ("decoder", "draft"):
-                for item in cfg["model"][block_name].get("session_options", {}).get("provider_options", []):
-                    for opts in item.values():
-                        if isinstance(opts, dict):
-                            opts[gc_key] = "0"
         # Diagnostic: log the composed EP config for both blocks so a mismatch
         # (which the engine's identical-provider-options check rejects) is visible.
         print("decoder provider_options:",
@@ -400,19 +597,38 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
         print("draft provider_options:  ",
               json.dumps(cfg["model"]["draft"]["session_options"]["provider_options"]))
 
-    # Recreate the output dir from scratch so support files (tokenizer, chat
-    # template) always match the current target, not a stale previous pair.
-    import shutil
+    target_provider_options = _normalized_provider_options(cfg["model"]["decoder"])
+    draft_provider_options = _normalized_provider_options(cfg["model"]["draft"])
+    if target_provider_options != draft_provider_options:
+        raise ValueError(
+            "Target and draft provider_options differ after EP composition. Native "
+            "speculative decoding requires identical provider configuration. "
+            f"target={json.dumps(target_provider_options, sort_keys=True)} "
+            f"draft={json.dumps(draft_provider_options, sort_keys=True)}")
+
+    # Recreate the wrapper and stage both complete model trees below it. Their
+    # decoder paths are traversal-free, and hard links avoid duplicating large
+    # ONNX/external-data files when the model cache and temp directory share a volume.
     if os.path.isdir(out_dir):
-        shutil.rmtree(out_dir, ignore_errors=True)
+        shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
-    # Copy tokenizer / chat-template support files from the target (skip weights).
+    target_counts = _stage_tree(target_path, os.path.join(out_dir, "target"))
+    draft_counts = _stage_tree(draft_path, os.path.join(out_dir, "draft"))
+    print(f"staged target model: {target_counts}")
+    print(f"staged draft model:  {draft_counts}")
+
+    # Preserve target tokenizer/chat-template files at the wrapper root. Also
+    # materialize any config-relative provider assets (for example OpenVINO
+    # cache_dir/load_config) at the paths retained in provider_options.
     for name in os.listdir(target_path):
         if name.endswith((".onnx", ".onnx.data")) or name in ("genai_config.json", "model_config.json"):
             continue
         src = os.path.join(target_path, name)
         if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(out_dir, name))
+            _link_or_copy_file(src, os.path.join(out_dir, name))
+    _stage_provider_assets(cfg["model"]["decoder"], target_path, out_dir)
+    _stage_provider_assets(cfg["model"]["draft"], draft_path, out_dir)
+
     with open(os.path.join(out_dir, "genai_config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
     return out_dir
@@ -502,14 +718,6 @@ def load_model(og, model_dir: str, provider: str | None, device: str | None):
     cfg = og.Config(model_dir)
     cfg.clear_providers()
     cfg.append_provider(provider)
-    # Graph capture (CUDA graph / WebGPU capture) requires a shared past/present KV buffer. The
-    # speculative phase must run with it OFF (rewind can't roll back a shared buffer), so disable it
-    # on the standard baseline too -- both phases then share one KV policy (apples-to-apples), and the
-    # baseline stops tripping genai's "Graph capture is not supported with past_present_share_buffer
-    # set to false" guard on dynamic-shape EPs (e.g. TensorRT-RTX ships enable_cuda_graph=1).
-    gc_key = _graph_capture_option(provider)
-    if gc_key:
-        cfg.set_provider_option(provider, gc_key, "0")
     if device:
         cfg.set_decoder_provider_options_hardware_device_type(provider, device.upper())
     return og.Model(cfg)
@@ -671,6 +879,7 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed,
         if cooldown:
             speculative_options["cooldown_bool"] = True
         p.set_speculative_options(**speculative_options)
+        verify_speculative_options(p, speculative_options)
 
     g = og.Generator(model, p)
 
@@ -689,7 +898,9 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed,
 
     new_tokens = g.token_count() - start_len
     seq = list(int(t) for t in g.get_sequence(0))
-    stats = g.get_speculative_stats() if speculative else None
+    stats = dict(g.get_speculative_stats()) if speculative else None
+    if stats is not None:
+        validate_speculative_stats(stats)
     del g
     gc.collect()
     return dict(prefill_s=prefill_s, decode_s=decode_s, new_tokens=new_tokens,
@@ -704,15 +915,21 @@ CSV_COLUMNS = [
     "provider", "device",
     "new_tokens", "prefill_s", "decode_s", "decode_tok_s", "e2e_tok_s",
     "speedup_decode", "speedup_e2e",
-    "acceptance_rate", "rounds", "draft_proposed", "draft_accepted",
-    "corrections", "bonuses", "mean_accepted_tokens",
-    "target_forward_passes", "target_verify_forward_passes",
+    "acceptance_rate", "rounds", "completed_rounds", "interrupted_rounds",
+    "active_rounds", "draft_proposed", "draft_evaluated", "draft_accepted",
+    "avg_draft_tokens_per_round", "mean_accepted_tokens_per_round",
+    "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+    "corrections", "bonuses", "tokens_queued", "tokens_emitted",
+    "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+    "target_forward_passes", "target_passes_per_token", "target_verify_forward_passes",
     "target_reanchor_forward_passes", "target_reconciliation_forward_passes",
     "cooldown_entries", "cooldown_steps", "cooldown_remaining",
     "standard_fallback_steps", "full_accept_rounds", "partial_accept_rounds",
-    "zero_accept_rounds", "total_target_ms", "total_reconciliation_ms",
+    "zero_accept_rounds", "total_draft_ms", "total_target_ms", "total_reconciliation_ms",
     "total_target_verify_ms", "total_target_reanchor_ms",
-    "avg_draft_ms_per_token", "avg_target_ms_per_token", "effective_speedup",
+    "avg_draft_ms_per_token", "avg_target_ms_per_round",
+    "target_baseline_ms_per_token", "target_overhead_ratio", "formula_supported",
+    "estimated_speedup", "observed_speedup",
     "greedy_match",
     "peak_gpu_mem_gib", "peak_cpu_mem_gib",
 ]
@@ -809,6 +1026,10 @@ def main():
             ap.error(f"unknown mode {m!r} (greedy|sampling)")
     if args.adaptive_k and not 1 <= args.adaptive_k_min <= 16:
         ap.error("--adaptive-k-min must be in [1,16]")
+    if args.reps < 1:
+        ap.error("--reps must be at least 1")
+    if args.warmup < 0:
+        ap.error("--warmup must be non-negative")
     if args.adaptive_k:
         ks = ["adaptive"]
         runtime_ks = {"adaptive": args.adaptive_k_min}
@@ -894,10 +1115,15 @@ def main():
     print(f"target={target_path}")
     print(f"draft ={draft_path}")
 
-    spec_dir = build_spec_config(target_path, draft_path,
-                                 os.path.join(tempfile.gettempdir(),
-                                              f"ogspec_{tgt_label}_{dft_label}"),
-                                 provider=provider, device=device)
+    spec_out_dir = tempfile.mkdtemp(prefix="ogspec_")
+    try:
+        spec_dir = build_spec_config(
+            target_path, draft_path, spec_out_dir,
+            provider=provider, device=device)
+    except Exception:
+        shutil.rmtree(spec_out_dir, ignore_errors=True)
+        raise
+    atexit.register(shutil.rmtree, spec_dir, ignore_errors=True)
     std_dir = target_path
 
     rows = []
@@ -968,8 +1194,9 @@ def main():
                     decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                     e2e_tok_s=round(e2e_tps, 3), speedup_decode="", speedup_e2e="",
                     acceptance_rate="", rounds="", draft_proposed="", draft_accepted="",
-                    corrections="", bonuses="", mean_accepted_tokens="",
-                    avg_draft_ms_per_token="", avg_target_ms_per_token="", effective_speedup="",
+                    corrections="", bonuses="", mean_accepted_tokens_per_round="",
+                    avg_draft_ms_per_token="", avg_target_ms_per_round="",
+                    estimated_speedup="", observed_speedup="",
                     greedy_match="", peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
             baselines[(mode, idx)] = dict(
                 dec=statistics.median(base_dec), e2e=statistics.median(base_e2e),
@@ -1016,12 +1243,21 @@ def main():
                 runtime_k = runtime_ks[K]
                 s_dec = []
                 last = None
+                last_target_passes_per_token = 0.0
                 for rep in range(args.reps):
                     r = run_once(
                         og, spec_model, ids, max_new, mode, True, runtime_k, args.seed,
                         args.adaptive_k, args.adaptive_k_min, args.cooldown
                     )
                     st = r["stats"] or {}
+                    rounds = int(st["rounds"])
+                    accepted = int(st["draft_tokens_accepted"])
+                    target_passes = int(st["target_forward_passes"])
+                    mean_accepted = accepted / rounds if rounds else 0.0
+                    target_passes_per_token = (
+                        target_passes / r["new_tokens"] if r["new_tokens"] else 0.0
+                    )
+                    last_target_passes_per_token = target_passes_per_token
                     dec_tps = r["new_tokens"] / r["decode_s"] if r["decode_s"] else 0.0
                     e2e_tps = r["new_tokens"] / (r["prefill_s"] + r["decode_s"]) \
                         if (r["prefill_s"] + r["decode_s"]) else 0.0
@@ -1036,13 +1272,13 @@ def main():
                         mode=mode, K=K, cooldown=args.cooldown,
                         adaptive_k=args.adaptive_k,
                         adaptive_k_min=args.adaptive_k_min if args.adaptive_k else "",
-                        effective_k=st.get("effective_k", runtime_k),
-                        adaptive_k_increases=st.get("adaptive_k_increases", 0),
-                        adaptive_k_decreases=st.get("adaptive_k_decreases", 0),
-                        adaptive_k_observations=st.get("adaptive_k_observations", 0),
-                        adaptive_k_probes=st.get("adaptive_k_probes", 0),
+                        effective_k=st["effective_k"],
+                        adaptive_k_increases=st["adaptive_k_increases"],
+                        adaptive_k_decreases=st["adaptive_k_decreases"],
+                        adaptive_k_observations=st["adaptive_k_observations"],
+                        adaptive_k_probes=st["adaptive_k_probes"],
                         adaptive_k_throughput=round(
-                            st.get("adaptive_k_throughput", 0.0), 6),
+                            st["adaptive_k_throughput"], 6),
                         task=it["task"], subcategory=it["subcategory"],
                         question_id=it["question_id"], prompt_id=idx, rep=rep,
                         decoder="speculative",
@@ -1052,41 +1288,68 @@ def main():
                         e2e_tok_s=round(e2e_tps, 3),
                         speedup_decode=round(dec_tps / base_dec_med, 3) if base_dec_med else "",
                         speedup_e2e=round(e2e_tps / base_e2e_med, 3) if base_e2e_med else "",
-                        acceptance_rate=round(st.get("acceptance_rate", 0.0), 4),
-                        rounds=st.get("rounds", ""),
-                        draft_proposed=st.get("draft_tokens_proposed", ""),
-                        draft_accepted=st.get("draft_tokens_accepted", ""),
-                        corrections=st.get("correction_tokens", ""),
-                        bonuses=st.get("bonus_tokens", ""),
-                        mean_accepted_tokens=round(st.get("mean_accepted_tokens", 0.0), 3),
-                        target_forward_passes=st.get("target_forward_passes", 0),
-                        target_verify_forward_passes=st.get(
-                            "target_verify_forward_passes", 0),
-                        target_reanchor_forward_passes=st.get(
-                            "target_reanchor_forward_passes", 0),
-                        target_reconciliation_forward_passes=st.get(
-                            "target_reconciliation_forward_passes", 0),
-                        cooldown_entries=st.get("cooldown_entries", 0),
-                        cooldown_steps=st.get("cooldown_steps", 0),
-                        cooldown_remaining=st.get("cooldown_remaining", 0),
-                        standard_fallback_steps=st.get("standard_fallback_steps", 0),
-                        full_accept_rounds=st.get("full_accept_rounds", 0),
-                        partial_accept_rounds=st.get("partial_accept_rounds", 0),
-                        zero_accept_rounds=st.get("zero_accept_rounds", 0),
-                        total_target_ms=round(st.get("total_target_ms", 0.0), 4),
+                        acceptance_rate=round(st["acceptance_rate"], 4),
+                        rounds=rounds,
+                        completed_rounds=st["completed_rounds"],
+                        interrupted_rounds=st["interrupted_rounds"],
+                        active_rounds=st["active_rounds"],
+                        draft_proposed=st["draft_tokens_proposed"],
+                        draft_evaluated=st["draft_tokens_evaluated"],
+                        draft_accepted=accepted,
+                        avg_draft_tokens_per_round=round(
+                            st["avg_draft_tokens_per_round"], 4),
+                        mean_accepted_tokens_per_round=round(mean_accepted, 4),
+                        mean_emitted_tokens_per_round=round(
+                            st["mean_emitted_tokens_per_round"], 4),
+                        expected_tokens_per_round=round(
+                            st["expected_tokens_per_round"], 4),
+                        corrections=st["correction_tokens"],
+                        bonuses=st["bonus_tokens"],
+                        tokens_queued=st["tokens_queued"],
+                        tokens_emitted=st["tokens_emitted"],
+                        tokens_discarded=st["tokens_discarded"],
+                        tokens_buffered=st["tokens_buffered"],
+                        draft_forward_passes=st["draft_forward_passes"],
+                        target_forward_passes=target_passes,
+                        target_passes_per_token=round(target_passes_per_token, 6),
+                        target_verify_forward_passes=st[
+                            "target_verify_forward_passes"],
+                        target_reanchor_forward_passes=st[
+                            "target_reanchor_forward_passes"],
+                        target_reconciliation_forward_passes=st[
+                            "target_reconciliation_forward_passes"],
+                        cooldown_entries=st["cooldown_entries"],
+                        cooldown_steps=st["cooldown_steps"],
+                        cooldown_remaining=st["cooldown_remaining"],
+                        standard_fallback_steps=st["standard_fallback_steps"],
+                        full_accept_rounds=st["full_accept_rounds"],
+                        partial_accept_rounds=st["partial_accept_rounds"],
+                        zero_accept_rounds=st["zero_accept_rounds"],
+                        total_draft_ms=round(st["total_draft_ms"], 4),
+                        total_target_ms=round(st["total_target_ms"], 4),
                         total_reconciliation_ms=round(
-                            st.get("total_reconciliation_ms", 0.0), 4),
+                            st["total_reconciliation_ms"], 4),
                         total_target_verify_ms=round(
-                            st.get("total_target_verify_ms", 0.0), 4),
+                            st["total_target_verify_ms"], 4),
                         total_target_reanchor_ms=round(
-                            st.get("total_target_reanchor_ms", 0.0), 4),
-                        avg_draft_ms_per_token=round(st.get("avg_draft_ms_per_token", 0.0), 4),
-                        avg_target_ms_per_token=round(st.get("avg_target_ms_per_token", 0.0), 4),
-                        effective_speedup=round(st.get("effective_speedup", 0.0), 3),
+                            st["total_target_reanchor_ms"], 4),
+                        avg_draft_ms_per_token=round(
+                            st["avg_draft_ms_per_token"], 4),
+                        avg_target_ms_per_round=round(
+                            st["avg_target_ms_per_round"], 4),
+                        target_baseline_ms_per_token=round(
+                            st["target_baseline_ms_per_token"], 4),
+                        target_overhead_ratio=round(
+                            st["target_overhead_ratio"], 6),
+                        formula_supported=bool(st["formula_supported"]),
+                        estimated_speedup=round(st["estimated_speedup"], 4),
+                        observed_speedup=round(st["observed_speedup"], 4),
                         greedy_match=match,
                         peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
+                if last is None:
+                    raise RuntimeError("No speculative benchmark repetitions were run")
                 s_dec_med = statistics.median(s_dec)
-                acc = (last or {}).get("acceptance_rate", 0.0)
+                acc = last["acceptance_rate"]
                 done += 1
                 sp = s_dec_med / base_dec_med if base_dec_med else 0.0
                 print(f"[{done}/{total_cfgs}] {mode} {it['task']}/{it['question_id']} "
@@ -1099,6 +1362,15 @@ def main():
                     f"timing={last.get('total_target_verify_ms', 0.0):.1f}/"
                     f"{last.get('total_target_reanchor_ms', 0.0):.1f}/"
                     f"{last.get('total_reconciliation_ms', 0.0):.1f}ms",
+                    flush=True,
+                )
+                print(
+                    f"    efficiency: accepted/round="
+                    f"{(last['draft_tokens_accepted'] / last['rounds']) if last['rounds'] else 0.0:.2f} "
+                    f"emitted/round={last['mean_emitted_tokens_per_round']:.2f} "
+                    f"target_passes/token="
+                    f"{last_target_passes_per_token:.3f} "
+                    f"discarded={last['tokens_discarded']} buffered={last['tokens_buffered']}",
                     flush=True,
                 )
                 if args.cooldown:
@@ -1225,7 +1497,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
     if best is not None:
         (bmode, bK), bgeo = best
         bacc = median_over_tasks(bmode, bK, "acceptance_rate")
-        bmat = median_over_tasks(bmode, bK, "mean_accepted_tokens")
+        bmat = median_over_tasks(bmode, bK, "mean_accepted_tokens_per_round")
         if bgeo >= 1.0:
             print(f"\n>> BEST: {bmode} K={bK}  ->  {bgeo:.2f}x faster decode   "
                   f"(accept {bacc:.0%}, {bmat:.1f} tokens/round)")
@@ -1295,6 +1567,27 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                 f"partial={sum(r['partial_accept_rounds'] for r in selected)} "
                 f"zero={sum(r['zero_accept_rounds'] for r in selected)}"
             )
+            print(
+                f"    lifecycle: completed={sum(r['completed_rounds'] for r in selected)} "
+                f"interrupted={sum(r['interrupted_rounds'] for r in selected)} "
+                f"active={sum(r['active_rounds'] for r in selected)} "
+                f"queued/emitted/discarded/buffered="
+                f"{sum(r['tokens_queued'] for r in selected)}/"
+                f"{sum(r['tokens_emitted'] for r in selected)}/"
+                f"{sum(r['tokens_discarded'] for r in selected)}/"
+                f"{sum(r['tokens_buffered'] for r in selected)}"
+            )
+            formula_rows = [r for r in selected if r["formula_supported"]]
+            if formula_rows:
+                print(
+                    f"    formula: supported={len(formula_rows)}/{len(selected)} "
+                    f"estimated_p50="
+                    f"{statistics.median(r['estimated_speedup'] for r in formula_rows):.2f}x "
+                    f"observed_p50="
+                    f"{statistics.median(r['observed_speedup'] for r in formula_rows):.2f}x "
+                    f"target_passes/token_p50="
+                    f"{statistics.median(r['target_passes_per_token'] for r in selected):.3f}"
+                )
             if selected[0]["cooldown"]:
                 print(
                     f"    cooldown: entries={sum(r['cooldown_entries'] for r in selected)} "
@@ -1337,14 +1630,15 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                 if std is None or spec is None:
                     continue
                 acc = med_spec(mode, task, bK, "acceptance_rate") or 0.0
-                mat = med_spec(mode, task, bK, "mean_accepted_tokens") or 0.0
+                mat = med_spec(
+                    mode, task, bK, "mean_accepted_tokens_per_round") or 0.0
                 gm = med_spec(mode, task, bK, "greedy_match")
                 matchs = f"{gm:.0%}" if gm not in (None, "") else "-"
                 flag = "*" if task in INPUT_GUIDED_TASKS else ""
                 print(f"  {task + flag:16}{std:>9.1f}{spec:>9.1f}{acc:>7.0%} "
                       f"{mat:>9.2f}{matchs:>7}")
 
-    print("\nFull per-prompt metrics (per-token ms, effective_speedup, memory) are in the CSV/JSON.")
+    print("\nFull per-prompt timing, formula, lifecycle, and memory metrics are in the CSV/JSON.")
     print("=" * width)
 
 

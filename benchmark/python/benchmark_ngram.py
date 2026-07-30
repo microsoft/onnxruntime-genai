@@ -410,6 +410,7 @@ def run_once(
         if cooldown:
             speculative_options["cooldown_bool"] = True
         params.set_speculative_options(**speculative_options)
+        common.verify_speculative_options(params, speculative_options)
 
     generator = og.Generator(model, params)
 
@@ -427,6 +428,8 @@ def run_once(
     new_tokens = generator.token_count() - start_length
     sequence = [int(token) for token in generator.get_sequence(0)]
     stats = dict(generator.get_speculative_stats()) if ngram_size else {}
+    if stats:
+        common.validate_speculative_stats(stats)
     del generator
     gc.collect()
 
@@ -510,14 +513,23 @@ CSV_COLUMNS = [
     "first_difference",
     "divergence_type",
     "rounds",
+    "completed_rounds",
+    "interrupted_rounds",
+    "active_rounds",
     "draft_proposed",
     "draft_evaluated",
     "draft_accepted",
     "acceptance_rate",
+    "avg_draft_tokens_per_round",
     "mean_accepted_tokens_per_round",
     "mean_emitted_tokens_per_round",
+    "expected_tokens_per_round",
     "corrections",
     "bonuses",
+    "tokens_queued",
+    "tokens_emitted",
+    "tokens_discarded",
+    "tokens_buffered",
     "draft_forward_passes",
     "target_forward_passes",
     "target_verify_forward_passes",
@@ -545,7 +557,13 @@ CSV_COLUMNS = [
     "total_target_reanchor_ms",
     "total_ngram_history_sync_ms",
     "total_ngram_lookup_ms",
-    "observed_speedup_estimate",
+    "avg_draft_ms_per_token",
+    "avg_target_ms_per_round",
+    "target_baseline_ms_per_token",
+    "target_overhead_ratio",
+    "formula_supported",
+    "estimated_speedup",
+    "observed_speedup",
     "peak_process_rss_gib",
 ]
 
@@ -995,6 +1013,27 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
                 f"partial={sum(row['partial_accept_rounds'] for row in selected)} "
                 f"zero={sum(row['zero_accept_rounds'] for row in selected)}"
             )
+            print(
+                f"    lifecycle: completed={sum(row['completed_rounds'] for row in selected)} "
+                f"interrupted={sum(row['interrupted_rounds'] for row in selected)} "
+                f"active={sum(row['active_rounds'] for row in selected)} "
+                f"queued/emitted/discarded/buffered="
+                f"{sum(row['tokens_queued'] for row in selected)}/"
+                f"{sum(row['tokens_emitted'] for row in selected)}/"
+                f"{sum(row['tokens_discarded'] for row in selected)}/"
+                f"{sum(row['tokens_buffered'] for row in selected)}"
+            )
+            formula_rows = [row for row in selected if row["formula_supported"]]
+            if formula_rows:
+                print(
+                    f"    formula: supported={len(formula_rows)}/{len(selected)} "
+                    f"estimated_p50="
+                    f"{statistics.median(row['estimated_speedup'] for row in formula_rows):.2f}x "
+                    f"observed_p50="
+                    f"{statistics.median(row['observed_speedup'] for row in formula_rows):.2f}x "
+                    f"target_overhead_p50="
+                    f"{statistics.median(row['target_overhead_ratio'] for row in formula_rows):.3f}"
+                )
             if selected[0]["cooldown"]:
                 print(
                     f"    cooldown: entries={sum(row['cooldown_entries'] for row in selected)} "
@@ -1538,6 +1577,7 @@ def main():
         if args.cooldown:
             probe_options["cooldown_bool"] = True
         probe.set_speculative_options(**probe_options)
+        common.verify_speculative_options(probe, probe_options)
         del probe
     except Exception as error:
         raise RuntimeError(
@@ -1664,7 +1704,8 @@ def main():
                     "target_passes_per_token": "",
                     "total_draft_ms": "",
                     "total_target_ms": "",
-                    "observed_speedup_estimate": "",
+                    "estimated_speedup": "",
+                    "observed_speedup": "",
                     "peak_process_rss_gib": "",
                 })
                 if args.log_level == "detailed":
@@ -1900,26 +1941,36 @@ def main():
                             "first_difference": comparison["first_difference"],
                             "divergence_type": divergence_type,
                             "rounds": rounds,
+                            "completed_rounds": int(stats["completed_rounds"]),
+                            "interrupted_rounds": int(stats["interrupted_rounds"]),
+                            "active_rounds": int(stats["active_rounds"]),
                             "draft_proposed": proposed,
                             "draft_evaluated": evaluated,
                             "draft_accepted": accepted,
                             "acceptance_rate": round(
-                                float(stats.get("acceptance_rate", 0.0)), 6
+                                float(stats["acceptance_rate"]), 6
+                            ),
+                            "avg_draft_tokens_per_round": round(
+                                float(stats["avg_draft_tokens_per_round"]), 6
                             ),
                             "mean_accepted_tokens_per_round": round(
                                 mean_accepted, 6
                             ),
                             "mean_emitted_tokens_per_round": round(
-                                float(stats.get(
-                                    "mean_emitted_tokens_per_round",
-                                    result["new_tokens"] / rounds if rounds else 0.0,
-                                )),
+                                float(stats["mean_emitted_tokens_per_round"]),
                                 6,
                             ),
-                            "corrections": int(stats.get("correction_tokens", 0)),
-                            "bonuses": int(stats.get("bonus_tokens", 0)),
+                            "expected_tokens_per_round": round(
+                                float(stats["expected_tokens_per_round"]), 6
+                            ),
+                            "corrections": int(stats["correction_tokens"]),
+                            "bonuses": int(stats["bonus_tokens"]),
+                            "tokens_queued": int(stats["tokens_queued"]),
+                            "tokens_emitted": int(stats["tokens_emitted"]),
+                            "tokens_discarded": int(stats["tokens_discarded"]),
+                            "tokens_buffered": int(stats["tokens_buffered"]),
                             "draft_forward_passes": int(
-                                stats.get("draft_forward_passes", 0)
+                                stats["draft_forward_passes"]
                             ),
                             "target_forward_passes": target_passes,
                             "target_verify_forward_passes": int(
@@ -1991,10 +2042,26 @@ def main():
                                 float(stats.get("total_ngram_history_sync_ms", 0.0)), 6
                             ),
                             "total_ngram_lookup_ms": round(
-                                float(stats.get("total_ngram_lookup_ms", 0.0)), 6
+                                float(stats["total_ngram_lookup_ms"]), 6
                             ),
-                            "observed_speedup_estimate": round(
-                                float(stats.get("observed_speedup", 0.0)), 6
+                            "avg_draft_ms_per_token": round(
+                                float(stats["avg_draft_ms_per_token"]), 6
+                            ),
+                            "avg_target_ms_per_round": round(
+                                float(stats["avg_target_ms_per_round"]), 6
+                            ),
+                            "target_baseline_ms_per_token": round(
+                                float(stats["target_baseline_ms_per_token"]), 6
+                            ),
+                            "target_overhead_ratio": round(
+                                float(stats["target_overhead_ratio"]), 6
+                            ),
+                            "formula_supported": bool(stats["formula_supported"]),
+                            "estimated_speedup": round(
+                                float(stats["estimated_speedup"]), 6
+                            ),
+                            "observed_speedup": round(
+                                float(stats["observed_speedup"]), 6
                             ),
                             "peak_process_rss_gib": "",
                         }
@@ -2053,6 +2120,12 @@ def main():
                             f"    target: verify={sum(row['target_verify_forward_passes'] for row in prompt_rows)} "
                             f"reanchor={sum(row['target_reanchor_forward_passes'] for row in prompt_rows)} "
                             f"reconcile={sum(row['target_reconciliation_forward_passes'] for row in prompt_rows)}"
+                        )
+                        print(
+                            f"    lifecycle: completed={sum(row['completed_rounds'] for row in prompt_rows)} "
+                            f"interrupted={sum(row['interrupted_rounds'] for row in prompt_rows)} "
+                            f"discarded={sum(row['tokens_discarded'] for row in prompt_rows)} "
+                            f"buffered={sum(row['tokens_buffered'] for row in prompt_rows)}"
                         )
                         print(
                             f"    n-gram: hits={sum(row['ngram_lookup_hits'] for row in prompt_rows)} "
