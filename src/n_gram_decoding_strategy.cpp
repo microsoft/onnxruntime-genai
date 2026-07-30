@@ -55,8 +55,7 @@ void ValidateNGramDecoding(const Model& model, const GeneratorParams& params) {
   capabilities.num_return_sequences = params.search.num_return_sequences;
   capabilities.uses_guidance =
       !params.guidance_type.empty() || !params.guidance_data.empty();
-  capabilities.uses_draft_model =
-      ModelType::UsesDraftModelSpeculation(config.type, config.draft.filename);
+  capabilities.uses_draft_model = config.draft.has_value();
   capabilities.is_plain_decoder_only_text = is_plain_decoder_only_text;
   capabilities.uses_sliding_kv_cache = uses_sliding_kv_cache;
   capabilities.uses_hybrid_state = !config.decoder.layer_types.empty();

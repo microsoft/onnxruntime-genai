@@ -89,6 +89,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Gets an immutable snapshot of the generator's speculative decoding statistics.
+        /// </summary>
+        /// <returns>A disposable snapshot of the current speculative decoding statistics.</returns>
         public SpeculativeStats GetSpeculativeStats()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GetSpeculativeStats(_generatorHandle, out IntPtr stats));

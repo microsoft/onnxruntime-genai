@@ -25,9 +25,8 @@ std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   const auto& model = generator.model_->config_->model;
   if (ModelType::IsTransducer(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
-  const bool uses_draft_model = ModelType::UsesDraftModelSpeculation(model.type, model.draft.filename);
   const bool uses_ngram = generator.search_->params_->speculative.ngram_size > 0;
-  if (uses_draft_model)
+  if (model.draft)
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   if (uses_ngram)
     return std::make_unique<NGramDecodingStrategy>(generator);
