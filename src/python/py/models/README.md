@@ -597,6 +597,25 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
 ```
 
+##### Quantize the KV Cache with Paged Attention
+
+`kv_cache_quant_type` can be combined with `use_paged_attention=true`. In that case the paged KV cache blocks
+(`[num_blocks, block_size, num_kv_heads, head_size]`) are allocated in the quantized element type and the
+`PagedAttention` op receives the `k_scale`/`v_scale` initializers plus the matching `k_quant_type`/`v_quant_type`
+attributes.
+
+Only `int8_*` and `fp8_*` are supported on the paged path; `int4_*` is rejected because `PagedAttention` has no
+sub-byte cache backend. Per-channel scales are emitted with the `(num_kv_heads, 1, head_size)` shape that
+`PagedAttention` requires.
+
+```bash
+# From wheel (paged attention + int8 per-channel KV cache):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+
+# From source (paged attention + fp8 per-tensor KV cache):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=fp8_per_tensor kv_cache_scale_file=path_to_scales.json
+```
+
 #### FP32 I/O for WebGPU EP
 
 This scenario is for when you want to force FP32 model I/O for WebGPU (useful for GPUs without FP16 support on WebGPU, such as GTX 10xx).

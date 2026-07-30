@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
 
@@ -31,6 +33,10 @@ class _FakeGQAModel:
     make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
     get_kv_cache_scale_names = Model.get_kv_cache_scale_names
+    extend_with_optional_inputs = Model.extend_with_optional_inputs
+    get_qk_norm_weight_inputs = Model.get_qk_norm_weight_inputs
+    get_kv_cache_scale_inputs = Model.get_kv_cache_scale_inputs
+    get_attention_op_attributes = Model.get_attention_op_attributes
 
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
@@ -120,6 +126,68 @@ def test_quantized_gqa_emits_scale_inputs_and_attributes():
     assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
     assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"
     assert node["attributes"]["kv_cache_bit_width"] == 4
+
+
+def test_quantized_paged_attention_emits_scale_inputs_and_attributes():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_quant_type = "int8_per_channel"
+    model.kv_quant_type = "PER_CHANNEL"
+    model.kv_cache_bit_width = 8
+
+    model.make_paged_attention(
+        "/paged",
+        layer_id=3,
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    node = model.nodes[-1]
+    assert node["inputs"][14:16] == [
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
+    ]
+    assert node["attributes"]["k_quant_type"] == "PER_CHANNEL"
+    assert node["attributes"]["v_quant_type"] == "PER_CHANNEL"
+    # PagedAttention derives the cache element type from the tensor, so it has no bit-width attribute.
+    assert "kv_cache_bit_width" not in node["attributes"]
+
+
+def test_quantized_paged_attention_requires_layer_id():
+    model = _FakeGQAModel("cuda")
+    model.kv_cache_quant_type = "int8_per_tensor"
+    model.kv_quant_type = "PER_TENSOR"
+
+    with pytest.raises(ValueError, match="layer_id is required"):
+        model.make_paged_attention(
+            "/paged",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_lengths="cumulative_sequence_lengths",
+            past_sequence_lengths="past_sequence_lengths",
+            block_table="block_table",
+        )
+
+
+@pytest.mark.parametrize("provided", ["q_norm_weight", "k_norm_weight"])
+def test_paged_attention_rejects_unpaired_qk_norm_weights(provided):
+    model = _FakeGQAModel("cuda")
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        model.make_paged_attention(
+            "/paged",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_lengths="cumulative_sequence_lengths",
+            past_sequence_lengths="past_sequence_lengths",
+            block_table="block_table",
+            **{provided: "norm"},
+        )
 
 
 def test_get_qk_norm_weight_names_follows_convention():
