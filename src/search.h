@@ -43,6 +43,16 @@ struct Search : LeakChecked<Search> {
   virtual void SetLogits(DeviceSpan<float> logits) = 0;
   virtual bool IsDone() const = 0;
 
+  // Deferred completion lets a caller that drives many independent searches launch the token
+  // selection work for all of them before paying for a single device synchronization. When
+  // enabled, the part of token selection that depends on a device result is postponed until
+  // CompleteGeneration() is called. With it disabled (the default) token selection completes
+  // inline, exactly as before.
+  //
+  // Once CompleteGeneration() has returned, GetNextTokens().CpuSpan() holds the selected tokens.
+  virtual void DeferCompletion(bool /*defer*/) {}
+  virtual void CompleteGeneration() {}
+
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }

@@ -101,7 +101,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
+    auto input_ids = request->UnprocessedTokensCpu();
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
     if (request->IsPrefill()) {
@@ -231,6 +231,25 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   if (requires_cast) {
     logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_fp32_->CreateTensor(logits_shape);
+  }
+
+  // On a pure decode step every request contributes exactly one token, so the rows the search needs
+  // are already the first `batch` rows of the output and the whole batch converts in one launch
+  // instead of one launch per request.
+  bool rows_are_contiguous = !valid_token_indices.empty();
+  for (size_t i = 0; i < valid_token_indices.size() && rows_are_contiguous; ++i) {
+    rows_are_contiguous = valid_token_indices[i] == i;
+  }
+
+  if (requires_cast && rows_are_contiguous) {
+    auto logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
+    model_.p_device_inputs_->Cast(logits_bytes.Span().data(), logits_fp32_span.Span().data(),
+                                  active_logits_->GetType(), Ort::TypeToTensorType<float>,
+                                  valid_token_indices.size() * static_cast<size_t>(vocab_size));
+    for (size_t i = 0; i < valid_token_indices.size(); ++i) {
+      logits_vector.push_back(logits_fp32_span.subspan(i * vocab_size, vocab_size));
+    }
+    return logits_vector;
   }
 
   for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {

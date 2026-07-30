@@ -16,7 +16,14 @@ struct Search_Cuda : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const {
-    cudaStreamSynchronize(GetStream());
+    // done_cpu_ is pinned host memory written by CheckForEOSAndPad on the device, so it is only
+    // meaningful once the stream has drained. Tracking whether such a launch is outstanding lets a
+    // caller that has already synchronized (see GreedySearch_Cuda::CompleteGeneration) skip a
+    // redundant synchronization here.
+    if (done_pending_) {
+      cudaStreamSynchronize(GetStream());
+      done_pending_ = false;
+    }
     return *done_cpu_;
   }  // TODO: Use an event
   void ResetDone();
@@ -40,6 +47,8 @@ struct Search_Cuda : Search {
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   cuda_host_unique_ptr<bool> done_cpu_;
+  // Set when a device launch that may write done_cpu_ is outstanding.
+  mutable bool done_pending_{false};
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
@@ -55,11 +64,17 @@ struct GreedySearch_Cuda : Search_Cuda {
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
+  void DeferCompletion(bool defer) override { defer_completion_ = defer; }
+  void CompleteGeneration() override;
+
  private:
   DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
   std::unique_ptr<cuda::SamplingData> samplingdata_;
+
+  bool defer_completion_{false};
+  bool completion_pending_{false};
 };
 
 struct BeamSearch_Cuda : Search_Cuda {

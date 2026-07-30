@@ -71,6 +71,7 @@ BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::ResetDone() {
   *done_cpu_ = false;
+  done_pending_ = false;
   CUDA_CHECK(cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream()));
 }
 
@@ -164,10 +165,34 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   assert(next_tokens_.size() == eos_seen_.size());
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
-  // Append tokens
-  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-  if (!*done_cpu_) {
+  // Append tokens. The launch is unconditional so that no device result has to be read back here:
+  // CheckForEOSAndPad has already replaced a finished sequence's token with the pad token, and the
+  // host-side length below is only advanced for sequences that had not finished, so a slot written
+  // for a finished sequence is never read.
+  if (sequences_.GetSequenceLength() < sequences_.max_length_) {
     cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+  }
+
+  completion_pending_ = true;
+  done_pending_ = true;
+  if (!defer_completion_)
+    CompleteGeneration();
+}
+
+void GreedySearch_Cuda::CompleteGeneration() {
+  if (!completion_pending_)
+    return;
+  completion_pending_ = false;
+
+  // done_cpu_ lives in pinned host memory written by CheckForEOSAndPad, so it is only meaningful
+  // once the stream has drained. When completion is deferred, every search in the batch has already
+  // launched its work by the time the first of these calls runs, so only that first call waits.
+  // Reading the next tokens back here rides along on the same synchronization, which lets callers
+  // use GetNextTokens().CpuSpan() afterwards without another round trip.
+  next_tokens_buffer_.CopyDeviceToCpu();
+  done_pending_ = false;
+
+  if (!*done_cpu_) {
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
 

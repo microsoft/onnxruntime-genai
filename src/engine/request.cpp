@@ -22,7 +22,11 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 }  // namespace
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {}
+    : params_{params}, search_{CreateSearch(*params.get())} {
+  // The engine drives one independent search per request, so completion is batched: see
+  // ScheduledRequests::GenerateNextTokens().
+  search_->DeferCompletion(true);
+}
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
@@ -35,6 +39,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   processed_sequence_length_ = CurrentSequenceLength();
   search_->AppendTokens(device_tokens);
   seen_sequence_length_ = CurrentSequenceLength();
+  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
 }
 
@@ -75,6 +80,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
+    tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
 
@@ -83,11 +89,10 @@ int64_t Request::CurrentSequenceLength() const {
 }
 
 int32_t Request::UnseenToken() {
-  auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
-  if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())
+  if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
 
-  return sequence[seen_sequence_length_++];
+  return tokens_host_[seen_sequence_length_++];
 }
 
 bool Request::HasUnseenTokens() const {
@@ -98,6 +103,15 @@ DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
   auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
   return unprocessed_tokens;
+}
+
+std::span<const int32_t> Request::UnprocessedTokensCpu() const {
+  const size_t begin = static_cast<size_t>(processed_sequence_length_);
+  const size_t end = static_cast<size_t>(CurrentSequenceLength());
+  if (end > tokens_host_.size())
+    throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
+
+  return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
 bool Request::IsDone() const {
@@ -139,6 +153,20 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       assert(search_params.top_k == 0);
       search_->SampleTopP(search_params.top_p, search_params.temperature);
     }
+  }
+}
+
+void Request::CompleteGeneration() {
+  search_->CompleteGeneration();
+
+  const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  if (sequence_length > tokens_host_.size()) {
+    const size_t new_token_count = sequence_length - tokens_host_.size();
+    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    if (new_token_count > next_tokens.size())
+      throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
+
+    tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
   }
 
   if (search_->IsDone()) {

@@ -45,7 +45,7 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
 
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
+    auto input_ids = request->UnprocessedTokensCpu();
     for (size_t j = 0; j < max_sequence_length; ++j) {
       cpu_span[i * max_sequence_length + j] = (j < input_ids.size()) ? input_ids[j] : model->config_->model.pad_token_id;
     }
@@ -112,7 +112,7 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
 
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
+    auto input_ids = request->UnprocessedTokensCpu();
     auto current_sequence_length = request->IsPrefill() ? 1 : request->CurrentSequenceLength();
 
     for (size_t j = 0; j < max_sequence_length; ++j) {

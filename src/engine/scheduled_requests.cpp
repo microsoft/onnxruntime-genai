@@ -38,9 +38,19 @@ void ScheduledRequests::GenerateNextTokens() {
     throw std::runtime_error("Logits size does not match the number of requests.");
   }
 
+  // Every request owns an independent single-sequence search, so token selection runs once per
+  // request. Completing each one inline would block the host on the device once per request and
+  // serialize the whole batch; launching all of them first means only the first completion below
+  // actually waits for the device.
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
     if (requests_[request_idx]->status_ != RequestStatus::Completed) {
       requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+    }
+  }
+
+  for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+    if (requests_[request_idx]->status_ != RequestStatus::Completed) {
+      requests_[request_idx]->CompleteGeneration();
     }
   }
 }
