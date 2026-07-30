@@ -216,7 +216,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetBool(IntPtr /* const OgaSpeculativeStats* */ stats,
                                                                                byte[] /* const char* */ name,
-                                                                               out bool value);
+                                                                               [MarshalAs(UnmanagedType.I1)] out bool value);
 
         // This function returns the sequence data at the given index. The returned pointer is owned by the
         // OgaGenerator object and will be freed when the OgaGenerator object is destroyed. It is expected
