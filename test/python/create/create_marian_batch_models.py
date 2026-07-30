@@ -37,7 +37,11 @@ def make_graph(name, inputs, outputs, filename):
     initializers = []
     nodes = []
     for out_name, dtype, shape in outputs:
-        np_dtype = {TensorProto.FLOAT: np.float32, TensorProto.INT32: np.int32}[dtype]
+        np_dtype = {
+            TensorProto.FLOAT: np.float32,
+            TensorProto.INT32: np.int32,
+            TensorProto.INT64: np.int64,
+        }[dtype]
         shape_tensor = numpy_helper.from_array(np.array(shape, dtype=np.int64))
         shape_tensor.name = f"{out_name}_shape"
         initializers.append(shape_tensor)
@@ -85,7 +89,8 @@ def main():
     make_graph(
         "encoder",
         inputs=[
-            ("input_ids", TensorProto.INT32, [batch_beam, seq]),
+            # int64 input_ids exercises the cast path in MarianInputIDs::Update.
+            ("input_ids", TensorProto.INT64, [batch_beam, seq]),
             ("attention_mask", TensorProto.INT32, [batch_beam, seq]),
         ],
         outputs=[
@@ -97,7 +102,7 @@ def main():
     make_graph(
         "decoder",
         inputs=[
-            ("input_ids", TensorProto.INT32, [batch_beam]),
+            ("input_ids", TensorProto.INT64, [batch_beam]),
             (
                 "encoder_hidden_states",
                 TensorProto.FLOAT,
@@ -109,7 +114,8 @@ def main():
                 TensorProto.FLOAT,
                 [RNN_STATE_SLOTS, batch_beam, HIDDEN_SIZE],
             ),
-            ("past_key_values_length", TensorProto.INT32, [1]),
+            # Scalar int64: MarianState writes it via GetTensorMutableData<int64_t>.
+            ("past_key_values_length", TensorProto.INT64, []),
         ],
         outputs=[
             ("logits", TensorProto.FLOAT, [batch_beam, VOCAB_SIZE]),

@@ -416,10 +416,9 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
-// Marian sizes encoder buffers by batch_size and decoder buffers by
-// batch_size * num_beams. These fixtures are shapes-only graphs, so they pin
-// that arithmetic and nothing about generated text. Each configuration needs
-// its own fixture because dummy graphs cannot be shape-polymorphic.
+// Every ORT tensor is batch*beam wide: Run receives a [batch_size, sequence]
+// prompt buffer and DefaultInputIDs expands it over beams. These graphs declare
+// fixed dimensions so a mis-sized tensor fails to bind.
 TEST(CAPITests, MarianBatchIOContract) {
   auto model = OgaModel::Create(MODEL_PATH "marian-batch");
 
