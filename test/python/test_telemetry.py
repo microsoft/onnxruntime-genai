@@ -713,13 +713,13 @@ class TestDeviceId(unittest.TestCase):
         import telemetry.deviceid as deviceid
 
         device_id, status = deviceid.get_hashed_device_id_and_status()
-        # Product-salted SHA-256 with the custom-device-id prefix.
+        # Shared SHA-256 with the custom-device-id prefix.
         if status != deviceid.DeviceIdStatus.FAILED:
             self.assertEqual(len(device_id), 66)
             self.assertTrue(device_id.startswith("c:"))
-            self.assertTrue(all(c in "0123456789abcdef" for c in device_id[2:]))
+            self.assertTrue(all(c in "0123456789ABCDEF" for c in device_id[2:]))
             raw_id = deviceid._device_id_state["device_id"]
-            expected = hashlib.sha256(f"onnxruntime-genai:{raw_id}".encode()).hexdigest()
+            expected = hashlib.sha256(raw_id.encode()).hexdigest().upper()
             self.assertEqual(device_id, f"c:{expected}")
         self.assertIn(status, list(deviceid.DeviceIdStatus))
 
