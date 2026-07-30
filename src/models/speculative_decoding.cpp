@@ -12,9 +12,10 @@ namespace Generators {
 
 namespace {
 
-std::unique_ptr<Config> CloneConfigForDraft(const Config& source) {
+std::unique_ptr<Config> CloneConfigForDraft(const Config& source,
+                                            const Config::Model::Decoder& draft) {
   auto config = std::make_unique<Config>(source);
-  config->model.decoder = source.model.draft;
+  config->model.decoder = draft;
   return config;
 }
 
@@ -46,21 +47,32 @@ bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
   return true;
 }
 
+int64_t GetLogitsVocabSize(const DecoderOnly_Model& model, const char* model_role) {
+  const auto& logits_name = model.config_->model.decoder.outputs.logits;
+  if (!model.session_info_.HasOutput(logits_name))
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' was not found in the ONNX model.");
+
+  const auto logits_shape = model.session_info_.GetOutputShape(logits_name);
+  if (logits_shape.empty())
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' must have at least one dimension.");
+
+  const int64_t vocab_size = logits_shape.back();
+  if (vocab_size <= 0)
+    throw std::runtime_error(
+        std::string(model_role) + " logits output '" + logits_name +
+        "' must have a static positive vocabulary dimension.");
+
+  return vocab_size;
+}
+
 void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
                                    const DecoderOnly_Model& draft) {
-  const auto& target_logits_name = target.config_->model.decoder.outputs.logits;
-  const auto& draft_logits_name = draft.config_->model.decoder.outputs.logits;
-  if (!target.session_info_.HasOutput(target_logits_name) ||
-      !draft.session_info_.HasOutput(draft_logits_name))
-    return;
-  const auto target_logits_shape = target.session_info_.GetOutputShape(target_logits_name);
-  const auto draft_logits_shape = draft.session_info_.GetOutputShape(draft_logits_name);
-  if (target_logits_shape.empty() || draft_logits_shape.empty())
-    return;
-  int64_t target_vocab_size = target_logits_shape.back();
-  int64_t draft_vocab_size = draft_logits_shape.back();
-  if (target_vocab_size <= 0 || draft_vocab_size <= 0)
-    return;
+  const int64_t target_vocab_size = GetLogitsVocabSize(target, "Target");
+  const int64_t draft_vocab_size = GetLogitsVocabSize(draft, "Draft");
   if (target_vocab_size != draft_vocab_size)
     throw std::runtime_error(
         "Target and draft logit dimensions don't match. Target vocab: " +
@@ -73,18 +85,18 @@ void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
 // SpeculativeDecodingModel
 SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  if (config_->model.draft.filename.empty())
+  if (!config_->model.draft || config_->model.draft->filename.empty())
     throw std::runtime_error(
-        "model.type is \"speculative\" but model.draft.filename is not set in genai_config.json.");
+        "model.draft.filename is not set in genai_config.json.");
 
+  const auto& draft_config = *config_->model.draft;
   if (!ProviderConfigurationMatches(config_->model.decoder.session_options,
-                                    config_->model.draft.session_options))
+                                    draft_config.session_options))
     throw std::runtime_error(
         "Target and draft must use the same execution provider. "
         "Cross-EP speculative decoding is not supported in this release.");
 
-  // v0 scope: target and draft must be plain decoder-only LLMs. No Pipeline/multimodal (reject upfront).
-  if (!config_->model.decoder.pipeline.empty() || !config_->model.draft.pipeline.empty())
+  if (!config_->model.decoder.pipeline.empty() || !draft_config.pipeline.empty())
     throw std::runtime_error(
         "Speculative decoding does not support pipeline models in this release; "
         "target and draft must be plain decoder-only LLMs.");
@@ -93,30 +105,19 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "Speculative decoding does not support multimodal (vision/audio) models in this release; "
         "target and draft must be plain decoder-only LLMs.");
 
-  // The inner states are constructed directly as DecoderOnly_Model, which requires the modern
-  // separate key/value KV-cache format (past_key_names/past_value_names).
-  auto uses_combined_kv = [](const Config::Model::Decoder& d) {
-    return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
-  };
-  if (uses_combined_kv(config_->model.decoder) || uses_combined_kv(config_->model.draft))
-    throw std::runtime_error(
-        "Speculative decoding requires decoder-only target and draft models that use the separate "
-        "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
-        "such as the original gpt2 graph (past_%d/present_%d) are not supported in this release.");
-
-  // Reject only windowed caches that discard KV history.
   if (UsesNonRewindableWindowedKeyValueCache(*this, config_->model.decoder) ||
-      UsesNonRewindableWindowedKeyValueCache(*this, config_->model.draft))
+      UsesNonRewindableWindowedKeyValueCache(*this, draft_config))
     throw std::runtime_error(
         "Speculative decoding does not support physically sliding KV caches in this release; "
         "WindowedKeyValueCache cannot rewind after discarding KV history.");
-  if (!config_->model.decoder.layer_types.empty() || !config_->model.draft.layer_types.empty())
+  if (!config_->model.decoder.layer_types.empty() || !draft_config.layer_types.empty())
     throw std::runtime_error(
         "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
         "their rolling convolution state cannot be rewound.");
 
   target_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForTarget(*config_), ort_env);
-  draft_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForDraft(*config_), ort_env);
+  draft_model_ = std::make_shared<DecoderOnly_Model>(
+      CloneConfigForDraft(*config_, draft_config), ort_env);
   ValidateLogitsDimensionsMatch(*target_model_, *draft_model_);
   session_info_.Add(*target_model_->session_decoder_);
 }
@@ -126,7 +127,6 @@ std::unique_ptr<State> SpeculativeDecodingModel::CreateState(DeviceSpan<int32_t>
   return std::make_unique<SpeculativeDecodingState>(*this, sequence_lengths, params);
 }
 
-// SpeculativeDecodingState — construction
 SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)

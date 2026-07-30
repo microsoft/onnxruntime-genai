@@ -1211,7 +1211,11 @@ struct Model_Element : JSON::Element {
       return decoder_;
     }
     if (name == "draft") {
-      return draft_;
+      if (!v_.draft)
+        v_.draft.emplace();
+      if (!draft_)
+        draft_ = std::make_unique<Decoder_Element>(*v_.draft);
+      return *draft_;
     }
     if (name == "vision") {
       return vision_;
@@ -1235,9 +1239,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
-  // The draft model (speculative decoding) is parsed as a Decoder_Element because only
-  // decoder-only draft models are supported in v0 implementation.
-  Decoder_Element draft_{v_.draft};
+  std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
@@ -1897,10 +1899,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     model.decoder.session_options.providers.push_back(provider_option.name);
   }
 
-  // Speculative decoding: the draft block has its own session_options. Populate its providers list
-  // from provider_options too (mirrors the decoder above).
-  for (const auto& provider_option : model.draft.session_options.provider_options) {
-    model.draft.session_options.providers.push_back(provider_option.name);
+  if (model.draft) {
+    for (const auto& provider_option : model.draft->session_options.provider_options) {
+      model.draft->session_options.providers.push_back(provider_option.name);
+    }
   }
 
   if (model.encoder.session_options.has_value()) {

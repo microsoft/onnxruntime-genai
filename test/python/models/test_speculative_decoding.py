@@ -64,7 +64,7 @@ def _spec_config(decoder: dict | None = None, draft=_DEFAULT_DRAFT,
                  speculative: dict | None = None, **model_overrides) -> dict:
     decoder = decoder if decoder is not None else _decoder_block()
     model = {
-        "type": "speculative",
+        "type": "decoder",
         "vocab_size": 1000,
         "context_length": 512,
         "bos_token_id": 0,
@@ -93,27 +93,28 @@ def _write_config(directory: Path, config: dict) -> str:
 
 def _make_tiny_draft_spec_model(
         directory: Path, model_type: str, context_length: int,
-        draft_switch_at: int | None = None) -> str:
+        draft_switch_at: int | None = None, draft_vocab_size: int = 10) -> str:
     onnx = pytest.importorskip("onnx")
     from onnx import TensorProto, helper, numpy_helper
 
     directory.mkdir(parents=True, exist_ok=True)
 
-    def save_model(filename: str, switch_at: int | None = None):
+    def save_model(filename: str, switch_at: int | None = None, vocab_size: int = 10):
         input_ids = helper.make_tensor_value_info(
             "input_ids", TensorProto.INT32, ["batch", "sequence"])
         attention_mask = helper.make_tensor_value_info(
             "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
         logits = helper.make_tensor_value_info(
-            "logits", TensorProto.FLOAT, ["batch", "sequence", 10])
-        table = numpy_helper.from_array(np.eye(10, dtype=np.float32), "logits_table")
+            "logits", TensorProto.FLOAT, ["batch", "sequence", vocab_size])
+        table = numpy_helper.from_array(
+            np.eye(10, vocab_size, dtype=np.float32), "logits_table")
         nodes = [helper.make_node(
             "Gather", ["logits_table", "input_ids"], ["base_logits"], axis=0)]
         initializers = [table]
         if switch_at is None:
             nodes.append(helper.make_node("Identity", ["base_logits"], ["logits"]))
         else:
-            switched_table = np.zeros((10, 10), dtype=np.float32)
+            switched_table = np.zeros((10, vocab_size), dtype=np.float32)
             switched_table[:, 4] = 1.0
             initializers.extend([
                 numpy_helper.from_array(switched_table, "switched_logits_table"),
@@ -139,14 +140,14 @@ def _make_tiny_draft_spec_model(
         onnx.save(model, directory / filename)
 
     save_model("model.onnx")
-    if draft_switch_at is not None:
-        save_model("draft.onnx", draft_switch_at)
+    if draft_switch_at is not None or draft_vocab_size != 10:
+        save_model("draft.onnx", draft_switch_at, draft_vocab_size)
 
     decoder = _decoder_block(
         head_size=1, hidden_size=1, num_attention_heads=1,
         num_key_value_heads=1, num_hidden_layers=0)
     draft = copy.deepcopy(decoder)
-    if draft_switch_at is not None:
+    if draft_switch_at is not None or draft_vocab_size != 10:
         draft["filename"] = "draft.onnx"
     config = _spec_config(
         decoder=decoder, draft=draft, type=model_type,
@@ -160,31 +161,8 @@ def _make_tiny_draft_spec_model(
 # ---------------------------------------------------------------------------
 
 class TestSpeculativeConfigGuards:
-    def test_combined_kv_committed_gpt2_fixture(self, test_data_path, tmp_path):
-        """The committed gpt2 speculative fixture uses the legacy combined-KV graph,
-        which DecoderOnly_Model cannot bind. Must be rejected cleanly (not crash)."""
-        source_path = os.path.join(test_data_path, "hf-internal-testing", "tiny-random-gpt2-speculative")
-        config_path = os.path.join(source_path, "genai_config.json")
-        if not os.path.exists(config_path):
-            pytest.skip("tiny-random-gpt2-speculative fixture not found")
-        with open(config_path) as f:
-            config = json.load(f)
-        config["model"]["decoder"]["filename"] = "model.onnx"
-        config["model"]["draft"]["filename"] = "model.onnx"
-        path = _write_config(tmp_path / "combined_kv_fixture", config)
-        with pytest.raises(Exception, match="separate key/value KV-cache format"):
-            og.Model(path)
-
-    def test_combined_kv_inline(self, tmp_path):
-        decoder = _decoder_block()
-        decoder["inputs"]["past_names"] = "past_%d"
-        decoder["outputs"]["present_names"] = "present_%d"
-        path = _write_config(tmp_path / "combined_kv", _spec_config(decoder=decoder))
-        with pytest.raises(Exception, match="separate key/value KV-cache format"):
-            og.Model(path)
-
-    def test_missing_draft(self, tmp_path):
-        path = _write_config(tmp_path / "no_draft", _spec_config(draft=None))
+    def test_missing_draft_filename(self, tmp_path):
+        path = _write_config(tmp_path / "no_draft_filename", _spec_config(draft={}))
         with pytest.raises(Exception, match="draft.filename is not set"):
             og.Model(path)
 
@@ -278,7 +256,7 @@ def _build_self_spec(source_dir: str, dest_dir: Path, max_draft_tokens: int = 4)
     if not model_link.exists():
         os.link(model_abs, model_link)
     model = {
-        "type": "speculative",
+        "type": src["model"]["type"],
         "vocab_size": src["model"]["vocab_size"],
         "context_length": src["model"].get("context_length", 2048),
         "bos_token_id": src["model"].get("bos_token_id", 0),
@@ -454,7 +432,7 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
     decoder, src = _decoder_from(target_dir, dest_dir, "target.onnx")
     draft, _ = _decoder_from(draft_dir, dest_dir, "draft.onnx")
     model = {
-        "type": "speculative",
+        "type": src["model"]["type"],
         "vocab_size": src["model"]["vocab_size"],
         "context_length": src["model"].get("context_length", 2048),
         "bos_token_id": src["model"].get("bos_token_id", 0),
@@ -823,6 +801,25 @@ class TestSpeculativeGeneration:
         assert stats["completed_rounds"] == 1
         assert stats["effective_k"] == 1
         assert stats["adaptive_k_increases"] == 0
+
+    def test_logits_vocab_mismatch_fails_during_model_creation(self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "vocab_mismatch", "llama", context_length=16,
+            draft_vocab_size=11)
+        with pytest.raises(Exception, match="Target vocab: 10, Draft vocab: 11"):
+            og.Model(path)
+
+    def test_missing_configured_logits_output_fails_during_model_creation(self, tmp_path):
+        model_dir = tmp_path / "missing_logits"
+        path = _make_tiny_draft_spec_model(model_dir, "llama", context_length=16)
+        config_path = model_dir / "genai_config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+        config["model"]["draft"]["outputs"]["logits"] = "missing_logits"
+        _write_config(model_dir, config)
+
+        with pytest.raises(Exception, match="Draft logits output 'missing_logits' was not found"):
+            og.Model(path)
 
     def test_draft_enables_speculation_for_regular_model_type(self, tmp_path):
         path = _make_tiny_draft_spec_model(

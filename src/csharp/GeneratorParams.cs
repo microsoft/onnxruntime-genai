@@ -46,11 +46,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return value;
         }
 
+        /// <summary>
+        /// Sets a numerical speculative decoding option.
+        /// </summary>
+        /// <param name="name">The speculative option name, such as <c>max_draft_tokens</c>.</param>
+        /// <param name="value">The value to set.</param>
         public void SetSpeculativeNumber(string name, double value)
         {
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(name), value));
         }
 
+        /// <summary>
+        /// Gets the current value of a numerical speculative decoding option.
+        /// </summary>
+        /// <param name="name">The speculative option name.</param>
+        /// <returns>The current option value.</returns>
         public double GetSpeculativeNumber(string name)
         {
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSpeculativeNumber(_generatorParamsHandle, StringUtils.ToUtf8(name), out double value));

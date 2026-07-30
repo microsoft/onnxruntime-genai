@@ -61,16 +61,6 @@ struct ModelType {
     return IsRNNT(model_type) || IsTDT(model_type);
   }
 
-  // Speculative decoding wraps two decoder-only models (target + draft) under a single model.
-  inline static bool IsSpeculative(const std::string& model_type) {
-    return model_type == "speculative";
-  }
-
-  inline static bool UsesDraftModelSpeculation(const std::string& model_type,
-                                               const std::string& draft_filename) {
-    return IsSpeculative(model_type) || !draft_filename.empty();
-  }
-
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
     static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
