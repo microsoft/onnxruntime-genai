@@ -899,11 +899,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
           "speech.filename is set but speech.config_filename is missing. "
           "Both are required for audio support.");
     }
-    if (!has_speech_model && has_speech_config) {
-      throw std::runtime_error(
-          "speech.config_filename is set but speech.filename is missing. "
-          "Both are required for audio support.");
-    }
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
   }
   if (config->model.type == "marian-ssru")
