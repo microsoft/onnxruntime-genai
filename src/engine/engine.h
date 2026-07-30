@@ -6,6 +6,7 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "../telemetry/engine_telemetry.h"
 
 /**
  * @file engine.h
@@ -71,6 +72,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unique_ptr<Scheduler> scheduler_;                 // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;        // The executor responsible for running the model.
   std::queue<std::shared_ptr<Request>> ready_requests_;  // The list of requests that are ready for the application to process.
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  uint32_t telemetry_id_{};
+  bool dynamic_batching_{};
+#endif
 };
 
 }  // namespace Generators

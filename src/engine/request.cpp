@@ -24,7 +24,8 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 Request::Request(std::shared_ptr<GeneratorParams> params)
     : params_{params}, search_{CreateSearch(*params.get())} {}
 
-void Request::Assign(std::shared_ptr<Engine> engine) {
+void Request::Assign(std::shared_ptr<Engine> engine, uint32_t session_id,
+                     uint32_t engine_id, bool dynamic_batching) {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
@@ -36,6 +37,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   search_->AppendTokens(device_tokens);
   seen_sequence_length_ = CurrentSequenceLength();
   prefill_input_ids_.clear();
+  telemetry_.Begin(session_id, engine_id, dynamic_batching, seen_sequence_length_);
 }
 
 void Request::Schedule() {
@@ -48,13 +50,22 @@ void Request::Schedule() {
   }
 
   status_ = RequestStatus::InProgress;
+  telemetry_.OnScheduled();
 }
 
 void Request::Remove() {
   auto engine = engine_.lock();
   if (engine) {
     engine->RemoveRequest(shared_from_this());
+  } else {
+    CompleteRemoval();
   }
+}
+
+void Request::CompleteRemoval() {
+  const bool completed = status_ == RequestStatus::Completed;
+  telemetry_.OnRemoved(completed);
+  engine_.reset();
   status_ = RequestStatus::Unassigned;
 }
 
@@ -108,7 +119,7 @@ bool Request::IsPrefill() const {
   return is_prefill_;
 }
 
-void Request::GenerateNextTokens(DeviceSpan<float> logits) {
+void Request::GenerateNextTokens(DeviceSpan<float> logits, size_t batch_size) {
   processed_sequence_length_ = search_->GetSequence(0).size();
   is_prefill_ = false;
 
@@ -144,6 +155,8 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   if (search_->IsDone()) {
     status_ = RequestStatus::Completed;
   }
+  telemetry_.OnStep(CurrentSequenceLength(), batch_size,
+                    status_ == RequestStatus::Completed);
 }
 
 std::shared_ptr<GeneratorParams> Request::Params() {

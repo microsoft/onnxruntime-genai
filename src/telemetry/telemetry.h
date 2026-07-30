@@ -57,6 +57,20 @@ struct GenerateEndInfo {
   double tokens_per_second{};
 };
 
+struct EngineRequestInfo {
+  int64_t prompt_tokens{};
+  int64_t generated_tokens{};
+  int64_t step_count{};
+  int64_t max_batch_size{};
+  double average_batch_size{};
+  double queue_time_ms{};
+  double time_to_first_token_ms{};
+  double decode_time_ms{};
+  double total_time_ms{};
+  bool dynamic_batching{};
+  std::string_view outcome;
+};
+
 class GenAiTelemetry {
  public:
   static GenAiTelemetry& Instance();
@@ -102,6 +116,10 @@ class GenAiTelemetry {
   void LogGeneration(uint32_t session_id, uint32_t generator_id, int64_t prompt_tokens,
                      const std::string& input_modality, const GenerateEndInfo& info,
                      int64_t start_timestamp_ms, int64_t end_timestamp_ms);
+
+  // EngineRequest: one aggregate event emitted after an engine request leaves the decode path.
+  void LogEngineRequest(uint32_t session_id, uint32_t engine_id, uint32_t request_id,
+                        const EngineRequestInfo& info, int64_t end_timestamp_ms);
 
   // AdapterActivated: Emitted when a LoRA adapter is activated for a generator.
   // The adapter name is NOT sent (it may be sensitive); only correlation ids, so

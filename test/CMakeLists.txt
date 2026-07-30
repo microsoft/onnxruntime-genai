@@ -15,6 +15,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # reinit_tests.cpp is a standalone executable (it calls OgaShutdown() to exercise re-initialization
 # and has its own main()), so keep it out of the unit_tests sources.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/engine_telemetry_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -103,6 +104,29 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+if(ENABLE_TELEMETRY)
+  add_executable(engine_telemetry_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine_telemetry_tests.cpp")
+  target_include_directories(engine_telemetry_tests PRIVATE
+    ${ORT_HEADER_DIR}
+    ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+    ${CMAKE_SOURCE_DIR}/src
+  )
+  target_link_libraries(engine_telemetry_tests PRIVATE
+    onnxruntime-genai-obj
+    GTest::gtest_main
+  )
+  add_dependencies(engine_telemetry_tests onnxruntime-genai)
+  set_target_properties(engine_telemetry_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+  )
+  if(NOT MSVC)
+    target_compile_options(engine_telemetry_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME EngineTelemetryTests COMMAND engine_telemetry_tests)
+endif()
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests
