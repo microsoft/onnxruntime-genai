@@ -296,7 +296,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   if (!spec_state)
     throw std::runtime_error(
         "SpeculativeDecodingStrategy::Step requires a SpeculativeDecodingState "
-        "(model.type=\"speculative\" or a Phi3-family model with a draft).");
+        "(a decoder-only model with model.draft configured).");
 
   const auto& params = *g.search_->params_;
   const int seed_length = g.search_->GetSequenceLength();

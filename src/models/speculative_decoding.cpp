@@ -12,9 +12,10 @@ namespace Generators {
 
 namespace {
 
-std::unique_ptr<Config> CloneConfigForDraft(const Config& source) {
+std::unique_ptr<Config> CloneConfigForDraft(const Config& source,
+                                            const Config::Model::Decoder& draft) {
   auto config = std::make_unique<Config>(source);
-  config->model.decoder = source.model.draft;
+  config->model.decoder = draft;
   return config;
 }
 
@@ -73,18 +74,18 @@ void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
 // SpeculativeDecodingModel
 SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  if (config_->model.draft.filename.empty())
+  if (!config_->model.draft || config_->model.draft->filename.empty())
     throw std::runtime_error(
-        "model.type is \"speculative\" but model.draft.filename is not set in genai_config.json.");
+        "model.draft.filename is not set in genai_config.json.");
 
+  const auto& draft_config = *config_->model.draft;
   if (!ProviderConfigurationMatches(config_->model.decoder.session_options,
-                                    config_->model.draft.session_options))
+                                    draft_config.session_options))
     throw std::runtime_error(
         "Target and draft must use the same execution provider. "
         "Cross-EP speculative decoding is not supported in this release.");
 
-  // v0 scope: target and draft must be plain decoder-only LLMs. No Pipeline/multimodal (reject upfront).
-  if (!config_->model.decoder.pipeline.empty() || !config_->model.draft.pipeline.empty())
+  if (!config_->model.decoder.pipeline.empty() || !draft_config.pipeline.empty())
     throw std::runtime_error(
         "Speculative decoding does not support pipeline models in this release; "
         "target and draft must be plain decoder-only LLMs.");
@@ -98,7 +99,7 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
   auto uses_combined_kv = [](const Config::Model::Decoder& d) {
     return !d.inputs.past_names.empty() || !d.outputs.present_names.empty();
   };
-  if (uses_combined_kv(config_->model.decoder) || uses_combined_kv(config_->model.draft))
+  if (uses_combined_kv(config_->model.decoder) || uses_combined_kv(draft_config))
     throw std::runtime_error(
         "Speculative decoding requires decoder-only target and draft models that use the separate "
         "key/value KV-cache format (past_key_names/past_value_names). Combined-KV / legacy formats "
@@ -106,17 +107,18 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
 
   // Reject only windowed caches that discard KV history.
   if (UsesNonRewindableWindowedKeyValueCache(*this, config_->model.decoder) ||
-      UsesNonRewindableWindowedKeyValueCache(*this, config_->model.draft))
+      UsesNonRewindableWindowedKeyValueCache(*this, draft_config))
     throw std::runtime_error(
         "Speculative decoding does not support physically sliding KV caches in this release; "
         "WindowedKeyValueCache cannot rewind after discarding KV history.");
-  if (!config_->model.decoder.layer_types.empty() || !config_->model.draft.layer_types.empty())
+  if (!config_->model.decoder.layer_types.empty() || !draft_config.layer_types.empty())
     throw std::runtime_error(
         "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
         "their rolling convolution state cannot be rewound.");
 
   target_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForTarget(*config_), ort_env);
-  draft_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForDraft(*config_), ort_env);
+  draft_model_ = std::make_shared<DecoderOnly_Model>(
+      CloneConfigForDraft(*config_, draft_config), ort_env);
   ValidateLogitsDimensionsMatch(*target_model_, *draft_model_);
   session_info_.Add(*target_model_->session_decoder_);
 }
@@ -126,7 +128,6 @@ std::unique_ptr<State> SpeculativeDecodingModel::CreateState(DeviceSpan<int32_t>
   return std::make_unique<SpeculativeDecodingState>(*this, sequence_lengths, params);
 }
 
-// SpeculativeDecodingState — construction
 SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)

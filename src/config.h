@@ -431,7 +431,7 @@ struct Config {
 
     } decoder;
 
-    Decoder draft;
+    std::optional<Decoder> draft;
 
   } model;
 

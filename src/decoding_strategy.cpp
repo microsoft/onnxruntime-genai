@@ -23,7 +23,7 @@ std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   const auto& model = generator.model_->config_->model;
   if (ModelType::IsTransducer(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
-  if (ModelType::UsesDraftModelSpeculation(model.type, model.draft.filename))
+  if (model.draft)
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   return std::make_unique<StandardDecodingStrategy>();
 }

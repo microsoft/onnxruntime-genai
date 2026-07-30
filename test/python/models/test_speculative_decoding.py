@@ -64,7 +64,7 @@ def _spec_config(decoder: dict | None = None, draft=_DEFAULT_DRAFT,
                  speculative: dict | None = None, **model_overrides) -> dict:
     decoder = decoder if decoder is not None else _decoder_block()
     model = {
-        "type": "speculative",
+        "type": "decoder",
         "vocab_size": 1000,
         "context_length": 512,
         "bos_token_id": 0,
@@ -183,8 +183,8 @@ class TestSpeculativeConfigGuards:
         with pytest.raises(Exception, match="separate key/value KV-cache format"):
             og.Model(path)
 
-    def test_missing_draft(self, tmp_path):
-        path = _write_config(tmp_path / "no_draft", _spec_config(draft=None))
+    def test_missing_draft_filename(self, tmp_path):
+        path = _write_config(tmp_path / "no_draft_filename", _spec_config(draft={}))
         with pytest.raises(Exception, match="draft.filename is not set"):
             og.Model(path)
 
@@ -255,7 +255,7 @@ def _build_self_spec(source_dir: str, dest_dir: Path, max_draft_tokens: int = 4)
     if not model_link.exists():
         os.link(model_abs, model_link)
     model = {
-        "type": "speculative",
+        "type": src["model"]["type"],
         "vocab_size": src["model"]["vocab_size"],
         "context_length": src["model"].get("context_length", 2048),
         "bos_token_id": src["model"].get("bos_token_id", 0),
@@ -431,7 +431,7 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
     decoder, src = _decoder_from(target_dir, dest_dir, "target.onnx")
     draft, _ = _decoder_from(draft_dir, dest_dir, "draft.onnx")
     model = {
-        "type": "speculative",
+        "type": src["model"]["type"],
         "vocab_size": src["model"]["vocab_size"],
         "context_length": src["model"].get("context_length", 2048),
         "bos_token_id": src["model"].get("bos_token_id", 0),
