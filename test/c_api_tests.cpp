@@ -416,6 +416,50 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+// Marian sizes encoder buffers by batch_size and decoder buffers by
+// batch_size * num_beams. These fixtures are shapes-only graphs, so they pin
+// that arithmetic and nothing about generated text. Each configuration needs
+// its own fixture because dummy graphs cannot be shape-polymorphic.
+TEST(CAPITests, MarianBatchIOContract) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch");
+
+  // One token per row; MarianState::Run appends eos, giving a width of 2.
+  const std::array<int32_t, 1> first{5};
+  const std::array<int32_t, 1> second{7};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("batch_size", 2);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  generator->GenerateNextToken();
+
+  EXPECT_EQ(generator->GetSequenceCount(0), generator->GetSequenceCount(1));
+}
+
+// Beam search makes every graph tensor batch*beam wide. The prompt length is
+// load-bearing: at two tokens the correct sequence width is 3 and sizing the
+// prompt buffer by batch*beam gives 4, so the fixture rejects the regression.
+TEST(CAPITests, MarianBatchWithBeamsIOContract) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch-beams");
+
+  const std::array<int32_t, 2> first{5, 6};
+  const std::array<int32_t, 2> second{7, 8};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("batch_size", 2);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  generator->GenerateNextToken();
+}
+
 #if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiBatch) {
   auto model = OgaModel::Create(PHI2_PATH);
