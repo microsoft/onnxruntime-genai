@@ -25,6 +25,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
+    - [Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)](#export-a-modelopt-nvfp4fp8-checkpoint-qwen36)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
@@ -343,6 +344,26 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 ```
+
+#### Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)
+
+This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized by NVIDIA TensorRT Model Optimizer and you want to carry its NVFP4/FP8 tensors into the ONNX model instead of dequantizing to fp16 and re-quantizing to int4.
+
+```bash
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=nvfp4 use_original_nvfp4_weights=true use_original_fp8_weights=true
+```
+
+The relevant extra options are:
+
+* `moe_quant_type=nvfp4` — emit the routed experts as a native NVFP4 `QMoE` op (E2M1 codes with E4M3 block scales, block size 16) built straight from the checkpoint tensors.
+* `use_original_nvfp4_weights=true` — emit the dense NVFP4 modules (shared expert, `lm_head`) as the weight-only `MatMulBlockQuantizedFp4Weight` contrib op. `nvfp4_dense_exclude_layers` and `nvfp4_lmhead_fp16` keep selected modules at fp16 for A/B comparison.
+* `use_original_fp8_weights=true` — emit the self-attention `q/k/v/o` projections as the weight-only `MatMulBlockQuantizedFp8Weight` contrib op. `fp8_attn_static_input_scale=true` additionally applies the checkpoint's calibrated per-tensor activation scale (W8A8), and `fp8_attn_exclude_layers` keeps selected layers at fp16.
+* `fp8_linear_attn` (default `true` when FP8 weights are used) — apply the same weight-only FP8 treatment to the GatedDeltaNet `in_proj_qkv` / `in_proj_z` / `out_proj` projections. `fp8_linear_attn_static_input_scale=true` opts those into W8A8 as well.
+* `fp8_kv_cache=true` with `kv_cache_scale_file=path_to_scales.json` — store the KV cache as FP8 (E4M3) using calibrated per-layer scales. See [kv_cache_calibration.py](kv_cache_calibration.py) for producing the scale file.
+* `fuse_linear_attn_gates` (default `true` on CUDA) — collapse the float32 gate glue around `LinearAttention` into the fused `com.microsoft::LinearAttentionGate` and `com.microsoft::GatedRMSNorm` ops. Set to `false` for execution providers that lack those kernels.
+
+These options require an ONNX Runtime build that provides the corresponding contrib ops.
 
 #### Enable WebGPU Graph Capture
 
