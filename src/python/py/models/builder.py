@@ -190,7 +190,7 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key in ("paged_block_size", "max_batch_size"):
+        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
             if key not in extra_options:
                 continue
             try:
