@@ -82,6 +82,19 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+RequestStateSnapshot Request::Snapshot() const {
+  const int64_t current = CurrentSequenceLength();
+  RequestStateSnapshot snapshot;
+  snapshot.request_id = this;
+  snapshot.status = status_;
+  snapshot.current_sequence_length = current;
+  snapshot.processed_sequence_length = processed_sequence_length_;
+  snapshot.seen_sequence_length = seen_sequence_length_;
+  snapshot.unprocessed_token_count = current - processed_sequence_length_;
+  snapshot.is_prefill = is_prefill_;
+  return snapshot;
+}
+
 int32_t Request::UnseenToken() {
   auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
   if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())

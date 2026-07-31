@@ -4,6 +4,8 @@
 #pragma once
 
 #include "../generators.h"
+#include "request_status.h"
+#include "engine_invariants.h"
 
 /**
  * @file request.h
@@ -12,14 +14,6 @@
  */
 
 namespace Generators {
-
-enum class RequestStatus {
-  Unassigned,  // A request has been created but has not been added to the engine yet.
-               // This is the state of a request when it is first created.
-  Assigned,    // The request has been added to the engine and is waiting to be scheduled.
-  InProgress,  // The request has been scheduled and is currently being processed.
-  Completed,   // The request has been completed successfully.
-};
 
 /**
  * @class Request
@@ -117,6 +111,15 @@ struct Request : std::enable_shared_from_this<Request>,
    * @return The current sequence length.
    */
   int64_t CurrentSequenceLength() const;
+
+  /**
+   * @brief Captures an immutable snapshot of this request's progress counters.
+   * @return A RequestStateSnapshot for invariant validation and state inspection.
+   *
+   * The snapshot copies out the request's status and sequence-length counters; it holds no
+   * reference into the request and does not mutate any state.
+   */
+  RequestStateSnapshot Snapshot() const;
 
   RequestStatus status_{RequestStatus::Unassigned};
 
