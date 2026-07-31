@@ -79,9 +79,7 @@ def _check_extra_options(extra_options, precision, execution_provider):
     builder_module.get_hf_details = lambda *args, **kwargs: {
         "hf_config": types.SimpleNamespace(tie_word_embeddings=True)
     }
-    builder_module.check_extra_options(
-        "dummy-model", "", "", precision, execution_provider, "", extra_options
-    )
+    builder_module.check_extra_options("dummy-model", "", "", precision, execution_provider, "", extra_options)
 
 
 # ===========================================================================
@@ -152,6 +150,7 @@ def _make_kv_model(
     num_kv_heads=2,
     num_layers=3,
     extra_options=None,
+    use_paged_attention=False,
 ):
     model = Model.__new__(Model)
     model.ep = ep
@@ -161,6 +160,7 @@ def _make_kv_model(
     model.kv_cache_quant_type = kv_cache_quant_type
     model.extra_options = extra_options if extra_options is not None else {}
     model.attention_attrs = {"op_type": op_type}
+    model.use_paged_attention = use_paged_attention
     model.input_types = {}
     model.output_types = {}
     model.input_shapes = {
@@ -174,9 +174,37 @@ def _make_kv_model(
     return model
 
 
-def test_quantized_kv_cache_requires_group_query_attention():
+def test_quantized_kv_cache_requires_group_query_or_paged_attention():
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", op_type="MultiHeadAttention")
-    with pytest.raises(ValueError, match="requires GroupQueryAttention"):
+    with pytest.raises(ValueError, match="requires GroupQueryAttention or PagedAttention"):
+        model.make_quantized_kv_cache_init()
+
+
+@pytest.mark.parametrize("quant_type", ["int8_per_tensor", "int8_per_channel", "fp8_per_tensor", "fp8_per_channel"])
+def test_paged_attention_accepts_int8_and_fp8_kv_cache(quant_type):
+    model = _make_kv_model(
+        kv_cache_quant_type=quant_type,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+    )
+    model.make_quantized_kv_cache_init()
+
+    expected_dtype = ir.DataType.FLOAT8E4M3FN if quant_type.startswith("fp8") else ir.DataType.INT8
+    assert model.input_types["past_key_values.key"] == expected_dtype
+    assert model.output_types["present.value"] == expected_dtype
+
+
+@pytest.mark.parametrize("quant_type", ["int4_per_tensor", "int4_per_channel"])
+def test_paged_attention_rejects_int4_kv_cache(quant_type):
+    # PagedAttention's T_CACHE constraint has no sub-byte member, so int4 caches are not exportable.
+    model = _make_kv_model(
+        kv_cache_quant_type=quant_type,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+    )
+    with pytest.raises(ValueError, match="only supports int8 and fp8"):
         model.make_quantized_kv_cache_init()
 
 
@@ -337,6 +365,66 @@ def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size(tmp_pa
 
     for arr in captured.values():
         assert arr.size == 2 * 16
+        # GroupQueryAttention only looks at the element count, so the scales stay flat.
+        assert arr.shape == (2 * 16,)
+
+
+def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
+    # PagedAttention validates the per-channel scale shape and requires (kv_num_heads, 1, head_size),
+    # unlike GroupQueryAttention which only checks the element count.
+    scale_size = 2 * 16
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [[0.1] * scale_size],
+                    "v_scales": [[0.2] * scale_size],
+                }
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_channel",
+        ep="cuda",
+        op_type="PagedAttention",
+        num_kv_heads=2,
+        head_size=16,
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+        use_paged_attention=True,
+    )
+    model.kv_quant_type = "PER_CHANNEL"
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    assert set(captured) == {"model.layers.0.attn.k_scale", "model.layers.0.attn.v_scale"}
+    for arr in captured.values():
+        assert arr.shape == (2, 1, 16)
+
+
+def test_paged_per_tensor_scale_initializers_stay_scalar(tmp_path):
+    # The canonical (kv_num_heads, 1, head_size) reshape must only apply to per-channel scales.
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        ep="cuda",
+        op_type="PagedAttention",
+        num_kv_heads=2,
+        head_size=16,
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+        use_paged_attention=True,
+    )
+    model.kv_quant_type = "PER_TENSOR"
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    for arr in captured.values():
+        assert arr.shape == (1,)
 
 
 def test_missing_scale_file_is_rejected():
