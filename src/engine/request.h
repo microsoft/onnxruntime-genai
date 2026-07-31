@@ -85,7 +85,8 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Returns the unprocessed tokens from the host-side mirror of the sequence.
-   * @return Span of unprocessed token IDs that is valid until the next call to GenerateNextTokens.
+   * @return Span of unprocessed token IDs, valid only until the next call that appends to the
+   *         sequence (CompleteGeneration, AddTokens or Assign). Copy it if it must outlive those.
    *
    * Same tokens as UnprocessedTokens(), but readable without copying them back from the device.
    * Building the next step's input ids is the hot path for this, and a device readback there costs

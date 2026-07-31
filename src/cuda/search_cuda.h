@@ -21,7 +21,7 @@ struct Search_Cuda : Search {
     // caller that has already synchronized (see GreedySearch_Cuda::CompleteGeneration) skip a
     // redundant synchronization here.
     if (done_pending_) {
-      cudaStreamSynchronize(GetStream());
+      CUDA_CHECK(cudaStreamSynchronize(GetStream()));
       done_pending_ = false;
     }
     return *done_cpu_;

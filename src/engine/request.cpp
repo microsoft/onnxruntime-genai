@@ -23,6 +23,18 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
     : params_{params}, search_{CreateSearch(*params.get())} {
+  // A request is one sequence: the engine batches requests, not rows within a request. Several
+  // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
+  // next-token span, so a wider search would silently mirror the wrong row's tokens.
+  if (params->search.batch_size != 1) {
+    throw std::runtime_error("A request must have search.batch_size == 1; batch across requests instead.");
+  }
+  // Beam search does not implement the deferred completion contract below, so its next tokens would
+  // never be copied back from the device.
+  if (params->search.num_beams != 1) {
+    throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
+  }
+
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
