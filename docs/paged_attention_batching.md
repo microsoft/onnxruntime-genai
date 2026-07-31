@@ -2,7 +2,8 @@
 
 Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
 "Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.
-"Phase 3" is the scheduler-owned sampler stacked on Phase 2. All three are described here as built.
+"Phase 3" is [PR #2361](https://github.com/microsoft/onnxruntime-genai/pull/2361), stacked on Phase 2.
+All three are described here as built.
 
 This document explains how batching works in the two generation paths in onnxruntime-genai, why
 they differ, and what was changed to close most of the remaining throughput gap between them.
@@ -347,7 +348,7 @@ The remaining gap is the two per-request tail launches per step (`CheckForEOSAnd
 
 ---
 
-## 6. Phase 3: scheduler-owned batched sampler
+## 6. Phase 3 ([PR #2361](https://github.com/microsoft/onnxruntime-genai/pull/2361)): scheduler-owned batched sampler
 
 Phase 2 proves the performance value of batching, but its CUDA workspace is cached on the process-
 global device interface and its fast path requires uniform parameters, contiguous logits, and no
