@@ -1,7 +1,8 @@
 # Engine Batching Design
 
-Status: "Phase 1" is merged ([PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343));
-"Phase 2" is implemented and described here as built.
+Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
+"Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.
+Both are described here as built.
 
 This document explains how batching works in the two generation paths in onnxruntime-genai, why
 they differ, and what was changed to close most of the remaining throughput gap between them.
@@ -174,7 +175,7 @@ between tiny kernels while the host walked the list.
 
 ---
 
-## 4. Phase 1 (merged): defer completion
+## 4. Phase 1 ([PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343)): defer completion
 
 PR #2343 split *launching* token selection from *completing* it. Each request still runs its own
 sampler, but the device-dependent part is deferred, so all requests launch before anyone waits.
@@ -215,7 +216,7 @@ in ~50 µs.
 
 ---
 
-## 5. Phase 2 (implemented): batched sampling fast path
+## 5. Phase 2 ([PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345)): batched sampling fast path
 
 ### 5.1 Key insight
 
