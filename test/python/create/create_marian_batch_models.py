@@ -114,8 +114,8 @@ def main():
                 TensorProto.FLOAT,
                 [RNN_STATE_SLOTS, batch_beam, HIDDEN_SIZE],
             ),
-            # Scalar int64: MarianState writes it via GetTensorMutableData<int64_t>.
-            ("past_key_values_length", TensorProto.INT64, []),
+            # MarianState binds one int64 element here, independent of batch and beams.
+            ("past_key_values_length", TensorProto.INT64, [1]),
         ],
         outputs=[
             ("logits", TensorProto.FLOAT, [batch_beam, VOCAB_SIZE]),
