@@ -10,6 +10,10 @@
 #include "../logging.h"
 
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+#include <chrono>
+#include <future>
+#include <thread>
+
 #include "Enums.hpp"
 #include "ILogConfiguration.hpp"
 #include "LogManager.hpp"
@@ -283,25 +287,68 @@ void GenAiTelemetry::Shutdown() {
   // new ones from observing the logger while teardown is in progress.
   initialized_.store(false);
 
-  // 1DS-recommended shutdown sequence. Each operation is independent and best effort so Release()
-  // still runs if flushing or teardown fails.
-  if (impl_ && impl_->log_manager) {
-    try {
-      impl_->log_manager->Flush();
-    } catch (...) {
+  if (!impl_) return;
+  auto impl = std::move(impl_);
+
+  // 1DS-recommended shutdown sequence. Each step is independent and best effort so Release() still
+  // runs if flushing or teardown fails. Release() must precede destroying Impl because the SDK holds
+  // a reference to Impl::config.
+  auto teardown = [](Impl* p) {
+    if (p && p->log_manager) {
+      try {
+        p->log_manager->Flush();
+      } catch (...) {
+      }
+      try {
+        p->log_manager->FlushAndTeardown();
+      } catch (...) {
+      }
+      try {
+        MAT::LogManagerProvider::Release(p->config);
+      } catch (...) {
+      }
+      p->log_manager = nullptr;
+      p->logger = nullptr;
     }
-    try {
-      impl_->log_manager->FlushAndTeardown();
-    } catch (...) {
-    }
-    try {
-      MAT::LogManagerProvider::Release(impl_->config);
-    } catch (...) {
-    }
-    impl_->log_manager = nullptr;
-    impl_->logger = nullptr;
+  };
+
+  // Explicit runtime shutdown (e.g. OgaShutdown()): tear down synchronously. No threads are being
+  // force-killed here, so FlushAndTeardown() completes promptly, and a synchronous teardown keeps a
+  // subsequent Initialize() from racing a still-running teardown over the SDK's process-global state.
+  // OgaShutdown() only reaches here while the singleton is alive (it checks IsDestroyed() first), so
+  // this branch is exactly "not at process exit".
+  if (!s_instance_destroyed.load()) {
+    teardown(impl.get());
+    return;
   }
-  impl_.reset();
+
+  // Process exit (static destructor): FlushAndTeardown() can deadlock here. The SDK's WaitPause() is
+  // an *unbounded* condition_variable wait; if a logging activity count was left unbalanced (a thread
+  // torn down mid-LogEvent by exit()), the pause state stays 'Pausing' forever and WaitPause never
+  // returns, wedging the whole process. Run teardown on a detached worker with a bounded wait and, on
+  // timeout, leak the manager (reclaimed by the OS at exit) rather than hang — consistent with
+  // CFG_INT_MAX_TEARDOWN_TIME=0, which already declares that teardown must not block process exit.
+  Impl* raw = impl.release();
+  try {
+    auto teardown_done = std::make_shared<std::promise<void>>();
+    std::future<void> teardown_future = teardown_done->get_future();
+
+    std::thread([raw, teardown_done, teardown]() mutable {
+      teardown(raw);
+      delete raw;  // destroys Impl (and the ILogConfiguration it owns) on the worker, after Release.
+      teardown_done->set_value();
+    }).detach();
+
+    // Common case: teardown completes near-instantly. Pathological case: cap the added exit latency
+    // instead of hanging forever. The shared promise keeps set_value() safe even after this times
+    // out, and std::promise/std::thread (unlike std::async) means the future's destructor never joins.
+    constexpr auto kTeardownBudget = std::chrono::seconds(2);
+    (void)teardown_future.wait_for(kTeardownBudget);
+  } catch (...) {
+    // Failed to spawn the teardown worker (e.g. resource exhaustion at exit). Leak 'raw' rather than
+    // let an exception escape ~GenAiTelemetry() (which would std::terminate) or risk a synchronous
+    // teardown that could hang the process. The OS reclaims the memory at exit.
+  }
 #endif
 }
 GenAiTelemetry::~GenAiTelemetry() {
