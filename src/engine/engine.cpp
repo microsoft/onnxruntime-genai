@@ -28,7 +28,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
   auto scheduler = Scheduler::Create(model, cache_manager);
-  auto model_executor = std::make_unique<ModelExecutor>(model, cache_manager);
+  auto model_executor = ModelExecutor::Create(model, cache_manager);
   return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
 }
 
