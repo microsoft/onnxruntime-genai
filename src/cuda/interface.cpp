@@ -183,9 +183,36 @@ struct CudaInterfaceImplBase : DeviceInterface {
     cuda::LaunchAddLogitsMask(batch_logits, batch_beam_size, vocab_size, logits_mask, GetStream());
   }
 
+  bool SampleTopKTopP(DeviceSpan<float> scores, DeviceSpan<int32_t> next_tokens,
+                      int vocab_size, int batch_size, int k, float p, float temperature) override {
+    if (scores.size() < static_cast<size_t>(batch_size) * vocab_size || next_tokens.size() < static_cast<size_t>(batch_size))
+      throw std::runtime_error("SampleTopKTopP - scores or next_tokens is too small for the batch");
+
+    // The workspace is sized for the largest batch seen so far and reused, since the engine calls
+    // this once per decode step with a batch that changes as requests join and leave.
+    if (!sampling_data_ || batch_size > sampling_cap_batch_ || vocab_size != sampling_cap_vocab_) {
+      const size_t buffer_size = cuda::SamplingData::CalculateTotalSize(batch_size, vocab_size, GetStream());
+      sampling_buffer_ = Allocate<uint8_t>(buffer_size);
+      sampling_data_ = std::make_unique<cuda::SamplingData>(std::random_device{}(), batch_size, vocab_size,
+                                                            GetStream(), sampling_buffer_.Span().data(), buffer_size);
+      sampling_cap_batch_ = batch_size;
+      sampling_cap_vocab_ = vocab_size;
+    }
+
+    cuda::GetSample(sampling_data_.get(), GetStream(), next_tokens.Span().data(), scores.Span().data(),
+                    vocab_size, batch_size, k, p, temperature);
+    return true;
+  }
+
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     cudaMemGetInfo(&free_bytes, &total_bytes);
   }
+
+ private:
+  DeviceSpan<uint8_t> sampling_buffer_;
+  std::unique_ptr<cuda::SamplingData> sampling_data_;
+  int sampling_cap_batch_{};
+  int sampling_cap_vocab_{};
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {

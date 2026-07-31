@@ -170,14 +170,18 @@ std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
   const std::vector<int64_t> logits_shape{batch_size, vocab_size};
 
   const bool requires_cast = logits_->GetType() != Ort::TypeToTensorType<float>;
+  DeviceSpan<float> logits_fp32_span;
   if (requires_cast) {
     logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_fp32_->CreateTensor(logits_shape);
+    // Wrapped once so that every row below is a subspan of the same allocation: GetDeviceSpan()
+    // wraps the tensor memory afresh on each call, which would leave the rows unrelated.
+    logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
   }
 
   for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
     if (requires_cast) {
-      auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
+      auto logits_of_last_token_fp32 = logits_fp32_span.subspan(i * vocab_size, vocab_size);
       void* src_data = logits_bytes_vector[i].Span().data();
       void* dst_data = logits_of_last_token_fp32.Span().data();
       model_.p_device_inputs_->Cast(src_data, dst_data, logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);

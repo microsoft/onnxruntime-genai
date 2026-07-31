@@ -53,6 +53,18 @@ struct Search : LeakChecked<Search> {
   virtual void DeferCompletion(bool /*defer*/) {}
   virtual void CompleteGeneration() {}
 
+  // Lets a caller that drives many single-sequence searches sample them all in one call. The
+  // caller binds each search to a one-element slot of a shared next-token buffer, samples the
+  // whole buffer itself, calls OnNextTokensSampled() on each search to launch the per-sequence
+  // tail (EOS handling and appending to the sequence), then copies the shared buffer back once
+  // before calling CompleteGeneration(). The copy has to come after the tail so that it observes
+  // the EOS padding.
+  //
+  // Returns false if the search cannot use a shared buffer, in which case the caller must fall
+  // back to driving each search through SelectTop()/SampleTopKTopP() individually.
+  virtual bool BindNextTokensSlot(DeviceSpan<int32_t> /*slot*/) { return false; }
+  virtual void OnNextTokensSampled() {}
+
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }

@@ -161,6 +161,33 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
                   params_->search.batch_size, k, p, temperature);
 
+  external_host_copy_ = false;
+  LaunchNextTokensTail();
+
+  if (!defer_completion_)
+    CompleteGeneration();
+}
+
+bool GreedySearch_Cuda::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
+  if (params_->BatchBeamSize() != 1 || slot.size() != 1)
+    return false;
+
+  // Both spans stay alive through the shared_ptr inside DeviceSpan, so a caller that grows its
+  // buffer between steps cannot leave this search writing into freed memory.
+  next_tokens_buffer_ = slot;
+  next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
+  return true;
+}
+
+void GreedySearch_Cuda::OnNextTokensSampled() {
+  external_host_copy_ = true;
+  LaunchNextTokensTail();
+}
+
+// Everything token selection does after the sampler has written next_tokens_, for both the
+// per-search and the batched entry points. Nothing here reads a device result, so the launches
+// for a whole batch of searches can be queued before anyone waits.
+void GreedySearch_Cuda::LaunchNextTokensTail() {
   // Check for EOS
   assert(next_tokens_.size() == eos_seen_.size());
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
@@ -175,8 +202,6 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
 
   completion_pending_ = true;
   done_pending_ = true;
-  if (!defer_completion_)
-    CompleteGeneration();
 }
 
 void GreedySearch_Cuda::CompleteGeneration() {
@@ -188,8 +213,10 @@ void GreedySearch_Cuda::CompleteGeneration() {
   // once the stream has drained. When completion is deferred, every search in the batch has already
   // launched its work by the time the first of these calls runs, so only that first call waits.
   // Reading the next tokens back here rides along on the same synchronization, which lets callers
-  // use GetNextTokens().CpuSpan() afterwards without another round trip.
-  next_tokens_buffer_.CopyDeviceToCpu();
+  // use GetNextTokens().CpuSpan() afterwards without another round trip. When the tokens were
+  // sampled into a shared buffer the caller has already done that copy for the whole batch.
+  if (!external_host_copy_)
+    next_tokens_buffer_.CopyDeviceToCpu();
   done_pending_ = false;
 
   if (!*done_cpu_) {

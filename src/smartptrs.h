@@ -54,6 +54,9 @@ struct DeviceSpan {
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
+  // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
+  bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
+
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
   std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
 
@@ -130,6 +133,13 @@ struct DeviceInterface {
   virtual bool UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { return false; }
   virtual bool UpdateAttentionMask(void* /*next_mask_data*/, void* /*mask_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { return false; }
   virtual void LaunchAddLogitsMask(float* /*batch_logits*/, int /*batch_beam_size*/, int /*vocab_size*/, const uint32_t* /*logits_mask*/) { assert(false); }
+
+  // Selects one token per row from a contiguous [batch_size, vocab_size] score tensor, writing
+  // batch_size tokens. Returns false when the device has no batched sampler, in which case the
+  // caller has to sample one row at a time.
+  virtual bool SampleTopKTopP(DeviceSpan<float> /*scores*/, DeviceSpan<int32_t> /*next_tokens*/,
+                              int /*vocab_size*/, int /*batch_size*/,
+                              int /*k*/, float /*p*/, float /*temperature*/) { return false; }
 
   virtual void UpdateCacheIndirection(int32_t* /*tgt_indir_cache*/, const int32_t* /*src_indir_cache*/, const int32_t* /*beam_ids*/, int /*batch_size*/, int /*beam_width*/, int /*input_seq_length*/, int /*max_seq_length*/, int /*current_length*/) { assert(false); }
   virtual void ReorderPastStates(void* /*out_buffer*/, const void* /*in_buffer*/, int /*batch_size*/, int /*num_heads*/, int /*max_length*/, int /*head_size*/, int /*chunk_size*/) { assert(false); }

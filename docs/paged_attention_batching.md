@@ -1,11 +1,10 @@
 # Engine Batching Design
 
-Status: design proposal. The "Phase 1" work described here is merged
-([PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343)); "Phase 2" is not yet
-implemented.
+Status: "Phase 1" is merged ([PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343));
+"Phase 2" is implemented and described here as built.
 
 This document explains how batching works in the two generation paths in onnxruntime-genai, why
-they differ, and what would have to change to close the remaining throughput gap between them.
+they differ, and what was changed to close most of the remaining throughput gap between them.
 
 ---
 
@@ -197,13 +196,26 @@ all-decode step.
 Result at batch 32: 4109 → 4517 tok/s. Syncs 130 → 32, tail launches 160 → 129, tail time
 2.384 → 1.423 ms.
 
+Review of PR #2343 added three hardening changes that Phase 2 builds on:
+
+- `Request`'s constructor now rejects `search.batch_size != 1` and `search.num_beams != 1`. A wider
+  search would have mirrored the wrong row's tokens (several places read row 0 while
+  `CompleteGeneration()` took the tail of the next-token span), and beam search never overrides the
+  deferred-completion contract, so its next tokens were never copied back. Phase 2's gate can
+  therefore assume single-row greedy searches instead of re-checking per step.
+- `UnprocessedTokensCpu()`'s documented lifetime was corrected: the span points into `tokens_host_`
+  and is valid only until the next call that appends to the sequence.
+- The `cudaStreamSynchronize` in `Search_Cuda::IsDone()` is now `CUDA_CHECK`ed. Clearing
+  `done_pending_` after a failed sync would make the next `IsDone()` skip the wait and read a stale
+  `done_cpu_`.
+
 What Phase 1 did **not** do is reduce the amount of sampling work. There are still 32 separate
 single-row `GetSample` invocations costing ~451 µs of GPU time to do what one batched call would do
 in ~50 µs.
 
 ---
 
-## 5. Phase 2 (proposed): batched sampling fast path
+## 5. Phase 2 (implemented): batched sampling fast path
 
 ### 5.1 Key insight
 
@@ -222,23 +234,32 @@ inheriting any of the constraints that make it unusable for a server.
 The fast path is taken only when all of the following hold for the current step. Otherwise the
 existing two-phase per-request loop runs unchanged.
 
-- Device is CUDA (`SamplingData` and `GetSample` are CUDA-only).
-- Every scheduled request has identical `do_sample`, `top_k`, `top_p`, `temperature`.
-- Every request has `num_beams == 1`.
-- Logits processors are no-ops for every request:
-  - `sequences_.GetSequenceLength() >= min_length` (see `Search_Cuda::ApplyMinLength`, which
-    early-returns in that case),
-  - `repetition_penalty == 1.0f` (`Search_Cuda::ApplyRepetitionPenalty` early-returns),
-  - `no_repeat_ngram_size == 0` (CUDA throws otherwise anyway).
-- The decoder produced a contiguous `[batch, vocab]` fp32 tensor. `VarlenDecoderIO::ProcessLogits`
-  already builds exactly this in `logits_fp32_` on its batched-cast path; that path is taken when
-  `valid_token_indices[i] == i` for all *i*, i.e. every request contributed exactly one token.
+- At least two scheduled requests, none of them already `Completed`. A completed request is skipped
+  by the per-request loops, which would leave a hole in the logits rows that a single batched
+  sampler call cannot express.
+- Every scheduled request resolves to the same `(k, p, temperature)` triple. `Request` funnels every
+  sampling branch into `SampleTopKTopP`, so comparing the resolved triple rather than the raw
+  options also treats equivalent spellings (`top_k == 1`, `temperature == 0`, `do_sample == false`)
+  as the same.
+- If the resolved triple is not argmax, no request pinned `random_seed`. Argmax ignores the random
+  state, so batching cannot change it; a batch-wide generator would otherwise break the
+  reproducibility a pinned seed promises.
+- The logits rows are `vocab_size` long, back to back in request order, and inside a single
+  allocation. `DeviceSpan::SameBufferAs` establishes the last part, which is what makes it safe to
+  widen row 0 into the `[batch, vocab]` view the sampler reads.
+- Every request's `Search` accepts a shared next-token slot. Only `GreedySearch_Cuda` does, so this
+  doubles as the device and single-row check. `num_beams == 1` and `batch_size == 1` are already
+  enforced by `Request`'s constructor.
 
-Note the gate naturally excludes mixed prefill/decode steps, which is correct: those have
-non-contiguous logits rows and are not the steady-state case worth optimizing.
+Note the layout check naturally excludes mixed prefill/decode steps, which is correct: those pick
+their rows out of a larger tensor and are not the steady-state case worth optimizing.
 
-Per-request `max_length` and per-request EOS token sets deliberately do **not** need to match,
-because those are handled after sampling, in the per-request completion (see 5.4).
+Logits processors do **not** have to be no-ops. Each request still runs `ApplyMinLength`,
+`ApplyRepetitionPenalty` and `ApplyNoRepeatNgram` over its own row of the shared tensor before the
+batched sampler runs, so `min_length` and `repetition_penalty` stay per-request.
+
+Per-request `max_length` and per-request EOS token sets likewise do not need to match, because those
+are handled after sampling, in the per-request tail (see 5.4).
 
 ### 5.3 Layering
 
@@ -250,46 +271,56 @@ devices fall back automatically:
 
 ```cpp
 // src/smartptrs.h — DeviceInterface
-virtual bool SampleBatch(DeviceSpan<float> /*logits*/, DeviceSpan<int32_t> /*next_tokens*/,
-                         int /*batch_size*/, int /*vocab_size*/,
-                         int /*k*/, float /*p*/, float /*temperature*/) { return false; }
+virtual bool SampleTopKTopP(DeviceSpan<float> /*scores*/, DeviceSpan<int32_t> /*next_tokens*/,
+                            int /*vocab_size*/, int /*batch_size*/,
+                            int /*k*/, float /*p*/, float /*temperature*/) { return false; }
 ```
 
-The CUDA override owns a lazily created, batch-sized `SamplingData` cached on the device interface
-(or on the `Engine`), sized to the configured maximum batch and reused across steps.
+The CUDA override owns a lazily created `SamplingData` cached on the device interface, grown when a
+batch exceeds the cached capacity and reused across steps.
 
 ### 5.4 Control flow
 
 `ScheduledRequests::GenerateNextTokens()` gains a fast path:
 
 1. Evaluate the gate. If it fails, run the existing two loops and return.
-2. Acquire the shared next-token buffer, sized `max_batch`, owned by the `Engine`.
-3. Bind each request's `Search` to its own one-element slice of that buffer.
-4. Call `SampleBatch` once over the contiguous logits.
-5. `CopyDeviceToCpu()` the shared buffer once — this is the single synchronization for the step.
-6. For each request, run the per-request tail: EOS check against *that request's* EOS set, append
-   to *that request's* sequence, `max_length` check, status update.
+2. Bind each request's `Search` to its own one-element slice of the engine-owned shared next-token
+   buffer.
+3. For each request, run the pre-sampling half of token selection: sequence bookkeeping, handing it
+   its logits row, and the logits processors.
+4. Call `SampleTopKTopP` once over the contiguous `[batch, vocab]` logits.
+5. For each request, launch the per-sequence tail: EOS check against *that request's* EOS set and
+   append to *that request's* sequence. Nothing here reads a device result, so the whole batch
+   queues without waiting.
+6. `CopyDeviceToCpu()` the shared buffer once — the single synchronization for the step. It has to
+   come after step 5 so that it observes the tokens padded for sequences that just hit EOS.
+7. For each request, complete: advance the host mirror, `max_length` check, status update.
 
-Step 6 keeps the two remaining per-request launches (`CheckForEOSAndPad`,
+Steps 5 and 7 keep the two remaining per-request launches (`CheckForEOSAndPad`,
 `AppendNextTokensToSequences`). They are cheap and, crucially, they are where the per-request
 semantics live — which is precisely why per-request `max_length` and EOS sets do not need to be
 uniform for the fast path to be valid.
 
-### 5.5 Required changes
+Because `DeviceSpan::subspan` shares the underlying buffer and `CpuSpan()` returns the view at the
+subspan's offset, the one copy in step 6 populates every request's view with no extra copies. A
+request that stays bound but later takes the slow path is still correct: it samples into its own
+slot and copies the shared buffer back itself, which is why a partial bind can simply fall back.
+
+### 5.5 Changes
 
 | File | Change |
 |---|---|
-| `src/smartptrs.h` | Add `DeviceInterface::SampleBatch(...)` returning `false` by default. |
-| `src/cuda/interface.cpp` | Override `SampleBatch`: lazily create/reuse a batch-sized `cuda::SamplingData`, call `cuda::GetSample` once, return `true`. Re-create the workspace only when the requested batch exceeds the cached capacity. |
-| `src/search.h` | Add `virtual bool BindSharedNextTokens(DeviceSpan<int32_t> /*slot*/) { return false; }` and `virtual void OnSharedNextTokensReady() {}`, both no-ops so CPU/beam/`Generator` paths are unaffected. |
-| `src/cuda/search_cuda.h` | `GreedySearch_Cuda` overrides both. Add `bool shared_next_tokens_{false};`. |
-| `src/cuda/search_cuda.cpp` | `BindSharedNextTokens`: reject unless `BatchBeamSize() == 1`; repoint `next_tokens_buffer_` and `next_tokens_` at the supplied slice; set `shared_next_tokens_ = true`. `OnSharedNextTokensReady`: run the existing `CheckForEOSAndPad` + `AppendNextTokensToSequences` tail and set `completion_pending_` / `done_pending_`. `CompleteGeneration`: skip its own `next_tokens_buffer_.CopyDeviceToCpu()` when `shared_next_tokens_` is set, since the engine already copied the shared buffer. |
-| `src/engine/engine.h` / `engine.cpp` | Own the shared next-token `DeviceSpan<int32_t>` sized to the configured max batch, and hand it to `ScheduledRequests`. |
+| `src/smartptrs.h` | Add `DeviceInterface::SampleTopKTopP(...)` returning `false` by default, and `DeviceSpan::SameBufferAs` so the engine can tell whether pointer arithmetic between two spans is meaningful. |
+| `src/cuda/interface.cpp` | Override `SampleTopKTopP`: lazily create/reuse a batch-sized `cuda::SamplingData`, call `cuda::GetSample` once, return `true`. Re-create the workspace only when the requested batch exceeds the cached capacity. |
+| `src/search.h` | Add `virtual bool BindNextTokensSlot(DeviceSpan<int32_t> /*slot*/) { return false; }` and `virtual void OnNextTokensSampled() {}`, both no-ops so CPU/beam/`Generator` paths are unaffected. |
+| `src/cuda/search_cuda.h` / `.cpp` | `GreedySearch_Cuda` overrides both. `BindNextTokensSlot` rejects unless the search is single-row and the slot is one element, then repoints `next_tokens_buffer_` and `next_tokens_`. The post-sampling tail moves into `LaunchNextTokensTail()`, shared by `SampleTopKTopP` and `OnNextTokensSampled`. `CompleteGeneration` skips its own `CopyDeviceToCpu()` when the caller owns the copy. |
+| `src/engine/engine.h` / `.cpp` | Own the shared next-token `DeviceSpan<int32_t>`, grown as batches get larger, and hand it to `ScheduledRequests` each step. |
 | `src/engine/scheduled_requests.h` / `.cpp` | Implement the gate and the fast path in `GenerateNextTokens()`; keep the existing two-loop path as the fallback. |
-| `src/engine/request.h` / `request.cpp` | Expose whatever the gate needs to inspect (sampling params, `num_beams`, `min_length` satisfaction) and split `CompleteGeneration()` so the shared-buffer variant skips the redundant copy. |
+| `src/engine/request.h` / `.cpp` | Split the pre-sampling half of `GenerateNextTokens()` into `PrepareGeneration()`, and forward `SearchOptions()`, `BindNextTokensSlot()` and `OnNextTokensSampled()`. |
+| `src/engine/decoders/*_decoder_io.cpp` | Wrap the fp32 logits tensor once instead of per row. `Tensor::GetDeviceSpan()` wraps the tensor memory afresh on each call, so calling it inside the loop produced rows that were adjacent in device memory but belonged to unrelated `DeviceBuffer` objects, which the gate has to reject. This also removes N redundant wraps per step. |
 
 Nothing outside `src/engine/` and `src/cuda/` changes behaviour: the new `Search` virtuals default
-to no-ops, and `SampleBatch` defaults to "unsupported".
+to no-ops, and `DeviceInterface::SampleTopKTopP` defaults to "unsupported".
 
 ### 5.6 Secondary benefit: memory
 
@@ -297,19 +328,21 @@ Today every `Request` allocates its own `SamplingData` sized for one row but a f
 several vocab-length fp32 buffers plus curand state, per request. A shared batch-sized workspace
 replaces N of those with one, which matters at high concurrency with large vocabularies.
 
-### 5.7 Projected result
+### 5.7 Result
 
-| Per step at batch 32 | Before PR #2343 | After PR #2343 | Projected Phase 2 |
-|---|---|---|---|
-| `cudaStreamSynchronize` | 130 | 32 | 1 |
-| Tail `cudaLaunchKernel` | 160 | 129 | ~68 |
-| GPU time in sampling | 451 µs | 451 µs | ~50 µs |
-| Tail wall time | 2.384 ms | 1.423 ms | ~0.45–0.55 ms |
-| Step | 8.603 ms | 7.620 ms | ~6.7 ms |
-| Throughput | 4109 tok/s | 4517 tok/s | ~5100 tok/s |
+Measured on H200, gpt-oss with INT8 per-channel KV, prompt 128 / 256 new tokens:
 
-For reference the `Generator` path reaches 5303 tok/s at batch 32, so this would bring the Engine
-to roughly −3%, versus −22% before any of this work.
+| Throughput | Before PR #2343 | Phase 1 | Phase 2 | GQA `Generator` |
+|---|---|---|---|---|
+| batch 1 | 376.3 | 376.6 | 377.4 | 374.4 |
+| batch 8 | 1683.8 | 1749.7 | 1810.2 | 1792.7 |
+| batch 32 | 4109.5 | 4517.1 | 4999.4 | 5303.5 |
+
+Batch 1 is unchanged, as expected: a batch of one does not take the fast path. Batch 8 now edges
+past the `Generator`. Batch 32 closes the gap from −22.5% to −5.7%.
+
+The remaining gap is the two per-request tail launches per step (`CheckForEOSAndPad`,
+`AppendNextTokensToSequences`) plus the paged attention kernel itself; see section 6.
 
 ---
 
@@ -335,27 +368,42 @@ batching, for a fraction of the win. Deferred.
 
 ## 7. Testing
 
-The gate makes this a behaviour-preserving optimization, so the bar is bit-exactness plus coverage
-of the fallback path.
+The gate makes this a behaviour-preserving optimization, so the bar is bit-exactness against the
+pre-change build plus coverage of the fallback path.
 
-- **Bit-exactness against the pre-change build.** Drive the Engine with a fixed prompt set, both as
-  a batch and one at a time, and compare generated token IDs. This is how PR #2343 was validated
-  (582 tokens across 16 sequences, identical).
-- **Fallback coverage.** Requests with differing `top_k`/`top_p`/`temperature` in one batch;
-  a request with `repetition_penalty != 1`; a request still under `min_length`; a mixed
-  prefill/decode step. Each must take the slow path and produce the same tokens as today.
-- **Per-request semantics under the fast path.** Requests with different `max_length` and different
-  EOS sets in the same batch must still stop independently.
-- **Paged-specific regression suite.** `check_e2e`, `needle_test --filler 400`, and
-  `long_decode_test` — the last is the only one that decodes past 2048 KV and crosses block-table
-  column boundaries.
-- **Unit tests.** `unit_tests --gtest_filter='*CAPITests*:*ContinuousDecoding*:*Sampling*Cuda*:*Rewind*'`.
-- **`Generator` regression.** Must be unchanged, since all new virtuals default to no-ops there.
+### Choosing a valid oracle
 
-### Known issue, not caused by this work
+PagedAttention output is **not reproducible across processes**. With greedy search and a fixed
+prompt, two runs of the same binary on an idle GPU produce different tokens *and* a different token
+count. This reproduces identically on `main`, so it is a pre-existing property of the operator, not
+of the engine. It makes paged output useless as a bit-exactness oracle. (Repeating a batch *within*
+one process is stable, which is a much weaker signal.)
 
-Paged decode is not reproducible **across processes** when the KV block pool is in a different
-allocation state: a request can generate a different number of tokens from run to run. This
-reproduces identically on `main`. Batch-8 and single-request outputs *are* stable within a process
-and across builds, which is what the bit-exactness comparison relies on. Mixed staggered batches
-should not be used as a determinism signal.
+The valid oracle is the **GQA model driven through the `Engine`**, which is deterministic across
+processes. It exercises `Request`, the `tokens_host_` mirror,
+`ScheduledRequests::GenerateNextTokens`, `GreedySearch_Cuda`'s deferred completion and the batched
+sampler — everything on the changed path except `VarlenDecoderIO`, since it goes through
+`StaticBatchDecoderIO` instead. That gap is covered by the paged regression suite below on
+behaviour rather than exact tokens.
+
+Note that this also localizes the nondeterminism: identical engine and search code is deterministic
+under GQA attention and nondeterministic under PagedAttention, so the variability lives in the
+PagedAttention operator. That is worth investigating separately.
+
+Note also that a batched run and a solo run of the same prompt legitimately produce different
+tokens, because the batch size changes the GEMM shapes and therefore the logits. Comparisons must
+be like-for-like across builds, never batch-vs-solo.
+
+### What was run
+
+- **Bit-exactness, GQA through the `Engine`, before vs after.** Seven scenarios, 628 tokens,
+  identical: uniform greedy (fast path), `repetition_penalty = 1.2`, `min_length = 20`, staggered
+  per-request `max_length`, a batch mixing greedy and two different sampling configurations,
+  a batch with pinned `random_seed`, and four solo runs. The instrumented build confirmed which of
+  these take the fast path and which fall back, so none of the comparisons is vacuous.
+- **Paged regression suite.** `check_e2e`, `needle_test --filler 400` (8093-token prompt, needle
+  retrieved), and `long_decode_test` — the last is the only one that decodes past 2048 KV and
+  crosses block-table column boundaries.
+- **Unit tests.** `unit_tests --gtest_filter='*CAPITests*:*ContinuousDecoding*:*Sampling*Cuda*:*Rewind*'`,
+  36 passed.
+- **`Generator` regression.** Unchanged, since all new virtuals default to no-ops there.
