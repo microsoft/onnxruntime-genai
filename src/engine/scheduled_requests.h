@@ -9,9 +9,32 @@ namespace Generators {
 
 struct DecoderIO;
 
+struct BatchedSamplingPlan {
+  void Reserve(size_t capacity) {
+    requests.reserve(capacity);
+    logits.reserve(capacity);
+    params.reserve(capacity);
+    states.reserve(capacity);
+  }
+
+  void Clear() {
+    requests.clear();
+    logits.clear();
+    params.clear();
+    states.clear();
+  }
+
+  std::vector<Request*> requests;
+  std::vector<DeviceSpan<float>> logits;
+  std::vector<BatchedSamplingParams> params;
+  std::vector<BatchedSamplerState*> states;
+};
+
 struct ScheduledRequests {
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                    std::shared_ptr<Model> model);
+                    std::shared_ptr<Model> model,
+                    BatchedSampler* batched_sampler,
+                    BatchedSamplingPlan* sampling_plan);
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
@@ -38,10 +61,6 @@ struct ScheduledRequests {
 
   void AddDecoderState(std::unique_ptr<DecoderIO> decoder_state);
 
-  // Scratch buffer owned by the engine, big enough for one token per scheduled request. When
-  // supplied, token selection for the whole batch can be sampled in a single call.
-  void SetSharedNextTokens(DeviceSpan<int32_t> next_tokens) { shared_next_tokens_ = next_tokens; }
-
   void GenerateNextTokens();
 
  private:
@@ -51,7 +70,8 @@ struct ScheduledRequests {
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::shared_ptr<GeneratorParams> params_;
-  DeviceSpan<int32_t> shared_next_tokens_;
+  BatchedSampler* batched_sampler_{};
+  BatchedSamplingPlan* sampling_plan_{};
 };
 
 }  // namespace Generators

@@ -181,8 +181,18 @@ bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
   return search_->BindNextTokensSlot(slot);
 }
 
+bool Request::SupportsBatchedSampling() const {
+  return search_->SupportsBatchedSampling();
+}
+
 void Request::OnNextTokensSampled() {
   search_->OnNextTokensSampled();
+}
+
+BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
+  if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
+    batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
+  return *batched_sampler_state_;
 }
 
 void Request::CompleteGeneration() {

@@ -63,6 +63,7 @@ struct Search : LeakChecked<Search> {
   // Returns false if the search cannot use a shared buffer, in which case the caller must fall
   // back to driving each search through SelectTop()/SampleTopKTopP() individually.
   virtual bool BindNextTokensSlot(DeviceSpan<int32_t> /*slot*/) { return false; }
+  virtual bool SupportsBatchedSampling() const { return false; }
   virtual void OnNextTokensSampled() {}
 
   virtual void SelectTop() = 0;
