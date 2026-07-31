@@ -86,6 +86,33 @@ std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
+  // Validate every block before mutating any pool state so that an invalid request (a null block,
+  // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
+  // is rejected without partially freeing the batch.
+  std::vector<bool> seen(Capacity(), false);
+  for (const auto& block : blocks) {
+    if (!block) {
+      throw std::runtime_error("Cannot free a null block.");
+    }
+
+    const size_t id = block->Id();
+    if (id >= Capacity()) {
+      throw std::runtime_error("Cannot free block with out-of-range id " + std::to_string(id) +
+                               " for a pool with capacity " + std::to_string(Capacity()) + ".");
+    }
+
+    if (blocks_[id] != block) {
+      throw std::runtime_error("Cannot free block with id " + std::to_string(id) +
+                               " that is not currently allocated by this pool.");
+    }
+
+    if (seen[id]) {
+      throw std::runtime_error("Cannot free block with id " + std::to_string(id) +
+                               " more than once in the same call.");
+    }
+    seen[id] = true;
+  }
+
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
   }
