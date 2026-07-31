@@ -152,9 +152,23 @@ void Shutdown() {
 
   // Reset g_ort_globals directly (rather than through GetOrtGlobals(), which would lazily construct
   // the globals just to immediately tear them down). If genai was never initialized there is nothing
-  // to do. Delete now because on process exit is too late. ~OrtGlobals tears down the device
-  // interfaces (including the RyzenAI EP shutdown) and unloads the genai add-on libraries.
+  // to do. ~OrtGlobals tears down the device interfaces (including the RyzenAI EP shutdown), unloads
+  // the genai add-on libraries, and finally releases the OrtEnv.
   std::scoped_lock lock{g_ort_globals_mutex};
+
+  // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
+  // running ~OrtGlobals is unsafe: releasing the OrtEnv from within __cxa_finalize drives ORT's
+  // Environment/LoggingManager destructor to lock a mutex whose backing static may already be
+  // finalized, which throws "mutex lock failed: Invalid argument" -- and a throwing destructor at
+  // teardown is uncaught, so the process aborts via std::terminate. Re-init after shutdown is
+  // impossible once the process is exiting, so intentionally leak the globals here and let the OS
+  // reclaim the memory. Runtime OgaShutdown() (g_process_exiting == false) still performs the full
+  // teardown that in-process re-init relies on.
+  if (g_process_exiting) {
+    (void)g_ort_globals.release();
+    return;
+  }
+
   g_ort_globals.reset();
 }
 
