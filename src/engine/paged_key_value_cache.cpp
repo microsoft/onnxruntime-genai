@@ -67,8 +67,9 @@ size_t TotalSlots(const std::shared_ptr<Request>& request) {
 // token whose key and value live in the cache afterwards.
 //
 // This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes this
-// step's tokens at absolute positions [processed, processed + pending), so the cache must own
-// `processed + pending` slots.
+// step's tokens at absolute positions [processed, processed + scheduled), so the cache must own
+// `processed + scheduled` slots. With a chunked prefill only part of the prompt is covered, and
+// the remaining chunks extend it on later steps.
 size_t PendingSlots(const std::shared_ptr<Request>& request) {
   return SlotsAfterStep(request->ProcessedSequenceLength(), request->UnprocessedTokens().size());
 }

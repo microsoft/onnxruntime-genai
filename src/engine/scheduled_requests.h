@@ -10,8 +10,12 @@ namespace Generators {
 struct DecoderIO;
 
 struct ScheduledRequests {
+  // `allow_chunked_prefill` lets a request spread a prompt longer than its `search.chunk_size` over
+  // several steps. Only the paged cache can serve that, since it is the only one that can hold a
+  // partly written sequence.
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                    std::shared_ptr<Model> model);
+                    std::shared_ptr<Model> model,
+                    bool allow_chunked_prefill = false);
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 

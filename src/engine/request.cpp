@@ -4,6 +4,7 @@
 #include "request.h"
 
 #include "engine.h"
+#include "sequence_positions.h"
 #include "../search.h"
 
 namespace Generators {
@@ -86,6 +87,24 @@ int64_t Request::ProcessedSequenceLength() const {
   return processed_sequence_length_;
 }
 
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens(bool allow_chunking) {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size, allow_chunking);
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+}
+
 int32_t Request::UnseenToken() {
   auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
   if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())
@@ -100,8 +119,7 @@ bool Request::HasUnseenTokens() const {
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
-  return unprocessed_tokens;
+  return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
 }
 
 bool Request::IsDone() const {
@@ -113,7 +131,7 @@ bool Request::IsPrefill() const {
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
+  AdvanceChunk();
   is_prefill_ = false;
 
   search_->SetLogits(logits);

@@ -54,7 +54,7 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     }
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_, /*allow_chunked_prefill=*/false);
 
   if (!scheduled_requests) {
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
@@ -118,7 +118,7 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
     }
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_, /*allow_chunked_prefill=*/true);
 
   if (!scheduled_requests) {
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");

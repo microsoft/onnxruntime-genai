@@ -9,8 +9,14 @@
 namespace Generators {
 
 ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                                     std::shared_ptr<Model> model)
+                                     std::shared_ptr<Model> model,
+                                     bool allow_chunked_prefill)
     : requests_{requests}, model_{model} {
+  // Fixes what each request contributes to this step before anything reads UnprocessedTokens():
+  // the cache sizing, the decoder inputs and the logits row selection all have to agree on it.
+  for (auto& request : requests_) {
+    request->ScheduleTokens(allow_chunked_prefill);
+  }
 }
 
 std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
@@ -39,8 +45,18 @@ void ScheduledRequests::GenerateNextTokens() {
   }
 
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed) {
-      requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+    auto& request = requests_[request_idx];
+    if (request->status_ == RequestStatus::Completed) {
+      continue;
+    }
+
+    // A request whose prompt is still being chunked ends this step in the middle of its own prompt,
+    // so its last logits row predicts a token the prompt already supplies. It selects nothing and
+    // only moves its cursor, which is what makes the next step resume where this one stopped.
+    if (request->IsChunkComplete()) {
+      request->GenerateNextTokens(logits[request_idx]);
+    } else {
+      request->AdvanceChunk();
     }
   }
 }

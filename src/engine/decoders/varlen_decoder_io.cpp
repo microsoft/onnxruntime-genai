@@ -107,8 +107,9 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 
     // The operator writes this step's token j of sequence i at absolute position
     // past_sequence_lengths[i] + j, so this has to be the number of tokens already in the cache.
-    // Deriving it from the sequence length instead is off by one on a decode step, where the
-    // search has already appended the token that is about to be processed.
+    // Deriving it from the sequence length instead would be off by one on a decode step, where the
+    // search has already appended the token that is about to be processed, and would be wrong by a
+    // whole chunk during a chunked prefill.
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->ProcessedSequenceLength());
 
     running_length += input_ids.size();
