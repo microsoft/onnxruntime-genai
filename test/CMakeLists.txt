@@ -130,10 +130,12 @@ endif()
 
 # Dedicated white-box unit tests for the continuous-batching Engine. Like reinit_tests, this binary
 # links the genai OBJECT library (not the public shared DLL) so it can exercise internal Engine
-# types (Block/BlockPool today; scheduler, cache manager, and Request invariants as the framework
-# grows) directly. It is kept separate from unit_tests so that internal test-only fakes/helpers do
-# not leak into the public-API suite and Engine failures are attributable to Engine correctness.
-# These are Tier 0 pure unit tests: no model, no ONNX session, no GPU.
+# types (Block/BlockPool, the scheduler, cache manager, model executor, and Request invariants)
+# directly. It is kept separate from unit_tests so that internal test-only fakes/helpers do not leak
+# into the public-API suite and Engine failures are attributable to Engine correctness.
+# It hosts pure unit tests (no model, no ONNX session, no GPU) alongside component
+# tests that mint requests from a tiny CPU fixture model; the fixture model only loads and never
+# runs the graph, so the suite still needs no GPU and no real inference.
 file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.cpp"
