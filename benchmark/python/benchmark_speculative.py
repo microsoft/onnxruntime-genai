@@ -49,6 +49,7 @@ import csv
 import filecmp
 import gc
 import json
+import math
 import os
 import re
 import shutil
@@ -1175,14 +1176,222 @@ def run_once(og, model, ids, max_new, mode, speculative, K, seed,
                 tail=seq[start_len:], stats=stats)
 
 
+def compare_tokens(expected, actual):
+    common_length = min(len(expected), len(actual))
+    matching_positions = sum(
+        expected_token == actual_token
+        for expected_token, actual_token in zip(expected, actual)
+    )
+    first_difference = next(
+        (index for index, pair in enumerate(zip(expected, actual))
+         if pair[0] != pair[1]),
+        common_length if len(expected) != len(actual) else -1,
+    )
+    denominator = max(len(expected), len(actual))
+    return {
+        "exact_match": expected == actual,
+        "token_match_rate": matching_positions / denominator if denominator else 1.0,
+        "first_difference": first_difference,
+    }
+
+
+def classify_divergence(comparison, expected_length, actual_length):
+    if comparison["exact_match"]:
+        return "exact"
+    if comparison["first_difference"] == min(expected_length, actual_length):
+        return "length_only"
+    return "token_divergence"
+
+
+def percentile(values, percent):
+    values = sorted(values)
+    if not values:
+        return None
+    position = (len(values) - 1) * percent / 100
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[lower]
+    weight = position - lower
+    return values[lower] * (1 - weight) + values[upper] * weight
+
+
+def geometric_mean(values):
+    values = [value for value in values if value is not None and value > 0]
+    if not values:
+        return None
+    return math.exp(sum(math.log(value) for value in values) / len(values))
+
+
+def format_quality(quality):
+    if not quality["quality_metric"]:
+        return "not_scored"
+    result = "correct" if quality["quality_score"] else "wrong"
+    prediction = quality["quality_prediction"]
+    return f"{result}({prediction})" if prediction else result
+
+
+def format_quality_with_reference(quality):
+    result = format_quality(quality)
+    reference = quality["quality_reference_answer"]
+    return f"{result} expected={reference}" if reference else result
+
+
+def format_config(k):
+    return "adaptive" if k == "adaptive" else f"K={k}"
+
+
+def print_detailed_run(item, rep, baseline, row):
+    seed_text = f" seed={row['seed']}" if row["mode"] == "sampling" else ""
+    print(
+        f"  {item['task']}/{item['question_id']} mode={row['mode']}{seed_text} "
+        f"{format_config(row['K'])} cooldown={'on' if row['cooldown'] else 'off'} "
+        f"rep={rep + 1}"
+    )
+    print(
+        f"    speed: decode={row['speedup_decode']:.2f}x "
+        f"e2e={row['speedup_e2e']:.2f}x "
+        f"baseline={baseline['dec']:.2f} tok/s "
+        f"speculative={row['decode_tok_s']:.2f} tok/s"
+    )
+    print(
+        f"    timing: prefill={row['prefill_s']:.4f}s "
+        f"decode={row['decode_s']:.4f}s "
+        f"e2e={row['prefill_s'] + row['decode_s']:.4f}s"
+    )
+    print(
+        f"    output: baseline={len(baseline['tail'])} tokens "
+        f"speculative={row['new_tokens']} exact={row['exact_match']} "
+        f"first_diff={row['first_difference']} "
+        f"match={row['token_match_rate']:.1%} type={row['divergence_type']}"
+    )
+    print(
+        f"    spec: accept={row['acceptance_rate']:.1%} "
+        f"proposed={row['draft_proposed']} evaluated={row['draft_evaluated']} "
+        f"accepted={row['draft_accepted']} rounds={row['rounds']} "
+        f"accepted/round={row['mean_accepted_tokens_per_round']:.2f} "
+        f"emitted/round={row['mean_emitted_tokens_per_round']:.2f} "
+        f"target_passes/token={row['target_passes_per_token']:.3f}"
+    )
+    print(
+        f"    target: verify={row['target_verify_forward_passes']} "
+        f"reanchor={row['target_reanchor_forward_passes']} "
+        f"reconcile={row['target_reconciliation_forward_passes']} "
+        f"timing={row['total_target_verify_ms']:.1f}/"
+        f"{row['total_target_reanchor_ms']:.1f}/"
+        f"{row['total_reconciliation_ms']:.1f}ms"
+    )
+    print(
+        f"    draft: passes={row['draft_forward_passes']} "
+        f"time={row['total_draft_ms']:.1f}ms "
+        f"avg={row['avg_draft_ms_per_token']:.3f}ms/token"
+    )
+    if row["cooldown"]:
+        print(
+            f"    cooldown: entries={row['cooldown_entries']} "
+            f"steps={row['cooldown_steps']} "
+            f"fallback={row['standard_fallback_steps']} "
+            f"remaining={row['cooldown_remaining']} "
+            f"accept_rounds={row['full_accept_rounds']}/"
+            f"{row['partial_accept_rounds']}/{row['zero_accept_rounds']} "
+            "(full/partial/zero)"
+        )
+    if row["adaptive_k"]:
+        print(
+            f"    adaptive K: start={row['adaptive_k_min']} "
+            f"final={row['effective_k']} "
+            f"moves=+{row['adaptive_k_increases']}/-{row['adaptive_k_decreases']} "
+            f"probes={row['adaptive_k_probes']} "
+            f"observations={row['adaptive_k_observations']} "
+            f"throughput={row['adaptive_k_throughput']:.4f} tok/ms"
+        )
+    if row["quality_metric"]:
+        print(
+            f"    quality: standard={format_quality_with_reference(baseline['quality'])} "
+            f"speculative={format_quality_with_reference(row)} "
+            f"transition={row['quality_transition']}"
+        )
+
+
+def print_mismatch_completions(tokenizer, baseline_tokens, speculative_tokens):
+    limit = 2000
+    baseline_text = tokenizer.decode(baseline_tokens)
+    speculative_text = tokenizer.decode(speculative_tokens)
+    if len(baseline_text) > limit:
+        baseline_text = baseline_text[:limit] + "... [truncated]"
+    if len(speculative_text) > limit:
+        speculative_text = speculative_text[:limit] + "... [truncated]"
+    print("    standard completion:")
+    print(baseline_text)
+    print("    speculative completion:")
+    print(speculative_text)
+
+
+def print_progress_summary(config_rows, completed, total, k):
+    speedups = [row["speedup_decode"] for row in config_rows]
+    acceptance = [row["acceptance_rate"] for row in config_rows]
+    exact = sum(bool(row["exact_match"]) for row in config_rows)
+    regressions = sum(row["speedup_decode"] < 1.0 for row in config_rows)
+    print(
+        f"\n  [progress {completed}/{total} mode={config_rows[0]['mode']} "
+        f"{format_config(k)}] decode speedup "
+        f"median={statistics.median(speedups):.2f}x "
+        f"p10={percentile(speedups, 10):.2f}x "
+        f"p90={percentile(speedups, 90):.2f}x; "
+        f"regressions={regressions}/{len(config_rows)}; "
+        f"acceptance median={statistics.median(acceptance):.1%}; "
+        f"exact={exact}/{len(config_rows)}"
+    )
+    if config_rows[0]["adaptive_k"]:
+        print(
+            f"    adaptive K: start={config_rows[0]['adaptive_k_min']} "
+            f"final_p50={statistics.median(row['effective_k'] for row in config_rows):.1f} "
+            f"final_range={min(row['effective_k'] for row in config_rows)}-"
+            f"{max(row['effective_k'] for row in config_rows)} "
+            f"moves=+{sum(row['adaptive_k_increases'] for row in config_rows)}"
+            f"/-{sum(row['adaptive_k_decreases'] for row in config_rows)} "
+            f"probes={sum(row['adaptive_k_probes'] for row in config_rows)} "
+            f"observations={sum(row['adaptive_k_observations'] for row in config_rows)}"
+        )
+    quality_rows = [
+        row for row in config_rows
+        if row["quality_metric"] and row["rep"] == 0
+    ]
+    if quality_rows:
+        transitions = {}
+        for row in quality_rows:
+            transitions[row["quality_transition"]] = (
+                transitions.get(row["quality_transition"], 0) + 1
+            )
+        standard_correct = sum(
+            row["quality_transition"] in ("both_correct", "baseline_only")
+            for row in quality_rows
+        )
+        speculative_correct = sum(
+            row["quality_transition"] in ("both_correct", "speculative_only")
+            for row in quality_rows
+        )
+        count = len(quality_rows)
+        transition_text = ", ".join(
+            f"{name}={value}" for name, value in sorted(transitions.items())
+        )
+        print(
+            f"    quality: standard={standard_correct / count:.1%} "
+            f"speculative={speculative_correct / count:.1%} "
+            f"delta={(speculative_correct - standard_correct) / count:+.1%}; "
+            f"{transition_text}"
+        )
+    print(flush=True)
+
+
 CSV_COLUMNS = [
-    "mode", "K", "cooldown", "adaptive_k", "adaptive_k_min", "effective_k",
+    "mode", "seed", "K", "cooldown", "adaptive_k", "adaptive_k_min", "effective_k",
     "adaptive_k_increases", "adaptive_k_decreases", "adaptive_k_observations",
     "adaptive_k_probes", "adaptive_k_throughput",
     "task", "subcategory", "question_id", "quality_metric", "quality_score",
     "quality_prediction", "quality_reference_answer", "quality_detail",
     "quality_transition", "prompt_id", "rep", "decoder",
-    "provider", "device",
+    "provider", "device", "prompt_tokens",
     "new_tokens", "prefill_s", "decode_s", "decode_tok_s", "e2e_tok_s",
     "speedup_decode", "speedup_e2e",
     "acceptance_rate", "rounds", "completed_rounds", "interrupted_rounds",
@@ -1199,7 +1408,8 @@ CSV_COLUMNS = [
     "total_target_verify_ms", "total_target_reanchor_ms",
     "avg_draft_ms_per_token", "avg_target_ms_per_round",
     "target_baseline_ms_per_token", "target_overhead_ratio", "formula_supported",
-    "estimated_speedup", "observed_speedup",
+    "estimated_speedup", "observed_speedup", "exact_match", "token_match_rate",
+    "first_difference", "divergence_type",
     "greedy_match",
     "peak_gpu_mem_gib", "peak_cpu_mem_gib",
 ]
@@ -1367,6 +1577,23 @@ def main():
         action="store_true",
         help="required for HumanEval; executes generated Python in human-eval's guard",
     )
+    ap.add_argument(
+        "--log-level",
+        choices=["summary", "progress", "detailed"],
+        default="progress",
+        help="console detail: final summary only, periodic progress, or every repetition",
+    )
+    ap.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="print a rolling summary every N prompts; 0 disables periodic summaries",
+    )
+    ap.add_argument(
+        "--log-completions-on-mismatch",
+        action="store_true",
+        help="log decoded standard/speculative outputs for non-exact generations",
+    )
     ap.add_argument("--reps", type=int, default=2, help="measured repetitions per config")
     ap.add_argument("--warmup", type=int, default=1, help="warmup generations per model")
     ap.add_argument("--seed", type=int, default=0, help="FIXED sampling seed (reproducibility)")
@@ -1413,6 +1640,8 @@ def main():
         ap.error("--humaneval-problems cannot be negative")
     if args.humaneval_timeout <= 0:
         ap.error("--humaneval-timeout must be positive")
+    if args.progress_every < 0:
+        ap.error("--progress-every cannot be negative")
     suites = parse_suites(ap, args.suites)
     if "humaneval" in suites and not args.allow_code_execution:
         ap.error(
@@ -1550,8 +1779,6 @@ def main():
         return write_results_checkpoint(rows, csv_path, json_path)
 
     # baseline (per mode, prompt) + speculative (per mode, prompt, K)
-    total_cfgs = len(modes) * len(prompt_items) * (1 + len(ks))
-    done = 0
     bench_t0 = time.time()
 
     # Two-phase design (memory-safe): run all STANDARD baselines with only the
@@ -1578,14 +1805,16 @@ def main():
         think=think,
     )
                for it in prompt_items]
-    for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
-        print(f"  [{idx}] {it['task']}/{it['question_id']}: {len(ids)} tokens")
+    if args.log_level == "detailed":
+        for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
+            print(f"  [{idx}] {it['task']}/{it['question_id']}: {len(ids)} tokens")
 
     if args.warmup:
         print("Warming up (standard) ...", flush=True)
         for _ in range(args.warmup):
             run_once(og, std_model, encoded[0], 16, "greedy", False, 0, args.seed)
 
+    config_rows_by_key = {}
     for mode in modes:
         for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
             base_dec, base_e2e, base_tail, base_quality = [], [], None, None
@@ -1605,28 +1834,49 @@ def main():
                     tokenizer.decode,
                 )
                 rows.append(dict(
-                    mode=mode, K="", cooldown="", adaptive_k="", adaptive_k_min="", effective_k="",
+                    mode=mode, seed=args.seed if mode == "sampling" else "",
+                    K="", cooldown="", adaptive_k="", adaptive_k_min="", effective_k="",
                     adaptive_k_increases="", adaptive_k_decreases="",
                     adaptive_k_observations="", adaptive_k_probes="",
                     adaptive_k_throughput="",
                     task=it["task"], subcategory=it["subcategory"],
                     question_id=it["question_id"], **base_quality, quality_transition="",
                     prompt_id=idx, rep=rep, decoder="standard",
-                    provider=provider_label, device=device_label,
+                    provider=provider_label, device=device_label, prompt_tokens=len(ids),
                     new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                     decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                     e2e_tok_s=round(e2e_tps, 3), speedup_decode="", speedup_e2e="",
                     acceptance_rate="", rounds="", draft_proposed="", draft_accepted="",
                     corrections="", bonuses="", mean_accepted_tokens_per_round="",
                     avg_draft_ms_per_token="", avg_target_ms_per_round="",
-                    estimated_speedup="", observed_speedup="",
+                    estimated_speedup="", observed_speedup="", exact_match="",
+                    token_match_rate="", first_difference="", divergence_type="",
                     greedy_match="", peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
+                if args.log_level == "detailed":
+                    print(
+                        f"  [standard {idx + 1}/{len(prompt_items)}] "
+                        f"{it['task']}/{it['question_id']} mode={mode} "
+                        f"seed={args.seed if mode == 'sampling' else '-'} rep={rep + 1}: "
+                        f"decode={dec_tps:.2f} tok/s e2e={e2e_tps:.2f} tok/s "
+                        f"tokens={r['new_tokens']} prefill={r['prefill_s']:.4f}s "
+                        f"decode_time={r['decode_s']:.4f}s "
+                        f"quality={format_quality_with_reference(base_quality)}",
+                        flush=True,
+                    )
             baselines[(mode, idx)] = dict(
                 dec=statistics.median(base_dec), e2e=statistics.median(base_e2e),
                 tail=base_tail, quality=base_quality)
-            done += 1
-            print(f"[{done}/{total_cfgs}] {mode} {it['task']}/{it['question_id']} standard: "
-                  f"{baselines[(mode, idx)]['dec']:.1f} tok/s decode", flush=True)
+            if args.log_level == "progress":
+                print(
+                    f"[standard {idx + 1}/{len(prompt_items)}] "
+                    f"{it['task']}/{it['question_id']} mode={mode} "
+                    f"seed={args.seed if mode == 'sampling' else '-'}: "
+                    f"decode={baselines[(mode, idx)]['dec']:.2f} tok/s "
+                    f"e2e={baselines[(mode, idx)]['e2e']:.2f} tok/s "
+                    f"tokens={len(base_tail)} "
+                    f"quality={format_quality_with_reference(base_quality)}",
+                    flush=True,
+                )
             flush()
 
     # Free the standalone target before loading the (larger) speculative pair.
@@ -1666,9 +1916,10 @@ def main():
             base_quality = b["quality"]
             for K in ks:
                 runtime_k = runtime_ks[K]
+                config_rows = config_rows_by_key.setdefault((mode, K), [])
+                prompt_rows = []
                 s_dec = []
                 last = None
-                last_target_passes_per_token = 0.0
                 for rep in range(args.reps):
                     r = run_once(
                         og, spec_model, ids, max_new, mode, True, runtime_k, args.seed,
@@ -1682,17 +1933,15 @@ def main():
                     target_passes_per_token = (
                         target_passes / r["new_tokens"] if r["new_tokens"] else 0.0
                     )
-                    last_target_passes_per_token = target_passes_per_token
                     dec_tps = r["new_tokens"] / r["decode_s"] if r["decode_s"] else 0.0
                     e2e_tps = r["new_tokens"] / (r["prefill_s"] + r["decode_s"]) \
                         if (r["prefill_s"] + r["decode_s"]) else 0.0
                     s_dec.append(dec_tps)
                     last = st
-                    match = ""
-                    if mode == "greedy" and base_tail is not None:
-                        n = min(len(base_tail), len(r["tail"]))
-                        match = round(sum(1 for a, c in zip(base_tail[:n], r["tail"][:n])
-                                          if a == c) / n, 4) if n else ""
+                    comparison = compare_tokens(base_tail, r["tail"])
+                    divergence_type = classify_divergence(
+                        comparison, len(base_tail), len(r["tail"])
+                    )
                     quality = score_completion(
                         it,
                         r["tail"],
@@ -1700,8 +1949,9 @@ def main():
                         quality_cache,
                         spec_tokenizer.decode,
                     )
-                    rows.append(dict(
-                        mode=mode, K=K, cooldown=args.cooldown,
+                    row = dict(
+                        mode=mode, seed=args.seed if mode == "sampling" else "",
+                        K=K, cooldown=args.cooldown,
                         adaptive_k=args.adaptive_k,
                         adaptive_k_min=args.adaptive_k_min if args.adaptive_k else "",
                         effective_k=st["effective_k"],
@@ -1717,7 +1967,7 @@ def main():
                             base_quality, quality),
                         prompt_id=idx, rep=rep,
                         decoder="speculative",
-                        provider=provider_label, device=device_label,
+                        provider=provider_label, device=device_label, prompt_tokens=len(ids),
                         new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                         decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                         e2e_tok_s=round(e2e_tps, 3),
@@ -1779,70 +2029,116 @@ def main():
                         formula_supported=bool(st["formula_supported"]),
                         estimated_speedup=round(st["estimated_speedup"], 4),
                         observed_speedup=round(st["observed_speedup"], 4),
-                        greedy_match=match,
-                        peak_gpu_mem_gib="", peak_cpu_mem_gib=""))
+                        exact_match=comparison["exact_match"],
+                        token_match_rate=round(comparison["token_match_rate"], 6),
+                        first_difference=comparison["first_difference"],
+                        divergence_type=divergence_type,
+                        greedy_match=(
+                            round(comparison["token_match_rate"], 4)
+                            if mode == "greedy" else ""
+                        ),
+                        peak_gpu_mem_gib="", peak_cpu_mem_gib="")
+                    rows.append(row)
+                    config_rows.append(row)
+                    prompt_rows.append(row)
+                    if args.log_level == "detailed":
+                        print_detailed_run(it, rep, b, row)
+                    if args.log_completions_on_mismatch and not comparison["exact_match"]:
+                        print_mismatch_completions(
+                            spec_tokenizer, base_tail, r["tail"]
+                        )
                 if last is None:
                     raise RuntimeError("No speculative benchmark repetitions were run")
                 s_dec_med = statistics.median(s_dec)
-                acc = last["acceptance_rate"]
-                done += 1
-                sp = s_dec_med / base_dec_med if base_dec_med else 0.0
-                print(f"[{done}/{total_cfgs}] {mode} {it['task']}/{it['question_id']} "
-                      f"spec K={K}: {s_dec_med:.1f} tok/s  speedup x{sp:.2f}  "
-                      f"accept={acc:.0%}", flush=True)
-                if last and base_quality and base_quality["quality_metric"]:
-                    representative = next(
-                        row for row in reversed(rows)
-                        if row["decoder"] == "speculative"
-                        and row["mode"] == mode
-                        and row["prompt_id"] == idx
-                        and row["K"] == K
+                representative = prompt_rows[0]
+                if args.log_level in ("progress", "detailed"):
+                    print(
+                        f"  {it['task']}/{it['question_id']}: "
+                        f"decode={statistics.median(row['speedup_decode'] for row in prompt_rows):.2f}x "
+                        f"e2e={statistics.median(row['speedup_e2e'] for row in prompt_rows):.2f}x "
+                        f"baseline={base_dec_med:.2f} tok/s "
+                        f"speculative={s_dec_med:.2f} tok/s"
                     )
                     print(
-                        f"    quality: standard={'correct' if base_quality['quality_score'] else 'wrong'} "
-                        f"speculative={'correct' if representative['quality_score'] else 'wrong'} "
-                        f"transition={representative['quality_transition']}",
+                        f"    spec: accept="
+                        f"{statistics.median(row['acceptance_rate'] for row in prompt_rows):.1%} "
+                        f"accepted/round="
+                        f"{statistics.median(row['mean_accepted_tokens_per_round'] for row in prompt_rows):.2f} "
+                        f"emitted/round="
+                        f"{statistics.median(row['mean_emitted_tokens_per_round'] for row in prompt_rows):.2f} "
+                        f"target_passes/token="
+                        f"{statistics.median(row['target_passes_per_token'] for row in prompt_rows):.3f}"
+                    )
+                    print(
+                        f"    target: verify="
+                        f"{sum(row['target_verify_forward_passes'] for row in prompt_rows)} "
+                        f"reanchor="
+                        f"{sum(row['target_reanchor_forward_passes'] for row in prompt_rows)} "
+                        f"reconcile="
+                        f"{sum(row['target_reconciliation_forward_passes'] for row in prompt_rows)}"
+                    )
+                    print(
+                        f"    draft: passes="
+                        f"{sum(row['draft_forward_passes'] for row in prompt_rows)} "
+                        f"time={sum(row['total_draft_ms'] for row in prompt_rows):.1f}ms"
+                    )
+                    print(
+                        f"    lifecycle: completed="
+                        f"{sum(row['completed_rounds'] for row in prompt_rows)} "
+                        f"interrupted={sum(row['interrupted_rounds'] for row in prompt_rows)} "
+                        f"discarded={sum(row['tokens_discarded'] for row in prompt_rows)} "
+                        f"buffered={sum(row['tokens_buffered'] for row in prompt_rows)}"
+                    )
+                    if args.cooldown:
+                        print(
+                            f"    cooldown: entries="
+                            f"{sum(row['cooldown_entries'] for row in prompt_rows)} "
+                            f"steps={sum(row['cooldown_steps'] for row in prompt_rows)} "
+                            f"fallback="
+                            f"{sum(row['standard_fallback_steps'] for row in prompt_rows)} "
+                            f"accept_rounds="
+                            f"{sum(row['full_accept_rounds'] for row in prompt_rows)}/"
+                            f"{sum(row['partial_accept_rounds'] for row in prompt_rows)}/"
+                            f"{sum(row['zero_accept_rounds'] for row in prompt_rows)}"
+                        )
+                    if args.adaptive_k:
+                        print(
+                            f"    adaptive K: start={args.adaptive_k_min} "
+                            f"final_p50="
+                            f"{statistics.median(row['effective_k'] for row in prompt_rows):.1f} "
+                            f"final_range={min(row['effective_k'] for row in prompt_rows)}-"
+                            f"{max(row['effective_k'] for row in prompt_rows)} "
+                            f"moves=+"
+                            f"{sum(row['adaptive_k_increases'] for row in prompt_rows)}"
+                            f"/-{sum(row['adaptive_k_decreases'] for row in prompt_rows)} "
+                            f"probes={sum(row['adaptive_k_probes'] for row in prompt_rows)}"
+                        )
+                    print(
+                        f"    output: standard={len(base_tail)} tokens "
+                        f"speculative={representative['new_tokens']} tokens "
+                        f"exact={sum(bool(row['exact_match']) for row in prompt_rows)}/"
+                        f"{len(prompt_rows)} "
+                        f"match={statistics.median(row['token_match_rate'] for row in prompt_rows):.1%} "
+                        f"first_diff={representative['first_difference']} "
+                        f"type={representative['divergence_type']}"
+                    )
+                    print(
+                        f"    quality: standard={format_quality_with_reference(base_quality)} "
+                        f"speculative={format_quality_with_reference(representative)} "
+                        f"transition={representative['quality_transition'] or 'not_scored'}",
                         flush=True,
                     )
-                print(
-                    f"    target: verify={last.get('target_verify_forward_passes', 0)} "
-                    f"reanchor={last.get('target_reanchor_forward_passes', 0)} "
-                    f"reconcile={last.get('target_reconciliation_forward_passes', 0)} "
-                    f"timing={last.get('total_target_verify_ms', 0.0):.1f}/"
-                    f"{last.get('total_target_reanchor_ms', 0.0):.1f}/"
-                    f"{last.get('total_reconciliation_ms', 0.0):.1f}ms",
-                    flush=True,
-                )
-                print(
-                    f"    efficiency: accepted/round="
-                    f"{(last['draft_tokens_accepted'] / last['rounds']) if last['rounds'] else 0.0:.2f} "
-                    f"emitted/round={last['mean_emitted_tokens_per_round']:.2f} "
-                    f"target_passes/token="
-                    f"{last_target_passes_per_token:.3f} "
-                    f"discarded={last['tokens_discarded']} buffered={last['tokens_buffered']}",
-                    flush=True,
-                )
-                if args.cooldown:
-                    print(
-                        f"    cooldown: entries={last.get('cooldown_entries', 0)} "
-                        f"steps={last.get('cooldown_steps', 0)} "
-                        f"fallback={last.get('standard_fallback_steps', 0)} "
-                        f"remaining={last.get('cooldown_remaining', 0)} "
-                        f"accept_rounds={last.get('full_accept_rounds', 0)}/"
-                        f"{last.get('partial_accept_rounds', 0)}/"
-                        f"{last.get('zero_accept_rounds', 0)}",
-                        flush=True,
+                completed = idx + 1
+                if (
+                    args.log_level in ("progress", "detailed")
+                    and args.progress_every
+                    and (
+                        completed % args.progress_every == 0
+                        or completed == len(prompt_items)
                     )
-                if args.adaptive_k:
-                    print(
-                        f"    adaptive K: start={args.adaptive_k_min} "
-                        f"final={last.get('effective_k', runtime_k)} "
-                        f"moves=+{last.get('adaptive_k_increases', 0)}"
-                        f"/-{last.get('adaptive_k_decreases', 0)} "
-                        f"probes={last.get('adaptive_k_probes', 0)} "
-                        f"observations={last.get('adaptive_k_observations', 0)} "
-                        f"throughput={last.get('adaptive_k_throughput', 0.0):.4f} tok/ms",
-                        flush=True,
+                ):
+                    print_progress_summary(
+                        config_rows, completed, len(prompt_items), K
                     )
                 flush()
 
@@ -1857,6 +2153,7 @@ def main():
         run_ctx=dict(target=tgt_label, draft=dft_label, provider=provider_label,
                      device=device_label, n_prompts=len(prompt_items),
                      reps=args.reps, max_new=max_new, suites=suites,
+                     seed=args.seed,
                      adaptive_k=args.adaptive_k,
                      adaptive_k_min=args.adaptive_k_min, cooldown=args.cooldown),
         mem_baseline=mem_baseline, mem_spec=mem_spec)
@@ -1926,7 +2223,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         cand = [(K, geo[(mode, K)]) for K in ks if geo[(mode, K)] is not None]
         best_k[mode] = max(cand, key=lambda kv: kv[1])[0] if cand else None
 
-    width = 78
+    width = 104
 
     # ---- run-context header ----
     print("\n" + "=" * width)
@@ -1937,7 +2234,10 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         print(f"target={run_ctx['target']}  draft={run_ctx['draft']}   EP={ep}   "
               f"prompts={run_ctx['n_prompts']}  reps={run_ctx['reps']}  "
               f"max_new={run_ctx['max_new']}")
-        print(f"suites={','.join(run_ctx.get('suites', ['mtbench']))}")
+        print(
+            f"suites={','.join(run_ctx.get('suites', ['mtbench']))}  "
+            f"sampling_seed={run_ctx.get('seed', '-')}"
+        )
         if run_ctx.get("adaptive_k"):
             print(f"adaptive K: enabled, start/floor={run_ctx['adaptive_k_min']}, "
                   "native maximum=16")
@@ -1957,25 +2257,16 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
             print(f"\n>> BEST: {bmode} K={bK}  ->  {bgeo:.2f}x  (speculative did NOT beat "
                   f"baseline on average; accept {bacc:.0%})")
 
-    # ---- memory (baseline -> speculative, and the draft's added cost) ----
-    if mem_baseline is not None and mem_spec is not None:
-        if IS_NVIDIA_SYSTEM:
-            base_gib, spec_gib, unit = mem_baseline.peak_gpu_gib, mem_spec.peak_gpu_gib, "GiB GPU"
-        else:
-            base_gib, spec_gib, unit = mem_baseline.peak_cpu_gib, mem_spec.peak_cpu_gib, "GiB host RAM"
-        print(f">> Memory: {base_gib:.1f} -> {spec_gib:.1f} {unit}  "
-              f"(+{max(spec_gib - base_gib, 0.0):.1f} for the draft model)")
-
     # ---- legend ----
     print("\nLegend: speedup > 1.0 = speculative faster (higher is better); '!' = slower than baseline")
     print("        accept   = % of drafted tokens the target accepted")
     print("        mean_acc = avg tokens accepted per round (higher = fewer target calls)")
-    print("        match    = greedy output matches baseline (sanity, expect ~100%; '-' in sampling)")
+    print("        match    = positional token agreement with the paired standard output")
     print("        *        = input-guided task (prompt->output overlap inflates acceptance)")
 
     print("\nPerformance distribution across all measured rows")
-    print(f"  {'mode/config':22}{'min':>8}{'p10':>8}{'p50':>8}{'p90':>8}"
-          f"{'max':>8}{'geomean':>10}{'>1x':>8}")
+    print(f"  {'mode/config':22}{'min':>8}{'mean':>8}{'p10':>8}{'p50':>8}{'p90':>8}"
+          f"{'max':>8}{'geomean':>10}{'>1x':>8}{'e2e p50':>10}")
     for mode in modes:
         for K in ks:
             selected = [
@@ -1986,12 +2277,15 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
             if not selected:
                 continue
             speedups = [r["speedup_decode"] for r in selected]
+            e2e_speedups = [r["speedup_e2e"] for r in selected]
             faster = sum(value > 1.0 for value in speedups) / len(speedups)
             print(
                 f"  {f'{mode}/K={K}':22}"
-                f"{min(speedups):>8.2f}{percentile(speedups, 10):>8.2f}"
+                f"{min(speedups):>8.2f}{statistics.mean(speedups):>8.2f}"
+                f"{percentile(speedups, 10):>8.2f}"
                 f"{statistics.median(speedups):>8.2f}{percentile(speedups, 90):>8.2f}"
                 f"{max(speedups):>8.2f}{geomean(speedups):>10.2f}{faster:>8.0%}"
+                f"{statistics.median(e2e_speedups):>10.2f}"
             )
             if selected[0]["adaptive_k"]:
                 print(
@@ -2048,6 +2342,133 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                     f"remaining={sum(r['cooldown_remaining'] for r in selected)}"
                 )
 
+    print("\nSpeculation efficiency and output correctness")
+    print(
+        f"  {'mode/config':22}{'accept':>9}{'weighted':>10}{'accepted/r':>12}"
+        f"{'emit/r':>9}{'target/tok':>11}{'exact':>8}{'match':>9}"
+    )
+    for mode in modes:
+        for K in ks:
+            selected = [
+                r for r in rows
+                if r["decoder"] == "speculative" and r["mode"] == mode
+                and r["K"] == K
+            ]
+            if not selected:
+                continue
+            total_accepted = sum(r["draft_accepted"] for r in selected)
+            total_evaluated = sum(r["draft_evaluated"] for r in selected)
+            weighted_acceptance = (
+                total_accepted / total_evaluated if total_evaluated else 0.0
+            )
+            print(
+                f"  {f'{mode}/{format_config(K)}':22}"
+                f"{statistics.median(r['acceptance_rate'] for r in selected):>9.1%}"
+                f"{weighted_acceptance:>10.1%}"
+                f"{statistics.median(r['mean_accepted_tokens_per_round'] for r in selected):>12.2f}"
+                f"{statistics.median(r['mean_emitted_tokens_per_round'] for r in selected):>9.2f}"
+                f"{statistics.median(r['target_passes_per_token'] for r in selected):>11.3f}"
+                f"{sum(bool(r['exact_match']) for r in selected) / len(selected):>8.1%}"
+                f"{statistics.median(r['token_match_rate'] for r in selected):>9.1%}"
+            )
+            divergence_counts = {}
+            for row in selected:
+                divergence_counts[row["divergence_type"]] = (
+                    divergence_counts.get(row["divergence_type"], 0) + 1
+                )
+            counts = ", ".join(
+                f"{name}={value}" for name, value in sorted(divergence_counts.items())
+            )
+            mismatch_positions = [
+                r["first_difference"] for r in selected
+                if not r["exact_match"] and r["first_difference"] >= 0
+            ]
+            first_diff = (
+                f"{statistics.median(mismatch_positions):.0f}"
+                if mismatch_positions else "-"
+            )
+            print(
+                f"    totals: proposed={sum(r['draft_proposed'] for r in selected)} "
+                f"evaluated={total_evaluated} accepted={total_accepted} "
+                f"rounds={sum(r['rounds'] for r in selected)} "
+                f"corrections={sum(r['corrections'] for r in selected)} "
+                f"bonuses={sum(r['bonuses'] for r in selected)} "
+                f"draft_passes={sum(r['draft_forward_passes'] for r in selected)} "
+                f"target_passes={sum(r['target_forward_passes'] for r in selected)}"
+            )
+            print(
+                f"    timing: draft={sum(r['total_draft_ms'] for r in selected):.1f}ms "
+                f"target={sum(r['total_target_ms'] for r in selected):.1f}ms; "
+                f"mismatch_first_diff_p50={first_diff}; {counts}"
+            )
+            print(
+                f"    target breakdown: verify="
+                f"{sum(r['target_verify_forward_passes'] for r in selected)} passes/"
+                f"{sum(r['total_target_verify_ms'] for r in selected):.1f}ms "
+                f"reanchor={sum(r['target_reanchor_forward_passes'] for r in selected)} passes/"
+                f"{sum(r['total_target_reanchor_ms'] for r in selected):.1f}ms "
+                f"reconcile="
+                f"{sum(r['target_reconciliation_forward_passes'] for r in selected)} passes/"
+                f"{sum(r['total_reconciliation_ms'] for r in selected):.1f}ms"
+            )
+            print(
+                f"    round outcomes: full={sum(r['full_accept_rounds'] for r in selected)} "
+                f"partial={sum(r['partial_accept_rounds'] for r in selected)} "
+                f"zero={sum(r['zero_accept_rounds'] for r in selected)}"
+            )
+            print(
+                f"    lifecycle: completed={sum(r['completed_rounds'] for r in selected)} "
+                f"interrupted={sum(r['interrupted_rounds'] for r in selected)} "
+                f"active={sum(r['active_rounds'] for r in selected)} "
+                f"queued/emitted/discarded/buffered="
+                f"{sum(r['tokens_queued'] for r in selected)}/"
+                f"{sum(r['tokens_emitted'] for r in selected)}/"
+                f"{sum(r['tokens_discarded'] for r in selected)}/"
+                f"{sum(r['tokens_buffered'] for r in selected)}"
+            )
+            formula_rows = [r for r in selected if r["formula_supported"]]
+            if formula_rows:
+                print(
+                    f"    formula: supported={len(formula_rows)}/{len(selected)} "
+                    f"estimated_p50="
+                    f"{statistics.median(r['estimated_speedup'] for r in formula_rows):.2f}x "
+                    f"observed_p50="
+                    f"{statistics.median(r['observed_speedup'] for r in formula_rows):.2f}x "
+                    f"target_overhead_p50="
+                    f"{statistics.median(r['target_overhead_ratio'] for r in formula_rows):.3f}"
+                )
+            if selected[0]["cooldown"]:
+                print(
+                    f"    cooldown: entries={sum(r['cooldown_entries'] for r in selected)} "
+                    f"steps={sum(r['cooldown_steps'] for r in selected)} "
+                    f"fallback={sum(r['standard_fallback_steps'] for r in selected)} "
+                    f"remaining={sum(r['cooldown_remaining'] for r in selected)}"
+                )
+            if selected[0]["adaptive_k"]:
+                print(
+                    f"    adaptive K: start={selected[0]['adaptive_k_min']} "
+                    f"final_p50={statistics.median(r['effective_k'] for r in selected):.1f} "
+                    f"final_range={min(r['effective_k'] for r in selected)}-"
+                    f"{max(r['effective_k'] for r in selected)} "
+                    f"moves=+{sum(r['adaptive_k_increases'] for r in selected)}"
+                    f"/-{sum(r['adaptive_k_decreases'] for r in selected)} "
+                    f"probes={sum(r['adaptive_k_probes'] for r in selected)} "
+                    f"observations={sum(r['adaptive_k_observations'] for r in selected)} "
+                    f"throughput_p50="
+                    f"{statistics.median(r['adaptive_k_throughput'] for r in selected):.4f} tok/ms"
+                )
+
+    print("\nOutput interpretation")
+    print(
+        "  Greedy exact/match measures paired standard-versus-speculative agreement. "
+        "Batched verification can diverge from sequential greedy because of "
+        "floating-point accumulation order."
+    )
+    print(
+        "  Sampling exact/match compares paired fixed-seed paths for diagnostics only; "
+        "different valid samples are not a correctness failure."
+    )
+
     def sp_cell(sp):
         if sp is None:
             return f"{'-':>7} "
@@ -2071,7 +2492,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         bestlbl = f"K={best_k[mode]}" if best_k[mode] else "-"
         print(f"  {'GEOMEAN':16}{gcells}  {bestlbl:>5}")
 
-        # ---- detail at the winning K (acceptance / mean_acc / greedy match) ----
+        # ---- detail at the winning K (acceptance / mean_acc / token match) ----
         bK = best_k[mode]
         if bK is not None:
             print(f"\n  detail at best K={bK}:")
@@ -2084,8 +2505,10 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                 acc = med_spec(mode, task, bK, "acceptance_rate") or 0.0
                 mat = med_spec(
                     mode, task, bK, "mean_accepted_tokens_per_round") or 0.0
-                gm = med_spec(mode, task, bK, "greedy_match")
-                matchs = f"{gm:.0%}" if gm not in (None, "") else "-"
+                token_match = med_spec(mode, task, bK, "token_match_rate")
+                matchs = (
+                    f"{token_match:.0%}" if token_match not in (None, "") else "-"
+                )
                 flag = "*" if task in INPUT_GUIDED_TASKS else ""
                 print(f"  {task + flag:16}{std:>9.1f}{spec:>9.1f}{acc:>7.0%} "
                       f"{mat:>9.2f}{matchs:>7}")
@@ -2095,7 +2518,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
         if row["quality_metric"] and row["rep"] == 0
     ))
     if quality_tasks:
-        print("\nTask quality (first deterministic repetition)")
+        print("\nTask quality (first measured repetition)")
         for mode in modes:
             print(f"  mode={mode}")
             print(f"    {'task':18}{'metric':>12}{'standard':>12}" + "".join(
@@ -2147,6 +2570,24 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                             for name, value in sorted(transitions.items())
                         )
                         print(f"      {task} K={K}: {details}")
+
+    if mem_baseline is not None and mem_spec is not None:
+        if IS_NVIDIA_SYSTEM:
+            base_gib, spec_gib, unit = (
+                mem_baseline.peak_gpu_gib,
+                mem_spec.peak_gpu_gib,
+                "GiB GPU",
+            )
+        else:
+            base_gib, spec_gib, unit = (
+                mem_baseline.peak_cpu_gib,
+                mem_spec.peak_cpu_gib,
+                "GiB host RAM",
+            )
+        print(
+            f"\nMemory: {base_gib:.1f} -> {spec_gib:.1f} {unit} "
+            f"(+{max(spec_gib - base_gib, 0.0):.1f} for the draft model)"
+        )
 
     print("\nFull per-prompt timing, formula, lifecycle, quality, and memory metrics "
           "are in the CSV/JSON.")
