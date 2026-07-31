@@ -3,6 +3,7 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
+#include "../sequence_positions.h"
 
 namespace Generators {
 
@@ -104,14 +105,11 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
-    if (request->IsPrefill()) {
-      // When a request is created, the current sequence length becomes the prompt length.
-      // But the kv cache is not updated until the first token is generated.
-      // So we set the past sequence length to current sequence length minus the unprocessed tokens length.
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength() - input_ids.size());
-    } else {
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength());
-    }
+    // The operator writes this step's token j of sequence i at absolute position
+    // past_sequence_lengths[i] + j, so this has to be the number of tokens already in the cache.
+    // Deriving it from the sequence length instead is off by one on a decode step, where the
+    // search has already appended the token that is about to be processed.
+    sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->ProcessedSequenceLength());
 
     running_length += input_ids.size();
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
@@ -164,11 +162,7 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   } else {
     for (auto& request : scheduled_requests) {
       const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      // CurrentSequenceLength() already counts the unprocessed tokens for a prefill request, and
-      // excludes them for a generation request, mirroring how past_sequence_lengths is filled above.
-      const int32_t kv_len = request->IsPrefill()
-                                 ? static_cast<int32_t>(request->CurrentSequenceLength())
-                                 : static_cast<int32_t>(request->CurrentSequenceLength()) + query_len;
+      const int32_t kv_len = static_cast<int32_t>(SlotsAfterStep(request->ProcessedSequenceLength(), query_len));
       max_query_len = std::max(max_query_len, query_len);
       max_kv_len = std::max(max_kv_len, kv_len);
     }

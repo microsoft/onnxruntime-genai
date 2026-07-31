@@ -82,6 +82,10 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
+}
+
 int32_t Request::UnseenToken() {
   auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
   if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())
