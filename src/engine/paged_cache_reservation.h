@@ -17,6 +17,7 @@ struct PagedCacheBlockTable {
   const void* request_id{};
   size_t committed_slots{};
   std::vector<std::shared_ptr<Block>> blocks;
+  std::vector<std::shared_ptr<Block>> window_blocks;
 };
 
 struct PagedCacheReservationRequest {
@@ -32,6 +33,8 @@ struct PagedCacheReservationDelta {
   size_t tail_slots_to_consume{};
   size_t reserved_block_offset{};
   size_t reserved_block_count{};
+  size_t reserved_window_block_offset{};
+  size_t reserved_window_block_count{};
   bool newly_admitted{};
 };
 
@@ -46,7 +49,9 @@ class PagedCacheReservation {
   // Requests omitted from the reservation keep their committed tables unchanged.
   PagedCacheReservation(BlockPool& block_pool,
                         std::vector<PagedCacheBlockTable>& committed_tables,
-                        std::span<const PagedCacheReservationRequest> requests);
+                        std::span<const PagedCacheReservationRequest> requests,
+                        BlockPool* window_block_pool = nullptr,
+                        size_t window_ring_blocks = 0);
   PagedCacheReservation(PagedCacheReservation&& other) noexcept;
   PagedCacheReservation& operator=(PagedCacheReservation&&) = delete;
   PagedCacheReservation(const PagedCacheReservation&) = delete;
@@ -64,6 +69,9 @@ class PagedCacheReservation {
   void FillBlockTable(std::span<const void* const> request_ids,
                       size_t columns,
                       std::span<int32_t> output) const;
+  void FillWindowBlockTable(std::span<const void* const> request_ids,
+                            size_t columns,
+                            std::span<int32_t> output) const;
   void Commit();
   void Release();
 
@@ -73,8 +81,11 @@ class PagedCacheReservation {
   void AdvanceCommittedSlots(PagedCacheBlockTable& table, size_t target_slots);
 
   BlockPool* block_pool_{};
+  BlockPool* window_block_pool_{};
+  size_t window_ring_blocks_{};
   std::vector<PagedCacheBlockTable>* committed_tables_{};
   std::vector<std::shared_ptr<Block>> reserved_blocks_;
+  std::vector<std::shared_ptr<Block>> reserved_window_blocks_;
   std::vector<PagedCacheReservationDelta> deltas_;
   std::vector<PagedCacheBlockTable> new_tables_;
   PagedCacheReservationState state_{PagedCacheReservationState::Released};
