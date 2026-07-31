@@ -7,8 +7,8 @@
 Compares standard decoding with model-free n-gram speculative decoding on
 identical prompts. Greedy decoding is the default; sampling can be selected
 with fixed seeds and configurable search controls. MT-Bench measures broad
-speed behavior, while optional GSM8K and HumanEval suites add task-level
-accuracy and pass@1 measurements.
+speed behavior, while optional instruction-following, math, long-context, and
+code suites add task-level quality measurements.
 The script reuses model resolution, chat-template handling, and local-build
 import logic from benchmark_speculative.py, but requires only one target model.
 
@@ -42,39 +42,14 @@ import gc
 import json
 import math
 import os
-import re
 import statistics
 import sys
 import threading
 import time
-import urllib.request
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 
+import benchmark_suites as suite_utils
 import benchmark_speculative as common
-
-
-GSM8K_URL = (
-    "https://raw.githubusercontent.com/openai/grade-school-math/master/"
-    "grade_school_math/data/test.jsonl"
-)
-GSM8K_FEW_SHOT_EXAMPLES = """Question: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?
-Answer: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. #### 6
-
-Question: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?
-Answer: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. #### 5
-
-Question: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?
-Answer: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. #### 39
-
-Question: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?
-Answer: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. #### 8
-
-Question: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?
-Answer: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 2 + 2 = 4 more toys. 5 + 4 = 9. #### 9
-
-"""
-SUPPORTED_SUITES = {"mtbench", "gsm8k", "humaneval"}
 
 
 class ProcessMemoryMonitor:
@@ -118,6 +93,7 @@ class ProcessMemoryMonitor:
 
 
 def parse_int_list(parser, value, name, minimum, maximum):
+    values = []
     try:
         values = [int(item.strip()) for item in value.split(",") if item.strip()]
     except ValueError:
@@ -131,16 +107,7 @@ def parse_int_list(parser, value, name, minimum, maximum):
 
 
 def parse_suites(parser, value):
-    suites = [item.strip().lower() for item in value.split(",") if item.strip()]
-    if not suites:
-        parser.error("--suites must contain at least one suite")
-    unknown = sorted(set(suites) - SUPPORTED_SUITES)
-    if unknown:
-        parser.error(
-            f"--suites contains unsupported values: {', '.join(unknown)}; "
-            f"choose from {', '.join(sorted(SUPPORTED_SUITES))}"
-        )
-    return list(dict.fromkeys(suites))
+    return suite_utils.parse_suites(parser, value)
 
 
 def parse_modes(parser, value):
@@ -154,211 +121,6 @@ def parse_modes(parser, value):
             "choose from greedy,sampling"
         )
     return list(dict.fromkeys(modes))
-
-
-def extract_gsm8k_answer(text):
-    match = re.search(r"####\s*([+-]?[\d,]+\.?\d*)", text)
-    if match:
-        return match.group(1).replace(",", "")
-    match = re.search(
-        r"(?:the answer is|answer:|= )\s*\$?([+-]?[\d,]+\.?\d*)",
-        text,
-        re.IGNORECASE,
-    )
-    if match:
-        return match.group(1).replace(",", "")
-    numbers = re.findall(r"[+-]?\d[\d,]*\.?\d*", text)
-    return numbers[-1].replace(",", "") if numbers else None
-
-
-def trim_gsm8k_completion(completion):
-    for stop in ("\nQuestion:", "\n\nQuestion", "\n\n\n"):
-        index = completion.find(stop)
-        if index != -1:
-            completion = completion[:index]
-    return completion
-
-
-def gsm8k_answers_equal(prediction, reference):
-    if prediction is None:
-        return False
-    try:
-        return Decimal(prediction) == Decimal(reference)
-    except InvalidOperation:
-        return False
-
-
-def load_gsm8k_prompts(dataset_path, max_problems):
-    if not os.path.exists(dataset_path):
-        os.makedirs(os.path.dirname(os.path.abspath(dataset_path)), exist_ok=True)
-        print(f"Downloading GSM8K to {dataset_path} ...")
-        urllib.request.urlretrieve(GSM8K_URL, dataset_path)
-
-    examples = []
-    with open(dataset_path, encoding="utf-8") as file:
-        for index, line in enumerate(file):
-            example = json.loads(line)
-            ground_truth = extract_gsm8k_answer(example["answer"])
-            if ground_truth is None:
-                raise ValueError(f"GSM8K item {index} has no ground-truth answer")
-            examples.append({
-                "task": "gsm8k",
-                "subcategory": "math_reasoning",
-                "question_id": index,
-                "text": (
-                    f"{GSM8K_FEW_SHOT_EXAMPLES}Question: "
-                    f"{example['question']}\nAnswer:"
-                ),
-                "raw_prompt": True,
-                "quality_metric": "accuracy",
-                "reference_answer": ground_truth,
-            })
-            if max_problems and len(examples) >= max_problems:
-                break
-    return examples
-
-
-def load_humaneval_prompts(max_problems):
-    try:
-        from human_eval.data import read_problems
-    except ImportError as error:
-        raise RuntimeError(
-            "HumanEval requires the 'human-eval' package. "
-            "Install it with `pip install human-eval`."
-        ) from error
-
-    prompts = []
-    for task_id, problem in read_problems().items():
-        prompts.append({
-            "task": "humaneval",
-            "subcategory": "coding",
-            "question_id": task_id,
-            "text": problem["prompt"],
-            "raw_prompt": True,
-            "quality_metric": "pass@1",
-            "humaneval_problem": problem,
-        })
-        if max_problems and len(prompts) >= max_problems:
-            break
-    return prompts
-
-
-def trim_humaneval_completion(completion):
-    for stop in ("\nclass ", "\ndef ", "\n#", "\nif __name__", "\nprint(", "\n```"):
-        index = completion.find(stop)
-        if index != -1:
-            completion = completion[:index]
-    return completion
-
-
-def _execute_humaneval(problem, completion, connection):
-    from human_eval.execution import create_tempdir, reliability_guard, swallow_io
-
-    try:
-        with create_tempdir():
-            import shutil
-
-            rmtree = shutil.rmtree
-            rmdir = os.rmdir
-            chdir = os.chdir
-            reliability_guard()
-            check_program = (
-                problem["prompt"]
-                + completion
-                + "\n"
-                + problem["test"]
-                + "\n"
-                + f"check({problem['entry_point']})"
-            )
-            try:
-                with swallow_io():
-                    exec(check_program, {})
-                result = "passed"
-            except BaseException as error:
-                result = f"failed: {error}"
-            finally:
-                shutil.rmtree = rmtree
-                os.rmdir = rmdir
-                os.chdir = chdir
-        connection.send(result)
-    except BaseException as error:
-        connection.send(f"failed: {error}")
-    finally:
-        connection.close()
-
-
-def check_humaneval_correctness(problem, completion, timeout):
-    import multiprocessing
-
-    receive, send = multiprocessing.Pipe(duplex=False)
-    process = multiprocessing.Process(
-        target=_execute_humaneval,
-        args=(problem, completion, send),
-    )
-    process.start()
-    send.close()
-    process.join(timeout)
-    if process.is_alive():
-        process.kill()
-        process.join()
-        result = "timed out"
-    elif receive.poll():
-        result = receive.recv()
-    else:
-        result = f"failed: evaluator process exited with code {process.exitcode}"
-    receive.close()
-    return {
-        "task_id": problem["task_id"],
-        "passed": result == "passed",
-        "result": result,
-    }
-
-
-def score_completion(item, token_ids, timeout, cache, decode):
-    metric = item.get("quality_metric")
-    if not metric:
-        return {
-            "quality_metric": "",
-            "quality_score": "",
-            "quality_prediction": "",
-            "quality_reference_answer": "",
-            "quality_detail": "",
-        }
-
-    cache_key = (item["task"], str(item["question_id"]), tuple(token_ids))
-    if cache_key in cache:
-        return cache[cache_key]
-
-    completion = decode(token_ids)
-    if metric == "accuracy":
-        prediction = extract_gsm8k_answer(trim_gsm8k_completion(completion))
-        result = {
-            "quality_metric": metric,
-            "quality_score": gsm8k_answers_equal(
-                prediction, item["reference_answer"]
-            ),
-            "quality_prediction": prediction or "",
-            "quality_reference_answer": item["reference_answer"],
-            "quality_detail": "",
-        }
-    elif metric == "pass@1":
-        outcome = check_humaneval_correctness(
-            item["humaneval_problem"],
-            trim_humaneval_completion(completion),
-            timeout,
-        )
-        result = {
-            "quality_metric": metric,
-            "quality_score": bool(outcome["passed"]),
-            "quality_prediction": "",
-            "quality_reference_answer": "",
-            "quality_detail": outcome["result"],
-        }
-    else:
-        raise ValueError(f"Unsupported quality metric: {metric}")
-
-    cache[cache_key] = result
-    return result
 
 
 def run_once(
@@ -480,7 +242,10 @@ CSV_COLUMNS = [
     "subcategory",
     "question_id",
     "quality_metric",
+    "quality_score_type",
     "quality_score",
+    "baseline_quality_score",
+    "quality_score_delta",
     "quality_prediction",
     "quality_reference_answer",
     "quality_detail",
@@ -501,6 +266,7 @@ CSV_COLUMNS = [
     "adaptive_k_probes",
     "adaptive_k_throughput",
     "prompt_tokens",
+    "output_token_budget",
     "new_tokens",
     "prefill_s",
     "decode_s",
@@ -619,37 +385,17 @@ def classify_divergence(comparison, expected_length, actual_length):
 
 
 def classify_quality_transition(baseline_quality, ngram_quality):
-    if not baseline_quality["quality_metric"]:
-        return ""
-    baseline_correct = bool(baseline_quality["quality_score"])
-    ngram_correct = bool(ngram_quality["quality_score"])
-    if baseline_correct and ngram_correct:
-        return "both_correct"
-    if baseline_correct:
-        return "baseline_only"
-    if ngram_correct:
-        return "ngram_only"
-    baseline_prediction = baseline_quality["quality_prediction"]
-    ngram_prediction = ngram_quality["quality_prediction"]
-    if baseline_prediction and baseline_prediction == ngram_prediction:
-        return "both_wrong_same_prediction"
-    if baseline_prediction and ngram_prediction:
-        return "both_wrong_different_prediction"
-    return "both_wrong"
+    return suite_utils.classify_quality_transition(
+        baseline_quality, ngram_quality, "ngram"
+    )
 
 
 def format_quality(quality):
-    if not quality["quality_metric"]:
-        return "not_scored"
-    result = "correct" if quality["quality_score"] else "wrong"
-    prediction = quality["quality_prediction"]
-    return f"{result}({prediction})" if prediction else result
+    return suite_utils.format_quality(quality)
 
 
 def format_quality_with_reference(quality):
-    result = format_quality(quality)
-    reference = quality["quality_reference_answer"]
-    return f"{result} expected={reference}" if reference else result
+    return suite_utils.format_quality_with_reference(quality)
 
 
 def format_seed(mode, seed):
@@ -781,34 +527,10 @@ def print_progress_summary(config_rows, completed, total, ngram_size, max_draft_
             f"probes={sum(row['adaptive_k_probes'] for row in config_rows)} "
             f"observations={sum(row['adaptive_k_observations'] for row in config_rows)}"
         )
-    quality_rows = [
-        row for row in config_rows
-        if row["quality_metric"] and row["rep"] == 0
-    ]
-    if quality_rows:
-        transitions = {}
-        for row in quality_rows:
-            transitions[row["quality_transition"]] = (
-                transitions.get(row["quality_transition"], 0) + 1
-            )
-        baseline_correct = sum(
-            row["quality_transition"] in ("both_correct", "baseline_only")
-            for row in quality_rows
-        )
-        ngram_correct = sum(
-            row["quality_transition"] in ("both_correct", "ngram_only")
-            for row in quality_rows
-        )
-        count = len(quality_rows)
-        transition_text = ", ".join(
-            f"{name}={value}" for name, value in sorted(transitions.items())
-        )
-        print(
-            f"    quality: baseline={baseline_correct / count:.1%} "
-            f"ngram={ngram_correct / count:.1%} "
-            f"delta={(ngram_correct - baseline_correct) / count:+.1%}; "
-            f"{transition_text}"
-        )
+    for line in suite_utils.format_quality_summary_lines(
+        config_rows, "standard", "ngram"
+    ):
+        print(f"    {line}")
     print(flush=True)
 
 
@@ -1083,7 +805,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
             ]
             metric = next(row["quality_metric"] for row in task_rows)
             baseline_scores = [
-                bool(row["quality_score"]) for row in task_rows
+                float(row["quality_score"]) for row in task_rows
                 if row["decoder"] == "standard"
             ]
             baseline = (
@@ -1094,7 +816,7 @@ def print_summary_group(rows, ngram_sizes, draft_lengths, context):
             for ngram_size in ngram_sizes:
                 for max_draft_tokens in draft_lengths:
                     config_scores = [
-                        bool(row["quality_score"]) for row in task_rows
+                        float(row["quality_score"]) for row in task_rows
                         if row["decoder"] == "ngram"
                         and row["ngram_size"] == ngram_size
                         and row["K"] == max_draft_tokens
@@ -1209,7 +931,12 @@ def main():
         action="store_true",
         help="temporarily use standard decoding after repeated zero-accept rounds",
     )
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=64,
+        help="new tokens for Spec-Bench/builtin prompts; quality suites use pinned task budgets",
+    )
     parser.add_argument("--reps", type=int, default=1,
                         help="measured repetitions per prompt/configuration")
     parser.add_argument("--warmup", type=int, default=1,
@@ -1237,7 +964,8 @@ def main():
     parser.add_argument(
         "--suites",
         default="mtbench",
-        help="comma-separated suites: mtbench,gsm8k,humaneval",
+        help="comma-separated suites: mtbench,gsm8k,ifeval,math500,longbench,"
+             "humaneval,humanevalplus,mbppplus,bigcodebench,livecodebench",
     )
 
     default_dataset = os.path.join(here, "question.jsonl")
@@ -1285,21 +1013,58 @@ def main():
         help="number of GSM8K problems; 0 uses the full 1,319-problem test set",
     )
     parser.add_argument(
+        "--ifeval-path",
+        default=os.path.join(here, ".cache", "ifeval_input_data.jsonl"),
+        help="IFEval JSONL path; downloaded from the pinned official dataset if absent",
+    )
+    parser.add_argument("--ifeval-problems", type=int, default=541,
+                        help="number of IFEval prompts; 0 uses all 541")
+    parser.add_argument(
+        "--math500-path",
+        default=os.path.join(here, ".cache", "math500_test.jsonl"),
+        help="MATH-500 JSONL path; downloaded from the pinned dataset if absent",
+    )
+    parser.add_argument("--math500-problems", type=int, default=500,
+                        help="number of MATH-500 problems; 0 uses all 500")
+    parser.add_argument(
+        "--longbench-tasks",
+        default="qasper,hotpotqa,gov_report,passage_retrieval_en",
+        help="LongBench v1 tasks: qasper,hotpotqa,gov_report,passage_retrieval_en",
+    )
+    parser.add_argument("--longbench-problems-per-task", type=int, default=50,
+                        help="problems per selected LongBench task; 0 uses all")
+    parser.add_argument("--longbench-max-input-tokens", type=int, default=16384,
+                        help="middle-truncate LongBench prompts above this input-token count")
+    parser.add_argument(
         "--humaneval-problems",
         type=int,
         default=164,
         help="number of HumanEval problems; 0 uses all 164",
     )
+    parser.add_argument("--humanevalplus-problems", type=int, default=164,
+                        help="number of HumanEval+ problems; 0 uses all 164")
+    parser.add_argument("--mbppplus-problems", type=int, default=378,
+                        help="number of MBPP+ problems; 0 uses all 378")
+    parser.add_argument("--bigcodebench-problems", type=int, default=148,
+                        help="number of BigCodeBench-Hard problems; 0 uses all 148")
+    parser.add_argument("--bigcodebench-subset", choices=["hard"], default="hard",
+                        help="pinned BigCodeBench subset")
+    parser.add_argument("--livecodebench-problems", type=int, default=100,
+                        help="number of newest LiveCodeBench problems; 0 uses the full release")
+    parser.add_argument("--livecodebench-release", default="release_v6",
+                        help="pinned LiveCodeBench release to select")
     parser.add_argument(
+        "--code-execution-timeout",
         "--humaneval-timeout",
+        dest="code_execution_timeout",
         type=float,
         default=3.0,
-        help="per-problem HumanEval execution timeout in seconds",
+        help="per-test timeout for generated Python execution",
     )
     parser.add_argument(
         "--allow-code-execution",
         action="store_true",
-        help="required for HumanEval; executes generated Python in human-eval's guard",
+        help="required for all executable code suites; use only on an isolated agent",
     )
     parser.add_argument(
         "--log-level",
@@ -1368,12 +1133,24 @@ def main():
         parser.error("--reps must be positive")
     if args.warmup < 0:
         parser.error("--warmup cannot be negative")
-    if args.gsm8k_problems < 0:
-        parser.error("--gsm8k-problems cannot be negative")
-    if args.humaneval_problems < 0:
-        parser.error("--humaneval-problems cannot be negative")
-    if args.humaneval_timeout <= 0:
-        parser.error("--humaneval-timeout must be positive")
+    count_options = {
+        "--gsm8k-problems": args.gsm8k_problems,
+        "--ifeval-problems": args.ifeval_problems,
+        "--math500-problems": args.math500_problems,
+        "--longbench-problems-per-task": args.longbench_problems_per_task,
+        "--humaneval-problems": args.humaneval_problems,
+        "--humanevalplus-problems": args.humanevalplus_problems,
+        "--mbppplus-problems": args.mbppplus_problems,
+        "--bigcodebench-problems": args.bigcodebench_problems,
+        "--livecodebench-problems": args.livecodebench_problems,
+    }
+    for option, value in count_options.items():
+        if value < 0:
+            parser.error(f"{option} cannot be negative")
+    if args.longbench_max_input_tokens < 512:
+        parser.error("--longbench-max-input-tokens must be at least 512")
+    if args.code_execution_timeout <= 0:
+        parser.error("--code-execution-timeout must be positive")
     if args.progress_every < 0:
         parser.error("--progress-every cannot be negative")
     modes = parse_modes(parser, args.modes)
@@ -1395,20 +1172,18 @@ def main():
         if not 0 <= args.min_new_tokens <= args.max_new_tokens:
             parser.error("--min-new-tokens must be in [0, --max-new-tokens]")
     suites = parse_suites(parser, args.suites)
-    if "humaneval" in suites and not args.allow_code_execution:
+    args.longbench_tasks = suite_utils.parse_longbench_tasks(
+        parser, args.longbench_tasks
+    )
+    executable_suites = suite_utils.CODE_EXECUTION_SUITES & set(suites)
+    if executable_suites and not args.allow_code_execution:
         parser.error(
-            "HumanEval executes generated Python. Pass --allow-code-execution "
-            "only on an isolated machine or container."
+            f"{', '.join(sorted(executable_suites))} executes generated Python. "
+            "Pass --allow-code-execution only on an isolated machine or container."
         )
-    if {"gsm8k", "humaneval"} & set(suites) and args.max_new_tokens < 512:
+    if executable_suites:
         print(
-            "WARNING: GSM8K/HumanEval reference evaluations use "
-            "--max-new-tokens 512; shorter outputs can understate quality.",
-            file=sys.stderr,
-        )
-    if "humaneval" in suites:
-        print(
-            "WARNING: human-eval's reliability guard is not a security sandbox. "
+            "WARNING: evaluator guards are not security sandboxes. "
             "Run generated code only on an isolated, disposable machine.",
             file=sys.stderr,
         )
@@ -1453,12 +1228,7 @@ def main():
             prompt_items.extend(mtbench_items)
         else:
             prompt_items.extend(common.builtin_prompts(args.max_prompts))
-    if "gsm8k" in suites:
-        prompt_items.extend(
-            load_gsm8k_prompts(args.gsm8k_path, args.gsm8k_problems)
-        )
-    if "humaneval" in suites:
-        prompt_items.extend(load_humaneval_prompts(args.humaneval_problems))
+    prompt_items.extend(suite_utils.load_additional_suite_prompts(args, suites))
     if not prompt_items:
         parser.error("the selected suites produced no prompts")
 
@@ -1545,11 +1315,14 @@ def main():
     print(f"model loaded in {time.perf_counter() - load_start:.1f}s")
 
     encoded = [
-        common.encode_prompt(
-            tokenizer,
-            item["text"],
-            chat=not (args.raw or item.get("raw_prompt", False)),
-            think=args.think,
+        suite_utils.truncate_prompt_tokens(
+            common.encode_prompt(
+                tokenizer,
+                item["text"],
+                chat=not (args.raw or item.get("raw_prompt", False)),
+                think=args.think,
+            ),
+            item,
         )
         for item in prompt_items
     ]
@@ -1614,6 +1387,9 @@ def main():
                 )
 
         for prompt_index, (item, token_ids) in enumerate(zip(prompt_items, encoded)):
+            prompt_max_new = suite_utils.generation_limit(
+                item, args.max_new_tokens
+            )
             decode_rates = []
             e2e_rates = []
             prefill_times = []
@@ -1625,7 +1401,7 @@ def main():
                     og,
                     model,
                     token_ids,
-                    args.max_new_tokens,
+                    prompt_max_new,
                     mode=mode,
                     seed=seed,
                     sampling_options=sampling_options,
@@ -1647,10 +1423,10 @@ def main():
                         f"standard {mode} output was not reproducible for "
                         f"prompt {prompt_index}, seed {seed}"
                     )
-                quality = score_completion(
+                quality = suite_utils.score_completion(
                     item,
                     result["tail"],
-                    args.humaneval_timeout,
+                    args.code_execution_timeout,
                     quality_cache,
                     tokenizer.decode,
                 )
@@ -1672,6 +1448,10 @@ def main():
                     "subcategory": item["subcategory"],
                     "question_id": item["question_id"],
                     **quality,
+                    "baseline_quality_score": quality["quality_score"],
+                    "quality_score_delta": (
+                        0.0 if quality["quality_metric"] else ""
+                    ),
                     "quality_transition": "",
                     "prompt_id": prompt_index,
                     "rep": rep,
@@ -1679,6 +1459,7 @@ def main():
                     "ngram_size": "",
                     "K": "",
                     "prompt_tokens": len(token_ids),
+                    "output_token_budget": prompt_max_new,
                     "new_tokens": result["new_tokens"],
                     "prefill_s": round(result["prefill_s"], 6),
                     "decode_s": round(result["decode_s"], 6),
@@ -1724,7 +1505,7 @@ def main():
                     og,
                     model,
                     token_ids,
-                    args.max_new_tokens,
+                    prompt_max_new,
                     mode=mode,
                     seed=seed,
                     sampling_options=sampling_options,
@@ -1792,6 +1573,9 @@ def main():
                 for prompt_index, (item, token_ids) in enumerate(
                     zip(prompt_items, encoded)
                 ):
+                    prompt_max_new = suite_utils.generation_limit(
+                        item, args.max_new_tokens
+                    )
                     baseline = baselines[(mode, seed, prompt_index)]
                     measured_speedups = []
                     measured_acceptance = []
@@ -1803,7 +1587,7 @@ def main():
                             og,
                             model,
                             token_ids,
-                            args.max_new_tokens,
+                            prompt_max_new,
                             mode=mode,
                             seed=seed,
                             sampling_options=sampling_options,
@@ -1842,10 +1626,10 @@ def main():
                         comparison = compare_tokens(
                             baseline["tail"], result["tail"]
                         )
-                        quality = score_completion(
+                        quality = suite_utils.score_completion(
                             item,
                             result["tail"],
-                            args.humaneval_timeout,
+                            args.code_execution_timeout,
                             quality_cache,
                             tokenizer.decode,
                         )
@@ -1896,6 +1680,14 @@ def main():
                             "subcategory": item["subcategory"],
                             "question_id": item["question_id"],
                             **quality,
+                            "baseline_quality_score": baseline["quality"][
+                                "quality_score"
+                            ],
+                            "quality_score_delta": (
+                                float(quality["quality_score"])
+                                - float(baseline["quality"]["quality_score"])
+                                if quality["quality_metric"] else ""
+                            ),
                             "quality_transition": quality_transition,
                             "prompt_id": prompt_index,
                             "rep": rep,
@@ -1927,6 +1719,7 @@ def main():
                                 float(stats.get("adaptive_k_throughput", 0.0)), 6
                             ),
                             "prompt_tokens": len(token_ids),
+                            "output_token_budget": prompt_max_new,
                             "new_tokens": result["new_tokens"],
                             "prefill_s": round(result["prefill_s"], 6),
                             "decode_s": round(result["decode_s"], 6),
@@ -2083,7 +1876,7 @@ def main():
                             og,
                             model,
                             token_ids,
-                            args.max_new_tokens,
+                            prompt_max_new,
                             mode=mode,
                             seed=seed,
                             sampling_options=sampling_options,

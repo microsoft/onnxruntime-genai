@@ -15,11 +15,11 @@ Two things are swept: ``--modes`` (greedy/sampling) and ``--k`` (max_draft_token
 With ``--adaptive-k``, the fixed-K sweep is replaced by one adaptive run per mode.
 The speculative config is composed on the fly from each model's own
 ``genai_config.json``, so any target/draft pair works. Prompts default to the bundled
-Spec-Bench dataset (``question.jsonl``); optional GSM8K and HumanEval suites add
-accuracy and pass@1 measurements. ``--limit-per-task`` subsamples Spec-Bench and
-``--builtin`` uses a small smoke-test set. Results are reported per task plus an
-overall geometric-mean speedup. Results are checkpointed atomically after each
-completed configuration; large CSVs rotate into numbered part files.
+Spec-Bench dataset (``question.jsonl``); optional instruction-following, math,
+long-context, and code suites add task-quality measurements. ``--limit-per-task``
+subsamples Spec-Bench and ``--builtin`` uses a small smoke-test set. Results are
+reported per task plus an overall geometric-mean speedup. Results are checkpointed
+atomically after each completed configuration; large CSVs rotate into numbered parts.
 
 Examples:
     # Default local flat layout (<models-root>/qwen3-8b/, qwen3-1.7b/)
@@ -59,268 +59,20 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.request
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 
+import benchmark_suites as suite_utils
 
-GSM8K_URL = (
-    "https://raw.githubusercontent.com/openai/grade-school-math/master/"
-    "grade_school_math/data/test.jsonl"
-)
-GSM8K_FEW_SHOT_EXAMPLES = """Question: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?
-Answer: There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. #### 6
-
-Question: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?
-Answer: There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. #### 5
-
-Question: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?
-Answer: Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. #### 39
-
-Question: Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?
-Answer: Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. #### 8
-
-Question: Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?
-Answer: Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 2 + 2 = 4 more toys. 5 + 4 = 9. #### 9
-
-"""
-SUPPORTED_SUITES = {"mtbench", "gsm8k", "humaneval"}
-
-
-def parse_suites(parser, value):
-    suites = [item.strip().lower() for item in value.split(",") if item.strip()]
-    if not suites:
-        parser.error("--suites must contain at least one suite")
-    unknown = sorted(set(suites) - SUPPORTED_SUITES)
-    if unknown:
-        parser.error(
-            f"--suites contains unsupported values: {', '.join(unknown)}; "
-            f"choose from {', '.join(sorted(SUPPORTED_SUITES))}"
-        )
-    return list(dict.fromkeys(suites))
-
-
-def extract_gsm8k_answer(text):
-    match = re.search(r"####\s*([+-]?[\d,]+\.?\d*)", text)
-    if match:
-        return match.group(1).replace(",", "")
-    match = re.search(
-        r"(?:the answer is|answer:|= )\s*\$?([+-]?[\d,]+\.?\d*)",
-        text,
-        re.IGNORECASE,
-    )
-    if match:
-        return match.group(1).replace(",", "")
-    numbers = re.findall(r"[+-]?\d[\d,]*\.?\d*", text)
-    return numbers[-1].replace(",", "") if numbers else None
-
-
-def trim_gsm8k_completion(completion):
-    for stop in ("\nQuestion:", "\n\nQuestion", "\n\n\n"):
-        index = completion.find(stop)
-        if index != -1:
-            completion = completion[:index]
-    return completion
-
-
-def gsm8k_answers_equal(prediction, reference):
-    if prediction is None:
-        return False
-    try:
-        return Decimal(prediction) == Decimal(reference)
-    except InvalidOperation:
-        return False
-
-
-def load_gsm8k_prompts(dataset_path, max_problems):
-    if not os.path.exists(dataset_path):
-        os.makedirs(os.path.dirname(os.path.abspath(dataset_path)), exist_ok=True)
-        print(f"Downloading GSM8K to {dataset_path} ...")
-        urllib.request.urlretrieve(GSM8K_URL, dataset_path)
-
-    examples = []
-    with open(dataset_path, encoding="utf-8") as file:
-        for index, line in enumerate(file):
-            example = json.loads(line)
-            ground_truth = extract_gsm8k_answer(example["answer"])
-            if ground_truth is None:
-                raise ValueError(f"GSM8K item {index} has no ground-truth answer")
-            examples.append({
-                "task": "gsm8k",
-                "subcategory": "math_reasoning",
-                "question_id": index,
-                "text": (
-                    f"{GSM8K_FEW_SHOT_EXAMPLES}Question: "
-                    f"{example['question']}\nAnswer:"
-                ),
-                "raw_prompt": True,
-                "quality_metric": "accuracy",
-                "reference_answer": ground_truth,
-            })
-            if max_problems and len(examples) >= max_problems:
-                break
-    return examples
-
-
-def load_humaneval_prompts(max_problems):
-    try:
-        from human_eval.data import read_problems
-    except ImportError as error:
-        raise RuntimeError(
-            "HumanEval requires the 'human-eval' package. "
-            "Install it with `pip install human-eval`."
-        ) from error
-
-    prompts = []
-    for task_id, problem in read_problems().items():
-        prompts.append({
-            "task": "humaneval",
-            "subcategory": "coding",
-            "question_id": task_id,
-            "text": problem["prompt"],
-            "raw_prompt": True,
-            "quality_metric": "pass@1",
-            "humaneval_problem": problem,
-        })
-        if max_problems and len(prompts) >= max_problems:
-            break
-    return prompts
-
-
-def trim_humaneval_completion(completion):
-    for stop in ("\nclass ", "\ndef ", "\n#", "\nif __name__", "\nprint(", "\n```"):
-        index = completion.find(stop)
-        if index != -1:
-            completion = completion[:index]
-    return completion
-
-
-def _execute_humaneval(problem, completion, connection):
-    from human_eval.execution import create_tempdir, reliability_guard, swallow_io
-
-    try:
-        with create_tempdir():
-            rmtree = shutil.rmtree
-            rmdir = os.rmdir
-            chdir = os.chdir
-            reliability_guard()
-            check_program = (
-                problem["prompt"]
-                + completion
-                + "\n"
-                + problem["test"]
-                + "\n"
-                + f"check({problem['entry_point']})"
-            )
-            try:
-                with swallow_io():
-                    exec(check_program, {})
-                result = "passed"
-            except BaseException as error:
-                result = f"failed: {error}"
-            finally:
-                shutil.rmtree = rmtree
-                os.rmdir = rmdir
-                os.chdir = chdir
-        connection.send(result)
-    except BaseException as error:
-        connection.send(f"failed: {error}")
-    finally:
-        connection.close()
-
-
-def check_humaneval_correctness(problem, completion, timeout):
-    import multiprocessing
-
-    receive, send = multiprocessing.Pipe(duplex=False)
-    process = multiprocessing.Process(
-        target=_execute_humaneval,
-        args=(problem, completion, send),
-    )
-    process.start()
-    send.close()
-    process.join(timeout)
-    if process.is_alive():
-        process.kill()
-        process.join()
-        result = "timed out"
-    elif receive.poll():
-        result = receive.recv()
-    else:
-        result = f"failed: evaluator process exited with code {process.exitcode}"
-    receive.close()
-    return {
-        "task_id": problem["task_id"],
-        "passed": result == "passed",
-        "result": result,
-    }
-
-
-def score_completion(item, token_ids, timeout, cache, decode):
-    metric = item.get("quality_metric")
-    if not metric:
-        return {
-            "quality_metric": "",
-            "quality_score": "",
-            "quality_prediction": "",
-            "quality_reference_answer": "",
-            "quality_detail": "",
-        }
-
-    cache_key = (item["task"], str(item["question_id"]), tuple(token_ids))
-    if cache_key in cache:
-        return cache[cache_key]
-
-    completion = decode(token_ids)
-    if metric == "accuracy":
-        prediction = extract_gsm8k_answer(trim_gsm8k_completion(completion))
-        result = {
-            "quality_metric": metric,
-            "quality_score": gsm8k_answers_equal(
-                prediction, item["reference_answer"]
-            ),
-            "quality_prediction": prediction or "",
-            "quality_reference_answer": item["reference_answer"],
-            "quality_detail": "",
-        }
-    elif metric == "pass@1":
-        outcome = check_humaneval_correctness(
-            item["humaneval_problem"],
-            trim_humaneval_completion(completion),
-            timeout,
-        )
-        result = {
-            "quality_metric": metric,
-            "quality_score": bool(outcome["passed"]),
-            "quality_prediction": "",
-            "quality_reference_answer": "",
-            "quality_detail": outcome["result"],
-        }
-    else:
-        raise ValueError(f"Unsupported quality metric: {metric}")
-
-    cache[cache_key] = result
-    return result
+parse_suites = suite_utils.parse_suites
+load_gsm8k_prompts = suite_utils.load_gsm8k_prompts
+load_humaneval_prompts = suite_utils.load_humaneval_prompts
+score_completion = suite_utils.score_completion
 
 
 def classify_quality_transition(baseline_quality, speculative_quality):
-    if not baseline_quality["quality_metric"]:
-        return ""
-    baseline_correct = bool(baseline_quality["quality_score"])
-    speculative_correct = bool(speculative_quality["quality_score"])
-    if baseline_correct and speculative_correct:
-        return "both_correct"
-    if baseline_correct:
-        return "baseline_only"
-    if speculative_correct:
-        return "speculative_only"
-    baseline_prediction = baseline_quality["quality_prediction"]
-    speculative_prediction = speculative_quality["quality_prediction"]
-    if baseline_prediction and baseline_prediction == speculative_prediction:
-        return "both_wrong_same_prediction"
-    if baseline_prediction and speculative_prediction:
-        return "both_wrong_different_prediction"
-    return "both_wrong"
+    return suite_utils.classify_quality_transition(
+        baseline_quality, speculative_quality, "speculative"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1224,17 +976,11 @@ def geometric_mean(values):
 
 
 def format_quality(quality):
-    if not quality["quality_metric"]:
-        return "not_scored"
-    result = "correct" if quality["quality_score"] else "wrong"
-    prediction = quality["quality_prediction"]
-    return f"{result}({prediction})" if prediction else result
+    return suite_utils.format_quality(quality)
 
 
 def format_quality_with_reference(quality):
-    result = format_quality(quality)
-    reference = quality["quality_reference_answer"]
-    return f"{result} expected={reference}" if reference else result
+    return suite_utils.format_quality_with_reference(quality)
 
 
 def format_config(k):
@@ -1353,34 +1099,10 @@ def print_progress_summary(config_rows, completed, total, k):
             f"probes={sum(row['adaptive_k_probes'] for row in config_rows)} "
             f"observations={sum(row['adaptive_k_observations'] for row in config_rows)}"
         )
-    quality_rows = [
-        row for row in config_rows
-        if row["quality_metric"] and row["rep"] == 0
-    ]
-    if quality_rows:
-        transitions = {}
-        for row in quality_rows:
-            transitions[row["quality_transition"]] = (
-                transitions.get(row["quality_transition"], 0) + 1
-            )
-        standard_correct = sum(
-            row["quality_transition"] in ("both_correct", "baseline_only")
-            for row in quality_rows
-        )
-        speculative_correct = sum(
-            row["quality_transition"] in ("both_correct", "speculative_only")
-            for row in quality_rows
-        )
-        count = len(quality_rows)
-        transition_text = ", ".join(
-            f"{name}={value}" for name, value in sorted(transitions.items())
-        )
-        print(
-            f"    quality: standard={standard_correct / count:.1%} "
-            f"speculative={speculative_correct / count:.1%} "
-            f"delta={(speculative_correct - standard_correct) / count:+.1%}; "
-            f"{transition_text}"
-        )
+    for line in suite_utils.format_quality_summary_lines(
+        config_rows, "standard", "speculative"
+    ):
+        print(f"    {line}")
     print(flush=True)
 
 
@@ -1388,10 +1110,11 @@ CSV_COLUMNS = [
     "mode", "seed", "K", "cooldown", "adaptive_k", "adaptive_k_min", "effective_k",
     "adaptive_k_increases", "adaptive_k_decreases", "adaptive_k_observations",
     "adaptive_k_probes", "adaptive_k_throughput",
-    "task", "subcategory", "question_id", "quality_metric", "quality_score",
+    "task", "subcategory", "question_id", "quality_metric", "quality_score_type",
+    "quality_score", "baseline_quality_score", "quality_score_delta",
     "quality_prediction", "quality_reference_answer", "quality_detail",
     "quality_transition", "prompt_id", "rep", "decoder",
-    "provider", "device", "prompt_tokens",
+    "provider", "device", "prompt_tokens", "output_token_budget",
     "new_tokens", "prefill_s", "decode_s", "decode_tok_s", "e2e_tok_s",
     "speedup_decode", "speedup_e2e",
     "acceptance_rate", "rounds", "completed_rounds", "interrupted_rounds",
@@ -1527,10 +1250,11 @@ def main():
     ap.add_argument("--cooldown", action="store_true",
                     help="temporarily use standard decoding after repeated zero-accept rounds")
     ap.add_argument("--suites", default="mtbench",
-                    help="comma-separated suites: mtbench,gsm8k,humaneval")
+                    help="comma-separated suites: mtbench,gsm8k,ifeval,math500,longbench,"
+                         "humaneval,humanevalplus,mbppplus,bigcodebench,livecodebench")
     # ---- fixed run configuration (NOT swept) ----
     ap.add_argument("--max-new-tokens", type=int, default=128,
-                    help="new tokens to generate per prompt (fixed)")
+                    help="new tokens for Spec-Bench/builtin prompts; quality suites use pinned task budgets")
     # ---- prompt source: Spec-Bench dataset (default) or built-in smoke-test ----
     _default_dataset = os.path.join(here, "question.jsonl")
     ap.add_argument("--dataset",
@@ -1568,14 +1292,50 @@ def main():
     )
     ap.add_argument("--gsm8k-problems", type=int, default=200,
                     help="number of GSM8K problems; 0 uses all 1,319")
+    ap.add_argument(
+        "--ifeval-path",
+        default=os.path.join(here, ".cache", "ifeval_input_data.jsonl"),
+        help="IFEval JSONL path; downloaded from the pinned official dataset if absent",
+    )
+    ap.add_argument("--ifeval-problems", type=int, default=541,
+                    help="number of IFEval prompts; 0 uses all 541")
+    ap.add_argument(
+        "--math500-path",
+        default=os.path.join(here, ".cache", "math500_test.jsonl"),
+        help="MATH-500 JSONL path; downloaded from the pinned dataset if absent",
+    )
+    ap.add_argument("--math500-problems", type=int, default=500,
+                    help="number of MATH-500 problems; 0 uses all 500")
+    ap.add_argument(
+        "--longbench-tasks",
+        default="qasper,hotpotqa,gov_report,passage_retrieval_en",
+        help="LongBench v1 tasks: qasper,hotpotqa,gov_report,passage_retrieval_en",
+    )
+    ap.add_argument("--longbench-problems-per-task", type=int, default=50,
+                    help="problems per selected LongBench task; 0 uses all")
+    ap.add_argument("--longbench-max-input-tokens", type=int, default=16384,
+                    help="middle-truncate LongBench prompts above this input-token count")
     ap.add_argument("--humaneval-problems", type=int, default=164,
                     help="number of HumanEval problems; 0 uses all 164")
-    ap.add_argument("--humaneval-timeout", type=float, default=3.0,
-                    help="per-problem HumanEval execution timeout in seconds")
+    ap.add_argument("--humanevalplus-problems", type=int, default=164,
+                    help="number of HumanEval+ problems; 0 uses all 164")
+    ap.add_argument("--mbppplus-problems", type=int, default=378,
+                    help="number of MBPP+ problems; 0 uses all 378")
+    ap.add_argument("--bigcodebench-problems", type=int, default=148,
+                    help="number of BigCodeBench-Hard problems; 0 uses all 148")
+    ap.add_argument("--bigcodebench-subset", choices=["hard"], default="hard",
+                    help="pinned BigCodeBench subset")
+    ap.add_argument("--livecodebench-problems", type=int, default=100,
+                    help="number of newest LiveCodeBench problems; 0 uses the full release")
+    ap.add_argument("--livecodebench-release", default="release_v6",
+                    help="pinned LiveCodeBench release to select (default: release_v6)")
+    ap.add_argument("--code-execution-timeout", "--humaneval-timeout",
+                    dest="code_execution_timeout", type=float, default=3.0,
+                    help="per-test timeout for generated Python execution")
     ap.add_argument(
         "--allow-code-execution",
         action="store_true",
-        help="required for HumanEval; executes generated Python in human-eval's guard",
+        help="required for all executable code suites; use only on an isolated agent",
     )
     ap.add_argument(
         "--log-level",
@@ -1634,29 +1394,39 @@ def main():
         ap.error("--reps must be at least 1")
     if args.warmup < 0:
         ap.error("--warmup must be non-negative")
-    if args.gsm8k_problems < 0:
-        ap.error("--gsm8k-problems cannot be negative")
-    if args.humaneval_problems < 0:
-        ap.error("--humaneval-problems cannot be negative")
-    if args.humaneval_timeout <= 0:
-        ap.error("--humaneval-timeout must be positive")
+    count_options = {
+        "--gsm8k-problems": args.gsm8k_problems,
+        "--ifeval-problems": args.ifeval_problems,
+        "--math500-problems": args.math500_problems,
+        "--longbench-problems-per-task": args.longbench_problems_per_task,
+        "--humaneval-problems": args.humaneval_problems,
+        "--humanevalplus-problems": args.humanevalplus_problems,
+        "--mbppplus-problems": args.mbppplus_problems,
+        "--bigcodebench-problems": args.bigcodebench_problems,
+        "--livecodebench-problems": args.livecodebench_problems,
+    }
+    for option, value in count_options.items():
+        if value < 0:
+            ap.error(f"{option} cannot be negative")
+    if args.longbench_max_input_tokens < 512:
+        ap.error("--longbench-max-input-tokens must be at least 512")
+    if args.code_execution_timeout <= 0:
+        ap.error("--code-execution-timeout must be positive")
     if args.progress_every < 0:
         ap.error("--progress-every cannot be negative")
     suites = parse_suites(ap, args.suites)
-    if "humaneval" in suites and not args.allow_code_execution:
+    args.longbench_tasks = suite_utils.parse_longbench_tasks(
+        ap, args.longbench_tasks
+    )
+    executable_suites = suite_utils.CODE_EXECUTION_SUITES & set(suites)
+    if executable_suites and not args.allow_code_execution:
         ap.error(
-            "HumanEval executes generated Python. Pass --allow-code-execution "
-            "only on an isolated machine or container."
+            f"{', '.join(sorted(executable_suites))} executes generated Python. "
+            "Pass --allow-code-execution only on an isolated machine or container."
         )
-    if {"gsm8k", "humaneval"} & set(suites) and args.max_new_tokens < 512:
+    if executable_suites:
         print(
-            "WARNING: GSM8K/HumanEval reference evaluations use "
-            "--max-new-tokens 512; shorter outputs can understate quality.",
-            file=sys.stderr,
-        )
-    if "humaneval" in suites:
-        print(
-            "WARNING: human-eval's reliability guard is not a security sandbox. "
+            "WARNING: evaluator guards are not security sandboxes. "
             "Run generated code only on an isolated, disposable machine.",
             file=sys.stderr,
         )
@@ -1692,10 +1462,7 @@ def main():
             prompt_items.extend(mtbench_items)
         else:
             prompt_items.extend(builtin_prompts(args.max_prompts))
-    if "gsm8k" in suites:
-        prompt_items.extend(load_gsm8k_prompts(args.gsm8k_path, args.gsm8k_problems))
-    if "humaneval" in suites:
-        prompt_items.extend(load_humaneval_prompts(args.humaneval_problems))
+    prompt_items.extend(suite_utils.load_additional_suite_prompts(args, suites))
     if not prompt_items:
         ap.error("the selected suites produced no prompts")
     chat = not args.raw
@@ -1798,13 +1565,18 @@ def main():
 
     # Pre-encode every prompt once (chat template applied here); the token-id
     # lists are reused verbatim by the speculative phase (same Qwen3 tokenizer).
-    encoded = [encode_prompt(
-        tokenizer,
-        it["text"],
-        chat=chat and not it.get("raw_prompt", False),
-        think=think,
-    )
-               for it in prompt_items]
+    encoded = [
+        suite_utils.truncate_prompt_tokens(
+            encode_prompt(
+                tokenizer,
+                it["text"],
+                chat=chat and not it.get("raw_prompt", False),
+                think=think,
+            ),
+            it,
+        )
+        for it in prompt_items
+    ]
     if args.log_level == "detailed":
         for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
             print(f"  [{idx}] {it['task']}/{it['question_id']}: {len(ids)} tokens")
@@ -1818,8 +1590,11 @@ def main():
     for mode in modes:
         for idx, (it, ids) in enumerate(zip(prompt_items, encoded)):
             base_dec, base_e2e, base_tail, base_quality = [], [], None, None
+            prompt_max_new = suite_utils.generation_limit(it, max_new)
             for rep in range(args.reps):
-                r = run_once(og, std_model, ids, max_new, mode, False, 0, args.seed)
+                r = run_once(
+                    og, std_model, ids, prompt_max_new, mode, False, 0, args.seed
+                )
                 dec_tps = r["new_tokens"] / r["decode_s"] if r["decode_s"] else 0.0
                 e2e_tps = r["new_tokens"] / (r["prefill_s"] + r["decode_s"]) \
                     if (r["prefill_s"] + r["decode_s"]) else 0.0
@@ -1829,7 +1604,7 @@ def main():
                 base_quality = score_completion(
                     it,
                     r["tail"],
-                    args.humaneval_timeout,
+                    args.code_execution_timeout,
                     quality_cache,
                     tokenizer.decode,
                 )
@@ -1840,9 +1615,15 @@ def main():
                     adaptive_k_observations="", adaptive_k_probes="",
                     adaptive_k_throughput="",
                     task=it["task"], subcategory=it["subcategory"],
-                    question_id=it["question_id"], **base_quality, quality_transition="",
+                    question_id=it["question_id"], **base_quality,
+                    baseline_quality_score=base_quality["quality_score"],
+                    quality_score_delta=(
+                        0.0 if base_quality["quality_metric"] else ""
+                    ),
+                    quality_transition="",
                     prompt_id=idx, rep=rep, decoder="standard",
                     provider=provider_label, device=device_label, prompt_tokens=len(ids),
+                    output_token_budget=prompt_max_new,
                     new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                     decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                     e2e_tok_s=round(e2e_tps, 3), speedup_decode="", speedup_e2e="",
@@ -1914,6 +1695,7 @@ def main():
             b = baselines[(mode, idx)]
             base_dec_med, base_e2e_med, base_tail = b["dec"], b["e2e"], b["tail"]
             base_quality = b["quality"]
+            prompt_max_new = suite_utils.generation_limit(it, max_new)
             for K in ks:
                 runtime_k = runtime_ks[K]
                 config_rows = config_rows_by_key.setdefault((mode, K), [])
@@ -1922,7 +1704,8 @@ def main():
                 last = None
                 for rep in range(args.reps):
                     r = run_once(
-                        og, spec_model, ids, max_new, mode, True, runtime_k, args.seed,
+                        og, spec_model, ids, prompt_max_new, mode, True,
+                        runtime_k, args.seed,
                         args.adaptive_k, args.adaptive_k_min, args.cooldown
                     )
                     st = r["stats"] or {}
@@ -1945,7 +1728,7 @@ def main():
                     quality = score_completion(
                         it,
                         r["tail"],
-                        args.humaneval_timeout,
+                        args.code_execution_timeout,
                         quality_cache,
                         spec_tokenizer.decode,
                     )
@@ -1963,11 +1746,18 @@ def main():
                             st["adaptive_k_throughput"], 6),
                         task=it["task"], subcategory=it["subcategory"],
                         question_id=it["question_id"], **quality,
+                        baseline_quality_score=base_quality["quality_score"],
+                        quality_score_delta=(
+                            float(quality["quality_score"])
+                            - float(base_quality["quality_score"])
+                            if quality["quality_metric"] else ""
+                        ),
                         quality_transition=classify_quality_transition(
                             base_quality, quality),
                         prompt_id=idx, rep=rep,
                         decoder="speculative",
                         provider=provider_label, device=device_label, prompt_tokens=len(ids),
+                        output_token_budget=prompt_max_new,
                         new_tokens=r["new_tokens"], prefill_s=round(r["prefill_s"], 4),
                         decode_s=round(r["decode_s"], 4), decode_tok_s=round(dec_tps, 3),
                         e2e_tok_s=round(e2e_tps, 3),
@@ -2533,7 +2323,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                     continue
                 metric = next(row["quality_metric"] for row in task_rows)
                 baseline_scores = [
-                    bool(row["quality_score"]) for row in task_rows
+                    float(row["quality_score"]) for row in task_rows
                     if row["decoder"] == "standard"
                 ]
                 baseline_score = (
@@ -2543,7 +2333,7 @@ def print_summary(rows, modes, ks, *, run_ctx=None, mem_baseline=None, mem_spec=
                 cells = []
                 for K in ks:
                     config_scores = [
-                        bool(row["quality_score"]) for row in task_rows
+                        float(row["quality_score"]) for row in task_rows
                         if row["decoder"] == "speculative" and row["K"] == K
                     ]
                     score = (
