@@ -3031,7 +3031,6 @@ class Model:
         if self.kv_cache_quant_type != "none":
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
-            attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
 
         if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
@@ -3073,6 +3072,8 @@ class Model:
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         attributes = self.get_attention_op_attributes(**kwargs)
+        if self.kv_cache_quant_type != "none":
+            attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
