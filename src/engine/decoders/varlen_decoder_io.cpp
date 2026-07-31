@@ -3,6 +3,7 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
+#include "../sequence_positions.h"
 
 namespace Generators {
 

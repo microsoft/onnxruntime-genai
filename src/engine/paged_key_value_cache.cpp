@@ -5,6 +5,8 @@
 
 #include <numeric>
 
+#include "sequence_positions.h"
+
 namespace Generators {
 
 namespace {
@@ -94,7 +96,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
-  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(RequiredSlots(request));
+  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(TotalSlots(request));
 }
 
 void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
