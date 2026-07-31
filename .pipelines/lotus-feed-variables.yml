@@ -10,6 +10,8 @@
 #   - PipAuthenticate@1  (pip)
 #   - the cargo:token credential provider + System.AccessToken  (cargo)
 #   - a Bearer System.AccessToken header  (ORT content download)
+#     ORT content downloads use an HTTP Authorization header populated from
+#     System.AccessToken by the download step.
 #   - NuGetAuthenticate@1 (NuGet and dotnet restore)
 # =============================================================================
 variables:
