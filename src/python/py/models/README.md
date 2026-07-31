@@ -26,6 +26,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)](#export-a-modelopt-nvfp4fp8-checkpoint-qwen36)
+    - [Enable MTP Head (Qwen3.6)](#enable-mtp-head-qwen36)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
@@ -364,6 +365,30 @@ The relevant extra options are:
 * `fuse_linear_attn_gates` (default `true` on CUDA) — collapse the float32 gate glue around `LinearAttention` into the fused `com.microsoft::LinearAttentionGate` and `com.microsoft::GatedRMSNorm` ops. Set to `false` for execution providers that lack those kernels.
 
 These options require an ONNX Runtime build that provides the corresponding contrib ops.
+
+#### Enable MTP Head (Qwen3.6)
+
+This scenario is for when you want to additionally export the multi-token-prediction (MTP) head of a Qwen3.6 MoE model for self-speculative decoding. When enabled, an auxiliary `mtp.onnx` (plus its `mtp.onnx.data`) is generated alongside the main model. The MTP head predicts the next-next token from the main model's last hidden state and the just-emitted token, so the main model must also expose its hidden states (`include_hidden_states=true`).
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_mtp=true include_hidden_states=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_mtp=true include_hidden_states=true
+```
+
+Note that `enable_mtp` is only supported for Qwen3.6 MoE models (`Qwen3_5MoeForConditionalGeneration`) that ship `mtp.*` weights in their safetensors. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load.
+
+By default the MTP head inherits the main model's precision. Two optional overrides trade off draft cost vs. acceptance rate for the small single-layer head:
+
+* `mtp_head_fp16=true` — build the head as a dense fp16 `MoE` op. Highest acceptance rate.
+* `mtp_head_quant_type=int4/int8/mxfp4/nvfp4` — quantize the whole head with the given scheme (same style as `moe_quant_type`): the routed experts become a `QMoE` op **and** the head's dense MatMuls (`mtp.fc`, the attention q/k/v/o projections, the shared expert and the draft lm_head) become `MatMulNBits` at the matching bit width. `int4` -> 4-bit dense + INT4 QMoE, `int8` -> 8-bit dense + INT8 QMoE. `mxfp4`/`nvfp4` are microscaling FP4 schemes that only exist for `QMoE`, so with those the dense MatMuls stay int4 and only the experts use FP4. For example, `mtp_head_quant_type=int8` is ~2.6x smaller on disk than the fp16 head with comparable acceptance and throughput, so it is preferred when GPU memory matters. (The legacy boolean `mtp_head_int8=true` is deprecated; use `mtp_head_quant_type=int8`.)
+* `mtp_head_int4_lmhead=true` — keep the head's draft lm_head at int4 even when the rest of the head is int8. The draft logits are corrected by speculative rejection sampling, so this cannot change output accuracy — only draft acceptance.
+
+`mtp_head_fp16` and `mtp_head_quant_type` are mutually exclusive. Both require the main model to be quantized (`-p int4`).
+
+A multi-token verify forward can additionally carry a window of recurrent/conv states so a partial accept can be handled by cropping instead of replaying the main model. Pass `recurrent_state_window=W` (with `W >= num_speculative_tokens + 1`) to widen `past/present_key_values.%d.{conv,recurrent}_state` to `[B, W, ...]` and emit the `state_window` attribute on `CausalConvWithState` / `LinearAttention`. This requires ONNX Runtime kernels that understand the attribute; leave it at the default `0` otherwise.
 
 #### Enable WebGPU Graph Capture
 
