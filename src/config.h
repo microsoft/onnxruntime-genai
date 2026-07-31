@@ -32,6 +32,7 @@ struct Config {
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -384,6 +385,10 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 

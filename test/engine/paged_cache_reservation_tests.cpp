@@ -166,5 +166,44 @@ TEST(PagedCacheReservationTest, ChunkedPrefillHoldsWholePromptButCommitsOnlyTheC
   EXPECT_EQ(tables[0].blocks.size(), 3u);
 }
 
+TEST(PagedCacheReservationTest, ReleaseReturnsWindowRingBlocks) {
+  BlockPool pool{kBlockSize, 1};
+  BlockPool window_pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests, &window_pool, 2};
+  EXPECT_EQ(window_pool.AvailableBlocks(), 0u);
+
+  reservation.Release();
+
+  EXPECT_EQ(pool.AvailableBlocks(), 1u);
+  EXPECT_EQ(window_pool.AvailableBlocks(), 2u);
+  EXPECT_TRUE(tables.empty());
+}
+
+TEST(PagedCacheReservationTest, WindowTableUsesReservedRingBeforeCommit) {
+  BlockPool pool{kBlockSize, 1};
+  BlockPool window_pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+  };
+  PagedCacheReservation reservation{pool, tables, requests, &window_pool, 2};
+  const std::array request_ids{kRequestA};
+  std::array<int32_t, 5> window_table;
+
+  reservation.FillWindowBlockTable(request_ids, 5, window_table);
+
+  EXPECT_EQ(window_table, (std::array<int32_t, 5>{0, 1, 0, 1, 0}));
+  reservation.Commit();
+  ASSERT_EQ(tables.size(), 1u);
+  ASSERT_EQ(tables[0].window_blocks.size(), 2u);
+  EXPECT_EQ(tables[0].window_blocks[0]->Id(), 0u);
+  EXPECT_EQ(tables[0].window_blocks[1]->Id(), 1u);
+}
+
 }  // namespace
 }  // namespace Generators
