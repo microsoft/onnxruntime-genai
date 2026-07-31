@@ -63,14 +63,25 @@ State::State(const GeneratorParams& params, const Model& model)
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture
+  // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_value_ = dis(gen);
-    graph_id_ = std::to_string(graph_id_value_);
+    GraphIdForLength(1, 0);
   }
+}
+
+std::string State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
+  auto it = graph_ids_.find(graph_key);
+  if (it != graph_ids_.end()) {
+    return it->second;
+  }
+  // Distinct random annotation id per captured length (ORT captures one graph per id).
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, INT_MAX);
+  std::string id = std::to_string(dis(gen));
+  graph_ids_[graph_key] = id;
+  return id;
 }
 
 void State::DumpInputs() {
@@ -95,13 +106,14 @@ void State::DumpOutputs() {
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run) {
+void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
+                int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -235,14 +247,22 @@ State::~State() {
   // in try/catch because destructors must not throw -- a throw during unwinding
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
-  if (graph_capture_session_ && graph_id_value_ > 0) {
-    try {
-      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
-    } catch (...) {
-      // Best-effort cleanup; swallow to keep the destructor non-throwing.
-      if (g_log.enabled && g_log.ort_lib) {
-        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
-                       << ") failed: unknown exception" << std::endl;
+  if (graph_capture_session_) {
+    // Speculative decoding (MTP) may capture more than one input length, each with its
+    // own annotation id, so release every id that was handed out.
+    for (const auto& length_and_id : graph_ids_) {
+      int id_value = std::stoi(length_and_id.second);
+      if (id_value <= 0) {
+        continue;
+      }
+      try {
+        graph_capture_session_->ReleaseCapturedGraph(id_value);
+      } catch (...) {
+        // Best-effort cleanup; swallow to keep the destructor non-throwing.
+        if (g_log.enabled && g_log.ort_lib) {
+          Log("ort_lib") << "ReleaseCapturedGraph(id=" << id_value
+                         << ") failed: unknown exception" << std::endl;
+        }
       }
     }
   }
