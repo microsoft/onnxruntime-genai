@@ -18,7 +18,8 @@ The speculative config is composed on the fly from each model's own
 Spec-Bench dataset (``question.jsonl``); optional GSM8K and HumanEval suites add
 accuracy and pass@1 measurements. ``--limit-per-task`` subsamples Spec-Bench and
 ``--builtin`` uses a small smoke-test set. Results are reported per task plus an
-overall geometric-mean speedup.
+overall geometric-mean speedup. Results are checkpointed atomically after each
+completed configuration; large CSVs rotate into numbered part files.
 
 Examples:
     # Default local flat layout (<models-root>/qwen3-8b/, qwen3-1.7b/)
@@ -1202,6 +1203,95 @@ CSV_COLUMNS = [
     "greedy_match",
     "peak_gpu_mem_gib", "peak_cpu_mem_gib",
 ]
+# Stay below Excel's 1,048,576-row worksheet limit, including the header.
+CSV_ROWS_PER_FILE = 1_000_000
+
+
+def _csv_output_paths(csv_path, row_count, rows_per_file):
+    if rows_per_file < 1:
+        raise ValueError("rows_per_file must be positive")
+    part_count = max(1, (row_count + rows_per_file - 1) // rows_per_file)
+    stem, extension = os.path.splitext(csv_path)
+    return [
+        csv_path if part_number == 1
+        else f"{stem}.part{part_number:03d}{extension}"
+        for part_number in range(1, part_count + 1)
+    ]
+
+
+def _stage_csv(path, rows):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    os.close(descriptor)
+    complete = False
+    try:
+        with open(temporary_path, "w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        complete = True
+    finally:
+        if not complete and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return temporary_path
+
+
+def _stage_json(path, rows):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    os.close(descriptor)
+    complete = False
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(rows, file, indent=2, ensure_ascii=False)
+        complete = True
+    finally:
+        if not complete and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return temporary_path
+
+
+def write_results_checkpoint(
+        rows, csv_path, json_path, rows_per_file=CSV_ROWS_PER_FILE):
+    """Atomically checkpoint UTF-8 results, rotating oversized CSV output."""
+    csv_paths = _csv_output_paths(csv_path, len(rows), rows_per_file)
+    staged_files = []
+    try:
+        for index, path in enumerate(csv_paths):
+            start = index * rows_per_file
+            staged_files.append(
+                (_stage_csv(path, rows[start:start + rows_per_file]), path)
+            )
+        staged_files.append((_stage_json(json_path, rows), json_path))
+        for temporary_path, destination in staged_files:
+            os.replace(temporary_path, destination)
+    finally:
+        for temporary_path, _ in staged_files:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+
+    stem, extension = os.path.splitext(os.path.basename(csv_path))
+    part_pattern = re.compile(
+        rf"{re.escape(stem)}\.part\d{{3}}{re.escape(extension)}"
+    )
+    expected = {os.path.abspath(path) for path in csv_paths}
+    directory = os.path.dirname(os.path.abspath(csv_path))
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if (entry.is_file() and part_pattern.fullmatch(entry.name)
+                    and os.path.abspath(entry.path) not in expected):
+                os.remove(entry.path)
+    return csv_paths
 
 
 def main():
@@ -1455,14 +1545,9 @@ def main():
     json_path = out_prefix + ".json"
 
     def flush():
-        # Rewrite the full CSV+JSON after every completed config, so a mid-sweep
-        # failure still leaves all completed metrics on disk for the CI artifact.
-        with open(csv_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-            w.writeheader()
-            w.writerows(rows)
-        with open(json_path, "w") as f:
-            json.dump(rows, f, indent=2)
+        # Save after every completed config. Staging keeps the previous checkpoint
+        # intact if serialization or disk writes fail.
+        return write_results_checkpoint(rows, csv_path, json_path)
 
     # baseline (per mode, prompt) + speculative (per mode, prompt, K)
     total_cfgs = len(modes) * len(prompt_items) * (1 + len(ks))
@@ -1761,11 +1846,12 @@ def main():
                     )
                 flush()
 
-    flush()
+    csv_paths = flush()
     mem_spec.stop()
     _backfill_memory(rows, "speculative", mem_spec)
-    flush()
-    print(f"\nDone in {time.time()-bench_t0:.0f}s. Wrote {csv_path}, {json_path} and {log_path}")
+    csv_paths = flush()
+    print(f"\nDone in {time.time()-bench_t0:.0f}s. Wrote "
+          f"{', '.join(csv_paths)}, {json_path} and {log_path}")
     print_summary(
         rows, modes, ks,
         run_ctx=dict(target=tgt_label, draft=dft_label, provider=provider_label,
