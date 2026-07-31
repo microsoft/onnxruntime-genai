@@ -167,6 +167,7 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "windowed_kv_cache",
     ]
 
     for key in bools:

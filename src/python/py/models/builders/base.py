@@ -35,6 +35,22 @@ from transformers import (
 from .cuda_quantizer import CudaQuantizer
 from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
+# EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx evicts
+# inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
+EPS_WITH_WINDOWED_KV_CACHE = {"trt-rtx", "cuda", "cpu"}
+
+
+def resolve_windowed_kv_cache_eps(extra_options):
+    """EPs allowed to give the sliding-window layers a cache shorter than max_length.
+
+    Empty means every layer keeps a full-length KV cache. PagedAttention has no windowed-cache
+    mode, so it never qualifies, and ``windowed_kv_cache=false`` opts out explicitly to build a
+    full-length-KV baseline from the same builder.
+    """
+    if not extra_options.get("windowed_kv_cache", True) or extra_options.get("use_paged_attention", False):
+        return set()
+    return set(EPS_WITH_WINDOWED_KV_CACHE)
+
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -53,9 +69,7 @@ class Model:
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
-        # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
-        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+        self.eps_with_windowed_kv_cache = resolve_windowed_kv_cache_eps(extra_options)
         # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
         # 0 means "use the EP default at runtime"; set explicitly to override.
         # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
@@ -3038,7 +3052,7 @@ class Model:
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
+        if self.window_size is not None and self.window_size > 0 and self.ep in self.eps_with_windowed_kv_cache and self.ep != "trt-rtx":
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
             attributes["sliding_window_cache"] = 1
