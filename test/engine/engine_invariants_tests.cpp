@@ -16,9 +16,13 @@
 namespace Generators {
 namespace {
 
-// Distinct fake request identities. The validator only compares/prints these, never dereferences.
-const void* const kRequestA = reinterpret_cast<const void*>(0x1);
-const void* const kRequestB = reinterpret_cast<const void*>(0x2);
+// Distinct fake request identities. The validator only compares/prints these, never dereferences,
+// so any two distinct, stable addresses work. Using addresses of static storage avoids
+// implementation-defined integer-to-pointer casts (which can trip UB tooling).
+const char kRequestStorageA{};
+const char kRequestStorageB{};
+const void* const kRequestA = &kRequestStorageA;
+const void* const kRequestB = &kRequestStorageB;
 
 constexpr size_t kBlockSize = 4;
 

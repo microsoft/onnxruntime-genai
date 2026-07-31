@@ -33,10 +33,10 @@ struct RequestStateSnapshot {
   // with the paged-cache snapshot. Never dereferenced by the validator.
   const void* request_id{nullptr};
   RequestStatus status{RequestStatus::Unassigned};
-  int64_t current_sequence_length{};     // Total tokens the Request's search currently holds.
-  int64_t processed_sequence_length{};   // Tokens the model has already processed into the cache.
-  int64_t seen_sequence_length{};        // Tokens already streamed to (seen by) the application.
-  int64_t unprocessed_token_count{};     // Tokens produced/appended but not yet processed.
+  int64_t current_sequence_length{};    // Total tokens the Request's search currently holds.
+  int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
+  int64_t seen_sequence_length{};       // Tokens already streamed to (seen by) the application.
+  int64_t unprocessed_token_count{};    // Tokens produced/appended but not yet processed.
   bool is_prefill{};
 };
 
@@ -52,8 +52,8 @@ struct RequestBlockSnapshot {
 struct PagedCacheSnapshot {
   size_t block_size{};
   size_t total_blocks{};
-  size_t free_blocks{};           // Blocks currently owned by no Request.
-  size_t block_table_columns{};   // Padded block-table width the model sees, or 0 when unused.
+  size_t free_blocks{};          // Blocks currently owned by no Request.
+  size_t block_table_columns{};  // Padded block-table width the model sees, or 0 when unused.
   std::vector<RequestBlockSnapshot> requests;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).
