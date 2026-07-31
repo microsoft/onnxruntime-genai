@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// Tier 0 pure unit tests for the Engine invariant validator (Generators::ValidateInvariants and
+// Pure unit tests for the Engine invariant validator (Generators::ValidateInvariants and
 // friends). The validator operates only on immutable snapshot value types, so these tests need no
 // model, cache, scheduler, or GPU: they construct snapshots directly and assert which invariant
 // violations are (and are not) reported.

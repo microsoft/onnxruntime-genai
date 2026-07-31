@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// Tier 0 pure unit tests for the paged-cache block arithmetic and ownership primitives
+// Pure unit tests for the paged-cache block arithmetic and ownership primitives
 // (Generators::Block and Generators::BlockPool). These require no model, no ONNX session, and no
 // GPU; they validate slot arithmetic, allocation/reservation semantics, capacity accounting, and
 // free-time ownership guards deterministically.
