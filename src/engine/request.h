@@ -172,6 +172,29 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   int64_t ProcessedSequenceLength() const;
 
+  /**
+   * @brief Chooses the tokens this request contributes to the step that is about to run.
+   * @param allow_chunking Whether the caller can serve a prompt across several steps.
+   *
+   * Called once per step, before anything reads UnprocessedTokens(). With chunking enabled and a
+   * `search.chunk_size` configured, a prompt longer than the chunk size is processed over several
+   * steps, which bounds the number of tokens a single model run carries.
+   */
+  void ScheduleTokens(bool allow_chunking);
+
+  /**
+   * @brief True when this step's tokens run to the end of the sequence.
+   *
+   * Only then does the last logits row of this request predict a new token. A partial prefill chunk
+   * ends in the middle of the prompt, so its logits are discarded.
+   */
+  bool IsChunkComplete() const;
+
+  /**
+   * @brief Moves the cursor past the tokens this step processed.
+   */
+  void AdvanceChunk();
+
   RequestStatus status_{RequestStatus::Unassigned};
 
   /**
@@ -233,15 +256,19 @@ struct Request : std::enable_shared_from_this<Request>,
   void* GetOpaqueData();
 
  private:
+  // Tokens of the current step, clamped to what is actually left to process.
+  size_t ScheduledTokenCount() const;
+
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
-  // have KV entries, and UnprocessedTokens() returns [processed, current). seen_sequence_length_
-  // independently tracks tokens consumed by the application; both cursors are at most current.
+  // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
+  // seen_sequence_length_ independently tracks tokens consumed by the application.
   std::vector<int32_t> prefill_input_ids_;
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
+  size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
