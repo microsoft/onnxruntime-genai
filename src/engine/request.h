@@ -143,6 +143,14 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   RequestStateSnapshot Snapshot() const;
 
+  /**
+   * @brief Number of leading tokens of the sequence whose keys and values are already in the cache.
+   *
+   * This is the absolute position the next scheduled token will be written at, which is what the
+   * decoder has to report to the model as the past sequence length.
+   */
+  int64_t ProcessedSequenceLength() const;
+
   RequestStatus status_{RequestStatus::Unassigned};
 
   /**

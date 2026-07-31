@@ -112,6 +112,10 @@ RequestStateSnapshot Request::Snapshot() const {
   return snapshot;
 }
 
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
+}
+
 int32_t Request::UnseenToken() {
   if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
