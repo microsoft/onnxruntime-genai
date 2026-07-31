@@ -3,6 +3,7 @@
 
 #include "engine.h"
 #include "admission.h"
+#include "sequence_positions.h"
 
 namespace Generators {
 
@@ -28,7 +29,7 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
     requests.push_back(entry.request);
   }
   return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
-                           GetBatchedSamplingPlan()};
+                           GetBatchedSamplingPlan(), /*allow_chunked_prefill=*/true};
 }
 
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
@@ -146,7 +147,7 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
     requests.push_back(entry.request);
   }
   return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
-                           GetBatchedSamplingPlan()};
+                           GetBatchedSamplingPlan(), /*allow_chunked_prefill=*/true};
 }
 
 void DynamicBatchScheduler::ReapCompletedRequests() {
@@ -184,9 +185,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     if (snapshot.status != expected_status) {
       throw std::runtime_error("Request status is invalid for dynamic step planning.");
     }
-    const auto unprocessed_token_count =
+    const auto remaining_token_count =
         snapshot.current_sequence_length - snapshot.processed_sequence_length;
-    if (unprocessed_token_count <= 0) {
+    if (remaining_token_count <= 0) {
       throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
     }
 
@@ -194,8 +195,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.request = request;
     entry.request_id = request.get();
     entry.sequence_length_before = snapshot.current_sequence_length;
-    entry.unprocessed_token_count =
-        static_cast<size_t>(unprocessed_token_count);
+    entry.unprocessed_token_count = ScheduledTokenCount(
+      static_cast<size_t>(remaining_token_count), request->SearchOptions().chunk_size,
+      /*allow_chunking=*/true);
     entry.target_cache_slots = RequiredSlots(
         static_cast<size_t>(snapshot.processed_sequence_length),
         entry.unprocessed_token_count);

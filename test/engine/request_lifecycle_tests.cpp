@@ -157,6 +157,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   plan.request = request;
   plan.request_id = request.get();
   plan.sequence_length_before = before.current_sequence_length;
+  plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
   const int32_t next_token = 5;
   auto logits = LogitsForToken(*model_, next_token);
 
@@ -200,6 +201,29 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 
+TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  const auto before = request->Snapshot();
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = before.current_sequence_length;
+  plan.unprocessed_token_count = 2;
+  plan.target_cache_slots = 2;
+
+  request->SaveStateForTransaction();
+  request->CommitStateForTransaction();
+  request->CommitStep(plan, RequestStepResult{});
+
+  const auto committed = request->Snapshot();
+  EXPECT_EQ(committed.status, RequestStatus::InProgress);
+  EXPECT_EQ(committed.current_sequence_length, before.current_sequence_length);
+  EXPECT_EQ(committed.processed_sequence_length, 2);
+  EXPECT_FALSE(committed.is_prefill);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
 TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
@@ -208,6 +232,7 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted)
   plan.request = request;
   plan.request_id = request.get();
   plan.sequence_length_before = before.current_sequence_length;
+  plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
   auto logits = LogitsForToken(*model_, EosToken(*model_));
 
   request->SaveStateForTransaction();

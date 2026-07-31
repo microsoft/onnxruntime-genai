@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace Generators {
 
@@ -26,6 +28,20 @@ constexpr size_t SlotsAfterStep(int64_t processed_length, size_t scheduled_token
 // a request is never accepted and then left stalled part way through its prefill.
 constexpr size_t SlotsForWholeSequence(int64_t sequence_length) {
   return static_cast<size_t>(sequence_length);
+}
+
+// Tokens a request contributes to the step that is about to run, out of the `unprocessed` tokens it
+// still has to push through the model.
+//
+// With chunking enabled and a `search.chunk_size` configured, a prompt longer than the chunk size
+// is spread over several steps, which bounds the activation footprint and the latency of a single
+// step. Everything downstream -- the cache sizing, the decoder inputs and the logits row selection
+// -- has to agree on this count, hence one definition of it.
+constexpr size_t ScheduledTokenCount(size_t unprocessed, std::optional<size_t> chunk_size, bool allow_chunking) {
+  if (!allow_chunking || !chunk_size.has_value() || *chunk_size == 0) {
+    return unprocessed;
+  }
+  return std::min(*chunk_size, unprocessed);
 }
 
 }  // namespace Generators
