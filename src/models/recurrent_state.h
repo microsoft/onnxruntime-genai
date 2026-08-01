@@ -41,6 +41,8 @@ struct RecurrentState {
  private:
   void ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states);
   void CopyStates(const std::vector<std::unique_ptr<OrtValue>>& src, std::vector<std::unique_ptr<OrtValue>>& dst);
+  // Single-kernel version of the CropToPosition copy loop. False if the device has no implementation.
+  bool TryBatchedSlotPromote(size_t slot);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -58,6 +60,11 @@ struct RecurrentState {
   // 1 means the legacy unwindowed layout (a single state, no window axis).
   int64_t state_window_{1};
   int forward_length_{0};  // seq_len of the last SetForwardLength(), needed to map position -> slot.
+
+  // Device-resident {base, slot_bytes} descriptors for the batched CropToPosition kernel, plus the
+  // host mirror used to detect a buffer reallocation.
+  DeviceSpan<StateSlotDesc> slot_descs_;
+  std::vector<StateSlotDesc> slot_descs_cpu_;
 
   // Mirrors past_present_share_buffer config: true means inputs alias outputs (same allocation,
   // stable handles for graph capture). False uses separate past/present buffers with per-step swap.

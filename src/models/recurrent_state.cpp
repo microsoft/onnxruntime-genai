@@ -195,12 +195,41 @@ void RecurrentState::CropToPosition(size_t position) {
   if (slot + 1 == static_cast<size_t>(state_window_)) return;  // Already the committed slot.
 
   auto& device = *model_.p_device_;
+  // Fast path: one kernel for all 2*num_layers tensors. The per-tensor loop below issues one
+  // cudaMemcpyAsync each, and at 30 layers that is 60 host-side driver calls on a step that is
+  // already GPU-idle-bound.
+  if (TryBatchedSlotPromote(slot)) return;
+
   for (auto& present : presents_) {
     auto window = ByteWrapTensor(device, *present);
     const size_t slot_bytes = window.size() / static_cast<size_t>(state_window_);
     window.subspan((static_cast<size_t>(state_window_) - 1) * slot_bytes, slot_bytes)
         .CopyFrom(window.subspan(slot * slot_bytes, slot_bytes));
   }
+}
+
+bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
+  auto& device = *model_.p_device_;
+
+  // The state buffers are stable across steps when inputs alias outputs (which graph capture
+  // requires), but re-derive the descriptors and compare so a reallocation cannot go unnoticed.
+  std::vector<StateSlotDesc> descs;
+  descs.reserve(presents_.size());
+  for (auto& present : presents_) {
+    auto window = ByteWrapTensor(device, *present);
+    auto bytes = window.Span();
+    descs.push_back({reinterpret_cast<uint8_t*>(bytes.data()),
+                     static_cast<uint64_t>(bytes.size()) / static_cast<uint64_t>(state_window_)});
+  }
+
+  if (slot_descs_cpu_ != descs) {
+    if (slot_descs_.size() != descs.size()) slot_descs_ = device.Allocate<StateSlotDesc>(descs.size());
+    slot_descs_.CopyFromCpu(std::span<const StateSlotDesc>(descs));
+    slot_descs_cpu_ = std::move(descs);
+  }
+
+  return device.CopyStateSlots(slot_descs_.Span().data(), static_cast<int>(slot_descs_.size()),
+                               static_cast<int>(slot), static_cast<int>(state_window_) - 1);
 }
 
 void RecurrentState::Update() {

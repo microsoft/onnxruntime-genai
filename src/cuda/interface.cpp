@@ -208,6 +208,11 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return true;
   }
 
+  bool CopyStateSlots(const void* descs_device, int count, int src_slot, int dst_slot) override {
+    cuda::LaunchCopyStateSlots(descs_device, count, src_slot, dst_slot, GetStream());
+    return true;
+  }
+
   bool Top2(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
             int32_t* out_tokens, float* out_scores) override {
     if (num_rows <= 0 || vocab_size <= 1) return false;
