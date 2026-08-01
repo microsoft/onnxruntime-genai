@@ -119,6 +119,11 @@ ortgenai_replace_required(
 # exits, versus 85/85 clean with this hunk alone). Tolerating the exception is the correct fix.
 # The guard's destructor locks m_pause_mutex, a member of the still-live heap-allocated
 # LogManagerImpl, so it cannot itself throw while unwinding.
+#
+# There is also a distinct rejected-activity path: a scheduled flush sets m_flushPending and resets
+# m_flushComplete before its task starts. If teardown pauses the LogManager first, StartActivity()
+# returns false; returning without signaling completion leaves WaitForFlush() blocked forever.
+# Cancel the scheduled handle and complete the pending flush under m_flushLock on that path.
 # Reported upstream; drop this hunk once the fix is in a pinned release.
 ortgenai_replace_required(
   "${SOURCE_DIR}/lib/offline/OfflineStorageHandler.cpp"
@@ -126,6 +131,12 @@ ortgenai_replace_required(
             return;
         }]=]
   [=[        if (!m_logManager.StartActivity()) {
+            // Teardown can pause the LogManager after a flush has been scheduled but before its task
+            // starts. Complete the rejected flush so WaitForFlush() cannot wait forever.
+            LOCKGUARD(m_flushLock);
+            m_flushHandle.Cancel();
+            m_flushComplete.post();
+            m_flushPending = false;
             return;
         }
         // Balance the activity count on every exit path, including an exception unwinding out of
