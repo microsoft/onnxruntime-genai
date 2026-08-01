@@ -953,7 +953,7 @@ class Model:
             inputs["position_ids"] = self.input_names["position_ids"]
         if self.use_paged_attention:
             inputs["block_table"] = self.input_names["block_table"]
-            if "block_table_windowed" in self.input_names:
+            if self.has_windowed_paged_layers():
                 inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
@@ -1038,27 +1038,25 @@ class Model:
                 "cache_slack": self.window_kv_cache_slack,
             }
 
-        if self.use_windowed_paged_kv_cache:
-            layer_idxs = [
-                layer_id for layer_id in range(self.num_layers) if self.uses_windowed_paged_cache(layer_id)
-            ]
-            if layer_idxs:
-                # The runtime sizes the ring from `window_size` and the prefill chunk size, and
-                # builds `block_table_windowed` by repeating each request's ring across the columns.
-                # Only these layers read that table and the smaller `num_blocks_windowed` cache.
-                genai_config["model"]["decoder"]["sliding_window"] = {
-                    "window_size": self.window_size,
-                    "slide_key_value_cache": False,
-                    "slide_inputs": False,
-                    "layers": layer_idxs,
-                    "cache_slack": 0,
-                }
-                # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
-                # ran in one shot would overwrite positions it still had to attend to. Chunking is
-                # not optional for this model, hence a default rather than an opt-in.
-                genai_config["search"]["chunk_size"] = int(
-                    self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
-                )
+        if self.has_windowed_paged_layers():
+            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
+            # builds `block_table_windowed` by repeating each request's ring across the columns.
+            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": [
+                    layer_id for layer_id in range(self.num_layers) if self.uses_windowed_paged_cache(layer_id)
+                ],
+                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
+            }
+            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
+            # ran in one shot would overwrite positions it still had to attend to. Chunking is
+            # not optional for this model, hence a default rather than an opt-in.
+            genai_config["search"]["chunk_size"] = int(
+                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
+            )
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -1103,6 +1101,18 @@ class Model:
             self.use_windowed_paged_kv_cache
             and hasattr(self, "is_local")
             and self.is_local(layer_id)
+        )
+
+    def has_windowed_paged_layers(self):
+        """True when at least one layer is actually served from the ring.
+
+        A model can carry `sliding_window` in its config without the builder knowing which layers
+        it applies to, in which case no layer reads the ring and nothing extra must be emitted.
+        `is_local` is assigned by the subclass after `Model.__init__`, so this cannot be asked from
+        `make_inputs_init`, which runs during it.
+        """
+        return self.use_windowed_paged_kv_cache and any(
+            self.uses_windowed_paged_cache(layer_id) for layer_id in range(self.num_layers)
         )
 
     def make_key_value_cache_shape(self, layer_id, shape):
@@ -1470,6 +1480,11 @@ class Model:
         return value
 
     def make_inputs_and_outputs(self):
+        # Only now, once the subclass has declared `is_local`, can we tell whether any layer reads
+        # the ring. Without one, `block_table_windowed` would be a graph input nothing consumes.
+        if "block_table_windowed" in self.input_names and not self.has_windowed_paged_layers():
+            del self.input_names["block_table_windowed"]
+
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for key in self.input_names:
