@@ -31,11 +31,6 @@ std::shared_ptr<Request> Engine::Step() {
 
     auto scheduled_requests = scheduler_->Schedule();
     model_executor_->Decode(scheduled_requests);
-    // Shared across steps so that a growing batch does not allocate every step. Requests bind to a
-    // slot of it for the step, and they keep the buffer alive if a later step replaces it.
-    if (shared_next_tokens_.size() < scheduled_requests.size())
-      shared_next_tokens_ = model_->p_device_scoring_->Allocate<int32_t>(scheduled_requests.size());
-    scheduled_requests.SetSharedNextTokens(shared_next_tokens_);
     scheduled_requests.GenerateNextTokens();
 
     for (auto& request : scheduled_requests) {

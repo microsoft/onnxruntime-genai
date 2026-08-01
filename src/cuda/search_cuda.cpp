@@ -34,17 +34,22 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
   next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
   next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
+}
+
+void GreedySearch_Cuda::EnsureSamplingData() {
+  if (samplingdata_)
+    return;
 
   unsigned long long random_seed = (params_->search.random_seed != -1)
                                        ? params_->search.random_seed
                                        : std::random_device{}();
 
   // Allocate a single buffer for all sampling data
-  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params.search.batch_size, params.config.model.vocab_size, GetStream());
-  sampling_buffer_ = params.p_device->Allocate<uint8_t>(sampling_buffer_size);
+  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params_->search.batch_size, params_->config.model.vocab_size, GetStream());
+  sampling_buffer_ = params_->p_device->Allocate<uint8_t>(sampling_buffer_size);
 
   // Create SamplingData with the externally allocated buffer
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.batch_size, params.config.model.vocab_size, GetStream(),
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
                                                        sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
@@ -156,6 +161,7 @@ void BeamSearch_Cuda::SelectTop() {
 }
 
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
+  EnsureSamplingData();
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
   cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
@@ -207,7 +213,6 @@ void GreedySearch_Cuda::LaunchNextTokensTail() {
 void GreedySearch_Cuda::CompleteGeneration() {
   if (!completion_pending_)
     return;
-  completion_pending_ = false;
 
   // done_cpu_ lives in pinned host memory written by CheckForEOSAndPad, so it is only meaningful
   // once the stream has drained. When completion is deferred, every search in the batch has already
@@ -217,6 +222,7 @@ void GreedySearch_Cuda::CompleteGeneration() {
   // sampled into a shared buffer the caller has already done that copy for the whole batch.
   if (!external_host_copy_)
     next_tokens_buffer_.CopyDeviceToCpu();
+  completion_pending_ = false;
   done_pending_ = false;
 
   if (!*done_cpu_) {
