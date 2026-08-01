@@ -195,6 +195,17 @@ def test_modelopt_loader_rejects_bad_checkpoints():
             json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
         with pytest.raises(ValueError, match="no 'weight_scale'"):
             _load(d)
+
+    # A layer with neither linear_attn nor self_attn -> named error, not a later AttributeError.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        del tensors["model.language_model.layers.1.self_attn.q_proj.weight"]
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
+        with pytest.raises(ValueError, match="attention variant cannot be determined"):
+            _load(d)
     print("OK: ModeloptModel rejects ambiguous and incomplete checkpoints.")
 
 

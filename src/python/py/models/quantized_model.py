@@ -1857,7 +1857,7 @@ class ModeloptModel:
             la.dt_bias = self._get(f"{p}.linear_attn.dt_bias")
             la.norm = self._tensor_module(f"{p}.linear_attn.norm.weight")
             layer.linear_attn = la
-        else:
+        elif self._get(f"{p}.self_attn.q_proj.weight") is not None:
             sa = ns()
             sa.q_proj = self._linear_module(f"{p}.self_attn.q_proj")
             sa.k_proj = self._linear_module(f"{p}.self_attn.k_proj")
@@ -1866,6 +1866,12 @@ class ModeloptModel:
             sa.q_norm = self._tensor_module(f"{p}.self_attn.q_norm.weight")
             sa.k_norm = self._tensor_module(f"{p}.self_attn.k_norm.weight")
             layer.self_attn = sa
+        else:
+            raise ValueError(
+                f"Layer {layer_id} has neither '{p}.linear_attn.in_proj_qkv.weight' nor "
+                f"'{p}.self_attn.q_proj.weight', so its attention variant cannot be determined. "
+                "The Model Optimizer checkpoint is incomplete or uses unsupported weight names."
+            )
 
         mlp = ns()
         mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")

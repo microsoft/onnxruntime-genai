@@ -36,7 +36,9 @@ def _load_builder_model_class():
     """Load ``Model`` from the source base.py, stubbing heavy optional imports.
 
     The two repack helpers under test are pure-torch static methods, so we do not
-    need transformers/onnxruntime installed just to exercise them.
+    need transformers/onnxruntime installed just to exercise them. Every entry this
+    function adds to ``sys.modules`` is removed again before returning, so a later
+    test in the same session still imports the real packages.
     """
     base_path = os.path.join(
         os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "builders", "base.py"
@@ -44,6 +46,13 @@ def _load_builder_model_class():
     base_path = os.path.abspath(base_path)
     builders_dir = os.path.dirname(base_path)
     models_dir = os.path.dirname(builders_dir)
+    injected = []
+
+    def inject(name, module):
+        if name not in sys.modules:
+            sys.modules[name] = module
+            injected.append(name)
+
     for name in (
         "transformers",
         "tqdm",
@@ -52,21 +61,25 @@ def _load_builder_model_class():
         "onnxruntime.quantization",
         "onnxruntime.quantization.matmul_nbits_quantizer",
     ):
-        sys.modules.setdefault(name, mock.MagicMock())
+        inject(name, mock.MagicMock())
     # Synthetic parent packages so base.py's `from .cuda_quantizer import ...` resolves
     # without executing the real builders __init__ (which imports every builder).
     pkg_models = types.ModuleType("_genai_models_pkg")
     pkg_models.__path__ = [models_dir]
     pkg_builders = types.ModuleType("_genai_models_pkg.builders")
     pkg_builders.__path__ = [builders_dir]
-    sys.modules["_genai_models_pkg"] = pkg_models
-    sys.modules["_genai_models_pkg.builders"] = pkg_builders
-    sys.modules["_genai_models_pkg.builders.cuda_quantizer"] = mock.MagicMock()
+    inject("_genai_models_pkg", pkg_models)
+    inject("_genai_models_pkg.builders", pkg_builders)
+    inject("_genai_models_pkg.builders.cuda_quantizer", mock.MagicMock())
     spec = importlib.util.spec_from_file_location("_genai_models_pkg.builders.base", base_path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules["_genai_models_pkg.builders.base"] = module
-    spec.loader.exec_module(module)
-    return module.Model
+    inject("_genai_models_pkg.builders.base", module)
+    try:
+        spec.loader.exec_module(module)
+        return module.Model
+    finally:
+        for name in injected:
+            sys.modules.pop(name, None)
 
 
 Model = _load_builder_model_class()
