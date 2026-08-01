@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// Component-contract tests for the continuous-batching schedulers (DynamicBatchScheduler and
-// StaticBatchScheduler). They drive a real scheduler against a recording CacheManager double and a
-// tiny CPU fixture model that is used only to mint real Request objects: the model never runs, so
-// these tests need no GPU and no real inference. They assert the scheduler's admission contract --
-// which requests it admits, in what order, how it honors capacity backpressure, and how it releases
-// completed and removed requests -- by observing the calls it makes to the cache manager.
+// Component-contract tests for the continuous-batching DynamicBatchScheduler. They drive a real
+// scheduler against a recording CacheManager double and a tiny CPU fixture model that is used only
+// to mint real Request objects: the model never runs, so these tests need no GPU and no real
+// inference. They assert the scheduler's admission contract -- which requests it admits, in what
+// order, how it honors capacity backpressure, and how it releases completed and removed requests --
+// by observing the calls it makes to the cache manager.
 
 #include <memory>
 #include <vector>
