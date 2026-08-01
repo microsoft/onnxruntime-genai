@@ -15,6 +15,22 @@ install(TARGETS
   PUBLIC_HEADER DESTINATION include
   FRAMEWORK DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# On desktop macOS, finalize the dylib's RPATH at BUILD time so `cmake --install`
+# and CPack do NOT run install_name_tool on the binary during packaging. The CI
+# Apple-signs the freshly built dylib *before* the package/install steps (see
+# .pipelines/stages/jobs/steps/core-macos-step.yml); any post-sign Mach-O edit —
+# including CMake's default install-time RPATH fixup — invalidates the code
+# signature, and macOS then kills any process that loads it with
+# "SIGKILL (Code Signature Invalid)". Building with the install RPATH already in
+# place makes the installed/packaged dylib byte-identical to the signed one.
+# Mirrors the convention used for the Python binding in src/python/CMakeLists.txt.
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST))
+  set_target_properties(onnxruntime-genai PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "@loader_path"
+  )
+endif()
 if(USE_CUDA OR USE_TRT_RTX)
   install(TARGETS
     onnxruntime-genai-cuda
