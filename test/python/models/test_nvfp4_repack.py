@@ -74,14 +74,16 @@ Model = _load_builder_model_class()
 _FP4_E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
 
-def _decode_e2m1(code):
-    code = int(code) & 0xF
-    v = _FP4_E2M1[code & 0x7]
-    return -v if (code & 0x8) else v
+def _decode_e2m1(codes):
+    """Decode an array of e2m1 nibbles (0-15) to float32."""
+    codes = np.asarray(codes) & 0xF
+    mag = _FP4_E2M1[codes & 0x7]
+    return np.where((codes & 0x8) > 0, -mag, mag)
 
 
-def _e4m3_byte_to_float(byte):
-    return torch.tensor([byte], dtype=torch.uint8).view(torch.float8_e4m3fn).float().item()
+def _e4m3_bytes_to_float(byte_array):
+    """Reinterpret raw e4m3 bytes as float32 (torch has the only FP8 decoder here)."""
+    return torch.from_numpy(np.ascontiguousarray(byte_array)).view(torch.float8_e4m3fn).float().numpy()
 
 
 def _make_modelopt_nvfp4_projection(n, k, seed):
@@ -99,28 +101,19 @@ def _make_modelopt_nvfp4_projection(n, k, seed):
     packed_nk2 = ((high << 4) | low).astype(np.uint8)  # [N, K/2]
 
     # Reference reconstruction from the modelopt-form tensors.
-    ref = np.empty((n, k), dtype=np.float32)
-    for i in range(n):
-        for j in range(k):
-            ref[i, j] = (
-                _decode_e2m1(codes_nk[i, j]) * _e4m3_byte_to_float(scale_bytes[i, j // block]) * float(global_scale)
-            )
+    scales = _e4m3_bytes_to_float(scale_bytes).repeat(block, axis=1)  # [N, K]
+    ref = (_decode_e2m1(codes_nk) * scales * float(global_scale)).astype(np.float32)
     return packed_nk2, scale_bytes, global_scale, ref
 
 
 def _kernel_dequant_from_qmoe_layout(packed_kn2, scale_nk16, global_scale, n, k):
     """Mirror the ORT QMoE nvfp4 dequant kernel over a [K, N/2]-packed weight."""
     block = 16
-    out = np.empty((n, k), dtype=np.float32)
     packed_kn2 = packed_kn2.numpy() if isinstance(packed_kn2, torch.Tensor) else packed_kn2
-    for row_n in range(n):
-        for col_k in range(k):
-            byte = packed_kn2[col_k, row_n // 2]
-            code = (byte & 0x0F) if (row_n % 2 == 0) else (byte >> 4)
-            out[row_n, col_k] = (
-                _decode_e2m1(code) * _e4m3_byte_to_float(scale_nk16[row_n, col_k // block]) * float(global_scale)
-            )
-    return out
+    # Even N is the low nibble, odd N is the high nibble, of byte [K, N/2].
+    codes_kn = np.stack([packed_kn2 & 0x0F, packed_kn2 >> 4], axis=-1).reshape(k, n)
+    scales = _e4m3_bytes_to_float(scale_nk16).repeat(block, axis=1)  # [N, K]
+    return (_decode_e2m1(codes_kn.T) * scales * float(global_scale)).astype(np.float32)
 
 
 def test_nvfp4_repack_roundtrip_matches_modelopt():
