@@ -14,6 +14,7 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
+#include "generators.h"
 #include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
@@ -562,6 +563,128 @@ TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
 }
 
 #if USE_CUDA
+TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
+  constexpr int vocab_size = 5;
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+[[maybe_unused]] auto model = OgaModel::Create(*config);
+
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto sampler = device->CreateBatchedSampler(3, vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  const std::array<std::array<float, vocab_size>, 3> logits{{
+      {{0.0f, 5.0f, 1.0f, 2.0f, 3.0f}},
+      {{0.0f, 1.0f, 6.0f, 2.0f, 3.0f}},
+      {{0.0f, 1.0f, 2.0f, 7.0f, 3.0f}},
+  }};
+  std::vector<Generators::DeviceSpan<float>> rows;
+  for (const auto& row_logits : logits) {
+    auto row = device->Allocate<float>(vocab_size);
+    std::copy(row_logits.begin(), row_logits.end(), row.CpuSpan().begin());
+    row.CopyCpuToDevice();
+    rows.push_back(std::move(row));
+  }
+
+  const std::array<Generators::BatchedSamplingParams, 3> params{{
+      {1, 0.0f, 1.0f},
+      {2, 0.01f, 0.7f},
+      {-1, 0.01f, 1.3f},
+  }};
+  std::array<std::unique_ptr<Generators::BatchedSamplerState>, 3> owned_states;
+  std::array<Generators::BatchedSamplerState*, 3> states;
+  for (size_t i = 0; i < states.size(); ++i) {
+    owned_states[i] = sampler->CreateState(static_cast<int>(10 + i));
+    states[i] = owned_states[i].get();
+  }
+
+  auto tokens = sampler->Sample(rows, params, states, vocab_size).CopyDeviceToCpu();
+  EXPECT_EQ(tokens[0], 1);
+  EXPECT_EQ(tokens[1], 2);
+  EXPECT_EQ(tokens[2], 3);
+}
+
+TEST(SamplingTests, SchedulerOwnedSamplerPreservesRngAcrossBatchReorderCuda) {
+  constexpr int vocab_size = 8;
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  auto model = OgaModel::Create(*config);
+
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto sampler_ab = device->CreateBatchedSampler(2, vocab_size);
+  auto sampler_ba = device->CreateBatchedSampler(2, vocab_size);
+  ASSERT_NE(sampler_ab, nullptr);
+  ASSERT_NE(sampler_ba, nullptr);
+
+  std::array<Generators::DeviceSpan<float>, 2> rows;
+  const std::array<float, vocab_size> logits{{0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f}};
+  for (auto& row : rows) {
+    row = device->Allocate<float>(vocab_size);
+    std::copy(logits.begin(), logits.end(), row.CpuSpan().begin());
+    row.CopyCpuToDevice();
+  }
+
+  const std::array<Generators::BatchedSamplingParams, 2> params{{
+      {4, 1.0f, 1.0f},
+      {4, 1.0f, 1.0f},
+  }};
+  auto state_a_ab = sampler_ab->CreateState(11);
+  auto state_b_ab = sampler_ab->CreateState(29);
+  auto state_b_ba = sampler_ba->CreateState(29);
+  auto state_a_ba = sampler_ba->CreateState(11);
+  std::array<Generators::BatchedSamplerState*, 2> states_ab{{state_a_ab.get(), state_b_ab.get()}};
+  std::array<Generators::BatchedSamplerState*, 2> states_ba{{state_b_ba.get(), state_a_ba.get()}};
+  std::array<Generators::DeviceSpan<float>, 2> rows_ba{{rows[1], rows[0]}};
+
+  for (int step = 0; step < 8; ++step) {
+    auto tokens_ab = sampler_ab->Sample(rows, params, states_ab, vocab_size).CopyDeviceToCpu();
+    auto tokens_ba = sampler_ba->Sample(rows_ba, params, states_ba, vocab_size).CopyDeviceToCpu();
+    EXPECT_EQ(tokens_ab[0], tokens_ba[1]);
+    EXPECT_EQ(tokens_ab[1], tokens_ba[0]);
+  }
+}
+
+TEST(SamplingTests, SchedulerOwnedSamplerCachesTopKPerBucketSizeCuda) {
+  constexpr int batch_size = 3;
+  constexpr int vocab_size = 100001;
+  constexpr int top_k = 25;
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  auto model = OgaModel::Create(*config);
+
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto sampler = device->CreateBatchedSampler(batch_size, vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  std::array<Generators::DeviceSpan<float>, batch_size> rows;
+  for (int row_index = 0; row_index < batch_size; ++row_index) {
+    rows[row_index] = device->Allocate<float>(vocab_size);
+    auto logits = rows[row_index].CpuSpan();
+    std::fill(logits.begin(), logits.end(), 0.0f);
+    logits[row_index + 1] = 100.0f;
+    rows[row_index].CopyCpuToDevice();
+  }
+
+  const std::array<Generators::BatchedSamplingParams, batch_size> params{{
+      {top_k, 0.01f, 1.0f},
+      {top_k, 0.02f, 1.0f},
+      {top_k, 0.02f, 1.0f},
+  }};
+  std::array<std::unique_ptr<Generators::BatchedSamplerState>, batch_size> owned_states;
+  std::array<Generators::BatchedSamplerState*, batch_size> states;
+  for (int row_index = 0; row_index < batch_size; ++row_index) {
+    owned_states[row_index] = sampler->CreateState(row_index);
+    states[row_index] = owned_states[row_index].get();
+  }
+
+  auto tokens = sampler->Sample(rows, params, states, vocab_size).CopyDeviceToCpu();
+  for (int row_index = 0; row_index < batch_size; ++row_index)
+    EXPECT_EQ(tokens[row_index], row_index + 1);
+}
+
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};

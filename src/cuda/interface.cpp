@@ -9,6 +9,7 @@
 #include "kernels.h"
 #include <charconv>
 #include <cstdarg>
+#include <random>
 #include <system_error>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -46,32 +47,248 @@ struct GpuMemory final : DeviceBuffer {
 
   void AllocateCpu() override {
     if (!p_cpu_)
-      ::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0);
+      CUDA_CHECK(::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0));
   }
 
   void CopyDeviceToCpu() override {
     AllocateCpu();
-    ::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream());
-    ::cudaStreamSynchronize(GetStream());
+    CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+    CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
-    ::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream());
+    CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
     if (source.GetType() == device_label)
-      ::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, ::cudaMemcpyDeviceToDevice, GetStream());
+      CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,
+                                   ::cudaMemcpyDeviceToDevice, GetStream()));
     else
       gp_genai->CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
   }
 
   void Zero() override {
-    ::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream());
+    CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
   }
 
   bool owned_;  // If we own the memory, we delete it on destruction
+};
+
+template <typename T>
+DeviceSpan<T> AllocateCudaSpan(size_t count) {
+  return DeviceSpan<T>{std::make_shared<GpuMemory>(count * sizeof(T))};
+}
+
+struct CudaSamplerStatePool {
+  explicit CudaSamplerStatePool(int initial_capacity) {
+    if (initial_capacity > 0) {
+      states_ = AllocateCudaSpan<curandState>(initial_capacity);
+      capacity_ = initial_capacity;
+    }
+  }
+
+  int Acquire(int random_seed) {
+    int index;
+    if (free_indices_.empty()) {
+      index = size_++;
+      EnsureCapacity(size_);
+    } else {
+      index = free_indices_.back();
+      free_indices_.pop_back();
+    }
+
+    const unsigned long long seed = random_seed == -1
+                                        ? static_cast<unsigned long long>(std::random_device{}())
+                                        : static_cast<unsigned long long>(random_seed);
+    cuda::LaunchInitCurandState(seed, states_.Span().data() + index, GetStream());
+    return index;
+  }
+
+  void Release(int index) {
+    free_indices_.push_back(index);
+  }
+
+  curandState* Data() { return states_.Span().data(); }
+
+ private:
+  void EnsureCapacity(int required_capacity) {
+    if (required_capacity <= capacity_)
+      return;
+
+    const int new_capacity = std::max(required_capacity, std::max(4, capacity_ * 2));
+    auto new_states = AllocateCudaSpan<curandState>(new_capacity);
+    if (size_ > 1) {
+      CUDA_CHECK(cudaMemcpyAsync(new_states.Span().data(), states_.Span().data(),
+                                 static_cast<size_t>(size_ - 1) * sizeof(curandState),
+                                 cudaMemcpyDeviceToDevice, GetStream()));
+      CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+    }
+    states_ = std::move(new_states);
+    capacity_ = new_capacity;
+  }
+
+  DeviceSpan<curandState> states_;
+  std::vector<int> free_indices_;
+  int size_{};
+  int capacity_{};
+};
+
+struct CudaBatchedSamplerState final : BatchedSamplerState {
+  CudaBatchedSamplerState(std::shared_ptr<CudaSamplerStatePool> pool, int index)
+      : pool_{std::move(pool)}, index_{index} {}
+
+  ~CudaBatchedSamplerState() override { pool_->Release(index_); }
+
+  std::shared_ptr<CudaSamplerStatePool> pool_;
+  int index_{};
+};
+
+struct CudaBatchedSampler final : BatchedSampler {
+  CudaBatchedSampler(int max_batch_size, int vocab_size)
+      : state_pool_{std::make_shared<CudaSamplerStatePool>(max_batch_size)} {
+    EnsureCapacity(max_batch_size, vocab_size);
+  }
+
+  std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
+    return std::make_unique<CudaBatchedSamplerState>(state_pool_, state_pool_->Acquire(random_seed));
+  }
+
+  bool OwnsState(const BatchedSamplerState& state) const override {
+    const auto* cuda_state = dynamic_cast<const CudaBatchedSamplerState*>(&state);
+    return cuda_state && cuda_state->pool_.get() == state_pool_.get();
+  }
+
+  DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
+                             std::span<const BatchedSamplingParams> params,
+                             std::span<BatchedSamplerState* const> states,
+                             int vocab_size) override {
+    const int batch_size = static_cast<int>(scores.size());
+    if (batch_size == 0 || params.size() != scores.size() || states.size() != scores.size())
+      throw std::runtime_error("BatchedSampler requires one parameter set and RNG state per score row.");
+
+    EnsureCapacity(batch_size, vocab_size);
+    row_order_.clear();
+    bucket_offsets_.clear();
+    bucket_params_.clear();
+    for (int row = 0; row < batch_size; ++row) {
+      if (scores[row].size() != static_cast<size_t>(vocab_size))
+        throw std::runtime_error("BatchedSampler score row has the wrong vocabulary size.");
+
+      auto* state = dynamic_cast<CudaBatchedSamplerState*>(states[row]);
+      if (!state || state->pool_.get() != state_pool_.get())
+        throw std::runtime_error("BatchedSampler received an RNG state from a different sampler.");
+      row_order_.push_back(row);
+    }
+
+    const auto params_less = [&](int lhs, int rhs) {
+      if (params[lhs].k != params[rhs].k)
+        return params[lhs].k < params[rhs].k;
+      if (params[lhs].p != params[rhs].p)
+        return params[lhs].p < params[rhs].p;
+      return params[lhs].temperature < params[rhs].temperature;
+    };
+    std::sort(row_order_.begin(), row_order_.end(), params_less);
+
+    for (int packed_row = 0; packed_row < batch_size; ++packed_row) {
+      const int row = row_order_[packed_row];
+      if (packed_row == 0 || params[row].k != bucket_params_.back().k ||
+          params[row].p != bucket_params_.back().p ||
+          params[row].temperature != bucket_params_.back().temperature) {
+        bucket_offsets_.push_back(packed_row);
+        bucket_params_.push_back(params[row]);
+      }
+    }
+    bucket_offsets_.push_back(batch_size);
+
+    auto score_ptrs_cpu = score_ptrs_.CpuSpan();
+    auto output_indices_cpu = output_indices_.CpuSpan();
+    auto state_indices_cpu = state_indices_.CpuSpan();
+    for (int packed_row = 0; packed_row < batch_size; ++packed_row) {
+      const int row = row_order_[packed_row];
+      score_ptrs_cpu[packed_row] = scores[row].Span().data();
+      output_indices_cpu[packed_row] = row;
+      state_indices_cpu[packed_row] = static_cast<CudaBatchedSamplerState*>(states[row])->index_;
+    }
+    score_ptrs_.CopyCpuToDevice();
+    output_indices_.CopyCpuToDevice();
+    state_indices_.CopyCpuToDevice();
+
+    bool rows_are_contiguous = bucket_params_.size() == 1;
+    for (int row = 0; row < batch_size && rows_are_contiguous; ++row) {
+      rows_are_contiguous = scores[row].SameBufferAs(scores[0]) &&
+                            scores[row].Span().data() == scores[0].Span().data() +
+                                                             static_cast<size_t>(row) * vocab_size;
+    }
+
+    if (rows_are_contiguous) {
+      const auto& sample_params = bucket_params_.front();
+      cuda::GetSample(sampling_data_.get(), GetStream(), next_tokens_.Span().data(),
+                      scores[0].Span().data(), vocab_size, batch_size,
+                      sample_params.k, sample_params.p, sample_params.temperature,
+                      state_pool_->Data(), state_indices_.Span().data());
+      return next_tokens_.subspan(0, batch_size);
+    }
+
+    cuda::LaunchGatherSamplingRows(score_ptrs_.Span().data(), packed_scores_.Span().data(),
+                                   batch_size, vocab_size, GetStream());
+    for (size_t bucket = 0; bucket < bucket_params_.size(); ++bucket) {
+      const int bucket_offset = bucket_offsets_[bucket];
+      const int bucket_size = bucket_offsets_[bucket + 1] - bucket_offset;
+      const auto& sample_params = bucket_params_[bucket];
+      cuda::GetSample(sampling_data_.get(), GetStream(),
+                      packed_tokens_.Span().data() + bucket_offset,
+                      packed_scores_.Span().data() + static_cast<size_t>(bucket_offset) * vocab_size,
+                      vocab_size, bucket_size, sample_params.k, sample_params.p, sample_params.temperature,
+                      state_pool_->Data(), state_indices_.Span().data() + bucket_offset);
+    }
+    cuda::LaunchScatterSamplingTokens(packed_tokens_.Span().data(), output_indices_.Span().data(),
+                                      next_tokens_.Span().data(), batch_size, GetStream());
+    return next_tokens_.subspan(0, batch_size);
+  }
+
+ private:
+  void EnsureCapacity(int batch_size, int vocab_size) {
+    if (batch_size <= batch_capacity_ && vocab_size == vocab_capacity_)
+      return;
+
+    batch_capacity_ = std::max(batch_size, std::max(4, batch_capacity_ * 2));
+    vocab_capacity_ = vocab_size;
+    score_ptrs_ = AllocateCudaSpan<const float*>(batch_capacity_);
+    output_indices_ = AllocateCudaSpan<int>(batch_capacity_);
+    state_indices_ = AllocateCudaSpan<int>(batch_capacity_);
+    packed_scores_ = AllocateCudaSpan<float>(static_cast<size_t>(batch_capacity_) * vocab_size);
+    packed_tokens_ = AllocateCudaSpan<int32_t>(batch_capacity_);
+    next_tokens_ = AllocateCudaSpan<int32_t>(batch_capacity_);
+    score_ptrs_.CpuSpan();
+    output_indices_.CpuSpan();
+    state_indices_.CpuSpan();
+    next_tokens_.CpuSpan();
+
+    const size_t buffer_size = cuda::SamplingData::CalculateTotalSize(batch_capacity_, vocab_size, GetStream());
+    sampling_buffer_ = AllocateCudaSpan<uint8_t>(buffer_size);
+    sampling_data_ = std::make_unique<cuda::SamplingData>(std::random_device{}(), batch_capacity_, vocab_size,
+                                                          GetStream(), sampling_buffer_.Span().data(), buffer_size);
+    row_order_.reserve(batch_capacity_);
+    bucket_offsets_.reserve(static_cast<size_t>(batch_capacity_) + 1);
+    bucket_params_.reserve(batch_capacity_);
+  }
+
+  std::shared_ptr<CudaSamplerStatePool> state_pool_;
+  DeviceSpan<const float*> score_ptrs_;
+  DeviceSpan<int> output_indices_;
+  DeviceSpan<int> state_indices_;
+  DeviceSpan<float> packed_scores_;
+  DeviceSpan<int32_t> packed_tokens_;
+  DeviceSpan<int32_t> next_tokens_;
+  DeviceSpan<uint8_t> sampling_buffer_;
+  std::unique_ptr<cuda::SamplingData> sampling_data_;
+  std::vector<int> row_order_;
+  std::vector<int> bucket_offsets_;
+  std::vector<BatchedSamplingParams> bucket_params_;
+  int batch_capacity_{};
+  int vocab_capacity_{};
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
@@ -114,8 +331,12 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return std::make_unique<BeamSearch_Cuda>(params);
   }
 
+  std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t max_batch_size, int vocab_size) override {
+    return std::make_unique<CudaBatchedSampler>(static_cast<int>(max_batch_size), vocab_size);
+  }
+
   void Synchronize() override {
-    ::cudaStreamSynchronize(GetStream());
+    CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
   }
 
   void* GetCudaStream() override {

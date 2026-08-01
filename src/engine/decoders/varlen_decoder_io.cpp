@@ -228,9 +228,13 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
                                           vocab_size};
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;
+  DeviceSpan<float> logits_fp32_span;
   if (requires_cast) {
     logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_fp32_->CreateTensor(logits_shape);
+    // Wrapped once so that every row below is a subspan of the same allocation: GetDeviceSpan()
+    // wraps the tensor memory afresh on each call, which would leave the rows unrelated.
+    logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
   }
 
   // On a pure decode step every request contributes exactly one token, so the rows the search needs
@@ -242,7 +246,6 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   }
 
   if (requires_cast && rows_are_contiguous) {
-    auto logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
     model_.p_device_inputs_->Cast(logits_bytes.Span().data(), logits_fp32_span.Span().data(),
                                   active_logits_->GetType(), Ort::TypeToTensorType<float>,
                                   valid_token_indices.size() * static_cast<size_t>(vocab_size));
@@ -254,7 +257,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
 
   for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
     if (requires_cast) {
-      auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
+      auto logits_of_last_token_fp32 = logits_fp32_span.subspan(i * vocab_size, vocab_size);
       void* src_data = logits_bytes_vector[i].Span().data();
       void* dst_data = logits_of_last_token_fp32.Span().data();
       model_.p_device_inputs_->Cast(src_data, dst_data, active_logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);

@@ -143,6 +143,38 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStatus status_{RequestStatus::Unassigned};
 
   /**
+   * @brief The search options this request was created with.
+   */
+  const Config::Search& SearchOptions() const;
+
+  /**
+   * @brief Binds this request's search to a one-element slot of a caller-owned next-token buffer.
+   * @return True if the search accepted the slot, false if it must be sampled on its own.
+   *
+   * Used by ScheduledRequests to sample a whole batch of requests in one call. See
+   * Search::BindNextTokensSlot.
+   */
+  bool BindNextTokensSlot(DeviceSpan<int32_t> slot);
+
+  bool SupportsBatchedSampling() const;
+
+  /**
+   * @brief Runs everything token selection needs before the sampler: sequence bookkeeping,
+   *        handing the logits to the search, and applying the logits processors.
+   */
+  void PrepareGeneration(DeviceSpan<float> logits);
+
+  /**
+   * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
+   */
+  void OnNextTokensSampled();
+
+  /**
+   * @brief Returns this request's persistent random state for the given batched sampler.
+   */
+  BatchedSamplerState& SamplingState(BatchedSampler& sampler);
+
+  /**
    * @brief Retrieves the generator parameters associated with this request.
    * @return Shared pointer to GeneratorParams.
    */
@@ -177,6 +209,7 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t processed_sequence_length_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
+  std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
 

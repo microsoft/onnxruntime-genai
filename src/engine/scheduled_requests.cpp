@@ -5,12 +5,37 @@
 
 #include "engine.h"
 #include "../search.h"
+#include <exception>
 
 namespace Generators {
 
+namespace {
+
+// Collapses Request::GenerateNextTokens' dispatch into the single (k, p, temperature) triple that
+// each branch ends up handing to the sampler on CUDA, where SelectTop() is SampleTopKTopP(1, 0, 1),
+// SampleTopK(k, t) is SampleTopKTopP(k, 1, t) and SampleTopP(p, t) is SampleTopKTopP(-1, p, t).
+// Returns nothing for options the per-request path rejects, so that it keeps raising the error.
+std::optional<BatchedSamplingParams> ResolveSampleArgs(const Config::Search& search) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0)
+    return BatchedSamplingParams{1, 0.0f, 1.0f};
+
+  if (search.num_beams != 1 || search.top_p < 0.0f || search.top_p > 1.0f || search.top_k < 0)
+    return std::nullopt;
+
+  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1)
+    return BatchedSamplingParams{search.top_k, search.top_p, search.temperature};
+  if (search.top_k > 1)
+    return BatchedSamplingParams{search.top_k, 1.0f, search.temperature};
+  return BatchedSamplingParams{-1, search.top_p, search.temperature};
+}
+
+}  // namespace
+
 ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                                     std::shared_ptr<Model> model)
-    : requests_{requests}, model_{model} {
+                                     std::shared_ptr<Model> model,
+                                     BatchedSampler* batched_sampler,
+                                     BatchedSamplingPlan* sampling_plan)
+    : requests_{requests}, model_{model}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
 }
 
 std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
@@ -33,26 +58,85 @@ void ScheduledRequests::GenerateNextTokens() {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
 
-  std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
-  if (logits.size() != requests_.size()) {
-    throw std::runtime_error("Logits size does not match the number of requests.");
+  try {
+    std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
+    if (logits.size() != requests_.size()) {
+      throw std::runtime_error("Logits size does not match the number of requests.");
+    }
+
+    if (TryGenerateNextTokensBatched(logits))
+      return;
+
+    // Every request owns an independent single-sequence search, so token selection runs once per
+    // request. Completing each one inline would block the host on the device once per request and
+    // serialize the whole batch; launching all of them first means only the first completion below
+    // actually waits for the device.
+    for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed) {
+        requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+      }
+    }
+
+    for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed) {
+        requests_[request_idx]->CompleteGeneration();
+      }
+    }
+  } catch (...) {
+    const auto error = std::current_exception();
+    try {
+      model_->p_device_scoring_->Synchronize();
+    } catch (...) {
+    }
+    std::rethrow_exception(error);
+  }
+}
+
+// Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
+// and groups rows by resolved sampling parameters, while each Request owns its persistent RNG state.
+bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits) {
+  if (!batched_sampler_ || !sampling_plan_)
+    return false;
+
+  sampling_plan_->Clear();
+
+  for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+    if (requests_[request_idx]->status_ == RequestStatus::Completed)
+      continue;
+
+    const auto args = ResolveSampleArgs(requests_[request_idx]->SearchOptions());
+    if (!args || !requests_[request_idx]->SupportsBatchedSampling())
+      return false;
+    sampling_plan_->requests.push_back(requests_[request_idx].get());
+    sampling_plan_->logits.push_back(logits[request_idx]);
+    sampling_plan_->params.push_back(*args);
+    sampling_plan_->states.push_back(&requests_[request_idx]->SamplingState(*batched_sampler_));
   }
 
-  // Every request owns an independent single-sequence search, so token selection runs once per
-  // request. Completing each one inline would block the host on the device once per request and
-  // serialize the whole batch; launching all of them first means only the first completion below
-  // actually waits for the device.
-  for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed) {
-      requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
-    }
+  if (sampling_plan_->requests.empty())
+    return true;
+
+  for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
+    sampling_plan_->requests[request_idx]->PrepareGeneration(sampling_plan_->logits[request_idx]);
   }
 
-  for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed) {
-      requests_[request_idx]->CompleteGeneration();
-    }
+  auto next_tokens = batched_sampler_->Sample(sampling_plan_->logits, sampling_plan_->params,
+                                              sampling_plan_->states,
+                                              model_->config_->model.vocab_size);
+
+  for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
+    if (!sampling_plan_->requests[request_idx]->BindNextTokensSlot(next_tokens.subspan(request_idx, 1)))
+      throw std::runtime_error("The scoring device supports batched sampling but the request search does not.");
+    sampling_plan_->requests[request_idx]->OnNextTokensSampled();
   }
+
+  next_tokens.CopyDeviceToCpu();
+
+  for (auto* request : sampling_plan_->requests) {
+    request->CompleteGeneration();
+  }
+
+  return true;
 }
 
 }  // namespace Generators

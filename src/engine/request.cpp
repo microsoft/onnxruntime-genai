@@ -135,15 +135,9 @@ bool Request::IsPrefill() const {
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
-  is_prefill_ = false;
+  PrepareGeneration(logits);
 
-  search_->SetLogits(logits);
   auto& search_params = search_->params_->search;
-  search_->ApplyMinLength(search_params.min_length);
-  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
-  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
-
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
     search_->SelectTop();
   } else {
@@ -166,6 +160,39 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       search_->SampleTopP(search_params.top_p, search_params.temperature);
     }
   }
+}
+
+void Request::PrepareGeneration(DeviceSpan<float> logits) {
+  processed_sequence_length_ = search_->GetSequence(0).size();
+  is_prefill_ = false;
+
+  search_->SetLogits(logits);
+  auto& search_params = search_->params_->search;
+  search_->ApplyMinLength(search_params.min_length);
+  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
+
+const Config::Search& Request::SearchOptions() const {
+  return search_->params_->search;
+}
+
+bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
+  return search_->BindNextTokensSlot(slot);
+}
+
+bool Request::SupportsBatchedSampling() const {
+  return search_->SupportsBatchedSampling();
+}
+
+void Request::OnNextTokensSampled() {
+  search_->OnNextTokensSampled();
+}
+
+BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
+  if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
+    batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
+  return *batched_sampler_state_;
 }
 
 void Request::CompleteGeneration() {
