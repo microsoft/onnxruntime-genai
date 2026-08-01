@@ -1245,12 +1245,16 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
 };
 
+// Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
+// JSON::Parse_Value only re-throws with the offending field's path prepended when it sees a
+// std::runtime_error, and the public C API boundary reports std::runtime_error, so every config
+// parsing error must use that single type to keep messages (and behavior) consistent.
 int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 2. Check if the value is outside the representable range of an integer.
@@ -1261,14 +1265,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is out of int32 range ["
        << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 3. Reject fractional values — these fields must be integral.
   if (x != std::trunc(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is not an integer";
-    throw std::invalid_argument(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 4. Perform the cast.

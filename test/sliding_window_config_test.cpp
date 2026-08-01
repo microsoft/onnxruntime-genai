@@ -54,6 +54,10 @@ std::string CaptureThrowMessage(Fn&& fn) {
     fn();
   } catch (const std::exception& e) {
     return e.what();
+  } catch (...) {
+    // The C API is only allowed to surface std::exception; report anything else instead of
+    // letting gtest print an opaque "Unknown C++ exception thrown in the test body".
+    return "<non-std::exception escaped the C API boundary>";
   }
   return {};
 }
@@ -89,7 +93,9 @@ TEST(SlidingWindowConfigTest, RejectsNonNumericCacheSlack) {
 
 TEST(SlidingWindowConfigTest, RejectsOutOfRangeCacheSlack) {
   // cache_slack is stored as an int; SafeDoubleToInt must reject values that do not fit.
-  const auto root = WriteConfigWithSlidingWindow("overflow", "{ \"window_size\": 128, \"cache_slack\": 1e20 }");
+  // Spelled as a plain integer rather than in exponent form so the test exercises the range
+  // check and not the platform-specific number scanner (std::from_chars vs std::strtod).
+  const auto root = WriteConfigWithSlidingWindow("overflow", "{ \"window_size\": 128, \"cache_slack\": 4000000000 }");
   const std::string message = CaptureThrowMessage([&] { OgaConfig::Create(root.string().c_str()); });
   EXPECT_NE(message.find("cache_slack"), std::string::npos) << message;
 }
