@@ -141,7 +141,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return true;
   }
 
-  bool ArgMax(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size, int32_t* out_tokens) override {
+  bool RunArgMax(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size) {
     if (num_rows <= 0 || vocab_size <= 0)
       return false;
 
@@ -173,6 +173,14 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
     // k=1 dispatches to distributed_select_sort, the fastest path for argmax over a large vocab.
     cuda::RunTopK(topk_data_.get(), stream, scores, vocab_size, num_rows, /*k=*/1);
+    return true;
+  }
+
+  bool ArgMax(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size, int32_t* out_tokens) override {
+    if (!RunArgMax(logits, logits_type, num_rows, vocab_size))
+      return false;
+
+    cudaStream_t stream = GetStream();
 
     // Copy only the small per-row top-1 indices back to the host (strided -> contiguous), then sync.
     if (!argmax_host_ || argmax_host_count_ < static_cast<size_t>(num_rows)) {
@@ -184,6 +192,19 @@ struct CudaInterfaceImplBase : DeviceInterface {
                                  sizeof(int32_t), num_rows, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
     std::memcpy(out_tokens, argmax_host_.get(), static_cast<size_t>(num_rows) * sizeof(int32_t));
+    return true;
+  }
+
+  bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
+                    DeviceSpan<int32_t> out_tokens) override {
+    if (out_tokens.size() < static_cast<size_t>(num_rows) ||
+        !RunArgMax(logits, logits_type, num_rows, vocab_size))
+      return false;
+
+    CUDA_CHECK(cudaMemcpy2DAsync(out_tokens.Span().data(), sizeof(int32_t),
+                                 topk_data_->topk_indices,
+                                 static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
+                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToDevice, GetStream()));
     return true;
   }
 

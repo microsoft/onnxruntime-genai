@@ -48,8 +48,6 @@ void DefaultInputIDs::Add() {
 }
 
 void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
-  auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
-
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
     for (int32_t i = 0; i < input_ids.size(); i++) {
       if (input_ids[i] == pad_token_id)
@@ -59,6 +57,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   };
 
   if (current_sequence_length_ && past_sequence_length_) {
+    auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }

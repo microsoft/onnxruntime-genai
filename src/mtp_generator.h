@@ -67,6 +67,10 @@ struct MtpGenerator {
   // post-final-norm output (hidden_states_out, last row) into `head_out_hidden_` for the next
   // chained step, and returns the greedy draft (or 0 if need_draft is false).
   int32_t DraftHeadStep(int32_t token, bool need_draft = true);
+  // Greedy multi-token fast path: keep the draft on device so it can feed the next head forward.
+  void DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draft);
+  void DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<int32_t> draft);
+  void CaptureDraftToDevice(DeviceSpan<int32_t> draft);
   // One MTP-head forward over `count` (hidden, token) pairs. The head's `hidden_states` input must
   // already be set by the caller to a [1,count,H] buffer whose every row is a MAIN-model hidden.
   // Appends all `count` tokens in a single forward, captures the head's own post-final-norm output
@@ -74,6 +78,7 @@ struct MtpGenerator {
   // for the token after tokens[count-1]. Used by the fused refeed+draft forward (see
   // pending_refeed_count_).
   int32_t DraftHeadStepMulti(const int32_t* tokens, int count);
+  void DraftHeadStepMultiToDevice(const int32_t* tokens, int count, DeviceSpan<int32_t> draft);
   // Single-token (num_speculative_tokens == 1) draft/verify step (the original fast path).
   void GenerateStepSingle(int32_t t);
   // Multi-token (num_speculative_tokens > 1) chained draft/verify step: chains the single MTP
@@ -138,6 +143,10 @@ struct MtpGenerator {
   // >1 chains the single MTP module N times (Qwen3.6 / vLLM-style). Read from the
   // ORT_MTP_NUM_SPECULATIVE_TOKENS env var at construction (default 1).
   int num_speculative_tokens_{1};
+  // Keep chained greedy drafts on device between CUDA head forwards. The override is retained for
+  // controlled performance comparisons; other devices use the existing host-token path by default.
+  bool device_draft_chain_{false};
+  bool validate_device_draft_chain_{false};
   // ORT_MTP_DIRECT_ARENA_COMMIT: on a model exported with recurrent_state_window > 1, commit a
   // partial accept by cropping the KV cache and the recurrent state window to the accepted length
   // and taking the bonus from the verify forward, instead of replaying the accepted prefix. Also
@@ -154,6 +163,7 @@ struct MtpGenerator {
   // extends this speculatively, then rolls it back to this value + accepted drafts.
   size_t head_len_{0};
   std::vector<int32_t> drafts_;         // scratch: the N chained draft tokens
+  DeviceSpan<int32_t> drafts_device_;   // same drafts, kept on device between chained head forwards
   std::vector<int32_t> verify_tokens_;  // scratch: [t, d0..d_{N-1}] for the verify forward
   std::vector<int32_t> verify_argmax_;  // scratch: main argmax of the N+1 verify rows
 

@@ -112,6 +112,8 @@ struct Generator : LeakChecked<Generator> {
   bool IsDone();
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
+  // Internal continuous-decoding path for tokens already resident on the model device.
+  void AppendTokens(DeviceSpan<int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   void SnapshotState();                     // Snapshot recurrent state for speculative rollback (e.g. MTP)

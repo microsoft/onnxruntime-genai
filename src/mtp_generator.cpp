@@ -124,6 +124,12 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     const int v = std::atoi(env);
     if (v >= 1) num_speculative_tokens_ = v;
   }
+  const bool cuda_device_draft_chain = mtp_model_.p_device_->GetType() == DeviceType::CUDA;
+  device_draft_chain_ = cuda_device_draft_chain;
+  if (const char* env = std::getenv("ORT_MTP_DEVICE_DRAFT_CHAIN")) {
+    device_draft_chain_ = cuda_device_draft_chain && std::atoi(env) != 0;
+  }
+  validate_device_draft_chain_ = std::getenv("ORT_MTP_VALIDATE_DEVICE_DRAFT_CHAIN") != nullptr;
   // Opt-in: commit a partial accept straight out of the verify forward's windowed recurrent state
   // instead of replaying the accepted prefix. Requires a model exported with
   // recurrent_state_window > 1. Read once -- the greedy step consults it on the
@@ -210,6 +216,7 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
       mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
     refeed_hidden_->CreateTensor(slice_shape);
     drafts_.resize(num_speculative_tokens_);
+    drafts_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_);
     verify_tokens_.resize(num_speculative_tokens_ + 1);
     verify_argmax_.resize(num_speculative_tokens_ + 1);
     merged_tokens_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
@@ -270,6 +277,49 @@ int32_t MtpGenerator::DraftHeadStep(int32_t token, bool need_draft) {
   return draft;
 }
 
+void MtpGenerator::CaptureDraftToDevice(DeviceSpan<int32_t> draft) {
+  auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
+  if (mtp_model_.p_device_->ArgMaxDevice(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
+                                         vocab_size_, draft)) {
+    if (validate_device_draft_chain_) {
+      const int32_t device_draft = draft.CopyDeviceToCpu()[0];
+      int32_t host_draft = 0;
+      if (!mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
+                                        vocab_size_, &host_draft) || device_draft != host_draft) {
+        throw std::runtime_error("MtpGenerator: device and host draft argmax differ");
+      }
+    }
+    return;
+  }
+
+  int32_t host_draft = 0;
+  if (!mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
+                                    vocab_size_, &host_draft)) {
+    auto logits = logits_span.CopyDeviceToCpu();
+    host_draft = ArgmaxRow(logits.data(), vocab_size_);
+  }
+  // A subspan shares its backing allocation, and CopyCpuToDevice transfers that whole allocation.
+  // Preserve any earlier chained drafts before updating this slot on an unsupported device.
+  auto draft_cpu = draft.CopyDeviceToCpu();
+  draft_cpu[0] = host_draft;
+  draft.CopyCpuToDevice();
+}
+
+void MtpGenerator::DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draft) {
+  std::array<int32_t, 1> tok{token};
+  mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  ++head_len_;
+  CaptureDraftToDevice(draft);
+  CaptureHeadFeedbackHidden();
+}
+
+void MtpGenerator::DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<int32_t> draft) {
+  mtp_->AppendTokens(token);
+  ++head_len_;
+  CaptureDraftToDevice(draft);
+  CaptureHeadFeedbackHidden();
+}
+
 void MtpGenerator::CaptureHeadFeedbackHidden() {
   // Capture the head's own post-final-norm output (hidden_states_out, the single processed row)
   // into head_out_hidden_ for the next chained draft step.
@@ -321,6 +371,13 @@ int32_t MtpGenerator::DraftHeadStepMulti(const int32_t* tokens, int count) {
 
   CaptureHeadFeedbackHidden();
   return draft;
+}
+
+void MtpGenerator::DraftHeadStepMultiToDevice(const int32_t* tokens, int count, DeviceSpan<int32_t> draft) {
+  mtp_->AppendTokens(cpu_span<const int32_t>(tokens, static_cast<size_t>(count)));
+  head_len_ += static_cast<size_t>(count);
+  CaptureDraftToDevice(draft);
+  CaptureHeadFeedbackHidden();
 }
 
 int32_t MtpGenerator::DraftHeadStepSample(int32_t token, int k) {
@@ -648,27 +705,55 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // so ONE (a+1)-token head forward both re-materializes the drafts in the head KV and produces
   // this step's first draft from its last row -- exactly what a separate refeed forward plus an
   // M=1 draft forward produced, at one forward instead of two.
-  if (pending_refeed_count_ > 0) {
-    const int a_prev = pending_refeed_count_;
-    mtp_->RewindToLength(pending_refeed_head_len_);  // drop last step's speculative drafts
-    head_len_ = pending_refeed_head_len_;
-    merged_tokens_[a_prev] = t;  // last row: the token committed at the top of this step
-    mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
-    drafts_[0] = DraftHeadStepMulti(merged_tokens_.data(), a_prev + 1);
+  size_t head_start = 0;
+  if (device_draft_chain_) {
+    if (pending_refeed_count_ > 0) {
+      const int a_prev = pending_refeed_count_;
+      mtp_->RewindToLength(pending_refeed_head_len_);  // drop last step's speculative drafts
+      head_len_ = pending_refeed_head_len_;
+      merged_tokens_[a_prev] = t;  // last row: the token committed at the top of this step
+      mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
+      DraftHeadStepMultiToDevice(merged_tokens_.data(), a_prev + 1, drafts_device_.subspan(0, 1));
+    } else {
+      if (pending_refeed_count_ == 0) {
+        // Nothing was accepted last step: only the speculative drafts need dropping.
+        mtp_->RewindToLength(pending_refeed_head_len_);
+        head_len_ = pending_refeed_head_len_;
+      }
+      mtp_->SetHiddenStates(hidden_slice_);
+      DraftHeadStepToDevice(t, drafts_device_.subspan(0, 1));
+    }
+    pending_refeed_count_ = -1;
+    head_start = head_len_ - 1;  // head KV length before t was appended
+    for (int k = 1; k < N; ++k) {
+      mtp_->SetHiddenStates(head_out_hidden_);
+      DraftHeadStepToDevice(drafts_device_.subspan(static_cast<size_t>(k - 1), 1),
+                            drafts_device_.subspan(static_cast<size_t>(k), 1));
+    }
+    auto drafts_cpu = drafts_device_.CopyDeviceToCpu();
+    std::copy_n(drafts_cpu.begin(), N, drafts_.begin());
   } else {
-    if (pending_refeed_count_ == 0) {
-      // Nothing was accepted last step: only the speculative drafts need dropping.
+    if (pending_refeed_count_ > 0) {
+      const int a_prev = pending_refeed_count_;
       mtp_->RewindToLength(pending_refeed_head_len_);
       head_len_ = pending_refeed_head_len_;
+      merged_tokens_[a_prev] = t;
+      mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
+      drafts_[0] = DraftHeadStepMulti(merged_tokens_.data(), a_prev + 1);
+    } else {
+      if (pending_refeed_count_ == 0) {
+        mtp_->RewindToLength(pending_refeed_head_len_);
+        head_len_ = pending_refeed_head_len_;
+      }
+      mtp_->SetHiddenStates(hidden_slice_);
+      drafts_[0] = DraftHeadStep(t);
     }
-    mtp_->SetHiddenStates(hidden_slice_);
-    drafts_[0] = DraftHeadStep(t);
-  }
-  pending_refeed_count_ = -1;
-  const size_t head_start = head_len_ - 1;  // head KV length before t was appended
-  for (int k = 1; k < N; ++k) {
-    mtp_->SetHiddenStates(head_out_hidden_);
-    drafts_[k] = DraftHeadStep(drafts_[k - 1]);
+    pending_refeed_count_ = -1;
+    head_start = head_len_ - 1;
+    for (int k = 1; k < N; ++k) {
+      mtp_->SetHiddenStates(head_out_hidden_);
+      drafts_[k] = DraftHeadStep(drafts_[k - 1]);
+    }
   }
   if (prof) {
     HostPhaseProfiler::sync(*mtp_model_.p_device_);

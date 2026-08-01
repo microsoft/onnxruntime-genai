@@ -654,6 +654,28 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
 }
 
+void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokensDevice"};
+
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.empty())
+    throw std::runtime_error("input_ids is empty");
+  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
+      state_->params_->search.max_length)
+    throw std::runtime_error("device input_ids + current sequence length exceeds max length");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  if (set_extra_inputs_) {
+    state_->SetExtraInputs(extra_inputs_);
+    set_extra_inputs_ = false;
+  }
+
+  search_->AppendTokens(input_ids);
+  computed_logits_ = false;
+  ComputeLogits(input_ids);
+}
+
 void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");

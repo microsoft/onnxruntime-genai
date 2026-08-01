@@ -169,6 +169,10 @@ struct DeviceInterface {
   // devices (caller falls back to a host-side path). Keep last for vtable/ABI stability.
   virtual bool TopKScores(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
                           int /*vocab_size*/, int /*k*/, int32_t* /*out_tokens*/, float* /*out_scores*/) { return false; }
+  // Device-output variant used when a greedy token feeds another device-resident forward before
+  // the host needs to inspect it. Keep last for vtable/ABI stability.
+  virtual bool ArgMaxDevice(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                            int /*vocab_size*/, DeviceSpan<int32_t> /*out_tokens*/) { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
