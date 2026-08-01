@@ -283,47 +283,25 @@ void GenAiTelemetry::Shutdown() {
   // new ones from observing the logger while teardown is in progress.
   initialized_.store(false);
 
-  if (!impl_) return;
-  auto impl = std::move(impl_);
-
-  // Explicit runtime shutdown (e.g. OgaShutdown()): tear down synchronously. No threads are being
-  // force-killed here, so FlushAndTeardown() completes promptly, and a synchronous teardown keeps a
-  // subsequent Initialize() from racing a half-torn-down manager over the SDK's process-global state.
-  // OgaShutdown() only reaches here while the singleton is alive (it checks IsDestroyed() first), so
-  // s_instance_destroyed == false is exactly "not at process exit".
-  //
-  // 1DS-recommended shutdown sequence. Each step is independent and best effort so Release() still
-  // runs if flushing or teardown fails; Release() must precede destroying Impl because the SDK holds
-  // a reference to Impl::config.
-  if (!s_instance_destroyed.load()) {
-    if (impl->log_manager) {
-      try {
-        impl->log_manager->Flush();
-      } catch (...) {
-      }
-      try {
-        impl->log_manager->FlushAndTeardown();
-      } catch (...) {
-      }
-      try {
-        MAT::LogManagerProvider::Release(impl->config);
-      } catch (...) {
-      }
-      impl->log_manager = nullptr;
-      impl->logger = nullptr;
+  // 1DS-recommended shutdown sequence. Each operation is independent and best effort so Release()
+  // still runs if flushing or teardown fails.
+  if (impl_ && impl_->log_manager) {
+    try {
+      impl_->log_manager->Flush();
+    } catch (...) {
     }
-    return;  // impl (and the ILogConfiguration it owns) destroyed here, after Release().
+    try {
+      impl_->log_manager->FlushAndTeardown();
+    } catch (...) {
+    }
+    try {
+      MAT::LogManagerProvider::Release(impl_->config);
+    } catch (...) {
+    }
+    impl_->log_manager = nullptr;
+    impl_->logger = nullptr;
   }
-
-  // Process exit (static destructor): deliberately do NOT run the 1DS teardown -- just leak the
-  // manager. FlushAndTeardown() calls an *unbounded* WaitPause() that deadlocks at exit if a logging
-  // activity count was left unbalanced (a thread torn down mid-LogEvent by exit()), which would wedge
-  // the whole process. Leaking is safe here: 1DS does not tear the manager down itself at process
-  // exit (LogManagerFactory keeps managers in a std::set<ILogManager*> of raw pointers and its
-  // destructor is empty), so ~LogManagerImpl never runs and there is no hang; the OS reclaims the
-  // manager and its background threads. Re-init after process exit is impossible, so nothing is lost,
-  // and no teardown work races the surrounding static-destruction sequence.
-  (void)impl.release();
+  impl_.reset();
 #endif
 }
 GenAiTelemetry::~GenAiTelemetry() {
