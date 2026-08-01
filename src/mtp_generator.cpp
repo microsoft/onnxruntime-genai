@@ -115,6 +115,29 @@ HostPhaseProfiler g_host_prof;
 
 MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, const GeneratorParams& params)
     : main_model_{main_model}, mtp_model_{mtp_model} {
+  if (params.search.batch_size != 1 || params.search.num_beams != 1 ||
+      params.search.num_return_sequences != 1) {
+    throw std::runtime_error("MtpGenerator supports only batch_size=1, num_beams=1, and num_return_sequences=1");
+  }
+  if (!params.guidance_type.empty()) {
+    throw std::runtime_error("MtpGenerator does not support guided generation");
+  }
+  if (main_model_.p_device_->GetType() != mtp_model_.p_device_->GetType()) {
+    throw std::runtime_error("MtpGenerator requires the main model and MTP head on the same device type");
+  }
+  if (main_model_.config_->model.vocab_size != mtp_model_.config_->model.vocab_size) {
+    throw std::runtime_error("MtpGenerator requires matching main-model and MTP-head vocabulary sizes");
+  }
+  if (main_model_.config_->model.decoder.hidden_size != mtp_model_.config_->model.decoder.hidden_size) {
+    throw std::runtime_error("MtpGenerator requires matching main-model and MTP-head hidden sizes");
+  }
+  const auto main_hidden_type = main_model_.session_info_.GetOutputDataType(
+      main_model_.config_->model.decoder.outputs.hidden_states);
+  const auto mtp_hidden_type = mtp_model_.session_info_.GetInputDataType(
+      mtp_model_.config_->model.decoder.inputs.hidden_states);
+  if (main_hidden_type != mtp_hidden_type) {
+    throw std::runtime_error("MtpGenerator requires matching hidden-state tensor types");
+  }
   // Number of speculative draft tokens per step (N). N=1 is the original single-token fast path;
   // N>1 chains the single MTP module N times (feeding its own post-norm hidden back), as vLLM's
   // AutoRegressiveSpeculator does. Tunable via env var for benchmarking without an API change;
@@ -144,11 +167,20 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     if (prefill_chunk_ < 0) prefill_chunk_ = 0;
     prefill_chunk_explicit_ = true;
   }
-  // Capture the 1-token decode and the verify shapes up to N+1 tokens.
-  auto& main_params = const_cast<GeneratorParams&>(params);
-  main_params.max_graph_capture_length = num_speculative_tokens_ + 1;
+  // Keep an MTP-owned parameter object so extending graph capture to the verify shapes does not
+  // mutate caller-owned params that may be reused to create an ordinary Generator.
+  main_params_ = std::make_shared<GeneratorParams>(main_model_);
+  main_params_->search = params.search;
+  main_params_->max_batch_size = params.max_batch_size;
+  main_params_->use_graph_capture = params.use_graph_capture;
+  main_params_->max_graph_capture_length = num_speculative_tokens_ + 1;
+  main_params_->use_multi_profile = params.use_multi_profile;
+  main_params_->p_device = params.p_device;
+  main_params_->guidance_type = params.guidance_type;
+  main_params_->guidance_data = params.guidance_data;
+  main_params_->guidance_ff_tokens_enabled = params.guidance_ff_tokens_enabled;
 
-  main_ = CreateGenerator(main_model_, params);
+  main_ = CreateGenerator(main_model_, *main_params_);
   // Default the chunking on for windowed-state models only (they are the ones running long
   // prompts through the MTP loop); 256 tokens/chunk costs a handful of extra forwards.
   if (!prefill_chunk_explicit_ && main_->CanCropRecurrentState()) prefill_chunk_ = 256;
@@ -179,6 +211,9 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   top_k_ = params.search.top_k;
   top_p_ = params.search.top_p;
   temperature_ = params.search.temperature;
+  main_logits_penalties_ = std::make_unique<LogitsPenaltyProcessor>(
+      vocab_size_, params.search.repetition_penalty, params.search.min_length,
+      params.search.no_repeat_ngram_size, main_model_.config_->model.eos_token_id);
   if (sampling_) {
     if (params.search.random_seed == -1) {
       std::random_device rd;
@@ -208,12 +243,12 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // Speculative sampling (any N, including N=1) uses the same chained draft/verify machinery.
   if (num_speculative_tokens_ > 1 || sampling_) {
     head_out_hidden_ = std::make_shared<Tensor>(
-      mtp_model_.p_device_inputs_,
-      mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
+        mtp_model_.p_device_inputs_,
+        mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
     head_out_hidden_->CreateTensor(slice_shape);
     refeed_hidden_ = std::make_shared<Tensor>(
-      mtp_model_.p_device_inputs_,
-      mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
+        mtp_model_.p_device_inputs_,
+        mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
     refeed_hidden_->CreateTensor(slice_shape);
     drafts_.resize(num_speculative_tokens_);
     drafts_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_);
@@ -227,8 +262,8 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     refeed_multi_.resize(static_cast<size_t>(num_speculative_tokens_) + 2);
     for (int j = 1; j <= num_speculative_tokens_ + 1; ++j) {
       refeed_multi_[j] = std::make_shared<Tensor>(
-        mtp_model_.p_device_inputs_,
-        mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
+          mtp_model_.p_device_inputs_,
+          mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
       const std::array<int64_t, 3> sh{1, j, hidden_size_};
       refeed_multi_[j]->CreateTensor(sh);
     }
@@ -285,7 +320,8 @@ void MtpGenerator::CaptureDraftToDevice(DeviceSpan<int32_t> draft) {
       const int32_t device_draft = draft.CopyDeviceToCpu()[0];
       int32_t host_draft = 0;
       if (!mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
-                                        vocab_size_, &host_draft) || device_draft != host_draft) {
+                                        vocab_size_, &host_draft) ||
+          device_draft != host_draft) {
         throw std::runtime_error("MtpGenerator: device and host draft argmax differ");
       }
     }
@@ -429,6 +465,23 @@ bool MtpGenerator::TopKScoresRows(const void* logits, int onnx_type, int num_row
                         topk_k_, topk_tok_scratch_.data(), topk_score_scratch_.data());
 }
 
+std::span<const float> MtpGenerator::ProcessMainLogitsRow(std::span<const float> logits, int row) {
+  if (!main_logits_penalties_->IsActive())
+    return logits;
+
+  OrtValue* raw = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.logits.c_str());
+  const auto shape = raw->GetTensorTypeAndShapeInfo()->GetShape();
+  if (shape.size() < 2 || row < 0 || row >= shape[shape.size() - 2])
+    throw std::runtime_error("MtpGenerator: target logits row is outside the model output");
+
+  auto sequence = main_->GetSequence(0).CopyDeviceToCpu();
+  const size_t output_rows = static_cast<size_t>(shape[shape.size() - 2]);
+  if (sequence.size() < output_rows)
+    throw std::runtime_error("MtpGenerator: target logits contain more rows than the token sequence");
+  const size_t prefix_length = sequence.size() - output_rows + static_cast<size_t>(row) + 1;
+  return main_logits_penalties_->Apply(logits, static_cast<int>(prefix_length), sequence.first(prefix_length));
+}
+
 void MtpGenerator::SparseFromTopKRow(int row, std::vector<int32_t>& idx, std::vector<float>& prob) {
   // The device returns the k top scores sorted descending; apply temperature softmax over them and
   // a top-p nucleus cutoff -- identical to ComputeSampledCategorical's top-k branch, but over only
@@ -470,6 +523,17 @@ void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
   OrtValue* raw = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.logits.c_str());
   auto info = raw->GetTensorTypeAndShapeInfo();
   const ONNXTensorElementDataType type = info->GetElementType();
+
+  if (main_logits_penalties_->IsActive()) {
+    const float* rows = MainLogitsRowsCpu(first_row, num_rows);
+    for (int r = 0; r < num_rows; ++r) {
+      auto processed = ProcessMainLogitsRow(
+          std::span<const float>(rows + static_cast<size_t>(r) * vocab_size_, static_cast<size_t>(vocab_size_)),
+          first_row + r);
+      out[r] = ArgmaxRow(processed.data(), vocab_size_);
+    }
+    return;
+  }
 
   if (std::getenv("ORT_MTP_LOG_TOP2_MARGINS") != nullptr) {
     std::vector<int32_t> top2_tokens(static_cast<size_t>(num_rows) * 2);
@@ -533,11 +597,11 @@ int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token, bool n
     // KV-advance only (e.g. after an accepted draft): skip the full-vocab argmax + stream sync.
     return 0;
   }
-  auto logits_span = mtp_->GetLogits();              // fp32, last token, [1, V]
+  auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
   int32_t draft = 0;
   if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
     return draft;
-  auto logits = logits_span.CopyDeviceToCpu();        // host fallback
+  auto logits = logits_span.CopyDeviceToCpu();  // host fallback
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
@@ -547,7 +611,7 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   auto src = ByteWrapTensor(*main_model_.p_device_, *hidden);
   const size_t row_bytes = hidden_slice_->GetByteSpan().size();  // bytes of one [1,1,H] row
   auto dst = hidden_slice2_->GetByteSpan();
-  dst.subspan(0, row_bytes).CopyFrom(src.subspan(0, row_bytes));            // row 0 <- hidden@0
+  dst.subspan(0, row_bytes).CopyFrom(src.subspan(0, row_bytes));                  // row 0 <- hidden@0
   dst.subspan(row_bytes, row_bytes).CopyFrom(src.subspan(row_bytes, row_bytes));  // row 1 <- hidden@1
 
   // One 2-token MTP forward: feeds tok0 (KV-advance) and tok1 (the next committed token); the
@@ -555,15 +619,18 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   mtp_->SetHiddenStates(hidden_slice2_);
   std::array<int32_t, 2> toks{tok0, tok1};
   mtp_->AppendTokens(cpu_span<const int32_t>(toks));
-  auto logits_span = mtp_->GetLogits();              // fp32, last token, [1, V]
+  auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
   int32_t draft = 0;
   if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
     return draft;
-  auto logits = logits_span.CopyDeviceToCpu();        // host fallback
+  auto logits = logits_span.CopyDeviceToCpu();  // host fallback
   return ArgmaxRow(logits.data(), vocab_size_);
 }
 
 void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  if (primed_)
+    throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
+
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
   // Off (single forward) when ORT_MTP_PREFILL_CHUNK is 0/unset or the prompt fits in one chunk.
   const size_t total = input_ids.size();
@@ -583,7 +650,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
 
   OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
   const int last = static_cast<int>(tail) - 1;
-  ExtractHiddenPosition(hidden, last);             // h for the token we are about to predict
+  ExtractHiddenPosition(hidden, last);  // h for the token we are about to predict
   if (sampling_) {
     // Sample the first generated token from the truncated target distribution at the last prompt
     // position. Use the on-device top-k over just that row (no full-vocab cast/copy of prefill logits).
@@ -595,18 +662,21 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     const void* row_ptr = base + static_cast<size_t>(last) * vocab_size_ * elem;
     std::vector<int32_t> idx;
     std::vector<float> prob;
-    if (TopKScoresRows(row_ptr, rtype, 1, *main_model_.p_device_)) {
+    if (!main_logits_penalties_->IsActive() &&
+        TopKScoresRows(row_ptr, rtype, 1, *main_model_.p_device_)) {
       SparseFromTopKRow(0, idx, prob);
     } else {
       const float* rowf = MainLogitsRowsCpu(last, 1);
-      ComputeSampledCategorical(std::span<const float>(rowf, static_cast<size_t>(vocab_size_)),
+      auto processed = ProcessMainLogitsRow(
+          std::span<const float>(rowf, static_cast<size_t>(vocab_size_)), last);
+      ComputeSampledCategorical(processed,
                                 top_k_, top_p_, temperature_, sampled_scratch_);
       idx = sampled_scratch_.indices;
       prob = sampled_scratch_.probs;
     }
     next_token_ = SampleSparse(idx, prob, rng_);
   } else {
-    ArgmaxMainRows(last, 1, &next_token_);         // token predicted for position length_
+    ArgmaxMainRows(last, 1, &next_token_);  // token predicted for position length_
   }
   has_pending_draft_ = false;
   pending_refeed_count_ = -1;
@@ -662,7 +732,8 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
     // 2a. Accept: t and d are both correct. Commit d and harvest the free prediction at row 1.
     ++accepts_;
     sequence_.push_back(d);
-    if (sequence_.size() >= static_cast<size_t>(max_length_)) {
+    if (contains(main_model_.config_->model.eos_token_id, d) ||
+        sequence_.size() >= static_cast<size_t>(max_length_)) {
       done_ = true;
       return;
     }
@@ -879,7 +950,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
     ++forwards_;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
-    ArgmaxMainRows(a, 1, &next_token_);        // main's token after the committed prefix
+    ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
     length_ += static_cast<size_t>(a) + 1;
     if (prof) ++g_host_prof.main_fwds;
@@ -945,14 +1016,18 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   // Prefer the on-device top-k (only k*(N+1) values leave the GPU); fall back to a host cast+copy.
   OrtValue* raw_logits = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.logits.c_str());
   const int rtype = static_cast<int>(raw_logits->GetTensorTypeAndShapeInfo()->GetElementType());
-  if (TopKScoresRows(raw_logits->GetTensorRawData(), rtype, N + 1, *main_model_.p_device_)) {
+  if (!main_logits_penalties_->IsActive() &&
+      TopKScoresRows(raw_logits->GetTensorRawData(), rtype, N + 1, *main_model_.p_device_)) {
     for (int kk = 0; kk <= N; ++kk) SparseFromTopKRow(kk, target_idx_[kk], target_prob_[kk]);
   } else {
     const float* logits = MainLogitsRowsCpu(0, N + 1);
     for (int kk = 0; kk <= N; ++kk) {
+      auto processed = ProcessMainLogitsRow(
+          std::span<const float>(logits + static_cast<size_t>(kk) * vocab_size_,
+                                 static_cast<size_t>(vocab_size_)),
+          kk);
       ComputeSampledCategorical(
-          std::span<const float>(logits + static_cast<size_t>(kk) * vocab_size_, static_cast<size_t>(vocab_size_)),
-          top_k_, top_p_, temperature_, sampled_scratch_);
+          processed, top_k_, top_p_, temperature_, sampled_scratch_);
       target_idx_[kk] = sampled_scratch_.indices;
       target_prob_[kk] = sampled_scratch_.probs;
     }

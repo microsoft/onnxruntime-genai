@@ -224,7 +224,8 @@ bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
 
   if (slot_descs_cpu_ != descs) {
     if (slot_descs_.size() != descs.size()) slot_descs_ = device.Allocate<StateSlotDesc>(descs.size());
-    slot_descs_.CopyFromCpu(std::span<const StateSlotDesc>(descs));
+    std::copy(descs.begin(), descs.end(), slot_descs_.CpuSpan().begin());
+    slot_descs_.CopyCpuToDevice();
     slot_descs_cpu_ = std::move(descs);
   }
 
@@ -254,6 +255,11 @@ void RecurrentState::RewindTo(size_t index) {
     // roll back a rejected draft). The caller (e.g. the MTP orchestrator)
     // guarantees the snapshot was taken at exactly `index`.
     if (snapshot_valid_) {
+      if (index != snapshot_position_) {
+        throw std::runtime_error(
+            "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
+            std::to_string(snapshot_position_));
+      }
       RestoreSnapshot();
       return;
     }
@@ -294,7 +300,7 @@ void RecurrentState::CopyStates(const std::vector<std::unique_ptr<OrtValue>>& sr
   }
 }
 
-void RecurrentState::Snapshot() {
+void RecurrentState::Snapshot(size_t position) {
   if (layer_indices_.empty()) return;
 
   // The live state is in presents_ (shared-buffer EPs alias input==output to it;
@@ -309,6 +315,7 @@ void RecurrentState::Snapshot() {
     }
   }
   CopyStates(presents_, snapshot_);
+  snapshot_position_ = position;
   snapshot_valid_ = true;
 }
 

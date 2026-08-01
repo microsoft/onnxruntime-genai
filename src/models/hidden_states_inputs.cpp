@@ -22,21 +22,28 @@ void HiddenStatesInputs::Add() {
 }
 
 Tensor* HiddenStatesInputs::GetOrCreateBuffer(int sequence_length) {
-  auto it = buffers_by_len_.find(sequence_length);
-  if (it != buffers_by_len_.end())
-    return it->second.get();
+  const bool capture_length = state_.params_->use_graph_capture &&
+                              sequence_length <= state_.params_->max_graph_capture_length;
+  if (capture_length) {
+    auto it = buffers_by_len_.find(sequence_length);
+    if (it != buffers_by_len_.end())
+      return it->second.get();
+  } else if (dynamic_buffer_ && dynamic_sequence_length_ == sequence_length) {
+    return dynamic_buffer_.get();
+  }
 
   auto tensor = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   const std::array<int64_t, 3> shape{shape_[0], sequence_length, shape_[2]};
-  // Static (allocate-once, stable device address) when graph capture is active so the captured
-  // graph for this length binds a fixed input address; a plain per-length buffer otherwise. Each
-  // length owns a distinct buffer, so captured graphs of different lengths never alias memory.
-  const bool use_static = state_.params_->use_graph_capture;
   const size_t bytes = static_cast<size_t>(shape[0]) * static_cast<size_t>(shape[1]) *
                        static_cast<size_t>(shape[2]) * Ort::SizeOf(type_);
-  tensor->CreateTensor(shape, use_static, use_static ? bytes : 0);
+  tensor->CreateTensor(shape, capture_length, capture_length ? bytes : 0);
   Tensor* raw = tensor.get();
-  buffers_by_len_[sequence_length] = std::move(tensor);
+  if (capture_length) {
+    buffers_by_len_[sequence_length] = std::move(tensor);
+  } else {
+    dynamic_buffer_ = std::move(tensor);
+    dynamic_sequence_length_ = sequence_length;
+  }
   return raw;
 }
 
@@ -51,6 +58,8 @@ void HiddenStatesInputs::Update(int sequence_length) {
   // Copy the caller-provided values into THIS length's dedicated device buffer. The source is
   // expected to hold exactly batch*sequence_length*hidden_size elements of the same type ([B,S,H]).
   auto source_info = pending_source_->GetTensorTypeAndShapeInfo();
+  if (source_info->GetElementType() != type_)
+    throw std::runtime_error("HiddenStatesInputs::Update type mismatch");
   const size_t source_elements = source_info->GetElementCount();
   auto dst = buffer->GetByteSpan();
   const size_t dst_bytes = dst.size();
@@ -94,21 +103,28 @@ void HiddenStatesOutputs::Add() {
 }
 
 Tensor* HiddenStatesOutputs::GetOrCreateBuffer(int sequence_length) {
-  auto it = buffers_by_len_.find(sequence_length);
-  if (it != buffers_by_len_.end())
-    return it->second.get();
+  const bool capture_length = state_.params_->use_graph_capture &&
+                              sequence_length <= state_.params_->max_graph_capture_length;
+  if (capture_length) {
+    auto it = buffers_by_len_.find(sequence_length);
+    if (it != buffers_by_len_.end())
+      return it->second.get();
+  } else if (dynamic_buffer_ && dynamic_sequence_length_ == sequence_length) {
+    return dynamic_buffer_.get();
+  }
 
   auto tensor = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   const std::array<int64_t, 3> shape{shape_[0], sequence_length, shape_[2]};
-  // Static (allocate-once, stable device address) when graph capture is active so the captured
-  // graph for this length binds a fixed output address; a plain per-length buffer otherwise. Each
-  // length owns a distinct buffer, so a captured graph never overwrites another length's output.
-  const bool use_static = state_.params_->use_graph_capture;
   const size_t bytes = static_cast<size_t>(shape[0]) * static_cast<size_t>(shape[1]) *
                        static_cast<size_t>(shape[2]) * Ort::SizeOf(type_);
-  tensor->CreateTensor(shape, use_static, use_static ? bytes : 0);
+  tensor->CreateTensor(shape, capture_length, capture_length ? bytes : 0);
   Tensor* raw = tensor.get();
-  buffers_by_len_[sequence_length] = std::move(tensor);
+  if (capture_length) {
+    buffers_by_len_[sequence_length] = std::move(tensor);
+  } else {
+    dynamic_buffer_ = std::move(tensor);
+    dynamic_sequence_length_ = sequence_length;
+  }
   return raw;
 }
 

@@ -38,8 +38,10 @@ struct HiddenStatesInputs {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  // One dedicated hidden_states buffer per sequence length (1, 2, ..., N+1).
+  // Dedicated stable buffers only for graph-captured lengths (1, 2, ..., N+1).
   std::unordered_map<int, std::unique_ptr<Tensor>> buffers_by_len_;
+  std::unique_ptr<Tensor> dynamic_buffer_;
+  int dynamic_sequence_length_{};
   OrtValue* pending_source_{};
 };
 
@@ -69,8 +71,10 @@ struct HiddenStatesOutputs {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  // One dedicated hidden_states output buffer per sequence length (1, 2, ..., N+1).
+  // Dedicated stable buffers only for graph-captured lengths (1, 2, ..., N+1).
   std::unordered_map<int, std::unique_ptr<Tensor>> buffers_by_len_;
+  std::unique_ptr<Tensor> dynamic_buffer_;
+  int dynamic_sequence_length_{};
 };
 
 }  // namespace Generators

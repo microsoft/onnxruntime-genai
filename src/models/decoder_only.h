@@ -27,7 +27,7 @@ struct DecoderOnly_State : State {
 
   void RewindTo(size_t index) override;
 
-  void SnapshotState() override;
+  void SnapshotState(size_t position) override;
 
   bool HasCroppableRecurrentState() const override;
   void CropToAccepted(size_t new_length, size_t recurrent_position) override;

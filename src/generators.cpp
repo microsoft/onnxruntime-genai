@@ -927,7 +927,7 @@ DeviceSpan<float> Generator::GetLogits() {
 
 void Generator::SnapshotState() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  state_->SnapshotState();
+  state_->SnapshotState(search_->GetSequenceLength());
 }
 
 bool Generator::CanCropRecurrentState() const {

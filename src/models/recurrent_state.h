@@ -21,7 +21,7 @@ struct RecurrentState {
   // (unlike the attention KV cache), so a draft/verify step snapshots the state before
   // a speculative forward and restores it if the draft is rejected. Restore copies back
   // in place so buffer addresses stay stable (required by CUDA-graph replay).
-  void Snapshot();
+  void Snapshot(size_t position);
   void RestoreSnapshot();
 
   // Per-position recurrent-state cropping (lossless multi-token MTP). When the model is exported
@@ -54,6 +54,7 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> presents_;
   std::vector<std::unique_ptr<OrtValue>> snapshot_;  // Lazily-allocated copy of the live state for speculative rollback.
   bool snapshot_valid_{false};                       // Whether snapshot_ holds a valid captured state.
+  size_t snapshot_position_{};                       // Sequence length represented by snapshot_.
 
   // Per-position state window. When the model declares a rank-4 conv_state / rank-5
   // recurrent_state, axis 1 is a static window of W per-token states (see IsWindowed above).

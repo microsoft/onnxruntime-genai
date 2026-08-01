@@ -107,6 +107,9 @@ struct MtpGenerator {
   // int) into topk_tok_scratch_/topk_score_scratch_ (only k*num_rows values leave the GPU). Returns
   // false if the device has no TopKScores impl (caller falls back to the host ComputeSampledCategorical).
   bool TopKScoresRows(const void* logits, int onnx_type, int num_rows, DeviceInterface& dev);
+  // Apply the same min-length, repetition, and no-repeat-ngram transforms as Generator to one
+  // target-logit row. `row` is its index in the current main-model output.
+  std::span<const float> ProcessMainLogitsRow(std::span<const float> logits, int row);
   // Build one row's truncated (top_k/top_p/temperature) sparse distribution from the device top-k
   // scratch: softmax with temperature over the k sorted scores, then a top-p nucleus cutoff.
   void SparseFromTopKRow(int row, std::vector<int32_t>& idx, std::vector<float>& prob);
@@ -118,6 +121,7 @@ struct MtpGenerator {
   const Model& main_model_;
   const Model& mtp_model_;
 
+  std::shared_ptr<GeneratorParams> main_params_;
   std::unique_ptr<Generator> main_;  // main decoder generator
   std::unique_ptr<Generator> mtp_;   // MTP head generator (drafts)
   // State retains GeneratorParams via shared_from_this, so the head needs a distinct persistent
@@ -174,6 +178,7 @@ struct MtpGenerator {
   float temperature_{1.0f};    // sampling temperature
   std::mt19937 rng_;           // RNG for draft sampling + accept/reject + correction/bonus draws
   SampledCategorical sampled_scratch_;              // reused truncated-distribution scratch
+  std::unique_ptr<LogitsPenaltyProcessor> main_logits_penalties_;
   std::vector<std::vector<int32_t>> draft_idx_;     // per draft position: truncated draft support
   std::vector<std::vector<float>> draft_prob_;      // per draft position: truncated draft probs q_k
   std::vector<std::vector<int32_t>> target_idx_;    // per verify row: truncated target support

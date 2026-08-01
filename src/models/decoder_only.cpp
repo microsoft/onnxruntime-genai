@@ -111,9 +111,9 @@ void DecoderOnly_State::RewindTo(size_t index) {
     recurrent_state_->RewindTo(index);
 }
 
-void DecoderOnly_State::SnapshotState() {
+void DecoderOnly_State::SnapshotState(size_t position) {
   if (recurrent_state_)
-    recurrent_state_->Snapshot();
+    recurrent_state_->Snapshot(position);
 }
 
 bool DecoderOnly_State::HasCroppableRecurrentState() const {

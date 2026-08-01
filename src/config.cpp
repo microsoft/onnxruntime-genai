@@ -733,11 +733,14 @@ struct Mtp_Element : JSON::Element {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "num_hidden_layers") {
-      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_hidden_layers <= 0) throw std::out_of_range("num_hidden_layers must be > 0");
     } else if (name == "num_key_value_heads") {
-      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_key_value_heads <= 0) throw std::out_of_range("num_key_value_heads must be > 0");
     } else if (name == "head_size") {
-      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
     } else if (name == "main_hidden_states") {
       v_.main_hidden_states = JSON::Get<std::string_view>(value);
     } else {

@@ -491,14 +491,18 @@ __global__ void CopyStateSlotsKernel(const StateSlotDescGpu* __restrict__ descs,
   const uint64_t stride = static_cast<uint64_t>(gridDim.x) * kSlotCopyThreads;
   const uint64_t start = static_cast<uint64_t>(blockIdx.x) * kSlotCopyThreads + threadIdx.x;
 
-  const uint64_t vec_count = bytes >> 4;
-  auto* dst_vec = reinterpret_cast<uint4*>(dst_bytes);
-  const auto* src_vec = reinterpret_cast<const uint4*>(src_bytes);
-  for (uint64_t i = start; i < vec_count; i += stride) {
-    dst_vec[i] = src_vec[i];
+  uint64_t copied_bytes = 0;
+  if (((reinterpret_cast<uintptr_t>(src_bytes) | reinterpret_cast<uintptr_t>(dst_bytes)) & 0xF) == 0) {
+    const uint64_t vec_count = bytes >> 4;
+    auto* dst_vec = reinterpret_cast<uint4*>(dst_bytes);
+    const auto* src_vec = reinterpret_cast<const uint4*>(src_bytes);
+    for (uint64_t i = start; i < vec_count; i += stride) {
+      dst_vec[i] = src_vec[i];
+    }
+    copied_bytes = vec_count << 4;
   }
 
-  for (uint64_t i = (vec_count << 4) + start; i < bytes; i += stride) {
+  for (uint64_t i = copied_bytes + start; i < bytes; i += stride) {
     dst_bytes[i] = src_bytes[i];
   }
 }

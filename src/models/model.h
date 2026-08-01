@@ -39,7 +39,7 @@ struct State {
   // state at the current length; a later RewindTo(length) restores it (the attention KV
   // cache is rolled back the usual way). Used by MTP self-speculative decoding to undo a
   // rejected draft, since recurrent state cannot be partially cropped like KV cache.
-  virtual void SnapshotState() {}
+  virtual void SnapshotState(size_t position) { (void)position; }
 
   // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
   // state (recurrent_state_window > 1), the accepted prefix can be committed WITHOUT a replay
