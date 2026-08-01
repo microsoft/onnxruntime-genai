@@ -212,10 +212,13 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     drafts_.resize(num_speculative_tokens_);
     verify_tokens_.resize(num_speculative_tokens_ + 1);
     verify_argmax_.resize(num_speculative_tokens_ + 1);
-    // Per-size [1,j,H] hidden buffers (j=1..N) so the post-verify head refeed of the j accepted
-    // drafts runs as ONE batched head forward instead of one forward per token.
-    refeed_multi_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
-    for (int j = 1; j <= num_speculative_tokens_; ++j) {
+    merged_tokens_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
+    // Per-size [1,j,H] hidden buffers (j=1..N+1) so the post-verify head refeed of the j accepted
+    // drafts runs as ONE batched head forward instead of one forward per token. The greedy path
+    // additionally fuses the next step's first draft into that forward, so it needs j = a+1 rows
+    // (up to N+1); the sampling path uses j = a (up to N).
+    refeed_multi_.resize(static_cast<size_t>(num_speculative_tokens_) + 2);
+    for (int j = 1; j <= num_speculative_tokens_ + 1; ++j) {
       refeed_multi_[j] = std::make_shared<Tensor>(
         mtp_model_.p_device_inputs_,
         mtp_model_.session_info_.GetInputDataType(mtp_model_.config_->model.decoder.inputs.hidden_states));
@@ -277,18 +280,47 @@ void MtpGenerator::CaptureHeadFeedbackHidden() {
         "mtp_emit_hidden=true (missing 'hidden_states_out' output).");
   }
   const size_t row_bytes = head_out_hidden_->GetByteSpan().size();
-  // The head ran a single token, so hidden_states_out is [1,1,H]: take row 0.
+  // The head may have processed several tokens in one forward (the fused refeed+draft step), in
+  // which case hidden_states_out is [1,S,H]. The chain always feeds forward from the LAST row.
+  auto hh_info = head_hidden->GetTensorTypeAndShapeInfo();
+  const auto hh_shape = hh_info->GetShape();
+  const size_t hh_rows =
+      hh_shape.size() >= 2 ? static_cast<size_t>(hh_shape[hh_shape.size() - 2]) : 1;
+  const size_t last_row_offset = (hh_rows > 0 ? hh_rows - 1 : 0) * row_bytes;
   auto dst = head_out_hidden_->GetByteSpan();
   if (head_hidden->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
     // ExtraOutputs are not IO-bound, so ORT may allocate this output on the CPU. Stage it through
     // the destination's pinned host buffer rather than passing a host pointer to cudaMemcpy D2D.
     auto dst_cpu = dst.CpuSpan();
-    std::memcpy(dst_cpu.data(), head_hidden->GetTensorRawData(), row_bytes);
+    std::memcpy(dst_cpu.data(),
+                static_cast<const uint8_t*>(head_hidden->GetTensorRawData()) + last_row_offset,
+                row_bytes);
     dst.CopyCpuToDevice();
   } else {
     auto src = ByteWrapTensor(*mtp_model_.p_device_, *head_hidden);
-    dst.CopyFrom(src.subspan(0, row_bytes));
+    dst.CopyFrom(src.subspan(last_row_offset, row_bytes));
   }
+}
+
+int32_t MtpGenerator::DraftHeadStepMulti(const int32_t* tokens, int count) {
+  // The head's `hidden_states` input must already be set by the caller to a [1,count,H] buffer
+  // whose rows are MAIN-model hidden states for consecutive positions. One forward appends all
+  // `count` tokens to the head KV; only the last row's logits are needed (the draft for the token
+  // after tokens[count-1]) -- the earlier rows exist purely to re-materialize the accepted drafts.
+  mtp_->AppendTokens(cpu_span<const int32_t>(tokens, static_cast<size_t>(count)));
+  head_len_ += static_cast<size_t>(count);
+
+  // ArgMax synchronizes the head's logits producer before the feedback D2D copy below.
+  auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
+  int32_t draft = 0;
+  if (!mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
+                                    vocab_size_, &draft)) {
+    auto logits = logits_span.CopyDeviceToCpu();  // host fallback
+    draft = ArgmaxRow(logits.data(), vocab_size_);
+  }
+
+  CaptureHeadFeedbackHidden();
+  return draft;
 }
 
 int32_t MtpGenerator::DraftHeadStepSample(int32_t token, int k) {
@@ -520,6 +552,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     ArgmaxMainRows(last, 1, &next_token_);         // token predicted for position length_
   }
   has_pending_draft_ = false;
+  pending_refeed_count_ = -1;
   primed_ = true;
 }
 
@@ -609,9 +642,30 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // Step 0 feeds the main model's hidden (hidden_slice_ holds h paired with t) and appends the
   // committed token t to the head KV. Steps 1..N-1 feed the head's OWN post-norm hidden
   // (head_out_hidden_, captured by DraftHeadStep) + the previous draft -- speculative appends.
-  const size_t head_start = head_len_;
-  mtp_->SetHiddenStates(hidden_slice_);
-  drafts_[0] = DraftHeadStep(t);
+  //
+  // When the previous step left an accepted prefix pending, its refeed is FUSED into step 0: the
+  // accepted drafts and t are consecutive positions that all pair with MAIN-model hidden states,
+  // so ONE (a+1)-token head forward both re-materializes the drafts in the head KV and produces
+  // this step's first draft from its last row -- exactly what a separate refeed forward plus an
+  // M=1 draft forward produced, at one forward instead of two.
+  if (pending_refeed_count_ > 0) {
+    const int a_prev = pending_refeed_count_;
+    mtp_->RewindToLength(pending_refeed_head_len_);  // drop last step's speculative drafts
+    head_len_ = pending_refeed_head_len_;
+    merged_tokens_[a_prev] = t;  // last row: the token committed at the top of this step
+    mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
+    drafts_[0] = DraftHeadStepMulti(merged_tokens_.data(), a_prev + 1);
+  } else {
+    if (pending_refeed_count_ == 0) {
+      // Nothing was accepted last step: only the speculative drafts need dropping.
+      mtp_->RewindToLength(pending_refeed_head_len_);
+      head_len_ = pending_refeed_head_len_;
+    }
+    mtp_->SetHiddenStates(hidden_slice_);
+    drafts_[0] = DraftHeadStep(t);
+  }
+  pending_refeed_count_ = -1;
+  const size_t head_start = head_len_ - 1;  // head KV length before t was appended
   for (int k = 1; k < N; ++k) {
     mtp_->SetHiddenStates(head_out_hidden_);
     drafts_[k] = DraftHeadStep(drafts_[k - 1]);
@@ -667,30 +721,27 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     }
   }
 
-  // --- Roll the MTP head KV back to the committed tokens: keep t (fed with its main hidden), drop
-  //     the N-1 speculative drafts, then re-materialize the a accepted drafts with the main model's
-  //     hidden states in ONE batched head forward (instead of a separate forward per token).
-  //     Extract the head-refeed hiddens from the verify output BEFORE any main rewind overwrites
-  //     the hidden buffer. The refeed needs no argmax and no head-feedback hidden: the next step's
-  //     first draft is fed the main model's hidden (hidden_slice_), not the head's own. ---
-  mtp_->RewindToLength(head_start + 1);
-  head_len_ = head_start + 1;
+  // --- Capture the head refeed payload, but DEFER the forward. Re-materializing the a accepted
+  //     drafts in the head KV and drafting this step's successor both consume MAIN-model hidden
+  //     states over consecutive positions, so they fuse into a single (a+1)-token head forward
+  //     issued at the top of the next step (see the draft phase). Only the payload is captured
+  //     here, because the accepted drafts' hidden rows must be read out of the verify output
+  //     BEFORE a finalize replay overwrites it. The head KV rewind is deferred too -- nothing
+  //     reads the head state between steps. ---
+  pending_refeed_head_len_ = head_start + 1;  // keep t (fed with its main hidden), drop the drafts
+  pending_refeed_count_ = a;
   if (a > 0) {
-    Tensor& hbuf = *refeed_multi_[a];
+    // Rows 0..a-1 are contiguous in both the verify output and the merged buffer: one D2D copy.
+    // Row a is filled in by the finalize phase below from hidden_slice_.
+    Tensor& hbuf = *refeed_multi_[a + 1];
     const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
-    auto dst = hbuf.GetByteSpan();
     auto src = ByteWrapTensor(*main_model_.p_device_, *vhidden);
-    for (int k = 0; k < a; ++k)
-      dst.subspan(static_cast<size_t>(k) * row_bytes, row_bytes)
-          .CopyFrom(src.subspan(static_cast<size_t>(k) * row_bytes, row_bytes));
-    mtp_->SetHiddenStates(refeed_multi_[a]);
-    mtp_->AppendTokens(cpu_span<const int32_t>(drafts_.data(), a));  // d0..d_{a-1} with main hiddens
-    head_len_ = head_start + 1 + static_cast<size_t>(a);
+    hbuf.GetByteSpan()
+        .subspan(0, static_cast<size_t>(a) * row_bytes)
+        .CopyFrom(src.subspan(0, static_cast<size_t>(a) * row_bytes));
+    for (int k = 0; k < a; ++k) merged_tokens_[k] = drafts_[k];
   }
-  if (prof) {
-    HostPhaseProfiler::sync(*mtp_model_.p_device_);
-    g_host_prof.head_fwds += (a > 0) ? 1 : 0;
-  }
+  if (prof) HostPhaseProfiler::sync(*mtp_model_.p_device_);
   auto tp3 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   if (a == N) {
@@ -747,6 +798,17 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
     length_ += static_cast<size_t>(a) + 1;
     if (prof) ++g_host_prof.main_fwds;
+  }
+
+  // Row a of the fused refeed buffer pairs with next_token_ (committed at the top of the next
+  // step). Its hidden is whatever finalize produced in hidden_slice_ -- verify row a on the
+  // all-accept / direct-arena-commit paths, or the replay forward's row on the fallback paths.
+  if (pending_refeed_count_ > 0) {
+    Tensor& hbuf = *refeed_multi_[pending_refeed_count_ + 1];
+    const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
+    hbuf.GetByteSpan()
+        .subspan(static_cast<size_t>(pending_refeed_count_) * row_bytes, row_bytes)
+        .CopyFrom(hidden_slice_->GetByteSpan());
   }
 
   if (prof) {

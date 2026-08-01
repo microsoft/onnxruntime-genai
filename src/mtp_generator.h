@@ -67,6 +67,13 @@ struct MtpGenerator {
   // post-final-norm output (hidden_states_out, last row) into `head_out_hidden_` for the next
   // chained step, and returns the greedy draft (or 0 if need_draft is false).
   int32_t DraftHeadStep(int32_t token, bool need_draft = true);
+  // One MTP-head forward over `count` (hidden, token) pairs. The head's `hidden_states` input must
+  // already be set by the caller to a [1,count,H] buffer whose every row is a MAIN-model hidden.
+  // Appends all `count` tokens in a single forward, captures the head's own post-final-norm output
+  // at the LAST row into head_out_hidden_ for the next chained step, and returns the greedy draft
+  // for the token after tokens[count-1]. Used by the fused refeed+draft forward (see
+  // pending_refeed_count_).
+  int32_t DraftHeadStepMulti(const int32_t* tokens, int count);
   // Single-token (num_speculative_tokens == 1) draft/verify step (the original fast path).
   void GenerateStepSingle(int32_t t);
   // Multi-token (num_speculative_tokens > 1) chained draft/verify step: chains the single MTP
@@ -177,6 +184,17 @@ struct MtpGenerator {
   // instead of issuing a separate draft forward.
   int32_t pending_draft_{};
   bool has_pending_draft_{false};
+
+  // Deferred + fused head refeed (multi-token greedy path). Re-materializing the accepted drafts in
+  // the head KV and drafting the next step's first token are two head forwards that both consume
+  // MAIN-model hidden states over consecutive positions, so they are fused into ONE (a+1)-token
+  // head forward issued at the top of the next step: rows [d0..d_{a-1}, next_token_] with the
+  // matching hidden rows, last-row argmax = the first draft. The head KV is therefore left in its
+  // speculative state between steps and rewound lazily (nothing reads it in between).
+  // -1 = no pending refeed (fresh prompt / N==1 / sampling path).
+  int pending_refeed_count_{-1};
+  size_t pending_refeed_head_len_{0};   // head KV length to rewind to before the fused forward
+  std::vector<int32_t> merged_tokens_;  // [d0..d_{a-1}, next_token_] for the fused forward
 
   size_t forwards_{};
   size_t accepts_{};
