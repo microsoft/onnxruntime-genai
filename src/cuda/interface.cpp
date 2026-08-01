@@ -189,15 +189,7 @@ struct CudaBatchedSampler final : BatchedSampler {
         return params[lhs].p < params[rhs].p;
       return params[lhs].temperature < params[rhs].temperature;
     };
-    for (size_t index = 1; index < row_order_.size(); ++index) {
-      const int row = row_order_[index];
-      size_t insertion_index = index;
-      while (insertion_index > 0 && params_less(row, row_order_[insertion_index - 1])) {
-        row_order_[insertion_index] = row_order_[insertion_index - 1];
-        --insertion_index;
-      }
-      row_order_[insertion_index] = row;
-    }
+    std::sort(row_order_.begin(), row_order_.end(), params_less);
 
     for (int packed_row = 0; packed_row < batch_size; ++packed_row) {
       const int row = row_order_[packed_row];
