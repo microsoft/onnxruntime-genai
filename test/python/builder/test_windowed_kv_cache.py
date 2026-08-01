@@ -181,6 +181,7 @@ def _make_shape_model(ep, local_layers=()):
     model = Model.__new__(Model)
     model.ep = ep
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
     if local_layers is not None:
         model.is_local = lambda layer_id: layer_id in local_layers
     return model
@@ -252,6 +253,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     model.ep_attrs = {ep: {}}
     model.extra_options = {}
     model.use_paged_attention = False
+    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"
@@ -319,8 +321,6 @@ def test_genai_config_omits_sliding_window_without_a_window(monkeypatch, tmp_pat
 
 @pytest.mark.parametrize("ep", ["cuda", "trt-rtx", "cpu"])
 def test_genai_config_omits_sliding_window_when_opted_out(monkeypatch, tmp_path, ep):
-    config = _write_genai_config(
-        monkeypatch, tmp_path, ep, window_size=128, eps_with_windowed_kv_cache=set()
-    )
+    config = _write_genai_config(monkeypatch, tmp_path, ep, window_size=128, eps_with_windowed_kv_cache=set())
 
     assert "sliding_window" not in config["model"]["decoder"]
