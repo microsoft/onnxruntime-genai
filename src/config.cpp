@@ -439,6 +439,62 @@ struct IntArray_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+struct Int64Array_Element : JSON::Element {
+  explicit Int64Array_Element(std::vector<int64_t>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(static_cast<int64_t>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<int64_t>& v_;
+};
+
+struct SharedInitializer_Element : JSON::Element {
+  explicit SharedInitializer_Element(Config::Model::SharedInitializer& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "name") {
+      v_.name = JSON::Get<std::string_view>(value);
+    } else if (name == "data_file") {
+      v_.data_file = JSON::Get<std::string_view>(value);
+    } else if (name == "offset") {
+      v_.offset = JSON::Get<std::string_view>(value);
+    } else if (name == "length") {
+      v_.length = JSON::Get<std::string_view>(value);
+    } else if (name == "data_type") {
+      v_.data_type = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shape") {
+      return shape_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::SharedInitializer& v_;
+  Int64Array_Element shape_{v_.shape};
+};
+
+struct SharedInitializers_Element : JSON::Element {
+  explicit SharedInitializers_Element(std::vector<Config::Model::SharedInitializer>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& initializer = v_.emplace_back();
+    element_ = std::make_unique<SharedInitializer_Element>(initializer);
+    return *element_;
+  }
+
+ private:
+  std::vector<Config::Model::SharedInitializer>& v_;
+  std::unique_ptr<SharedInitializer_Element> element_;
+};
+
 struct StringStringMap_Element : JSON::Element {
   explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
 
@@ -675,6 +731,9 @@ struct Decoder_Element : JSON::Element {
       layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
       return *layer_types_;
     }
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -688,6 +747,7 @@ struct Decoder_Element : JSON::Element {
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
 struct MtpInputs_Element : JSON::Element {
@@ -778,12 +838,20 @@ struct Mtp_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Mtp& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
   MtpInputs_Element inputs_{v_.inputs};
   MtpOutputs_Element outputs_{v_.outputs};
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
 struct VisionInputs_Element : JSON::Element {

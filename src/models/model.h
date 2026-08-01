@@ -220,6 +220,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
@@ -242,6 +243,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
  protected:
   void CreateSessionOptions();
+  void AddSharedInitializers();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
