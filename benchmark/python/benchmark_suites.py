@@ -63,7 +63,7 @@ SUPPORTED_SUITES = {
     "humaneval",
     "humanevalplus",
     "mbppplus",
-    "bigcodebench",
+    # "bigcodebench",  # Temporarily disabled pending a compatible evaluator environment.
     "livecodebench",
 }
 SUITE_ALIASES = {
@@ -72,14 +72,14 @@ SUITE_ALIASES = {
     "human-eval-plus": "humanevalplus",
     "mbpp+": "mbppplus",
     "mbpp-plus": "mbppplus",
-    "bigcodebench-hard": "bigcodebench",
+    # "bigcodebench-hard": "bigcodebench",
     "live-code-bench": "livecodebench",
 }
 CODE_EXECUTION_SUITES = {
     "humaneval",
     "humanevalplus",
     "mbppplus",
-    "bigcodebench",
+    # "bigcodebench",
     "livecodebench",
 }
 LONG_BENCH_TASKS = {
@@ -678,10 +678,11 @@ def load_additional_suite_prompts(args, suites):
         prompts.extend(load_humanevalplus_prompts(args.humanevalplus_problems))
     if "mbppplus" in suites:
         prompts.extend(load_mbppplus_prompts(args.mbppplus_problems))
-    if "bigcodebench" in suites:
-        prompts.extend(load_bigcodebench_prompts(
-            args.bigcodebench_problems, args.bigcodebench_subset
-        ))
+    # BigCodeBench is temporarily disabled; keep its loader dormant for later use.
+    # if "bigcodebench" in suites:
+    #     prompts.extend(load_bigcodebench_prompts(
+    #         args.bigcodebench_problems, args.bigcodebench_subset
+    #     ))
     if "livecodebench" in suites:
         prompts.extend(load_livecodebench_prompts(
             args.livecodebench_problems, args.livecodebench_release
@@ -1346,8 +1347,8 @@ def score_completion(item, token_ids, timeout, cache, decode):
         result = _score_longbench(item, completion)
     elif item["task"] in {"humanevalplus", "mbppplus"}:
         result = _score_evalplus(item, completion, timeout)
-    elif item["task"].startswith("bigcodebench/"):
-        result = _score_bigcodebench(item, completion, timeout)
+    # elif item["task"].startswith("bigcodebench/"):
+    #     result = _score_bigcodebench(item, completion, timeout)
     elif item["task"] == "livecodebench":
         result = _score_livecodebench(item, completion, timeout)
     else:

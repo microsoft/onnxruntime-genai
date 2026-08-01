@@ -1251,7 +1251,7 @@ def main():
                     help="temporarily use standard decoding after repeated zero-accept rounds")
     ap.add_argument("--suites", default="mtbench",
                     help="comma-separated suites: mtbench,gsm8k,ifeval,math500,longbench,"
-                         "humaneval,humanevalplus,mbppplus,bigcodebench,livecodebench")
+                         "humaneval,humanevalplus,mbppplus,livecodebench")
     # ---- fixed run configuration (NOT swept) ----
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="new tokens for Spec-Bench/builtin prompts; quality suites use pinned task budgets")
@@ -1321,10 +1321,11 @@ def main():
                     help="number of HumanEval+ problems; 0 uses all 164")
     ap.add_argument("--mbppplus-problems", type=int, default=378,
                     help="number of MBPP+ problems; 0 uses all 378")
-    ap.add_argument("--bigcodebench-problems", type=int, default=148,
-                    help="number of BigCodeBench-Hard problems; 0 uses all 148")
-    ap.add_argument("--bigcodebench-subset", choices=["hard"], default="hard",
-                    help="pinned BigCodeBench subset")
+    # BigCodeBench is temporarily disabled pending a compatible evaluator environment.
+    # ap.add_argument("--bigcodebench-problems", type=int, default=148,
+    #                 help="number of BigCodeBench-Hard problems; 0 uses all 148")
+    # ap.add_argument("--bigcodebench-subset", choices=["hard"], default="hard",
+    #                 help="pinned BigCodeBench subset")
     ap.add_argument("--livecodebench-problems", type=int, default=100,
                     help="number of newest LiveCodeBench problems; 0 uses the full release")
     ap.add_argument("--livecodebench-release", default="release_v6",
@@ -1402,7 +1403,7 @@ def main():
         "--humaneval-problems": args.humaneval_problems,
         "--humanevalplus-problems": args.humanevalplus_problems,
         "--mbppplus-problems": args.mbppplus_problems,
-        "--bigcodebench-problems": args.bigcodebench_problems,
+        # "--bigcodebench-problems": args.bigcodebench_problems,
         "--livecodebench-problems": args.livecodebench_problems,
     }
     for option, value in count_options.items():
