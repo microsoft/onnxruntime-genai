@@ -4,6 +4,7 @@
 #include "request.h"
 
 #include "engine.h"
+#include "sequence_positions.h"
 #include "../search.h"
 
 namespace Generators {
@@ -100,6 +101,28 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
+}
+
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens(bool allow_chunking) {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size, allow_chunking);
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+}
+
 int32_t Request::UnseenToken() {
   if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
@@ -113,8 +136,7 @@ bool Request::HasUnseenTokens() const {
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
-  return unprocessed_tokens;
+  return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
 }
 
 std::span<const int32_t> Request::UnprocessedTokensCpu() const {
@@ -163,7 +185,8 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
+  // Chunk-aware: with chunked prefill only part of the prompt was processed this step.
+  AdvanceChunk();
   is_prefill_ = false;
 
   search_->SetLogits(logits);

@@ -5,6 +5,8 @@
 
 #include <numeric>
 
+#include "sequence_positions.h"
+
 namespace Generators {
 
 namespace {
@@ -54,20 +56,22 @@ size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
                          });
 }
 
+// Slots the request needs once its whole prompt is in the cache. Used for admission only: the pool
+// reserves the blocks for the entire prompt up front, so a request is never accepted and then left
+// stalled part way through its prefill.
+size_t TotalSlots(const std::shared_ptr<Request>& request) {
+  return SlotsForWholeSequence(request->CurrentSequenceLength());
+}
+
 // Number of KV slots the model will have addressed once the pending step has run, i.e. one per
 // token whose key and value live in the cache afterwards.
 //
-// This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes the
-// unprocessed tokens at absolute positions [past, past + unprocessed), so the cache must own
-// `past + unprocessed` slots. CurrentSequenceLength() already counts the unprocessed tokens for
-// a prefill request and excludes them for a generation request, hence the branch.
-//
-// Counting appended tokens instead leaves the cache exactly one slot short on every decode step.
-// That stays invisible while the last block still has room, and turns into an out-of-bounds
-// block-table entry the moment a sequence length lands on a block boundary.
-size_t RequiredSlots(const std::shared_ptr<Request>& request) {
-  const size_t sequence_length = request->CurrentSequenceLength();
-  return request->IsPrefill() ? sequence_length : sequence_length + request->UnprocessedTokens().size();
+// This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes this
+// step's tokens at absolute positions [processed, processed + scheduled), so the cache must own
+// `processed + scheduled` slots. With a chunked prefill only part of the prompt is covered, and
+// the remaining chunks extend it on later steps.
+size_t PendingSlots(const std::shared_ptr<Request>& request) {
+  return SlotsAfterStep(request->ProcessedSequenceLength(), request->UnprocessedTokens().size());
 }
 
 }  // namespace
@@ -112,7 +116,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
-  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(RequiredSlots(request));
+  return block_pool_->AvailableBlocks() >= block_pool_->BlocksNeeded(TotalSlots(request));
 }
 
 void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
@@ -124,7 +128,7 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
   // used in AppendTokens() once the tokens are actually written to the cache. Marking them here
   // too would count the prompt twice and force the pool to be sized at roughly twice the
   // capacity it can actually use.
-  auto reserved_blocks = block_pool_->ReserveBlocks(RequiredSlots(request));
+  auto reserved_blocks = block_pool_->ReserveBlocks(TotalSlots(request));
   block_tables_.emplace_back(BlockTable{request, std::move(reserved_blocks)});
 }
 
@@ -137,7 +141,7 @@ bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const
     throw std::runtime_error("Given request is not found in the cache.");
   }
 
-  const size_t required_slots = RequiredSlots(request);
+  const size_t required_slots = PendingSlots(request);
   const size_t used_slots = UsedSlots(block_table_it->blocks);
   if (required_slots <= used_slots) {
     return true;
@@ -160,7 +164,7 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
                                            });
   assert(block_table_it != block_tables_.end());
 
-  const size_t required_slots = RequiredSlots(request);
+  const size_t required_slots = PendingSlots(request);
   const size_t used_slots = UsedSlots(block_table_it->blocks);
   if (required_slots <= used_slots) {
     return;

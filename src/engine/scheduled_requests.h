@@ -31,10 +31,14 @@ struct BatchedSamplingPlan {
 };
 
 struct ScheduledRequests {
+  // `allow_chunked_prefill` lets a request spread a prompt longer than its `search.chunk_size` over
+  // several steps. Only the paged cache can serve that, since it is the only one that can hold a
+  // partly written sequence.
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
                     std::shared_ptr<Model> model,
                     BatchedSampler* batched_sampler,
-                    BatchedSamplingPlan* sampling_plan);
+                    BatchedSamplingPlan* sampling_plan,
+                    bool allow_chunked_prefill = false);
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
@@ -72,6 +76,8 @@ struct ScheduledRequests {
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};
+  // Whether each request finished its prompt this step, snapshotted before the cursors move.
+  std::vector<bool> chunk_complete_;
 };
 
 }  // namespace Generators
