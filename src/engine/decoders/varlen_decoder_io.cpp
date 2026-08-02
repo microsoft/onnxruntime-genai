@@ -101,7 +101,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
+    auto input_ids = request->UnprocessedTokensCpu();
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
     if (request->IsPrefill()) {
@@ -228,14 +228,36 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
                                           vocab_size};
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;
+  DeviceSpan<float> logits_fp32_span;
   if (requires_cast) {
     logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_fp32_->CreateTensor(logits_shape);
+    // Wrapped once so that every row below is a subspan of the same allocation: GetDeviceSpan()
+    // wraps the tensor memory afresh on each call, which would leave the rows unrelated.
+    logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
+  }
+
+  // On a pure decode step every request contributes exactly one token, so the rows the search needs
+  // are already the first `batch` rows of the output and the whole batch converts in one launch
+  // instead of one launch per request.
+  bool rows_are_contiguous = !valid_token_indices.empty();
+  for (size_t i = 0; i < valid_token_indices.size() && rows_are_contiguous; ++i) {
+    rows_are_contiguous = valid_token_indices[i] == i;
+  }
+
+  if (requires_cast && rows_are_contiguous) {
+    model_.p_device_inputs_->Cast(logits_bytes.Span().data(), logits_fp32_span.Span().data(),
+                                  active_logits_->GetType(), Ort::TypeToTensorType<float>,
+                                  valid_token_indices.size() * static_cast<size_t>(vocab_size));
+    for (size_t i = 0; i < valid_token_indices.size(); ++i) {
+      logits_vector.push_back(logits_fp32_span.subspan(i * vocab_size, vocab_size));
+    }
+    return logits_vector;
   }
 
   for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
     if (requires_cast) {
-      auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
+      auto logits_of_last_token_fp32 = logits_fp32_span.subspan(i * vocab_size, vocab_size);
       void* src_data = logits_bytes_vector[i].Span().data();
       void* dst_data = logits_of_last_token_fp32.Span().data();
       model_.p_device_inputs_->Cast(src_data, dst_data, active_logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);

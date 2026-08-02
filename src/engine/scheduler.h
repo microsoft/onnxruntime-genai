@@ -21,7 +21,7 @@ struct Scheduler {
    * @param model A shared pointer to the Model object to be used by the Scheduler.
    * @param cache_manager A shared pointer to the CacheManager for managing cache states.
    */
-  Scheduler() = default;
+  explicit Scheduler(std::shared_ptr<Model> model);
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
@@ -61,6 +61,14 @@ struct Scheduler {
   virtual bool HasPendingRequests() const = 0;
 
   virtual ~Scheduler() = default;
+
+ protected:
+  BatchedSampler* GetBatchedSampler() const { return batched_sampler_.get(); }
+  BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
+
+ private:
+  std::unique_ptr<BatchedSampler> batched_sampler_;
+  BatchedSamplingPlan batched_sampling_plan_;
 };
 
 struct StaticBatchScheduler : Scheduler {
