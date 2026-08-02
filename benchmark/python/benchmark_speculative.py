@@ -526,7 +526,15 @@ def _normalized_provider_options(decoder):
     return result
 
 
-def _prefix_decoder_paths(decoder, prefix: str, context: str) -> None:
+def _normalize_provider_name(name: str | None) -> str:
+    normalized = (name or "").lower()
+    suffix = "executionprovider"
+    return normalized[:-len(suffix)] if normalized.endswith(suffix) else normalized
+
+
+def _prefix_decoder_paths(decoder, prefix: str, context: str,
+                          provider: str | None = None,
+                          source_dir: str | None = None) -> None:
     """Rewrite every decoder graph path below its staged model-tree prefix."""
     path_count = 0
     if decoder.get("filename"):
@@ -539,6 +547,20 @@ def _prefix_decoder_paths(decoder, prefix: str, context: str) -> None:
             filename = _safe_relative_path(
                 stage["filename"], f"{context}.pipeline[{index}].filename")
             stage["filename"] = f"{prefix}/{filename}"
+            path_count += 1
+    if not path_count and _normalize_provider_name(provider) == "qnn":
+        session_options = decoder.get("session_options", {})
+        context_file = session_options.get("ep.context_file_path")
+        if context_file:
+            context_file = _safe_relative_path(
+                context_file, f"{context}.session_options.ep.context_file_path")
+            source = os.path.join(source_dir or "", *context_file.split("/"))
+            if not source_dir or not os.path.isfile(source):
+                raise FileNotFoundError(
+                    f"{context} QNN context model does not exist: {source}")
+            staged_context_file = f"{prefix}/{context_file}"
+            decoder["filename"] = staged_context_file
+            session_options["ep.context_file_path"] = staged_context_file
             path_count += 1
     if not path_count:
         raise ValueError(f"{context} does not define a decoder filename or pipeline")
@@ -567,9 +589,13 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
             "speculative runs remain comparable.")
 
     cfg["model"]["type"] = "speculative"
-    _prefix_decoder_paths(cfg["model"]["decoder"], "target", "target model.decoder")
+    _prefix_decoder_paths(
+        cfg["model"]["decoder"], "target", "target model.decoder",
+        provider=provider, source_dir=target_path)
     draft_block = copy.deepcopy(draft_cfg["model"]["decoder"])
-    _prefix_decoder_paths(draft_block, "draft", "draft model.decoder")
+    _prefix_decoder_paths(
+        draft_block, "draft", "draft model.decoder",
+        provider=provider, source_dir=draft_path)
     cfg["model"]["draft"] = draft_block
     # `speculative` is a sibling of `model`/`search` (placement-sensitive parser).
     # K is overridden per-run via set_speculative_options, so this default is moot.
@@ -596,12 +622,10 @@ def build_spec_config(target_path: str, draft_path: str, out_dir: str,
             # SECOND entry that normalizes to the same name at load time, so the EP is added twice
             # ("Provider ... has already been registered"). Normalizing both sides updates the stock
             # entry in place instead.
-            def norm(n: str) -> str:
-                n = n.lower()
-                return n[:-len("executionprovider")] if n.endswith("executionprovider") else n
             entry = None
             for item in po_list:
-                if item and norm(next(iter(item))) == norm(provider):
+                if (item and _normalize_provider_name(next(iter(item)))
+                        == _normalize_provider_name(provider)):
                     entry = item[next(iter(item))]
                     break
             if entry is None:
