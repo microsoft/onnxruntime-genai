@@ -8,6 +8,7 @@
 # -------------------------------------------------------------------------
 from .base import Model
 from .chatglm import ChatGLMModel
+from .deepseek import DeepSeekV4Model
 from .ernie import ErnieModel
 from .gemma import Gemma2Model, Gemma3Model, GemmaModel
 from .gptoss import GPTOSSModel
@@ -35,6 +36,7 @@ from .whisper import WhisperModel
 
 __all__ = [
     "ChatGLMModel",
+    "DeepSeekV4Model",
     "ErnieModel",
     "GPTOSSModel",
     "Gemma2Model",

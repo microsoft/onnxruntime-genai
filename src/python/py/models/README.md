@@ -57,7 +57,8 @@ The tool currently supports the following model architectures.
 
 - AMD OLMo
 - ChatGLM
-- DeepSeek
+- DeepSeek (R1 distill variants via Llama/Qwen)
+- DeepSeek V4 Flash
 - ERNIE 4.5
 - Gemma
 - gpt-oss
