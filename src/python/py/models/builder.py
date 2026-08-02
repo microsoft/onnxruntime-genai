@@ -19,6 +19,7 @@ import onnx_ir as ir
 import torch
 from builders import (
     ChatGLMModel,
+    DeepSeekV4FlashModel,
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
@@ -464,6 +465,8 @@ def create_model(
         print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "DeepseekV4ForCausalLM":
+        onnx_model = DeepSeekV4FlashModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":

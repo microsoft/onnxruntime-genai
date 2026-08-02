@@ -1,0 +1,1149 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+"""ONNX graph builder for DeepSeek-V4-Flash.
+
+The architecture is composed node-by-node (no tracing/dynamo) so that fused
+contrib ops can be emitted directly instead of being pattern-matched out of a
+decomposed subgraph later.
+
+Novel pieces relative to a standard decoder, and how each is emitted:
+
+* Hyper-Connections (``hc_mult`` parallel residual streams mixed by a Sinkhorn
+  normalised routing matrix) -- plain ONNX ops, unrolled.
+* KV compressor (gated pooling of ``ratio`` consecutive tokens into one latent
+  row, with overlapping windows when ``ratio == 4``) -- plain ONNX ops.
+* Sliding-window MQA over a latent row with a learned per-head softmax sink and
+  *inverse* RoPE applied to the attention output.
+* MoE with ``sqrtsoftplus`` scoring, ``noaux_tc`` selection bias and hash routing
+  on the first ``num_hash_layers`` layers. Routing is computed in the graph and
+  handed to ``com.microsoft.QMoE`` as log-domain router logits, so the stock
+  kernel's softmax/top-k reproduces the reference weights exactly without needing
+  a new scoring mode in the kernel.
+
+Caches are fixed capacity: the sliding-window KV cache is a ring of exactly
+``sliding_window`` rows and the compressed cache is indexed directly by slot, so
+every cache tensor has a static shape.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+
+import onnx_ir as ir
+import torch
+from onnx_ir.tensor_adapters import to_torch_dtype
+
+from .base import Model
+from .safetensors_store import ExternalDataWriter
+
+NEG_INF = -1e30
+FP4_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+
+
+def mxfp4_quantize(w: torch.Tensor):
+    """[E, N, K] float -> (blocks [E, N, K/32, 16] uint8, ue8m0 scales [E, N, K/32] uint8).
+
+    Each byte holds two adjacent K codes, even K in the low nibble.
+    """
+    e, n, k = w.shape
+    wb = w.float().reshape(e, n, k // 32, 32)
+    amax = wb.abs().amax(-1, keepdim=True)
+    exp = torch.ceil(torch.log2((amax / 6.0).clamp_min(1e-30)))
+    exp = torch.where(amax > 0, exp, torch.zeros_like(exp)).clamp(-127, 127)
+    q = wb / torch.exp2(exp)
+    code = (q.abs().unsqueeze(-1) - FP4_LUT.to(w.device)).abs().argmin(-1).to(torch.uint8)
+    code = code | ((q < 0).to(torch.uint8) << 3)
+    blocks = (code[..., 0::2] | (code[..., 1::2] << 4)).reshape(e, n, k // 32, 16)
+    return blocks, (exp.squeeze(-1) + 127).to(torch.uint8)
+
+
+def mxfp4_dequantize(blocks, scales):
+    """Inverse of :func:`mxfp4_quantize` -> [E, N, K] float."""
+    e, n, kb, _ = blocks.shape
+    code = torch.stack([blocks & 0x0F, blocks >> 4], dim=-1).reshape(e, n, kb, 32)
+    mag = FP4_LUT.to(blocks.device)[(code & 0x07).long()]
+    val = torch.where((code & 0x08) > 0, -mag, mag)
+    return (val * torch.exp2(scales.float() - 127).unsqueeze(-1)).reshape(e, n, kb * 32)
+
+
+def pack_for_qmoe(blocks):
+    """[E, N, K/32, 16] -> QMoE's [E, K, N/2], even N in the low nibble."""
+    even_n, odd_n = blocks[:, 0::2], blocks[:, 1::2]
+    packed = torch.stack((((odd_n & 0x0F) << 4) | (even_n & 0x0F),
+                          ((odd_n >> 4) << 4) | (even_n >> 4)), dim=-1)
+    return packed.permute(0, 2, 3, 4, 1).reshape(
+        blocks.shape[0], blocks.shape[2] * 32, blocks.shape[1] // 2).contiguous()
+FP8_MAX = 448.0
+FP8_BLOCK = 128
+INT64_MAX = 9223372036854775807
+
+B = "batch_size"
+S = "sequence_length"
+
+
+class DeepSeekV4FlashModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # `intermediate_size` is absent from the checkpoint config; the experts use
+        # `moe_intermediate_size` and there is no dense FFN.
+        if not hasattr(config, "intermediate_size"):
+            config.intermediate_size = config.moe_intermediate_size
+        # Smoke-testing the real checkpoint is much cheaper with a prefix of the
+        # layers; the graph is otherwise identical.
+        if extra_options.get("dsv4_num_layers"):
+            config.num_hidden_layers = int(extra_options["dsv4_num_layers"])
+
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        c = config
+        self.dim = c.hidden_size
+        self.n_heads = c.num_attention_heads
+        self.head_dim = c.head_dim
+        self.rope_head_dim = c.qk_rope_head_dim
+        self.nope_dim = self.head_dim - self.rope_head_dim
+        self.q_lora_rank = c.q_lora_rank
+        self.o_groups = c.o_groups
+        self.o_lora_rank = c.o_lora_rank
+        self.window = c.sliding_window
+        self.eps = c.rms_norm_eps
+        self.softmax_scale = self.head_dim ** -0.5
+
+        self.hc = c.hc_mult
+        self.hc_mix_dim = (2 + self.hc) * self.hc
+        self.hc_iters = c.hc_sinkhorn_iters
+        self.hc_eps = c.hc_eps
+
+        self.n_experts = c.n_routed_experts
+        self.topk = c.num_experts_per_tok
+        self.moe_inter = c.moe_intermediate_size
+        self.route_scale = c.routed_scaling_factor
+        self.swiglu_limit = c.swiglu_limit
+        self.n_hash_layers = c.num_hash_layers
+
+        self.compress_ratios = list(c.compress_ratios)[: self.num_layers]
+        self.rope_theta = c.rope_theta
+        self.compress_rope_theta = c.compress_rope_theta
+        rs = c.rope_scaling
+        self.rope_factor = rs["factor"]
+        self.beta_fast = rs["beta_fast"]
+        self.beta_slow = rs["beta_slow"]
+
+        self.max_seq_len = int(extra_options.get("dsv4_max_seq_len", 4096))
+        self.moe_impl = extra_options.get("dsv4_moe_impl", "qmoe")
+
+        # Hybrid parallelism, matching what vLLM runs for this checkpoint:
+        # tensor-parallel for attention and the shared expert, expert-parallel
+        # for the routed experts.  One graph is emitted per rank; the ranks are
+        # stitched together at run time by two `com.microsoft.AllReduce` nodes
+        # per layer (after the output projection, and after the FFN).
+        self.world = int(extra_options.get("dsv4_tp_world", 1))
+        self.rank = int(extra_options.get("dsv4_tp_rank", 0))
+        if self.world > 1:
+            for what, n in (("o_groups", self.o_groups), ("heads", self.n_heads),
+                            ("experts", self.n_experts), ("moe_inter", self.moe_inter)):
+                if n % self.world:
+                    raise ValueError(f"dsv4_tp_world={self.world} does not divide {what}={n}")
+        self.n_heads_local = self.n_heads // self.world
+        self.o_groups_local = self.o_groups // self.world
+        self.n_experts_local = self.n_experts // self.world
+        self.moe_inter_local = self.moe_inter // self.world
+        self.expert_lo = self.rank * self.n_experts_local
+
+        self.sd: dict[str, torch.Tensor] = {}
+
+        # Streaming export: every initializer is appended to the external-data
+        # blob as soon as it is built and the checkpoint is read one tensor at a
+        # time, so a 150 GiB model can be emitted layer by layer without ever
+        # being resident.  The blob is written into the cache dir and moved next
+        # to the model by `save_model`; `location` is a bare basename so the
+        # references survive the move.
+        self.stream = extra_options.get("dsv4_stream_weights", "1") not in ("0", 0, False)
+        self.writer = (ExternalDataWriter(os.path.join(cache_dir, self.filename + ".data"))
+                       if self.stream else None)
+
+        ckpt = extra_options.get("dsv4_checkpoint")
+        if ckpt:
+            # Serves the builder's key names over the raw checkpoint and repacks
+            # the fp4 experts, reading only this rank's slice of them.
+            from .deepseek_v4_weights import DSV4Weights
+
+            self.sd = DSV4Weights(
+                ckpt,
+                expert_range=(self.expert_lo, self.expert_lo + self.n_experts_local),
+                device=extra_options.get("dsv4_repack_device", "cpu"),
+            )
+
+        self._make_dsv4_io()
+
+    def shard(self, t, axis):
+        """Take this rank's contiguous slice of ``t`` along ``axis``."""
+        if self.world == 1:
+            return t
+        n = t.shape[axis] // self.world
+        return t.narrow(axis, self.rank * n, n).contiguous()
+
+    def eshard(self, t, axis):
+        """Like :meth:`shard`, but a no-op when the store already narrowed the
+        experts to this rank (the real checkpoint reads only its own slice)."""
+        return t if getattr(self.sd, "pre_sharded", False) else self.shard(t, axis)
+
+    def all_reduce(self, name, x, dtype, shape):
+        if self.world == 1:
+            return x
+        self.make_node("AllReduce", inputs=[x], outputs=[name], name=name, domain="com.microsoft")
+        self.make_value(name, dtype, shape=shape)
+        return name
+
+    # ------------------------------------------------------------------ #
+    # graph I/O
+    # ------------------------------------------------------------------ #
+
+    def coff(self, ratio):
+        return 2 if ratio == 4 else 1
+
+    def state_len(self, ratio):
+        """Rolling raw-projection buffer; overlapping windows need two windows."""
+        return self.coff(ratio) * ratio
+
+    def comp_capacity(self, ratio):
+        return self.max_seq_len // ratio + 2
+
+    def _make_dsv4_io(self):
+        self.input_names = {"input_ids": "input_ids", "past_len": "past_len"}
+        self.input_types = {"input_ids": ir.DataType.INT64, "past_len": ir.DataType.INT64}
+        self.input_shapes = {"input_ids": [B, S], "past_len": []}
+        self.output_names = {"logits": "logits"}
+        self.output_types = {"logits": ir.DataType.FLOAT}
+        self.output_shapes = {"logits": [B, S, self.vocab_size]}
+
+        self.cache_spec = []  # (layer_id, key)
+        for i, r in enumerate(self.compress_ratios):
+            entries = [("kv", self.io_dtype, [B, self.window, self.head_dim])]
+            if r:
+                st = [B, self.state_len(r), self.coff(r) * self.head_dim]
+                entries += [
+                    ("comp", self.io_dtype, [B, self.comp_capacity(r), self.head_dim]),
+                    ("cstate_kv", ir.DataType.FLOAT, st),
+                    ("cstate_score", ir.DataType.FLOAT, st),
+                ]
+            for k, dt, shape in entries:
+                self.cache_spec.append((i, k))
+                self.input_names[f"past_{k}_{i}"] = f"past_{k}_{i}"
+                self.input_types[f"past_{k}_{i}"] = dt
+                self.input_shapes[f"past_{k}_{i}"] = shape
+                self.output_names[f"present_{k}_{i}"] = f"present_{k}_{i}"
+                self.output_types[f"present_{k}_{i}"] = dt
+                self.output_shapes[f"present_{k}_{i}"] = shape
+
+    def make_key_value_cache_shape(self, layer_id, shape):
+        return shape
+
+    # ------------------------------------------------------------------ #
+    # emission helpers
+    # ------------------------------------------------------------------ #
+
+    def op(self, op_type, inputs, name, dtype=None, shape=None, domain="", **attrs):
+        out = f"{name}/output_0"
+        self.make_node(op_type, inputs=inputs, outputs=[out], name=name, domain=domain, **attrs)
+        self.make_value(out, dtype, shape=shape)
+        return out
+
+    def const(self, dtype: str, value):
+        return f"/model/constants/{dtype}/{value!r}"
+
+    def init(self, tensor, name, to=None):
+        if name not in self.values:
+            if isinstance(tensor, ir.ExternalTensor):
+                value = self.make_value(name, tensor.dtype, tensor.shape)
+                value.const_value = tensor
+                self.model.graph.register_initializer(value)
+            elif self.writer is not None and isinstance(tensor, torch.Tensor):
+                tensor = tensor.detach()
+                if to is not None:
+                    tensor = tensor.to(to_torch_dtype(to))
+                self.init(self.writer.add(tensor.contiguous(), name), name)
+            else:
+                if isinstance(tensor, torch.Tensor):
+                    tensor = tensor.detach().contiguous()
+                self.make_initializer(tensor, name, to=to)
+        return name
+
+    def init_w(self, key, to=None):
+        """Register checkpoint tensor ``key`` under its own name."""
+        return self.init(self.sd[key], key, to=to)
+
+    def proj(self, name, x, key, shape, shard_axis=None):
+        """``x @ W.T`` for a checkpoint weight stored as ``[N, K]``.
+
+        The checkpoint keeps these projections in block-scaled fp8, which
+        ``MatMulBlockQuantizedFp8Weight`` consumes in that exact layout -- no
+        transpose and no dequantization.  Unquantized checkpoints (the parity
+        test model) fall back to a transposed initializer and a plain MatMul.
+        """
+        io = self.io_dtype
+        q = self.sd.qweight(key) if hasattr(self.sd, "qweight") else None
+        if q is None:
+            w = self.sd[key]
+            if shard_axis is not None:
+                w = self.shard(w, shard_axis)
+            return self.op("MatMul", [x, self.init(w.T, f"{key}/T", to=io)], name, io, shape)
+        w, scale = q
+        if shard_axis is not None:
+            w = self.shard(w, shard_axis)
+            # Row scales follow N; along K they follow the 128-wide blocks.
+            scale = self.shard(scale, shard_axis)
+        return self.op("MatMulBlockQuantizedFp8Weight",
+                       [x, self.init(w, f"{key}/q"), self.init(scale, f"{key}/s")],
+                       name, io, shape, domain="com.microsoft", block_size=FP8_BLOCK)
+
+    def cast(self, name, x, dtype, shape=None):
+        return self.op("Cast", [x], name, dtype, shape, to=dtype)
+
+    def reshape(self, name, x, dims, dtype, shape):
+        """dims is baked into a constant (0 = copy input dim, -1 = infer).
+
+        Shape operands must be Constant nodes rather than initializers: everything
+        is written to external data, and ORT's shape inference refuses to read
+        external tensors.
+        """
+        return self.op("Reshape", [x, self.const("INT64", list(dims))], name, dtype, shape)
+
+    def dyn_reshape(self, name, x, prefix_value, tail_dims, dtype, shape):
+        """Reshape to ``concat(prefix_value, tail_dims)`` for [batch, seq, ...] targets."""
+        t = self.const("INT64", list(tail_dims))
+        full = self.op("Concat", [prefix_value, t], f"{name}/cat", ir.DataType.INT64,
+                       [2 + len(tail_dims)], axis=0)
+        return self.op("Reshape", [x, full], name, dtype, shape)
+
+    def slice1(self, name, x, start, end, dtype, shape, axis=-1):
+        return self.op("Slice", [x, self.const("INT64", [start]), self.const("INT64", [end]),
+                                 self.const("INT64", [axis])], name, dtype, shape)
+
+    def floordiv(self, name, num, den, shape):
+        """Floor division for possibly negative int64 numerators (ONNX Div truncates)."""
+        n = self.op("Cast", [num], f"{name}/nd", ir.DataType.DOUBLE, shape, to=ir.DataType.DOUBLE)
+        q = self.op("Div", [n, self.const("DOUBLE", float(den))], f"{name}/div",
+                    ir.DataType.DOUBLE, shape)
+        f = self.op("Floor", [q], f"{name}/floor", ir.DataType.DOUBLE, shape)
+        return self.op("Cast", [f], name, ir.DataType.INT64, shape, to=ir.DataType.INT64)
+
+    def scalar_init(self, value, name, dtype=torch.float32):
+        return self.init(torch.tensor(value, dtype=dtype), name)
+
+    def unsq(self, name, x, axes, dtype, shape):
+        return self.op("Unsqueeze", [x, self.const("INT64", axes)], name, dtype, shape)
+
+    # ------------------------------------------------------------------ #
+    # rotary
+    # ------------------------------------------------------------------ #
+
+    def _rope_tables(self, base, original_seq_len):
+        """cos/sin already expanded to the full rotary width.
+
+        Storing ``repeat_interleave(cos, 2)`` lets the interleaved-pair rotation be
+        written as ``x * cos + (x @ R) * sin`` with a constant signed permutation R,
+        which avoids reshaping a dynamically shaped tensor.
+        """
+        dim = self.rope_head_dim
+        freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        if original_seq_len > 0:
+            def corr_dim(nrot):
+                return dim * math.log(original_seq_len / (nrot * 2 * math.pi)) / (2 * math.log(base))
+
+            low = max(math.floor(corr_dim(self.beta_fast)), 0)
+            high = min(math.ceil(corr_dim(self.beta_slow)), dim - 1)
+            if low == high:
+                high += 0.001
+            ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(0, 1)
+            smooth = 1 - ramp
+            freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+        t = torch.arange(self.max_seq_len, dtype=torch.float32)
+        ang = torch.outer(t, freqs)
+        return ang.cos().repeat_interleave(2, -1), ang.sin().repeat_interleave(2, -1)
+
+    def make_rope_tables(self):
+        for idx, (base, orig) in enumerate(
+            [(self.rope_theta, 0), (self.compress_rope_theta, self.original_context_length)]
+        ):
+            cos, sin = self._rope_tables(base, orig)
+            self.init(cos, f"rope/cos_{idx}")
+            self.init(sin, f"rope/sin_{idx}")
+
+        d = self.rope_head_dim
+        r = torch.zeros(d, d, dtype=torch.float32)
+        for k in range(d // 2):
+            r[2 * k + 1, 2 * k] = -1.0
+            r[2 * k, 2 * k + 1] = 1.0
+        self.init(r, "rope/R")
+        self.init(-r, "rope/R_inv")
+
+    def make_rope(self, name, x, cos, sin, shape, inverse=False):
+        """x is FLOAT with last dim == rope_head_dim; cos/sin broadcast against it."""
+        rot = self.op("MatMul", [x, "rope/R_inv" if inverse else "rope/R"],
+                      f"{name}/rot", ir.DataType.FLOAT, shape)
+        a = self.op("Mul", [x, cos], f"{name}/a", ir.DataType.FLOAT, shape)
+        b = self.op("Mul", [rot, sin], f"{name}/b", ir.DataType.FLOAT, shape)
+        return self.op("Add", [a, b], name, ir.DataType.FLOAT, shape)
+
+    # ------------------------------------------------------------------ #
+    # norms
+    # ------------------------------------------------------------------ #
+
+    def make_rmsnorm(self, name, x, weight, shape):
+        """Reference computes in fp32 with an fp32 weight; returns FLOAT."""
+        xf = self.cast(f"{name}/castf", x, ir.DataType.FLOAT, shape)
+        out = f"{name}/output_0"
+        self.make_node("SimplifiedLayerNormalization", inputs=[xf, weight], outputs=[out],
+                       name=name, axis=-1, epsilon=self.eps, stash_type=1)
+        self.make_value(out, ir.DataType.FLOAT, shape=shape)
+        return out
+
+    def _rsqrt_mean_sq(self, name, xf, shape):
+        red = shape[:-1] + [1]
+        sq = self.op("Mul", [xf, xf], f"{name}/sq", ir.DataType.FLOAT, shape)
+        mean = self.op("ReduceMean", [sq, self.const("INT64", [-1])], f"{name}/mean",
+                       ir.DataType.FLOAT, red, keepdims=1)
+        add = self.op("Add", [mean, self.const("FLOAT", self.eps)], f"{name}/eps",
+                      ir.DataType.FLOAT, red)
+        s = self.op("Sqrt", [add], f"{name}/sqrt", ir.DataType.FLOAT, red)
+        return self.op("Reciprocal", [s], name, ir.DataType.FLOAT, red)
+
+    def make_weightless_rmsnorm(self, name, x, shape, dtype):
+        """``x * rsqrt(mean(x^2) + eps)`` with the scale rounded to ``dtype`` first."""
+        red = shape[:-1] + [1]
+        xf = self.cast(f"{name}/castf", x, ir.DataType.FLOAT, shape)
+        rs = self._rsqrt_mean_sq(f"{name}/rs", xf, shape)
+        if dtype != ir.DataType.FLOAT:
+            rs = self.cast(f"{name}/castb", rs, dtype, red)
+        return self.op("Mul", [x, rs], name, dtype, shape)
+
+    # ------------------------------------------------------------------ #
+    # simulated FP8 activation quantisation (QAT numerics that must be kept)
+    # ------------------------------------------------------------------ #
+
+    def make_act_quant(self, name, x, shape, block=64):
+        """Per-block FP8-E4M3 round trip with a UE8M0 (power-of-two) scale."""
+        blocked = shape[:-1] + [shape[-1] // block, block]
+        red = blocked[:-1] + [1]
+        xf = self.reshape(f"{name}/rs", x, [0, 0, -1, block], ir.DataType.FLOAT, blocked)
+        a = self.op("Abs", [xf], f"{name}/abs", ir.DataType.FLOAT, blocked)
+        amax = self.op("ReduceMax", [a, self.const("INT64", [-1])], f"{name}/amax",
+                       ir.DataType.FLOAT, red, keepdims=1)
+        r = self.op("Div", [amax, self.const("FLOAT", FP8_MAX)], f"{name}/norm",
+                    ir.DataType.FLOAT, red)
+        r = self.op("Clip", [r, self.const("FLOAT", 1e-30)], f"{name}/clipmin",
+                    ir.DataType.FLOAT, red)
+        lg = self.op("Log", [r], f"{name}/log", ir.DataType.FLOAT, red)
+        lg = self.op("Div", [lg, self.const("FLOAT", math.log(2.0))], f"{name}/log2",
+                     ir.DataType.FLOAT, red)
+        e = self.op("Ceil", [lg], f"{name}/ceil", ir.DataType.FLOAT, red)
+        scale = self.op("Pow", [self.const("FLOAT", 2.0), e], f"{name}/scale",
+                        ir.DataType.FLOAT, red)
+        pos = self.op("Greater", [amax, self.const("FLOAT", 0.0)], f"{name}/pos",
+                      ir.DataType.BOOL, red)
+        scale = self.op("Where", [pos, scale, self.const("FLOAT", 1.0)], f"{name}/scale1",
+                        ir.DataType.FLOAT, red)
+        q = self.op("Div", [xf, scale], f"{name}/div", ir.DataType.FLOAT, blocked)
+        q = self.op("Clip", [q, self.const("FLOAT", -FP8_MAX), self.const("FLOAT", FP8_MAX)],
+                    f"{name}/clip", ir.DataType.FLOAT, blocked)
+        q = self.op("Cast", [q], f"{name}/tofp8", ir.DataType.FLOAT8E4M3FN, blocked,
+                    to=ir.DataType.FLOAT8E4M3FN)
+        q = self.op("Cast", [q], f"{name}/back", ir.DataType.FLOAT, blocked, to=ir.DataType.FLOAT)
+        q = self.op("Mul", [q, scale], f"{name}/mul", ir.DataType.FLOAT, blocked)
+        return self.reshape(name, q, [0, 0, -1], ir.DataType.FLOAT, shape)
+
+    # ------------------------------------------------------------------ #
+    # hyper-connections
+    # ------------------------------------------------------------------ #
+
+    def _hc_mixes(self, name, xflat, prefix, flat_shape):
+        mix_shape = flat_shape[:-1] + [self.hc_mix_dim]
+        fn = self.init(self.sd[f"{prefix}_fn"].T, f"{prefix}_fn/T", to=ir.DataType.FLOAT)
+        mixes = self.op("MatMul", [xflat, fn], f"{name}/lin", ir.DataType.FLOAT, mix_shape)
+        rs = self._rsqrt_mean_sq(f"{name}/rs", xflat, flat_shape)
+        return self.op("Mul", [mixes, rs], name, ir.DataType.FLOAT, mix_shape)
+
+    def _hc_affine(self, name, mixes, prefix, lo, hi, sc_i, bs_shape, out_shape):
+        m = self.slice1(f"{name}/slice", mixes, lo, hi, ir.DataType.FLOAT, bs_shape + [hi - lo])
+        sc = self.scalar_init(float(self.sd[f"{prefix}_scale"][sc_i]), f"{prefix}_scale/e{sc_i}")
+        s = self.op("Mul", [m, sc], f"{name}/scale", ir.DataType.FLOAT, bs_shape + [hi - lo])
+        b = self.init(self.sd[f"{prefix}_base"][lo:hi], f"{prefix}_base/s{lo}_{hi}")
+        return self.op("Add", [s, b], name, ir.DataType.FLOAT, out_shape)
+
+    def _sinkhorn(self, name, comb, shape, axis):
+        red = list(shape)
+        red[axis] = 1
+        s = self.op("ReduceSum", [comb, self.const("INT64", [axis])], f"{name}/sum",
+                    ir.DataType.FLOAT, red, keepdims=1)
+        s = self.op("Add", [s, self.const("FLOAT", self.hc_eps)], f"{name}/eps",
+                    ir.DataType.FLOAT, red)
+        return self.op("Div", [comb, s], name, ir.DataType.FLOAT, shape)
+
+    def make_hc_pre(self, name, x, prefix, bs_shape):
+        """Mix the ``hc`` residual streams into one and produce the re-expansion weights."""
+        hc, dim = self.hc, self.dim
+        flat_shape = bs_shape + [hc * dim]
+        xf = self.cast(f"{name}/castf", x, ir.DataType.FLOAT, bs_shape + [hc, dim])
+        xflat = self.reshape(f"{name}/flat", xf, [0, 0, hc * dim], ir.DataType.FLOAT, flat_shape)
+        mixes = self._hc_mixes(f"{name}/mixes", xflat, prefix, flat_shape)
+
+        pre_shape = bs_shape + [hc]
+        pre = self._hc_affine(f"{name}/pre", mixes, prefix, 0, hc, 0, bs_shape, pre_shape)
+        pre = self.op("Sigmoid", [pre], f"{name}/pre/sig", ir.DataType.FLOAT, pre_shape)
+        pre = self.op("Add", [pre, self.const("FLOAT", self.hc_eps)], f"{name}/pre/eps",
+                      ir.DataType.FLOAT, pre_shape)
+
+        post = self._hc_affine(f"{name}/post", mixes, prefix, hc, 2 * hc, 1, bs_shape, pre_shape)
+        post = self.op("Sigmoid", [post], f"{name}/post/sig", ir.DataType.FLOAT, pre_shape)
+        post = self.op("Mul", [post, self.const("FLOAT", 2.0)], f"{name}/post/x2",
+                       ir.DataType.FLOAT, pre_shape)
+
+        comb_shape = bs_shape + [hc, hc]
+        comb = self._hc_affine(f"{name}/comb", mixes, prefix, 2 * hc, (2 + hc) * hc, 2,
+                               bs_shape, bs_shape + [hc * hc])
+        comb = self.reshape(f"{name}/comb/rs", comb, [0, 0, hc, hc], ir.DataType.FLOAT, comb_shape)
+        comb = self.op("Softmax", [comb], f"{name}/comb/sm", ir.DataType.FLOAT, comb_shape, axis=-1)
+        comb = self.op("Add", [comb, self.const("FLOAT", self.hc_eps)], f"{name}/comb/eps",
+                       ir.DataType.FLOAT, comb_shape)
+        comb = self._sinkhorn(f"{name}/comb/i0c", comb, comb_shape, -2)
+        for it in range(self.hc_iters - 1):
+            comb = self._sinkhorn(f"{name}/comb/i{it + 1}r", comb, comb_shape, -1)
+            comb = self._sinkhorn(f"{name}/comb/i{it + 1}c", comb, comb_shape, -2)
+
+        pre_u = self.unsq(f"{name}/pre/u", pre, [-1], ir.DataType.FLOAT, pre_shape + [1])
+        prod = self.op("Mul", [pre_u, xf], f"{name}/y/mul", ir.DataType.FLOAT, bs_shape + [hc, dim])
+        y = self.op("ReduceSum", [prod, self.const("INT64", [2])], f"{name}/y",
+                    ir.DataType.FLOAT, bs_shape + [dim], keepdims=0)
+        return self.cast(f"{name}/y/cast", y, self.io_dtype, bs_shape + [dim]), post, comb
+
+    def make_hc_post(self, name, x, residual, post, comb, bs_shape):
+        """``post[..,h] * x + sum_g comb[..,g,h] * residual[..,g,:]`` -> [.., hc, dim]."""
+        hc, dim = self.hc, self.dim
+        out_shape = bs_shape + [hc, dim]
+        xf = self.cast(f"{name}/castx", x, ir.DataType.FLOAT, bs_shape + [dim])
+        xu = self.unsq(f"{name}/xu", xf, [-2], ir.DataType.FLOAT, bs_shape + [1, dim])
+        pu = self.unsq(f"{name}/pu", post, [-1], ir.DataType.FLOAT, bs_shape + [hc, 1])
+        term1 = self.op("Mul", [pu, xu], f"{name}/t1", ir.DataType.FLOAT, out_shape)
+
+        rf = self.cast(f"{name}/castr", residual, ir.DataType.FLOAT, out_shape)
+        ru = self.unsq(f"{name}/ru", rf, [-2], ir.DataType.FLOAT, bs_shape + [hc, 1, dim])
+        cu = self.unsq(f"{name}/cu", comb, [-1], ir.DataType.FLOAT, bs_shape + [hc, hc, 1])
+        prod = self.op("Mul", [cu, ru], f"{name}/t2/mul", ir.DataType.FLOAT,
+                       bs_shape + [hc, hc, dim])
+        term2 = self.op("ReduceSum", [prod, self.const("INT64", [2])], f"{name}/t2",
+                        ir.DataType.FLOAT, out_shape, keepdims=0)
+        out = self.op("Add", [term1, term2], f"{name}/sum", ir.DataType.FLOAT, out_shape)
+        return self.cast(name, out, self.io_dtype, out_shape)
+
+    def make_hc_head(self, name, x, prefix, bs_shape):
+        hc, dim = self.hc, self.dim
+        flat_shape = bs_shape + [hc * dim]
+        xf = self.cast(f"{name}/castf", x, ir.DataType.FLOAT, bs_shape + [hc, dim])
+        xflat = self.reshape(f"{name}/flat", xf, [0, 0, hc * dim], ir.DataType.FLOAT, flat_shape)
+        mixes = self._hc_mixes(f"{name}/mixes", xflat, prefix, flat_shape)
+        sc = self.scalar_init(float(self.sd[f"{prefix}_scale"][0]), f"{prefix}_scale/e0")
+        s = self.op("Mul", [mixes, sc], f"{name}/scale", ir.DataType.FLOAT, bs_shape + [hc])
+        b = self.init_w(f"{prefix}_base")
+        s = self.op("Add", [s, b], f"{name}/bias", ir.DataType.FLOAT, bs_shape + [hc])
+        pre = self.op("Sigmoid", [s], f"{name}/sig", ir.DataType.FLOAT, bs_shape + [hc])
+        pre = self.op("Add", [pre, self.const("FLOAT", self.hc_eps)], f"{name}/eps",
+                      ir.DataType.FLOAT, bs_shape + [hc])
+        pu = self.unsq(f"{name}/u", pre, [-1], ir.DataType.FLOAT, bs_shape + [hc, 1])
+        prod = self.op("Mul", [pu, xf], f"{name}/mul", ir.DataType.FLOAT, bs_shape + [hc, dim])
+        y = self.op("ReduceSum", [prod, self.const("INT64", [2])], f"{name}/sum",
+                    ir.DataType.FLOAT, bs_shape + [dim], keepdims=0)
+        return self.cast(name, y, self.io_dtype, bs_shape + [dim])
+
+    # ------------------------------------------------------------------ #
+    # KV compressor
+    # ------------------------------------------------------------------ #
+
+    def make_compressor(self, name, layer_id, ratio, x, ctx):
+        """Gated pooling of ``ratio`` consecutive tokens into one latent row.
+
+        Returns (rows [B, J, head_dim] io_dtype, first_slot, last_slot, J,
+                 present_cstate_kv, present_cstate_score). ``J`` depends only on the
+        sequence length, never on ``past_len``, so the shape stays inferable.
+        """
+        p = f"layers.{layer_id}.attn.compressor"
+        r, d, co, Lst = ratio, self.head_dim, self.coff(ratio), self.state_len(ratio)
+        rd, nd = self.rope_head_dim, self.nope_dim
+        F = ir.DataType.FLOAT
+        I = ir.DataType.INT64
+
+        xf = self.cast(f"{name}/castx", x, F, [B, S, self.dim])
+        kv = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wkv.weight"].T, f"{p}.wkv/T", to=F)],
+                     f"{name}/kv", F, [B, S, co * d])
+        sc = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wgate.weight"].T, f"{p}.wgate/T",
+                                              to=F)],
+                     f"{name}/sc", F, [B, S, co * d])
+        full_kv = self.op("Concat", [f"past_cstate_kv_{layer_id}", kv], f"{name}/fkv",
+                          F, [B, None, co * d], axis=1)
+        full_sc = self.op("Concat", [f"past_cstate_score_{layer_id}", sc], f"{name}/fsc",
+                          F, [B, None, co * d], axis=1)
+
+        n_full = self.op("Add", [ctx["S"], self.const("INT64", Lst)], f"{name}/nfull", I, [])
+        n_max = self.op("Sub", [n_full, self.const("INT64", 1)], f"{name}/nmax", I, [])
+        base = self.op("Sub", [ctx["past_len"], self.const("INT64", Lst)], f"{name}/base", I, [])
+        first_slot = self.op("Div", [ctx["past_len"], self.const("INT64", r)],
+                             f"{name}/first", I, [])
+        end = self.op("Sub", [ctx["total"], self.const("INT64", 1)], f"{name}/end", I, [])
+        last_slot = self.op("Div", [end, self.const("INT64", r)], f"{name}/last", I, [])
+        jm1 = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/jm1", I, [])
+        jdiv = self.op("Div", [jm1, self.const("INT64", r)], f"{name}/jdiv", I, [])
+        J = self.op("Add", [jdiv, self.const("INT64", 2)], f"{name}/J", I, [])
+
+        rng = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
+                      f"{name}/rng", I, [None])
+        slot = self.op("Add", [rng, first_slot], f"{name}/slot", I, [None])
+        slot2 = self.unsq(f"{name}/slot2", slot, [1], I, [None, 1])
+        slot_r = self.op("Mul", [slot2, self.const("INT64", r)], f"{name}/slotr", I, [None, 1])
+        off = self.unsq(f"{name}/off", self.init(torch.arange(r, dtype=torch.int64), f"{name}/arange"),
+                        [0], I, [1, r])
+        pos_cur = self.op("Add", [slot_r, off], f"{name}/pos", I, [None, r])
+
+        def window(tag, pos_t):
+            idx = self.op("Sub", [pos_t, base], f"{name}/{tag}/idx", I, [None, r])
+            ge0 = self.op("GreaterOrEqual", [idx, self.const("INT64", 0)],
+                          f"{name}/{tag}/ge0", ir.DataType.BOOL, [None, r])
+            lt = self.op("Less", [idx, n_full], f"{name}/{tag}/lt", ir.DataType.BOOL, [None, r])
+            inrange = self.op("And", [ge0, lt], f"{name}/{tag}/and", ir.DataType.BOOL, [None, r])
+            fut = self.op("Less", [pos_t, ctx["total"]], f"{name}/{tag}/fut",
+                          ir.DataType.BOOL, [None, r])
+            valid = self.op("And", [inrange, fut], f"{name}/{tag}/valid",
+                            ir.DataType.BOOL, [None, r])
+            if tag == "prev":
+                nneg = self.op("GreaterOrEqual", [pos_t, self.const("INT64", 0)],
+                               f"{name}/{tag}/nneg", ir.DataType.BOOL, [None, r])
+                valid = self.op("And", [valid, nneg], f"{name}/{tag}/valid2",
+                                ir.DataType.BOOL, [None, r])
+            cl = self.op("Clip", [idx, self.const("INT64", 0), n_max],
+                         f"{name}/{tag}/clip", I, [None, r])
+            flat = self.reshape(f"{name}/{tag}/flat", cl, [-1], I, [None])
+            return flat, valid
+
+        def gather(tag, src, flat):
+            g = self.op("Gather", [src, flat], f"{name}/{tag}/g", F, [B, None, co * d], axis=1)
+            return self.reshape(f"{name}/{tag}/g4", g, [0, -1, r, co * d], F, [B, None, r, co * d])
+
+        ape = self.init_w(f"{p}.ape")
+        if co == 2:
+            pos_prev = self.op("Sub", [pos_cur, self.const("INT64", r)], f"{name}/posp", I, [None, r])
+            fc, vc = window("cur", pos_cur)
+            fp_, vp = window("prev", pos_prev)
+            kv_p = self.slice1(f"{name}/kvp", gather("kvprev", full_kv, fp_), 0, d, F,
+                               [B, None, r, d])
+            kv_c = self.slice1(f"{name}/kvc", gather("kvcur", full_kv, fc), d, INT64_MAX, F,
+                               [B, None, r, d])
+            ape_p = self.init(self.sd[f"{p}.ape"][:, :d], f"{p}.ape/lo")
+            ape_c = self.init(self.sd[f"{p}.ape"][:, d:], f"{p}.ape/hi")
+            sc_p = self.op("Add", [self.slice1(f"{name}/scp", gather("scprev", full_sc, fp_),
+                                               0, d, F, [B, None, r, d]), ape_p],
+                           f"{name}/scpa", F, [B, None, r, d])
+            sc_c = self.op("Add", [self.slice1(f"{name}/scc", gather("sccur", full_sc, fc),
+                                               d, INT64_MAX, F, [B, None, r, d]), ape_c],
+                           f"{name}/scca", F, [B, None, r, d])
+            pooled_kv = self.op("Concat", [kv_p, kv_c], f"{name}/pkv", F, [B, None, 2 * r, d], axis=2)
+            pooled_sc = self.op("Concat", [sc_p, sc_c], f"{name}/psc", F, [B, None, 2 * r, d], axis=2)
+            valid = self.op("Concat", [vp, vc], f"{name}/valid", ir.DataType.BOOL,
+                            [None, 2 * r], axis=1)
+            span = 2 * r
+        else:
+            fc, valid = window("cur", pos_cur)
+            pooled_kv = gather("kv", full_kv, fc)
+            pooled_sc = self.op("Add", [gather("sc", full_sc, fc), ape], f"{name}/psc",
+                                F, [B, None, r, d])
+            span = r
+
+        vmask = self.unsq(f"{name}/vmask", valid, [0, 3], ir.DataType.BOOL, [1, None, span, 1])
+        masked = self.op("Where", [vmask, pooled_sc, self.const("FLOAT", NEG_INF)],
+                         f"{name}/masked", F, [B, None, span, d])
+        wsm = self.op("Softmax", [masked], f"{name}/wsm", F, [B, None, span, d], axis=2)
+        prod = self.op("Mul", [pooled_kv, wsm], f"{name}/prod", F, [B, None, span, d])
+        pooled = self.op("ReduceSum", [prod, self.const("INT64", [2])], f"{name}/pooled",
+                         F, [B, None, d], keepdims=0)
+
+        pooled_b = self.cast(f"{name}/pooled_b", pooled, self.io_dtype, [B, None, d])
+        normed = self.make_rmsnorm(f"{name}/norm", pooled_b,
+                                   self.init_w(f"{p}.norm.weight",
+                                               to=ir.DataType.FLOAT),
+                                   [B, None, d])
+
+        pos_slot = self.op("Clip", [self.reshape(f"{name}/slotflat", slot_r, [-1], I, [None]),
+                                    self.const("INT64", 0),
+                                    self.const("INT64", self.max_seq_len - 1)],
+                           f"{name}/posslot", I, [None])
+        cos = self.unsq(f"{name}/cos", self.op("Gather", [f"rope/cos_1", pos_slot],
+                                               f"{name}/cosg", F, [None, rd], axis=0),
+                        [0], F, [1, None, rd])
+        sin = self.unsq(f"{name}/sin", self.op("Gather", [f"rope/sin_1", pos_slot],
+                                               f"{name}/sing", F, [None, rd], axis=0),
+                        [0], F, [1, None, rd])
+        nope = self.slice1(f"{name}/nope", normed, 0, nd, F, [B, None, nd])
+        rope = self.slice1(f"{name}/ropep", normed, nd, INT64_MAX, F, [B, None, rd])
+        rope = self.make_rope(f"{name}/rope", rope, cos, sin, [B, None, rd])
+        nope = self.make_act_quant(f"{name}/aq", nope, [B, None, nd])
+        rows = self.op("Concat", [nope, rope], f"{name}/rows", F, [B, None, d], axis=-1)
+        rows = self.cast(f"{name}/rows_b", rows, self.io_dtype, [B, None, d])
+
+        st_shape = [B, Lst, co * d]
+        pkv = self.op("Slice", [full_kv, self.const("INT64", [-Lst]),
+                                self.const("INT64", [INT64_MAX]), self.const("INT64", [1])],
+                      f"{name}/pstate_kv", F, st_shape)
+        psc = self.op("Slice", [full_sc, self.const("INT64", [-Lst]),
+                                self.const("INT64", [INT64_MAX]), self.const("INT64", [1])],
+                      f"{name}/pstate_sc", F, st_shape)
+        return rows, first_slot, last_slot, J, pkv, psc
+
+    # ------------------------------------------------------------------ #
+    # attention
+    # ------------------------------------------------------------------ #
+
+    def make_attention(self, name, layer_id, x, ctx):
+        p = f"layers.{layer_id}.attn"
+        ratio = self.compress_ratios[layer_id]
+        # Tensor parallel: heads and output-projection groups are sliced together
+        # (heads are laid out contiguously within a group, so the two splits agree).
+        # KV is MQA -- a single latent row -- so it stays replicated.
+        H, D, rd, nd, W = (self.n_heads_local, self.head_dim, self.rope_head_dim,
+                           self.nope_dim, self.window)
+        G, R = self.o_groups_local, self.o_lora_rank
+        dh = self.n_heads * self.head_dim // self.o_groups
+        F, I, BOOL = ir.DataType.FLOAT, ir.DataType.INT64, ir.DataType.BOOL
+        io = self.io_dtype
+        tbl = 1 if ratio else 0
+
+        cos = self.op("Gather", [f"rope/cos_{tbl}", ctx["pos"]], f"{name}/cos", F, [S, rd], axis=0)
+        sin = self.op("Gather", [f"rope/sin_{tbl}", ctx["pos"]], f"{name}/sin", F, [S, rd], axis=0)
+        cos_q = self.unsq(f"{name}/cosq", cos, [0, 2], F, [1, S, 1, rd])
+        sin_q = self.unsq(f"{name}/sinq", sin, [0, 2], F, [1, S, 1, rd])
+        cos_k = self.unsq(f"{name}/cosk", cos, [0], F, [1, S, rd])
+        sin_k = self.unsq(f"{name}/sink", sin, [0], F, [1, S, rd])
+
+        def rope_last(tag, t, shape, c, s, inverse=False):
+            n = self.slice1(f"{tag}/nope", t, 0, nd, io, shape[:-1] + [nd])
+            r_ = self.slice1(f"{tag}/rope", t, nd, INT64_MAX, io, shape[:-1] + [rd])
+            r_ = self.cast(f"{tag}/ropef", r_, F, shape[:-1] + [rd])
+            r_ = self.make_rope(f"{tag}/rot", r_, c, s, shape[:-1] + [rd], inverse=inverse)
+            r_ = self.cast(f"{tag}/ropeb", r_, io, shape[:-1] + [rd])
+            return self.op("Concat", [n, r_], tag, io, shape, axis=-1)
+
+        # ---- Q ----
+        qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
+        qn = self.make_rmsnorm(f"{name}/qnorm", qa,
+                               self.init_w(f"{p}.q_norm.weight",
+                                           to=ir.DataType.FLOAT),
+                               [B, S, self.q_lora_rank])
+        qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
+        q = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
+        q = self.reshape(f"{name}/q4", q, [0, 0, H, D], io, [B, S, H, D])
+        q = self.make_weightless_rmsnorm(f"{name}/qrms", q, [B, S, H, D], io)
+        q = rope_last(f"{name}/qrope", q, [B, S, H, D], cos_q, sin_q)
+
+        # ---- KV (single latent row shared by all heads) ----
+        kv = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
+        kv = self.make_rmsnorm(f"{name}/kvnorm", kv,
+                               self.init_w(f"{p}.kv_norm.weight",
+                                           to=ir.DataType.FLOAT),
+                               [B, S, D])
+        kv = self.cast(f"{name}/kvnorm_b", kv, io, [B, S, D])
+        kv = rope_last(f"{name}/kvrope", kv, [B, S, D], cos_k, sin_k)
+        kv_n = self.slice1(f"{name}/kvn", kv, 0, nd, io, [B, S, nd])
+        kv_r = self.slice1(f"{name}/kvr", kv, nd, INT64_MAX, io, [B, S, rd])
+        kv_n = self.make_act_quant(f"{name}/kvaq",
+                                   self.cast(f"{name}/kvnf", kv_n, F, [B, S, nd]), [B, S, nd])
+        kv_n = self.cast(f"{name}/kvnb", kv_n, io, [B, S, nd])
+        kv = self.op("Concat", [kv_n, kv_r], f"{name}/kvq", io, [B, S, D], axis=-1)
+
+        # ---- sliding-window ring cache ----
+        ring = f"past_kv_{layer_id}"
+        j = self.init(torch.arange(W, dtype=torch.int64), "ring/arange")
+        qpos = ctx["qpos"]
+        qposw = self.op("Sub", [qpos, self.const("INT64", W)], f"{name}/qposw", I, [S, 1])
+
+        def ring_pos(tag, endval):
+            t = self.op("Sub", [endval, j], f"{name}/{tag}/t", I, [W])
+            fd = self.floordiv(f"{name}/{tag}/fd", t, W, [W])
+            m = self.op("Mul", [fd, self.const("INT64", W)], f"{name}/{tag}/m", I, [W])
+            return self.op("Add", [m, j], f"{name}/{tag}/q", I, [W])
+
+        pl_1 = self.op("Sub", [ctx["past_len"], self.const("INT64", 1)], f"{name}/pl1", I, [])
+        tot_1 = self.op("Sub", [ctx["total"], self.const("INT64", 1)], f"{name}/tot1", I, [])
+        q_old = ring_pos("old", pl_1)
+        q_new = ring_pos("new", tot_1)
+
+        q_old2 = self.unsq(f"{name}/qold2", q_old, [0], I, [1, W])
+        m1 = self.op("GreaterOrEqual", [q_old2, self.const("INT64", 0)], f"{name}/m1", BOOL, [1, W])
+        m2 = self.op("Less", [q_old2, ctx["past_len"]], f"{name}/m2", BOOL, [1, W])
+        m3 = self.op("Greater", [q_old2, qposw], f"{name}/m3", BOOL, [S, W])
+        ring_mask = self.op("And", [self.op("And", [m1, m2], f"{name}/m12", BOOL, [1, W]), m3],
+                            f"{name}/ringmask", BOOL, [S, W])
+
+        fpos = self.unsq(f"{name}/fpos", ctx["pos"], [0], I, [1, S])
+        f1 = self.op("LessOrEqual", [fpos, qpos], f"{name}/f1", BOOL, [S, S])
+        f2 = self.op("Greater", [fpos, qposw], f"{name}/f2", BOOL, [S, S])
+        fresh_mask = self.op("And", [f1, f2], f"{name}/freshmask", BOOL, [S, S])
+
+        tf1 = self.op("GreaterOrEqual", [q_new, ctx["past_len"]], f"{name}/tf1", BOOL, [W])
+        tf2 = self.op("GreaterOrEqual", [q_new, self.const("INT64", 0)], f"{name}/tf2", BOOL, [W])
+        take_fresh = self.unsq(f"{name}/tf", self.op("And", [tf1, tf2], f"{name}/tfa", BOOL, [W]),
+                               [0, 2], BOOL, [1, W, 1])
+        smax_idx = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/smaxidx", I, [])
+        gidx = self.op("Clip", [self.op("Sub", [q_new, ctx["past_len"]], f"{name}/gi", I, [W]),
+                                self.const("INT64", 0), smax_idx], f"{name}/gic", I, [W])
+        src = self.op("Gather", [kv, gidx], f"{name}/src", io, [B, W, D], axis=1)
+        present_kv = self.op("Where", [take_fresh, src, ring], f"{name}/present_kv", io, [B, W, D])
+
+        keys = [ring, kv]
+        masks = [ring_mask, fresh_mask]
+        presents = {"kv": present_kv}
+
+        if ratio:
+            rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+                f"{name}/comp", layer_id, ratio, x, ctx)
+            C = self.comp_capacity(ratio)
+            cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
+            ksel = self.op("Sub", [cidx, first_slot], f"{name}/ksel", I, [C])
+            n1 = self.op("GreaterOrEqual", [ksel, self.const("INT64", 0)], f"{name}/n1", BOOL, [C])
+            n2 = self.op("LessOrEqual", [cidx, last_slot], f"{name}/n2", BOOL, [C])
+            take_new = self.unsq(f"{name}/tn", self.op("And", [n1, n2], f"{name}/na", BOOL, [C]),
+                                 [0, 2], BOOL, [1, C, 1])
+            jmax = self.op("Sub", [J, self.const("INT64", 1)], f"{name}/jmax", I, [])
+            kclip = self.op("Clip", [ksel, self.const("INT64", 0), jmax], f"{name}/kclip", I, [C])
+            newc = self.op("Gather", [rows, kclip], f"{name}/newc", io, [B, C, D], axis=1)
+            present_comp = self.op("Where", [take_new, newc, f"past_comp_{layer_id}"],
+                                   f"{name}/present_comp", io, [B, C, D])
+            qp1 = self.op("Add", [qpos, self.const("INT64", 1)], f"{name}/qp1", I, [S, 1])
+            qpr = self.op("Div", [qp1, self.const("INT64", ratio)], f"{name}/qpr", I, [S, 1])
+            comp_mask = self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0], I, [1, C]), qpr],
+                                f"{name}/compmask", BOOL, [S, C])
+            keys.append(present_comp)
+            masks.append(comp_mask)
+            presents.update(comp=present_comp, cstate_kv=pkv, cstate_score=psc)
+
+        k = self.op("Concat", keys, f"{name}/keys", io, [B, None, D], axis=1)
+        mask = self.op("Concat", masks, f"{name}/mask", BOOL, [S, None], axis=1)
+
+        qf = self.cast(f"{name}/qf", q, F, [B, S, H, D])
+        kf = self.cast(f"{name}/kf", k, F, [B, None, D])
+        scores = self.op("Einsum", [qf, kf], f"{name}/scores", F, [B, S, H, None],
+                         equation="bshd,bnd->bshn")
+        scores = self.op("Mul", [scores, self.const("FLOAT", self.softmax_scale)],
+                         f"{name}/scaled", F, [B, S, H, None])
+        m4 = self.unsq(f"{name}/mask4", mask, [0, 2], BOOL, [1, S, 1, None])
+        scores = self.op("Where", [m4, scores, self.const("FLOAT", NEG_INF)],
+                         f"{name}/masked", F, [B, S, H, None])
+        smx = self.op("ReduceMax", [scores, self.const("INT64", [-1])], f"{name}/smax",
+                      F, [B, S, H, 1], keepdims=1)
+        pex = self.op("Exp", [self.op("Sub", [scores, smx], f"{name}/shift", F, [B, S, H, None])],
+                      f"{name}/exp", F, [B, S, H, None])
+        denom = self.op("ReduceSum", [pex, self.const("INT64", [-1])], f"{name}/den",
+                        F, [B, S, H, 1], keepdims=1)
+        sink = self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(1, 1, H, 1),
+                         f"{p}.attn_sink")
+        sink_e = self.op("Exp", [self.op("Sub", [sink, smx], f"{name}/sinkshift", F, [B, S, H, 1])],
+                         f"{name}/sinkexp", F, [B, S, H, 1])
+        denom = self.op("Add", [denom, sink_e], f"{name}/den2", F, [B, S, H, 1])
+        o = self.op("Einsum", [pex, kf], f"{name}/ctx", F, [B, S, H, D], equation="bshn,bnd->bshd")
+        o = self.op("Div", [o, denom], f"{name}/norm", F, [B, S, H, D])
+        o = self.cast(f"{name}/ob", o, io, [B, S, H, D])
+        o = rope_last(f"{name}/orope", o, [B, S, H, D], cos_q, sin_q, inverse=True)
+
+        # ---- grouped output projection ----
+        o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
+        o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
+        o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
+        wa = self.shard(self.sd[f"{p}.wo_a.weight"].reshape(self.o_groups, R, dh), 0)
+        o = self.op("MatMul", [o, self.init(wa.transpose(1, 2), f"{p}.wo_a/G", to=io)],
+                    f"{name}/oa", io, [G, None, R])
+        o = self.op("Transpose", [o], f"{name}/oat", io, [None, G, R], perm=[1, 0, 2])
+        o = self.reshape(f"{name}/oaf", o, [-1, G * R], io, [None, G * R])
+        o = self.proj(f"{name}/ob2", o, f"{p}.wo_b.weight", [None, self.dim], shard_axis=1)
+        # Each rank holds a column block of wo_b, so this is a partial sum.
+        o = self.all_reduce(f"{name}/ar", o, io, [None, self.dim])
+        o = self.dyn_reshape(f"{name}/out", o, ctx["bs"], [self.dim], io, [B, S, self.dim])
+        return o, presents
+
+    # ------------------------------------------------------------------ #
+    # MoE
+    # ------------------------------------------------------------------ #
+
+    def _swiglu(self, name, gate, up, shape):
+        lim = self.swiglu_limit
+        F = ir.DataType.FLOAT
+        if lim and lim > 0:
+            up = self.op("Clip", [up, self.const("FLOAT", -lim), self.const("FLOAT", lim)],
+                         f"{name}/clipu", F, shape)
+            gate = self.op("Clip", [gate, "", self.const("FLOAT", lim)], f"{name}/clipg", F, shape)
+        s = self.op("Sigmoid", [gate], f"{name}/sig", F, shape)
+        g = self.op("Mul", [gate, s], f"{name}/silu", F, shape)
+        return self.op("Mul", [g, up], name, F, shape)
+
+    def make_routing(self, name, layer_id, xf, nvec, ctx):
+        """sqrtsoftplus scores + noaux_tc selection bias (or hash routing).
+
+        Returns (idx [N, k] int64, weights [N, k] FLOAT already normalised, i.e.
+        summing to 1 before ``routed_scaling_factor``).
+        """
+        p = f"layers.{layer_id}.ffn"
+        E, k = self.n_experts, self.topk
+        F, I = ir.DataType.FLOAT, ir.DataType.INT64
+        gw = self.init(self.sd[f"{p}.gate_weight"].T, f"{p}.gate_weight/T",
+                       to=ir.DataType.FLOAT)
+        scores = self.op("MatMul", [xf, gw], f"{name}/scores", F, [None, E])
+        sp = self.op("Softplus", [scores], f"{name}/softplus", F, [None, E])
+        orig = self.op("Sqrt", [sp], f"{name}/sqrt", F, [None, E])
+
+        if layer_id < self.n_hash_layers:
+            flat_ids = self.reshape(f"{name}/ids", "input_ids", [-1], I, [None])
+            idx = self.op("Gather", [self.init_w(f"{p}.tid2eid"), flat_ids],
+                          f"{name}/idx", I, [None, k], axis=0)
+        else:
+            bias = self.init_w(f"{p}.gate_bias")
+            sel = self.op("Add", [orig, bias], f"{name}/sel", F, [None, E])
+            vals = f"{name}/topk/output_0"
+            idx = f"{name}/topk/output_1"
+            self.make_node("TopK", inputs=[sel, self.const("INT64", [k])], outputs=[vals, idx],
+                           name=f"{name}/topk", axis=-1, largest=1, sorted=1)
+            self.make_value(vals, F, shape=[None, k])
+            self.make_value(idx, I, shape=[None, k])
+
+        w = self.op("GatherElements", [orig, idx], f"{name}/w", F, [None, k], axis=1)
+        wsum = self.op("ReduceSum", [w, self.const("INT64", [-1])], f"{name}/wsum",
+                       F, [None, 1], keepdims=1)
+        wn = self.op("Div", [w, wsum], f"{name}/wn", F, [None, k])
+        return idx, wn
+
+    def make_moe(self, name, layer_id, x, ctx):
+        p = f"layers.{layer_id}.ffn"
+        E, k, dim, mi = self.n_experts, self.topk, self.dim, self.moe_inter
+        F, I = ir.DataType.FLOAT, ir.DataType.INT64
+        io = self.io_dtype
+
+        xflat = self.reshape(f"{name}/flat", x, [-1, dim], io, [None, dim])
+        xf = self.cast(f"{name}/flatf", xflat, F, [None, dim])
+        idx, wn = self.make_routing(f"{name}/route", layer_id, xf, None, ctx)
+
+        nrow = self.op("Shape", [xflat], f"{name}/nshape", I, [1], start=0, end=1)
+        eshape = self.op("Concat", [nrow, self.const("INT64", [E])],
+                         f"{name}/eshape", I, [2], axis=0)
+
+        # Expert parallel: this rank owns experts [lo, lo + E_loc).  It sees only
+        # the matching column block of the router, so the kernel's softmax hands
+        # back w_e / W_local; multiplying the rank output by W_local and then
+        # all-reducing recovers sum_e w_e * E_e(x) exactly.  Tokens with no local
+        # expert get an all -inf row, whose degenerate uniform softmax is
+        # annihilated by W_local == 0.
+        E_loc, lo = self.n_experts_local, self.expert_lo
+        zeros = self.op("ConstantOfShape", [eshape], f"{name}/zeros", F, [None, E],
+                        value=ir.tensor([0.0], dtype=ir.DataType.FLOAT))
+        dense_w = self.op("ScatterElements", [zeros, idx, wn], f"{name}/densew", F,
+                          [None, E], axis=1)
+
+        if self.moe_impl == "qmoe":
+            # QMoE selects its own top-k from `router_probs` via softmax. Feeding
+            # log(weight) on the selected experts and -inf elsewhere makes that
+            # softmax reproduce the reference weights exactly.
+            logw = self.op("Log", [wn], f"{name}/logw", F, [None, k])
+            base = self.op("ConstantOfShape", [eshape], f"{name}/negbase", F, [None, E],
+                           value=ir.tensor([NEG_INF], dtype=ir.DataType.FLOAT))
+            router = self.op("ScatterElements", [base, idx, logw], f"{name}/router",
+                             F, [None, E], axis=1)
+            if self.world > 1:
+                router = self.slice1(f"{name}/router_loc", router, lo, lo + E_loc,
+                                     F, [None, E_loc])
+            router = self.cast(f"{name}/routerb", router, io, [None, E_loc])
+            fc1_w, fc1_s, fc2_w, fc2_s = self.moe_qweights(p)
+            out = f"{name}/qmoe/output_0"
+            inputs = [xflat, router,
+                      fc1_w, fc1_s, "",
+                      fc2_w, fc2_s, "",
+                      "", "", "", "", "", "", "",
+                      self.g_moe(p, "fc1"), self.g_moe(p, "fc2")]
+            self.make_node("QMoE", inputs=inputs, outputs=[out], name=f"{name}/qmoe",
+                           domain="com.microsoft", activation_type="swiglu",
+                           expert_weight_bits=4, k=min(k, E_loc), normalize_routing_weights=0,
+                           swiglu_fusion=1, swiglu_limit=self.swiglu_limit,
+                           activation_alpha=1.0, activation_beta=0.0,
+                           use_sparse_mixer=0, quant_type="fp4", block_size=32)
+            self.make_value(out, io, shape=[None, dim])
+            y = self.cast(f"{name}/qmoef", out, F, [None, dim])
+            dw_loc = (self.slice1(f"{name}/dwloc", dense_w, lo, lo + E_loc, F, [None, E_loc])
+                      if self.world > 1 else dense_w)
+            wloc = self.op("ReduceSum", [dw_loc, self.const("INT64", [-1])], f"{name}/wloc",
+                           F, [None, 1], keepdims=1)
+            wloc = self.op("Mul", [wloc, self.const("FLOAT", float(self.route_scale))],
+                           f"{name}/wlocs", F, [None, 1])
+            y = self.op("Mul", [y, wloc], f"{name}/scaled", F, [None, dim])
+        else:
+            gate_w = self.op("Mul", [dense_w, self.const("FLOAT", float(self.route_scale))],
+                             f"{name}/gate", F, [None, E])
+            if self.world > 1:
+                gate_w = self.slice1(f"{name}/gate_loc", gate_w, lo, lo + E_loc, F, [None, E_loc])
+            w1 = self.init(self.eshard(self.sd[f"{p}.w1"], 0).float(), f"{p}.w1")
+            w2 = self.init(self.eshard(self.sd[f"{p}.w2"], 0).float(), f"{p}.w2")
+            w3 = self.init(self.eshard(self.sd[f"{p}.w3"], 0).float(), f"{p}.w3")
+            h = self.op("Einsum", [xf, w1], f"{name}/h", F, [None, E_loc, mi], equation="nd,eid->nei")
+            u = self.op("Einsum", [xf, w3], f"{name}/u", F, [None, E_loc, mi], equation="nd,eid->nei")
+            act = self._swiglu(f"{name}/act", h, u, [None, E_loc, mi])
+            gu = self.unsq(f"{name}/gu", gate_w, [-1], F, [None, E_loc, 1])
+            act = self.op("Mul", [act, gu], f"{name}/gated", F, [None, E_loc, mi])
+            y = self.op("Einsum", [act, w2], f"{name}/y", F, [None, dim], equation="nei,edi->nd")
+
+        # shared expert, tensor-parallel over the intermediate dim
+        mil = self.moe_inter_local
+        sg = self.proj(f"{name}/sg", xflat, f"{p}.sw1.weight", [None, mil], shard_axis=0)
+        su = self.proj(f"{name}/su", xflat, f"{p}.sw3.weight", [None, mil], shard_axis=0)
+        sact = self._swiglu(f"{name}/sact",
+                            self.cast(f"{name}/sgf", sg, F, [None, mil]),
+                            self.cast(f"{name}/suf", su, F, [None, mil]), [None, mil])
+        sy = self.proj(f"{name}/sy", self.cast(f"{name}/sactb", sact, io, [None, mil]),
+                       f"{p}.sw2.weight", [None, dim], shard_axis=1)
+        y = self.op("Add", [y, self.cast(f"{name}/syf", sy, F, [None, dim])],
+                    f"{name}/total", F, [None, dim])
+        y = self.cast(f"{name}/tob", y, io, [None, dim])
+        # One collective covers both the expert-parallel and the shared-expert split.
+        y = self.all_reduce(f"{name}/ar", y, io, [None, dim])
+        return self.dyn_reshape(f"{name}/out", y, ctx["bs"], [dim], io, [B, S, dim])
+
+    def moe_qweights(self, prefix):
+        """Initializer names for ``(fc1_w, fc1_scales, fc2_w, fc2_scales)`` in QMoE fp4 layout.
+
+        The CUDA kernel has no separate fc3 GEMM, so gate and up must arrive
+        pre-concatenated in fc1; interleaving them along the output dim is
+        ``swiglu_fusion=1``. Interleaving commutes with MXFP4 (blocks run along
+        the input dim), so a checkpoint that is already quantised can supply
+        ``fc1_q``/``fc1_s`` directly and skip the round trip.
+        """
+        names = [f"{prefix}.fc1_q", f"{prefix}.fc1_s", f"{prefix}.fc2_q", f"{prefix}.fc2_s"]
+        if names[0] in self.values:
+            return names
+        if names[0] in self.sd:
+            tensors = [self.eshard(self.sd[n], 0) for n in names]
+        else:
+            w1, w3, w2 = (self.eshard(self.sd[f"{prefix}.w{i}"], 0).float() for i in (1, 3, 2))
+            fc1 = torch.stack([w1, w3], dim=2).reshape(w1.shape[0], -1, w1.shape[2])
+            b1, s1 = mxfp4_quantize(fc1)
+            b2, s2 = mxfp4_quantize(w2)
+            tensors = [pack_for_qmoe(b1), s1, pack_for_qmoe(b2), s2]
+        self.init(tensors[0], names[0])
+        self.scale_init(names[1], tensors[1])
+        self.init(tensors[2], names[2])
+        self.scale_init(names[3], tensors[3])
+        return names
+
+    def scale_init(self, name, tensor):
+        """Register a uint8 tensor reinterpreted as FLOAT8E8M0 block scales."""
+        if name in self.values:
+            return name
+        u8 = tensor.detach().cpu().contiguous().view(torch.uint8)
+        if self.writer is not None:
+            return self.init(self.writer.add(u8, name, dtype=ir.DataType.FLOAT8E8M0), name)
+        t = ir.Tensor(u8.numpy(), dtype=ir.DataType.FLOAT8E8M0, name=name)
+        v = self.make_value(name, ir.DataType.FLOAT8E8M0, t.shape)
+        v.const_value = t
+        self.model.graph.register_initializer(v)
+        return name
+
+    def g_moe(self, prefix, proj):
+        return self.init(torch.ones(self.n_experts_local, dtype=torch.float32),
+                         f"{prefix}.{proj}_g")
+
+    # ------------------------------------------------------------------ #
+    # block / model
+    # ------------------------------------------------------------------ #
+
+    def make_block(self, layer_id, h, ctx):
+        n = f"/layers.{layer_id}"
+        bs = [B, S]
+        io = self.io_dtype
+        p = f"layers.{layer_id}"
+
+        residual = h
+        y, post, comb = self.make_hc_pre(f"{n}/hc_attn", h, f"{p}.hc_attn", bs)
+        y = self.cast(f"{n}/attn_norm_b",
+                      self.make_rmsnorm(f"{n}/attn_norm", y,
+                                        self.init_w(f"{p}.attn_norm.weight",
+                                                    to=ir.DataType.FLOAT), bs + [self.dim]),
+                      io, bs + [self.dim])
+        a, presents = self.make_attention(f"{n}/attn", layer_id, y, ctx)
+        h = self.make_hc_post(f"{n}/hc_attn_post", a, residual, post, comb, bs)
+
+        residual = h
+        y, post, comb = self.make_hc_pre(f"{n}/hc_ffn", h, f"{p}.hc_ffn", bs)
+        y = self.cast(f"{n}/ffn_norm_b",
+                      self.make_rmsnorm(f"{n}/ffn_norm", y,
+                                        self.init_w(f"{p}.ffn_norm.weight",
+                                                    to=ir.DataType.FLOAT), bs + [self.dim]),
+                      io, bs + [self.dim])
+        f_ = self.make_moe(f"{n}/ffn", layer_id, y, ctx)
+        h = self.make_hc_post(f"{n}/hc_ffn_post", f_, residual, post, comb, bs)
+        return h, presents
+
+    def make_dsv4_graph(self):
+        F, I = ir.DataType.FLOAT, ir.DataType.INT64
+        io = self.io_dtype
+        hc, dim = self.hc, self.dim
+
+        self.make_inputs_and_outputs()
+        self.make_rope_tables()
+
+        bs = self.op("Shape", ["input_ids"], "/shape", I, [2])
+        Sv = self.op("Gather", [bs, self.const("INT64", 1)], "/seqlen", I, [], axis=0)
+        rng = self.op("Range", [self.const("INT64", 0), Sv, self.const("INT64", 1)],
+                      "/range", I, [S])
+        pos = self.op("Add", [rng, "past_len"], "/pos", I, [S])
+        qpos = self.unsq("/qpos", pos, [1], I, [S, 1])
+        total = self.op("Add", ["past_len", Sv], "/total", I, [])
+        ctx = {"bs": bs, "S": Sv, "pos": pos, "qpos": qpos, "past_len": "past_len",
+               "total": total}
+
+        emb = self.op("Gather", [self.init_w("embed.weight", to=io),
+                                 "input_ids"], "/embed", io, [B, S, dim], axis=0)
+        h = self.unsq("/embed_u", emb, [2], io, [B, S, 1, dim])
+        tail = self.const("INT64", [hc, dim])
+        eshape = self.op("Concat", [bs, tail], "/hc_expand_shape", I, [4], axis=0)
+        h = self.op("Expand", [h, eshape], "/hc_expand", io, [B, S, hc, dim])
+
+        for layer_id in range(self.num_layers):
+            h, presents = self.make_block(layer_id, h, ctx)
+            for key, val in presents.items():
+                out = f"present_{key}_{layer_id}"
+                self.make_node("Identity", inputs=[val], outputs=[out], name=f"/out/{out}")
+
+        h = self.make_hc_head("/hc_head", h, "hc_head", [B, S])
+        n = self.make_rmsnorm("/norm", h, self.init_w("norm.weight",
+                                                      to=ir.DataType.FLOAT),
+                              [B, S, dim])
+        n = self.cast("/norm_b", n, io, [B, S, dim])
+        # Keep the vocabulary projection in the activation type; a float copy of
+        # it would be the single largest initializer in the model.
+        lg = self.op("MatMul", [n, self.init(self.sd["head.weight"].T, "head/T", to=io)],
+                     "/lm_head", io, [B, S, self.vocab_size])
+        self.make_node("Cast", inputs=[lg], outputs=["logits"], name="/logits",
+                       to=int(ir.DataType.FLOAT))
+
+    def save_model(self, out_dir):
+        if self.writer is None:
+            return super().save_model(out_dir)
+
+        # The initializers already live in the external-data blob, so this only
+        # has to serialize the graph -- no second pass over the weights.
+        print(f"Saving ONNX model in {out_dir}")
+        os.makedirs(out_dir, exist_ok=True)
+        self.writer.move_to(out_dir)
+        self.model.graph.sort()
+        out_path = os.path.join(out_dir, self.filename)
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        ir.save(self.model, out_path)
+        if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
+            os.rmdir(self.cache_dir)
+
+    def make_model(self, input_path):
+        if not self.sd:
+            raise ValueError("state dict must be populated (see load_dsv4_weights) before building")
+        self.make_dsv4_graph()
