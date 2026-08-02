@@ -146,10 +146,10 @@ class DeepSeekV4Model(Model):
 
         # Cast input to fp32 for stability (matching the PyTorch reference which
         # calls the norm in float32 regardless of the model IO dtype)
-        cast_in_name = f"{name}/CastToFP32"
+        cast_in_name = f"{name}/to_fp32/Cast"
         self.make_cast(cast_in_name, root_input, float_dtype, shape)
 
-        sq_name = f"{name}/Pow2"
+        sq_name = f"{name}/sq/Mul"
         self.make_mul(sq_name, [f"{cast_in_name}/output_0", f"{cast_in_name}/output_0"],
                       float_dtype, shape)
 
@@ -160,7 +160,7 @@ class DeepSeekV4Model(Model):
                               float_dtype, shape[:-1] + [1], keepdims=True)
 
         eps_const = f"/model/constants/FLOAT/{eps}"
-        add_eps_name = f"{name}/AddEps"
+        add_eps_name = f"{name}/eps/Add"
         self.make_add(add_eps_name, [f"{mean_name}/output_0", eps_const],
                       float_dtype, shape[:-1] + [1])
 
@@ -169,13 +169,13 @@ class DeepSeekV4Model(Model):
                         [f"{add_eps_name}/output_0"],
                         float_dtype, shape[:-1] + [1])
 
-        normed_name = f"{name}/NormedFP32"
+        normed_name = f"{name}/normed/Mul"
         self.make_mul(normed_name,
                       [f"{cast_in_name}/output_0", f"{rsqrt_name}/output_0"],
                       float_dtype, shape)
 
         # Cast back to model IO dtype
-        cast_out_name = f"{name}/CastBack"
+        cast_out_name = f"{name}/to_io/Cast"
         self.make_cast(cast_out_name, f"{normed_name}/output_0", self.io_dtype, shape)
         return f"{cast_out_name}/output_0"
 
@@ -433,7 +433,7 @@ class DeepSeekV4Model(Model):
         mix_out_dim = (2 + hc) * hc   # pre+post+comb outputs
 
         # 1. Flatten streams: [B, S, hc_mult, D] → [B, S, hc_mult * D]
-        flat_name = f"{base}/Flatten"
+        flat_name = f"{base}/flatten/Reshape"
         self.make_reshape(
             flat_name,
             [hc_streams, f"/model/constants/INT64/[0, 0, {hc * d}]"],
@@ -499,69 +499,69 @@ class DeepSeekV4Model(Model):
         self.make_initializer(scale_init[2:3], comb_scale_name, to=ir.DataType.FLOAT)
 
         # pre_logits = pre_w * pre_scale + pre_b
-        pre_scaled_name = f"{base}/PreScaled"
+        pre_scaled_name = f"{base}/pre_logits/Mul"
         self.make_mul(pre_scaled_name,
                       [f"{pre_w_name}/output_0", pre_scale_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
-        pre_logits_name = f"{base}/PreLogits"
+        pre_logits_name = f"{base}/pre_logits/Add"
         self.make_add(pre_logits_name,
                       [f"{pre_scaled_name}/output_0", pre_b_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
 
         # post_logits = post_w * post_scale + post_b
-        post_scaled_name = f"{base}/PostScaled"
+        post_scaled_name = f"{base}/post_logits/Mul"
         self.make_mul(post_scaled_name,
                       [f"{post_w_name}/output_0", post_scale_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
-        post_logits_name = f"{base}/PostLogits"
+        post_logits_name = f"{base}/post_logits/Add"
         self.make_add(post_logits_name,
                       [f"{post_scaled_name}/output_0", post_b_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
 
         # comb_logits = reshape(comb_w) * comb_scale + comb_b
-        comb_w_4d_name = f"{base}/CombW4D"
+        comb_w_4d_name = f"{base}/comb_logits/Reshape"
         self.make_reshape(
             comb_w_4d_name,
             [f"{comb_w_name}/output_0", f"/model/constants/INT64/[0, 0, {hc}, {hc}]"],
             ir.DataType.FLOAT,
             ["batch_size", "sequence_length", hc, hc],
         )
-        comb_scaled_name = f"{base}/CombScaled"
+        comb_scaled_name = f"{base}/comb_logits/Mul"
         self.make_mul(comb_scaled_name,
                       [f"{comb_w_4d_name}/output_0", comb_scale_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, hc])
-        comb_logits_name = f"{base}/CombLogits"
+        comb_logits_name = f"{base}/comb_logits/Add"
         self.make_add(comb_logits_name,
                       [f"{comb_scaled_name}/output_0", comb_b_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, hc])
 
         # 6. Compute pre: sigmoid(pre_logits) + eps
-        pre_sig_name = f"{base}/PreSigmoid"
+        pre_sig_name = f"{base}/pre/Sigmoid"
         self.make_sigmoid(pre_sig_name, f"{pre_logits_name}/output_0",
                           ir.DataType.FLOAT,
                           ["batch_size", "sequence_length", hc])
         pre_eps_name = f"model.layers.{layer_id}.{which}_hc.pre_eps"
         self.make_initializer(torch.tensor(self.hc_eps, dtype=torch.float32), pre_eps_name, to=ir.DataType.FLOAT)
-        pre_name = f"{base}/Pre"
+        pre_name = f"{base}/pre/Add"
         self.make_add(pre_name,
                       [f"{pre_sig_name}/output_0", pre_eps_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
 
         # 7. Compute post: 2 * sigmoid(post_logits)
-        post_sig_name = f"{base}/PostSigmoid"
+        post_sig_name = f"{base}/post/Sigmoid"
         self.make_sigmoid(post_sig_name, f"{post_logits_name}/output_0",
                           ir.DataType.FLOAT,
                           ["batch_size", "sequence_length", hc])
         two_const_name = f"model.layers.{layer_id}.{which}_hc.post_two"
         self.make_initializer(torch.tensor(2.0, dtype=torch.float32), two_const_name, to=ir.DataType.FLOAT)
-        post_name = f"{base}/Post"
+        post_name = f"{base}/post/Mul"
         self.make_mul(post_name,
                       [f"{post_sig_name}/output_0", two_const_name],
                       ir.DataType.FLOAT,
@@ -569,14 +569,14 @@ class DeepSeekV4Model(Model):
 
         # 8. Compute comb via Sinkhorn-Knopp (unrolled hc_sinkhorn_iters iterations)
         # Start: softmax(comb_logits, dim=-1) + eps
-        comb_sfmx_name = f"{base}/CombSoftmax"
+        comb_sfmx_name = f"{base}/comb/Softmax"
         self.make_softmax(comb_sfmx_name, f"{comb_logits_name}/output_0",
                           ir.DataType.FLOAT,
                           ["batch_size", "sequence_length", hc, hc],
                           axis=-1)
         comb_eps_name = f"model.layers.{layer_id}.{which}_hc.comb_eps"
         self.make_initializer(torch.tensor(self.hc_eps, dtype=torch.float32), comb_eps_name, to=ir.DataType.FLOAT)
-        comb_cur_name = f"{base}/CombInit"
+        comb_cur_name = f"{base}/comb_init/Add"
         self.make_add(comb_cur_name,
                       [f"{comb_sfmx_name}/output_0", comb_eps_name],
                       ir.DataType.FLOAT,
@@ -584,27 +584,27 @@ class DeepSeekV4Model(Model):
         comb_cur = f"{comb_cur_name}/output_0"
 
         # First col-normalize (before the loop alternation)
-        comb_cur = self.sinkhorn_col_normalize(base, "Init", comb_cur, hc)
+        comb_cur = self.sinkhorn_col_normalize(base, "init", comb_cur, hc)
 
         for it in range(self.hc_sinkhorn_iters - 1):
-            comb_cur = self.sinkhorn_row_normalize(base, f"It{it}Row", comb_cur, hc)
-            comb_cur = self.sinkhorn_col_normalize(base, f"It{it}Col", comb_cur, hc)
+            comb_cur = self.sinkhorn_row_normalize(base, f"it{it}", comb_cur, hc)
+            comb_cur = self.sinkhorn_col_normalize(base, f"it{it}", comb_cur, hc)
 
         comb_name = comb_cur   # [B, S, hc, hc]
 
         # 9. Cast post and comb back to IO dtype
-        post_cast_name = f"{base}/PostCast"
+        post_cast_name = f"{base}/post/Cast"
         self.make_cast(post_cast_name, f"{post_name}/output_0", self.io_dtype,
                        ["batch_size", "sequence_length", hc])
 
-        comb_cast_name = f"{base}/CombCast"
+        comb_cast_name = f"{base}/comb/Cast"
         self.make_cast(comb_cast_name, comb_name, self.io_dtype,
                        ["batch_size", "sequence_length", hc, hc])
 
         # 10. Compute collapsed = (pre * hidden_streams).sum(dim=2)
         # pre: [B, S, hc]; hidden_streams: [B, S, hc, D]
         # pre.unsqueeze(-1): [B, S, hc, 1]
-        pre_u_name = f"{base}/PreUnsqueeze"
+        pre_u_name = f"{base}/pre/Unsqueeze"
         self.make_unsqueeze(
             pre_u_name,
             [f"{pre_name}/output_0", "/model/constants/INT64/[3]"],
@@ -613,18 +613,18 @@ class DeepSeekV4Model(Model):
         )
 
         # Cast hidden_streams to fp32 for the weighted sum
-        hc_float_name = f"{base}/HCStreamsFP32"
+        hc_float_name = f"{base}/hc_streams/Cast"
         self.make_cast(hc_float_name, hc_streams, ir.DataType.FLOAT,
                        ["batch_size", "sequence_length", hc, d])
 
-        weighted_name = f"{base}/WeightedStreams"
+        weighted_name = f"{base}/weighted/Mul"
         self.make_mul(weighted_name,
                       [f"{pre_u_name}/output_0", f"{hc_float_name}/output_0"],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, d])
 
         # sum over axis 2 (hc_mult dimension)
-        collapsed_fp32_name = f"{base}/CollapsedFP32"
+        collapsed_fp32_name = f"{base}/collapsed/ReduceSum"
         self.make_reduce_sum(collapsed_fp32_name,
                              [f"{weighted_name}/output_0",
                               "/model/constants/INT64/[2]"],
@@ -632,7 +632,7 @@ class DeepSeekV4Model(Model):
                              ["batch_size", "sequence_length", d],
                              keepdims=False)
 
-        collapsed_cast_name = f"{base}/CollapsedCast"
+        collapsed_cast_name = f"{base}/collapsed/Cast"
         self.make_cast(collapsed_cast_name, f"{collapsed_fp32_name}/output_0",
                        self.io_dtype, ["batch_size", "sequence_length", d])
 
@@ -644,17 +644,17 @@ class DeepSeekV4Model(Model):
 
     def sinkhorn_row_normalize(self, base: str, tag: str, comb: str, hc: int) -> str:
         """Divide comb by its row sum: comb / comb.sum(dim=-1, keepdim=True)."""
-        row_sum_name = f"{base}/RowSum_{tag}"
+        row_sum_name = f"{base}/row_{tag}/ReduceSum"
         self.make_reduce_sum(row_sum_name, [comb, "/model/constants/INT64/[-1]"],
                              ir.DataType.FLOAT,
                              ["batch_size", "sequence_length", hc, 1], keepdims=True)
-        eps_name = f"{base}/RowEps_{tag}"
+        eps_name = f"{base}/row_{tag}/Add"
         self.make_add(eps_name,
                       [f"{row_sum_name}/output_0",
                        f"model.layers._shared.hc_eps"],   # shared eps const (created once)
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, 1])
-        out_name = f"{base}/RowNorm_{tag}"
+        out_name = f"{base}/row_{tag}/Div"
         self.make_div(out_name, [comb, f"{eps_name}/output_0"],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, hc])
@@ -662,17 +662,17 @@ class DeepSeekV4Model(Model):
 
     def sinkhorn_col_normalize(self, base: str, tag: str, comb: str, hc: int) -> str:
         """Divide comb by its column sum: comb / comb.sum(dim=-2, keepdim=True)."""
-        col_sum_name = f"{base}/ColSum_{tag}"
+        col_sum_name = f"{base}/col_{tag}/ReduceSum"
         self.make_reduce_sum(col_sum_name, [comb, "/model/constants/INT64/[-2]"],
                              ir.DataType.FLOAT,
                              ["batch_size", "sequence_length", 1, hc], keepdims=True)
-        eps_name = f"{base}/ColEps_{tag}"
+        eps_name = f"{base}/col_{tag}/Add"
         self.make_add(eps_name,
                       [f"{col_sum_name}/output_0",
                        f"model.layers._shared.hc_eps"],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", 1, hc])
-        out_name = f"{base}/ColNorm_{tag}"
+        out_name = f"{base}/col_{tag}/Div"
         self.make_div(out_name, [comb, f"{eps_name}/output_0"],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, hc])
@@ -709,7 +709,7 @@ class DeepSeekV4Model(Model):
         d = self.hidden_size
 
         # post.unsqueeze(-1): [B, S, hc, 1]
-        post_u_name = f"{base}/PostUnsqueeze"
+        post_u_name = f"{base}/post/Unsqueeze"
         self.make_unsqueeze(
             post_u_name,
             [post, "/model/constants/INT64/[-1]"],
@@ -718,7 +718,7 @@ class DeepSeekV4Model(Model):
         )
 
         # sublayer_out.unsqueeze(-2): [B, S, 1, D]
-        sub_u_name = f"{base}/SubUnsqueeze"
+        sub_u_name = f"{base}/sub/Unsqueeze"
         self.make_unsqueeze(
             sub_u_name,
             [sublayer_out, "/model/constants/INT64/[-2]"],
@@ -727,14 +727,14 @@ class DeepSeekV4Model(Model):
         )
 
         # post_u * sub_u → [B, S, hc, D]
-        scaled_sub_name = f"{base}/ScaledSublayer"
+        scaled_sub_name = f"{base}/scaled_sub/Mul"
         self.make_mul(scaled_sub_name,
                       [f"{post_u_name}/output_0", f"{sub_u_name}/output_0"],
                       self.io_dtype,
                       ["batch_size", "sequence_length", hc, d])
 
         # comb.transpose(-1,-2): [B, S, hc, hc] → [B, S, hc, hc] (transpose last 2 dims)
-        comb_t_name = f"{base}/CombTranspose"
+        comb_t_name = f"{base}/comb/Transpose"
         self.make_transpose(
             comb_t_name, comb, self.io_dtype,
             ["batch_size", "sequence_length", hc, hc],
@@ -751,7 +751,7 @@ class DeepSeekV4Model(Model):
         )
 
         # new_hidden = scaled_sub + mixed
-        out_name = f"{base}/NewHCStreams"
+        out_name = f"{base}/new_streams/Add"
         self.make_add(out_name,
                       [f"{scaled_sub_name}/output_0", f"{mixed_name}/output_0"],
                       self.io_dtype,
@@ -808,7 +808,7 @@ class DeepSeekV4Model(Model):
                                     f"{q_a_normed_name}/output_0")
 
         # Reshape for per-head q_b_norm: [B, S, H*head_dim] → [B, S, H, head_dim]
-        q_b_4d_name = f"{base}/q_b_4d"
+        q_b_4d_name = f"{base}/q_b/Reshape"
         self.make_reshape(
             q_b_4d_name,
             [f"{q_b_name}/output_0", f"/model/constants/INT64/[0, 0, {H}, {head_dim}]"],
@@ -825,7 +825,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Transpose to [B, H, S, head_dim] for RoPE
-        q_t_name = f"{base}/q_transposed"
+        q_t_name = f"{base}/q/Transpose"
         self.make_transpose(
             q_t_name, q_b_normed_name, self.io_dtype,
             ["batch_size", H, "sequence_length", head_dim],
@@ -860,32 +860,14 @@ class DeepSeekV4Model(Model):
             self.layernorm_attrs["epsilon"],
         )
 
-        # Reshape kv to [B, 1, S, head_dim] for RoPE + cache
-        kv_4d_name = f"{base}/kv_4d"
-        self.make_reshape(
-            kv_4d_name,
-            [f"{kv_normed_name}/output_0",
-             f"/model/constants/INT64/[0, 1, 0, {head_dim}]"],
-            self.io_dtype,
-            ["batch_size", 1, "sequence_length", head_dim],
-        )
-
-        # Transpose to [B, 1, S, head_dim] (already correct from reshape, just naming)
-        # kv_4d: [B, S, 1, head_dim] → need [B, 1, S, head_dim]
-        # Actually reshape gives [B, 1, S, head_dim] if we use [0,1,0,...] ... no.
-        # Let's reshape to [B, S, head_dim] and then unsqueeze + transpose.
-        kv_3d_name = f"{base}/kv_3d_normed"
-        # kv_normed output is [B, S, head_dim] - use it directly
-        kv_u_name = f"{base}/kv_unsqueeze"
+        # Unsqueeze kv from [B, S, head_dim] → [B, 1, S, head_dim] for RoPE + cache
+        kv_u_name = f"{base}/kv/Unsqueeze"
         self.make_unsqueeze(
             kv_u_name,
             [f"{kv_normed_name}/output_0", "/model/constants/INT64/[1]"],
             self.io_dtype,
             ["batch_size", 1, "sequence_length", head_dim],
         )
-        # Transpose to [B, 1, S, head_dim] - already [B, 1, S, head_dim] after unsqueeze
-        # Wait: unsqueeze at dim 1 of [B, S, head_dim] → [B, 1, S, head_dim]
-        # That's already correct.
 
         # Apply RoPE to kv (1 KV head)
         kv_rope_name = self.make_deepseek_rope(
@@ -900,7 +882,7 @@ class DeepSeekV4Model(Model):
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
 
         # Concat along the sequence dimension (axis=2)
-        kv_concat_name = f"{base}/kv_cache_concat"
+        kv_concat_name = f"{base}/kv_cache/Concat"
         self.make_concat(
             kv_concat_name,
             [past_k, kv_rope_name],
@@ -939,7 +921,7 @@ class DeepSeekV4Model(Model):
 
         # Q: [B, H, S, head_dim]; K: [B, 1, total_S, head_dim]
         # K^T: [B, 1, head_dim, total_S]
-        k_t_name = f"{base}/KTranspose"
+        k_t_name = f"{base}/k/Transpose"
         self.make_transpose(
             k_t_name, kv_total, self.io_dtype,
             ["batch_size", 1, head_dim, "total_sequence_length"],
@@ -961,7 +943,7 @@ class DeepSeekV4Model(Model):
             torch.tensor(scale, dtype=to_torch_dtype(self.io_dtype)),
             scale_init_name, to=self.io_dtype
         )
-        attn_scaled_name = f"{base}/AttnScaled"
+        attn_scaled_name = f"{base}/attn_scale/Mul"
         self.make_mul(attn_scaled_name,
                       [f"{attn_raw_name}/output_0", scale_init_name],
                       self.io_dtype,
@@ -970,7 +952,7 @@ class DeepSeekV4Model(Model):
         # Add causal attention mask [B, 1, S, total_S] (from MHA mask subgraph)
         mask_output = f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] else ""
         if mask_output:
-            attn_masked_name = f"{base}/AttnMasked"
+            attn_masked_name = f"{base}/attn_mask/Add"
             self.make_add(attn_masked_name,
                           [f"{attn_scaled_name}/output_0", mask_output],
                           self.io_dtype,
@@ -985,7 +967,7 @@ class DeepSeekV4Model(Model):
         self.make_initializer(attn.sinks.data, sinks_init_name, to=self.io_dtype)
 
         # Reshape sinks to [1, H, 1, 1] for broadcasting
-        sinks_4d_name = f"{base}/Sinks4D"
+        sinks_4d_name = f"{base}/sinks/Reshape"
         self.make_reshape(
             sinks_4d_name,
             [sinks_init_name, f"/model/constants/INT64/[1, {H}, 1, 1]"],
@@ -994,21 +976,21 @@ class DeepSeekV4Model(Model):
         )
 
         # max_val = max(attn_logits, axis=-1, keepdim=True)  [B, H, S, 1]
-        max_val_name = f"{base}/MaxVal"
+        max_val_name = f"{base}/stable_max/ReduceMax"
         self.make_reduce_max(max_val_name,
                              [attn_logits, "/model/constants/INT64/[-1]"],
                              self.io_dtype,
                              ["batch_size", H, "sequence_length", 1], keepdims=True)
 
         # stable_logits = attn_logits - max_val  [B, H, S, total_S]
-        stable_name = f"{base}/Stable"
+        stable_name = f"{base}/stable/Sub"
         self.make_sub(stable_name,
                       [attn_logits, f"{max_val_name}/output_0"],
                       self.io_dtype,
                       ["batch_size", H, "sequence_length", "total_sequence_length"])
 
         # stable_sinks = sinks_4d - max_val  [B, H, S, 1]
-        stable_sinks_name = f"{base}/StableSinks"
+        stable_sinks_name = f"{base}/stable_sinks/Sub"
         self.make_sub(stable_sinks_name,
                       [f"{sinks_4d_name}/output_0", f"{max_val_name}/output_0"],
                       self.io_dtype,
@@ -1033,7 +1015,7 @@ class DeepSeekV4Model(Model):
         )
 
         # sum_exp = sum(exp_logits, axis=-1, keepdim=True)  [B, H, S, 1]
-        sum_exp_name = f"{base}/SumExp"
+        sum_exp_name = f"{base}/sum_exp/ReduceSum"
         self.make_reduce_sum(sum_exp_name,
                              [f"{exp_logits_name}/output_0",
                               "/model/constants/INT64/[-1]"],
@@ -1041,14 +1023,14 @@ class DeepSeekV4Model(Model):
                              ["batch_size", H, "sequence_length", 1], keepdims=True)
 
         # denom = sum_exp + exp_sinks  [B, H, S, 1]
-        denom_name = f"{base}/Denom"
+        denom_name = f"{base}/denom/Add"
         self.make_add(denom_name,
                       [f"{sum_exp_name}/output_0", f"{exp_sinks_name}/output_0"],
                       self.io_dtype,
                       ["batch_size", H, "sequence_length", 1])
 
         # scores = exp_logits / denom  [B, H, S, total_S]
-        scores_name = f"{base}/Scores"
+        scores_name = f"{base}/scores/Div"
         self.make_div(scores_name,
                       [f"{exp_logits_name}/output_0", f"{denom_name}/output_0"],
                       self.io_dtype,
@@ -1065,7 +1047,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Transpose to [B, S, H, head_dim]
-        attn_t_name = f"{base}/AttnTranspose"
+        attn_t_name = f"{base}/attn/Transpose"
         self.make_transpose(
             attn_t_name, f"{attn_out_name}/output_0", self.io_dtype,
             ["batch_size", "sequence_length", H, head_dim],
@@ -1078,7 +1060,7 @@ class DeepSeekV4Model(Model):
         # apply_rotary_pos_emb(attn_output.T(1,2), cos, -sin).T(1,2)
         # i.e., transpose to [B, H, S, head_dim], apply neg-sin RoPE, transpose back
 
-        attn_t2_name = f"{base}/AttnTranspose2"
+        attn_t2_name = f"{base}/attn_t2/Transpose"
         self.make_transpose(
             attn_t2_name, f"{attn_t_name}/output_0", self.io_dtype,
             ["batch_size", H, "sequence_length", head_dim],
@@ -1091,7 +1073,7 @@ class DeepSeekV4Model(Model):
             neg_sin=True,
         )
         # Transpose back to [B, S, H, head_dim]
-        attn_final_t_name = f"{base}/AttnFinalTranspose"
+        attn_final_t_name = f"{base}/attn_final/Transpose"
         self.make_transpose(
             attn_final_t_name, attn_derope_name, self.io_dtype,
             ["batch_size", "sequence_length", H, head_dim],
@@ -1103,7 +1085,7 @@ class DeepSeekV4Model(Model):
         # ---------------------------------------------------------------- #
         # grouped = attn_output.reshape(B, S, o_groups, H*head_dim//o_groups)
         in_per_group = H * head_dim // self.o_groups  # 64*512//8 = 4096
-        grouped_reshape_name = f"{base}/GroupedReshape"
+        grouped_reshape_name = f"{base}/grouped/Reshape"
         self.make_reshape(
             grouped_reshape_name,
             [f"{attn_final_t_name}/output_0",
@@ -1123,7 +1105,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Flatten: [B, S, o_groups, o_lora_rank] → [B, S, o_groups*o_lora_rank]
-        flat_name = f"{base}/OAFlat"
+        flat_name = f"{base}/oa_flat/Reshape"
         self.make_reshape(
             flat_name,
             [o_a_out,
@@ -1171,7 +1153,7 @@ class DeepSeekV4Model(Model):
         # No reshape needed - initializer shape = [n_groups, in_per_group, out_per_group]
 
         # x: [B, S, n_groups, in_per_group] → [B*S, n_groups, in_per_group]
-        x_flat_name = f"{base}/XFlat"
+        x_flat_name = f"{base}/x_flat/Reshape"
         self.make_reshape(
             x_flat_name,
             [root_input, f"/model/constants/INT64/[-1, {n_groups}, {in_per_group}]"],
@@ -1180,7 +1162,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Transpose: [B*S, n_groups, in_per_group] → [n_groups, B*S, in_per_group]
-        x_t_name = f"{base}/XTranspose"
+        x_t_name = f"{base}/x/Transpose"
         self.make_transpose(
             x_t_name, f"{x_flat_name}/output_0", self.io_dtype,
             [n_groups, None, in_per_group],
@@ -1197,7 +1179,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Transpose back: [n_groups, B*S, out_per_group] → [B*S, n_groups, out_per_group]
-        y_name = f"{base}/Y"
+        y_name = f"{base}/y/Transpose"
         self.make_transpose(
             y_name, f"{y_t_name}/output_0", self.io_dtype,
             [None, n_groups, out_per_group],
@@ -1205,7 +1187,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Reshape: [B*S, n_groups, out_per_group] → [B, S, n_groups, out_per_group]
-        y_out_name = f"{base}/YOut"
+        y_out_name = f"{base}/y_out/Reshape"
         self.make_reshape(
             y_out_name,
             [f"{y_name}/output_0",
@@ -1248,7 +1230,7 @@ class DeepSeekV4Model(Model):
         shared_out = self.make_shared_expert(layer_id, mlp.shared_experts, collapsed)
 
         # ---- Combine routed + shared ----
-        combine_name = f"{base}/CombineAdd"
+        combine_name = f"{base}/combine/Add"
         self.make_add(combine_name,
                       [moe_out, shared_out],
                       self.io_dtype,
@@ -1291,7 +1273,7 @@ class DeepSeekV4Model(Model):
         # Apply e_score_correction_bias (buffer, trained)
         bias_name = f"model.layers.{layer_id}.moe.gate.e_score_correction_bias"
         self.make_initializer(mlp.gate.e_score_correction_bias.data, bias_name, to=self.io_dtype)
-        router_bias_name = f"{base}/router/BiasAdd"
+        router_bias_name = f"{base}/router/Add"
         self.make_add(router_bias_name,
                       [f"{router_name}/output_0", bias_name],
                       self.io_dtype,
@@ -1324,11 +1306,11 @@ class DeepSeekV4Model(Model):
         gate_name = self.make_raw_matmul(
             mlp.gate.weight.data,
             f"model.layers.{layer_id}.moe.gate.weight",
-            f"{base}/hash_router/GateMatMul",
+            f"{base}/hash_router/MatMul",
             root_input,
         )
         # Reshape: [B, S, E] → [B*S, E]
-        gate_reshape_name = f"{base}/hash_router/GateReshape"
+        gate_reshape_name = f"{base}/hash_router/Reshape"
         self.make_reshape(
             gate_reshape_name,
             [f"{gate_name}/output_0",
@@ -1442,7 +1424,7 @@ class DeepSeekV4Model(Model):
             torch.tensor(self.swiglu_limit, dtype=to_torch_dtype(self.io_dtype)),
             clamp_g_max_name, to=self.io_dtype
         )
-        gate_clamped_name = f"{base}/gate_clamped"
+        gate_clamped_name = f"{base}/gate/Clip"
         self.make_clip(gate_clamped_name,
                        [f"{gate_name}/output_0", "", clamp_g_max_name],
                        self.io_dtype,
@@ -1456,7 +1438,7 @@ class DeepSeekV4Model(Model):
             ["batch_size", "sequence_length", inter],
         )
 
-        silu_name = f"{base}/Silu"
+        silu_name = f"{base}/silu/Mul"
         self.make_mul(silu_name,
                       [f"{gate_clamped_name}/output_0", f"{silu_sig_name}/output_0"],
                       self.io_dtype,
@@ -1473,13 +1455,13 @@ class DeepSeekV4Model(Model):
             torch.tensor(self.swiglu_limit, dtype=to_torch_dtype(self.io_dtype)),
             clamp_u_max_name, to=self.io_dtype
         )
-        up_clamped_name = f"{base}/up_clamped"
+        up_clamped_name = f"{base}/up/Clip"
         self.make_clip(up_clamped_name,
                        [f"{up_name}/output_0", clamp_u_min_name, clamp_u_max_name],
                        self.io_dtype,
                        ["batch_size", "sequence_length", inter])
 
-        gate_up_mul_name = f"{base}/gate_up_mul"
+        gate_up_mul_name = f"{base}/gate_up/Mul"
         self.make_mul(gate_up_mul_name,
                       [f"{silu_name}/output_0", f"{up_clamped_name}/output_0"],
                       self.io_dtype,
@@ -1500,7 +1482,7 @@ class DeepSeekV4Model(Model):
         d = self.hidden_size
 
         # Flatten: [B, S, hc_mult, D] → [B, S, hc_mult * D]
-        flat_name = f"{base}/Flatten"
+        flat_name = f"{base}/flatten/Reshape"
         self.make_reshape(
             flat_name,
             [hc_streams, f"/model/constants/INT64/[0, 0, {hc * d}]"],
@@ -1535,13 +1517,13 @@ class DeepSeekV4Model(Model):
         self.make_initializer(hc_head.hc_scale.data.float(), hc_scale_name, to=ir.DataType.FLOAT)
         self.make_initializer(hc_head.hc_base.data.float(), hc_base_name, to=ir.DataType.FLOAT)
 
-        scaled_name = f"{base}/Scaled"
+        scaled_name = f"{base}/scaled/Mul"
         self.make_mul(scaled_name,
                       [f"{fn_mm_name}/output_0", hc_scale_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
 
-        biased_name = f"{base}/Biased"
+        biased_name = f"{base}/biased/Add"
         self.make_add(biased_name,
                       [f"{scaled_name}/output_0", hc_base_name],
                       ir.DataType.FLOAT,
@@ -1557,14 +1539,14 @@ class DeepSeekV4Model(Model):
         self.make_initializer(torch.tensor(self.hc_eps, dtype=torch.float32),
                               hchead_eps_name, to=ir.DataType.FLOAT)
 
-        pre_name = f"{base}/Pre"
+        pre_name = f"{base}/pre/Add"
         self.make_add(pre_name,
                       [f"{sig_name}/output_0", hchead_eps_name],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc])
 
         # Unsqueeze pre: [B, S, hc] → [B, S, hc, 1]
-        pre_u_name = f"{base}/PreUnsqueeze"
+        pre_u_name = f"{base}/pre/Unsqueeze"
         self.make_unsqueeze(
             pre_u_name,
             [f"{pre_name}/output_0", "/model/constants/INT64/[3]"],
@@ -1573,26 +1555,26 @@ class DeepSeekV4Model(Model):
         )
 
         # Cast hc_streams to fp32 for weighted sum
-        hc_fp32_name = f"{base}/HCFp32"
+        hc_fp32_name = f"{base}/hc_fp32/Cast"
         self.make_cast(hc_fp32_name, hc_streams, ir.DataType.FLOAT,
                        ["batch_size", "sequence_length", hc, d])
 
         # Weighted: [B, S, hc, 1] * [B, S, hc, D] → [B, S, hc, D]
-        weighted_name = f"{base}/Weighted"
+        weighted_name = f"{base}/weighted/Mul"
         self.make_mul(weighted_name,
                       [f"{pre_u_name}/output_0", f"{hc_fp32_name}/output_0"],
                       ir.DataType.FLOAT,
                       ["batch_size", "sequence_length", hc, d])
 
         # Sum over hc axis
-        out_fp32_name = f"{base}/OutFp32"
+        out_fp32_name = f"{base}/out_fp32/ReduceSum"
         self.make_reduce_sum(out_fp32_name,
                              [f"{weighted_name}/output_0", "/model/constants/INT64/[2]"],
                              ir.DataType.FLOAT,
                              ["batch_size", "sequence_length", d], keepdims=False)
 
         # Cast back to IO dtype
-        out_name = f"{base}/Out"
+        out_name = f"{base}/out/Cast"
         self.make_cast(out_name, f"{out_fp32_name}/output_0", self.io_dtype,
                        ["batch_size", "sequence_length", d])
         return f"{out_name}/output_0"
