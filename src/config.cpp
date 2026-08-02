@@ -535,6 +535,8 @@ struct SlidingWindow_Element : JSON::Element {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else if (name == "slide_inputs") {
       v_->slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_->cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
