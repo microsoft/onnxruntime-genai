@@ -234,7 +234,7 @@ class DeepSeekV4Model(Model):
 
         # ---- Extract nope / rope slices along the last (head_dim) axis ----
         # Slice(input, starts=[0], ends=[nope_dim], axes=[3])
-        nope_name = f"{name}/Nope"
+        nope_name = f"{name}/nope/Slice"
         self.make_slice(
             nope_name,
             [root_input,
@@ -245,7 +245,7 @@ class DeepSeekV4Model(Model):
             ["batch_size", num_heads, "sequence_length", nope_dim],
         )
 
-        rope_in_name = f"{name}/RopeIn"
+        rope_in_name = f"{name}/rope_in/Slice"
         self.make_slice(
             rope_in_name,
             [root_input,
@@ -261,7 +261,7 @@ class DeepSeekV4Model(Model):
         # Gather(cos_cache, position_ids, axis=0) → [B, S, rope_dim]
         pos_ids = self.input_names["position_ids"]  # [B, S]
 
-        cos_gathered_name = f"{name}/CosGather"
+        cos_gathered_name = f"{name}/cos/Gather"
         self.make_gather(
             cos_gathered_name,
             ["deepseek_cos_cache", pos_ids],
@@ -269,7 +269,7 @@ class DeepSeekV4Model(Model):
             ["batch_size", "sequence_length", rope_dim],
             axis=0,
         )
-        sin_gathered_name = f"{name}/SinGather"
+        sin_gathered_name = f"{name}/sin/Gather"
         self.make_gather(
             sin_gathered_name,
             ["deepseek_sin_cache", pos_ids],
@@ -279,14 +279,14 @@ class DeepSeekV4Model(Model):
         )
 
         # Unsqueeze to [B, 1, S, rope_dim] for head broadcasting
-        cos_u_name = f"{name}/CosUnsqueeze"
+        cos_u_name = f"{name}/cos/Unsqueeze"
         self.make_unsqueeze(
             cos_u_name,
             [f"{cos_gathered_name}/output_0", "/model/constants/INT64/[1]"],
             self.io_dtype,
             ["batch_size", 1, "sequence_length", rope_dim],
         )
-        sin_u_name = f"{name}/SinUnsqueeze"
+        sin_u_name = f"{name}/sin/Unsqueeze"
         self.make_unsqueeze(
             sin_u_name,
             [f"{sin_gathered_name}/output_0", "/model/constants/INT64/[1]"],
@@ -296,7 +296,7 @@ class DeepSeekV4Model(Model):
 
         # ---- Interleaved rotate_half ----
         # Even indices: rope_in[..., 0::2]
-        even_name = f"{name}/Even"
+        even_name = f"{name}/even/Slice"
         self.make_slice(
             even_name,
             [f"{rope_in_name}/output_0",
@@ -308,7 +308,7 @@ class DeepSeekV4Model(Model):
             ["batch_size", num_heads, "sequence_length", rope_dim // 2],
         )
         # Odd indices: rope_in[..., 1::2]
-        odd_name = f"{name}/Odd"
+        odd_name = f"{name}/odd/Slice"
         self.make_slice(
             odd_name,
             [f"{rope_in_name}/output_0",
@@ -321,25 +321,23 @@ class DeepSeekV4Model(Model):
         )
 
         # Negate odd slice → -x2
-        neg_odd_name = f"{name}/NegOdd"
-        self.make_node(
-            "Neg",
-            inputs=[f"{odd_name}/output_0"],
-            outputs=[f"{neg_odd_name}/output_0"],
-            name=neg_odd_name,
+        neg_odd_name = f"{name}/odd/Neg"
+        self.make_neg(
+            neg_odd_name,
+            f"{odd_name}/output_0",
+            self.io_dtype,
+            ["batch_size", num_heads, "sequence_length", rope_dim // 2],
         )
-        self.make_value(f"{neg_odd_name}/output_0", self.io_dtype,
-                        shape=["batch_size", num_heads, "sequence_length", rope_dim // 2])
 
         # Unsqueeze even and neg_odd along last axis for concat-interleave
-        neg_odd_u_name = f"{name}/NegOddU"
+        neg_odd_u_name = f"{name}/odd/Unsqueeze"
         self.make_unsqueeze(
             neg_odd_u_name,
             [f"{neg_odd_name}/output_0", "/model/constants/INT64/[4]"],
             self.io_dtype,
             ["batch_size", num_heads, "sequence_length", rope_dim // 2, 1],
         )
-        even_u_name = f"{name}/EvenU"
+        even_u_name = f"{name}/even/Unsqueeze"
         self.make_unsqueeze(
             even_u_name,
             [f"{even_name}/output_0", "/model/constants/INT64/[4]"],
@@ -348,7 +346,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Concat → [B, H, S, rope_dim//2, 2]
-        rotated_stacked_name = f"{name}/RotStacked"
+        rotated_stacked_name = f"{name}/rotated/Concat"
         self.make_concat(
             rotated_stacked_name,
             [f"{neg_odd_u_name}/output_0", f"{even_u_name}/output_0"],
@@ -358,7 +356,7 @@ class DeepSeekV4Model(Model):
         )
 
         # Reshape → [B, H, S, rope_dim]
-        rotated_name = f"{name}/RotHalf"
+        rotated_name = f"{name}/rotated/Reshape"
         self.make_reshape(
             rotated_name,
             [f"{rotated_stacked_name}/output_0",
@@ -368,24 +366,22 @@ class DeepSeekV4Model(Model):
         )
 
         # ---- rope_out = rope_in * cos + rotated * sin ----
-        cos_mul_name = f"{name}/CosMul"
+        cos_mul_name = f"{name}/cos/Mul"
         self.make_mul(cos_mul_name,
                       [f"{rope_in_name}/output_0", f"{cos_u_name}/output_0"],
                       self.io_dtype,
                       ["batch_size", num_heads, "sequence_length", rope_dim])
 
-        sin_mul_name = f"{name}/SinMul"
+        sin_mul_name = f"{name}/sin/Mul"
         if neg_sin:
             # conjugate rotation: rope * cos - rotated * sin
-            neg_sin_u_name = f"{name}/NegSinU"
-            self.make_node(
-                "Neg",
-                inputs=[f"{sin_u_name}/output_0"],
-                outputs=[f"{neg_sin_u_name}/output_0"],
-                name=neg_sin_u_name,
+            neg_sin_u_name = f"{name}/sin/Neg"
+            self.make_neg(
+                neg_sin_u_name,
+                f"{sin_u_name}/output_0",
+                self.io_dtype,
+                ["batch_size", 1, "sequence_length", rope_dim],
             )
-            self.make_value(f"{neg_sin_u_name}/output_0", self.io_dtype,
-                            shape=["batch_size", 1, "sequence_length", rope_dim])
             self.make_mul(sin_mul_name,
                           [f"{rotated_name}/output_0", f"{neg_sin_u_name}/output_0"],
                           self.io_dtype,
@@ -396,24 +392,22 @@ class DeepSeekV4Model(Model):
                           self.io_dtype,
                           ["batch_size", num_heads, "sequence_length", rope_dim])
 
-        rope_out_name = f"{name}/RopeOut"
+        rope_out_name = f"{name}/rope_out/Add"
         self.make_add(rope_out_name,
                       [f"{cos_mul_name}/output_0", f"{sin_mul_name}/output_0"],
                       self.io_dtype,
                       ["batch_size", num_heads, "sequence_length", rope_dim])
 
         # ---- Concat [nope, rope_out] → full head ----
-        out_name = f"{name}/output_0"
+        final_concat_name = f"{name}/final/Concat"
         self.make_concat(
-            f"{name}/FinalConcat",
+            final_concat_name,
             [f"{nope_name}/output_0", f"{rope_out_name}/output_0"],
             self.io_dtype,
             ["batch_size", num_heads, "sequence_length", head_dim],
             axis=3,
         )
-        # Rename the concat output to the canonical output name
-        # (make_concat already sets the output to "{name}/FinalConcat/output_0")
-        return f"{name}/FinalConcat/output_0"
+        return f"{final_concat_name}/output_0"
 
     # ------------------------------------------------------------------ #
     # HyperConnection
@@ -460,15 +454,13 @@ class DeepSeekV4Model(Model):
         # fn has shape [mix_out_dim, hc * D]; stored transposed for MatMul
         self.make_initializer(hc_module.fn.data.T.float(), fn_weight, to=ir.DataType.FLOAT)
 
-        fn_matmul_name = f"{base}/FnMatMul"
-        self.make_node(
-            "MatMul",
-            inputs=[normed_name, fn_weight],
-            outputs=[f"{fn_matmul_name}/output_0"],
-            name=fn_matmul_name,
+        fn_matmul_name = f"{base}/fn/MatMul"
+        self.make_matmul_simple(
+            fn_matmul_name,
+            [normed_name, fn_weight],
+            ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", mix_out_dim],
         )
-        self.make_value(f"{fn_matmul_name}/output_0", ir.DataType.FLOAT,
-                        shape=["batch_size", "sequence_length", mix_out_dim])
 
         # 4. Split into (pre_w, post_w, comb_w)
         pre_w_name = f"{base}/PreW"
@@ -750,15 +742,13 @@ class DeepSeekV4Model(Model):
         )
 
         # matmul(comb_t, hidden_streams): [B, S, hc, hc] @ [B, S, hc, D] = [B, S, hc, D]
-        mixed_name = f"{base}/CombMixed"
-        self.make_node(
-            "MatMul",
-            inputs=[f"{comb_t_name}/output_0", hc_streams],
-            outputs=[f"{mixed_name}/output_0"],
-            name=mixed_name,
+        mixed_name = f"{base}/mixed/MatMul"
+        self.make_matmul_simple(
+            mixed_name,
+            [f"{comb_t_name}/output_0", hc_streams],
+            self.io_dtype,
+            ["batch_size", "sequence_length", hc, d],
         )
-        self.make_value(f"{mixed_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", hc, d])
 
         # new_hidden = scaled_sub + mixed
         out_name = f"{base}/NewHCStreams"
@@ -803,18 +793,15 @@ class DeepSeekV4Model(Model):
             attn.q_a_norm.weight + self.layernorm_attrs["add_offset"],
             q_a_norm_w_name, to=self.io_dtype
         )
-        q_a_normed_name = f"{base}/q_a_norm"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[f"{q_a_name}/output_0", q_a_norm_w_name],
-            outputs=[f"{q_a_normed_name}/output_0"],
-            name=q_a_normed_name,
-            domain="com.microsoft",
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
+        q_a_normed_name = f"{base}/q_a_norm/SimplifiedLayerNorm"
+        self.make_simplified_layernorm(
+            q_a_normed_name,
+            f"{q_a_name}/output_0",
+            q_a_norm_w_name,
+            self.io_dtype,
+            ["batch_size", "sequence_length", q_lora],
+            self.layernorm_attrs["epsilon"],
         )
-        self.make_value(f"{q_a_normed_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", q_lora])
 
         # q_b_proj: Linear(q_lora, H * head_dim)
         q_b_name = self.make_matmul(attn.q_b_proj, f"{base}/q_b_proj/MatMul",
@@ -863,18 +850,15 @@ class DeepSeekV4Model(Model):
             attn.kv_norm.weight + self.layernorm_attrs["add_offset"],
             kv_norm_w_name, to=self.io_dtype
         )
-        kv_normed_name = f"{base}/kv_norm"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[f"{kv_proj_name}/output_0", kv_norm_w_name],
-            outputs=[f"{kv_normed_name}/output_0"],
-            name=kv_normed_name,
-            domain="com.microsoft",
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
+        kv_normed_name = f"{base}/kv_norm/SimplifiedLayerNorm"
+        self.make_simplified_layernorm(
+            kv_normed_name,
+            f"{kv_proj_name}/output_0",
+            kv_norm_w_name,
+            self.io_dtype,
+            ["batch_size", "sequence_length", head_dim],
+            self.layernorm_attrs["epsilon"],
         )
-        self.make_value(f"{kv_normed_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", head_dim])
 
         # Reshape kv to [B, 1, S, head_dim] for RoPE + cache
         kv_4d_name = f"{base}/kv_4d"
@@ -931,24 +915,22 @@ class DeepSeekV4Model(Model):
         kv_total = f"{kv_concat_name}/output_0"
 
         # present.{layer_id}.key
-        self.make_node(
-            "Identity",
-            inputs=[kv_total],
-            outputs=[present_k],
-            name=f"{base}/PresentK",
+        self.make_identity(
+            f"{base}/present_k/Identity",
+            kv_total,
+            self.io_dtype,
+            ["batch_size", 1, "total_sequence_length", head_dim],
+            output_name=present_k,
         )
-        self.make_value(present_k, self.io_dtype,
-                        shape=["batch_size", 1, "total_sequence_length", head_dim])
 
         # present.{layer_id}.value (same tensor)
-        self.make_node(
-            "Identity",
-            inputs=[kv_total],
-            outputs=[present_v],
-            name=f"{base}/PresentV",
+        self.make_identity(
+            f"{base}/present_v/Identity",
+            kv_total,
+            self.io_dtype,
+            ["batch_size", 1, "total_sequence_length", head_dim],
+            output_name=present_v,
         )
-        self.make_value(present_v, self.io_dtype,
-                        shape=["batch_size", 1, "total_sequence_length", head_dim])
 
         # ---------------------------------------------------------------- #
         # Scaled dot-product attention with sinks
@@ -965,15 +947,13 @@ class DeepSeekV4Model(Model):
         )
 
         # attn_raw = Q @ K^T * scale → [B, H, S, total_S]  (K broadcasts to H heads)
-        attn_raw_name = f"{base}/AttnRaw"
-        self.make_node(
-            "MatMul",
-            inputs=[q_rope_name, f"{k_t_name}/output_0"],
-            outputs=[f"{attn_raw_name}/output_0"],
-            name=attn_raw_name,
+        attn_raw_name = f"{base}/attn_raw/MatMul"
+        self.make_matmul_simple(
+            attn_raw_name,
+            [q_rope_name, f"{k_t_name}/output_0"],
+            self.io_dtype,
+            ["batch_size", H, "sequence_length", "total_sequence_length"],
         )
-        self.make_value(f"{attn_raw_name}/output_0", self.io_dtype,
-                        shape=["batch_size", H, "sequence_length", "total_sequence_length"])
 
         # Scale
         scale_init_name = f"model.layers.{layer_id}.self_attn.scale"
@@ -1035,26 +1015,22 @@ class DeepSeekV4Model(Model):
                       ["batch_size", H, "sequence_length", 1])
 
         # exp_logits = exp(stable_logits)  [B, H, S, total_S]
-        exp_logits_name = f"{base}/ExpLogits"
-        self.make_node(
-            "Exp",
-            inputs=[f"{stable_name}/output_0"],
-            outputs=[f"{exp_logits_name}/output_0"],
-            name=exp_logits_name,
+        exp_logits_name = f"{base}/exp_logits/Exp"
+        self.make_exp(
+            exp_logits_name,
+            f"{stable_name}/output_0",
+            self.io_dtype,
+            ["batch_size", H, "sequence_length", "total_sequence_length"],
         )
-        self.make_value(f"{exp_logits_name}/output_0", self.io_dtype,
-                        shape=["batch_size", H, "sequence_length", "total_sequence_length"])
 
         # exp_sinks = exp(stable_sinks)  [B, H, S, 1]
-        exp_sinks_name = f"{base}/ExpSinks"
-        self.make_node(
-            "Exp",
-            inputs=[f"{stable_sinks_name}/output_0"],
-            outputs=[f"{exp_sinks_name}/output_0"],
-            name=exp_sinks_name,
+        exp_sinks_name = f"{base}/exp_sinks/Exp"
+        self.make_exp(
+            exp_sinks_name,
+            f"{stable_sinks_name}/output_0",
+            self.io_dtype,
+            ["batch_size", H, "sequence_length", 1],
         )
-        self.make_value(f"{exp_sinks_name}/output_0", self.io_dtype,
-                        shape=["batch_size", H, "sequence_length", 1])
 
         # sum_exp = sum(exp_logits, axis=-1, keepdim=True)  [B, H, S, 1]
         sum_exp_name = f"{base}/SumExp"
@@ -1080,15 +1056,13 @@ class DeepSeekV4Model(Model):
 
         # ---- attn_output = scores @ V  [B, H, S, head_dim] ----
         # V = kv_total [B, 1, total_S, head_dim]; broadcasts to [B, H, ...]
-        attn_out_name = f"{base}/AttnOut"
-        self.make_node(
-            "MatMul",
-            inputs=[f"{scores_name}/output_0", kv_total],
-            outputs=[f"{attn_out_name}/output_0"],
-            name=attn_out_name,
+        attn_out_name = f"{base}/attn_out/MatMul"
+        self.make_matmul_simple(
+            attn_out_name,
+            [f"{scores_name}/output_0", kv_total],
+            self.io_dtype,
+            ["batch_size", H, "sequence_length", head_dim],
         )
-        self.make_value(f"{attn_out_name}/output_0", self.io_dtype,
-                        shape=["batch_size", H, "sequence_length", head_dim])
 
         # Transpose to [B, S, H, head_dim]
         attn_t_name = f"{base}/AttnTranspose"
@@ -1214,15 +1188,13 @@ class DeepSeekV4Model(Model):
         )
 
         # BatchMatMul: [n_groups, B*S, in_per_group] @ [n_groups, in_per_group, out_per_group]
-        y_t_name = f"{base}/YTranspose"
-        self.make_node(
-            "MatMul",
-            inputs=[f"{x_t_name}/output_0", w_name],
-            outputs=[f"{y_t_name}/output_0"],
-            name=y_t_name,
+        y_t_name = f"{base}/y_t/MatMul"
+        self.make_matmul_simple(
+            y_t_name,
+            [f"{x_t_name}/output_0", w_name],
+            self.io_dtype,
+            [n_groups, None, out_per_group],
         )
-        self.make_value(f"{y_t_name}/output_0", self.io_dtype,
-                        shape=[n_groups, None, out_per_group])
 
         # Transpose back: [n_groups, B*S, out_per_group] → [B*S, n_groups, out_per_group]
         y_name = f"{base}/Y"
@@ -1294,16 +1266,11 @@ class DeepSeekV4Model(Model):
         """
         num_experts = weight_tensor.shape[0]
         self.make_initializer(weight_tensor.T.contiguous(), init_name, to=self.io_dtype)
-        self.make_node(
-            "MatMul",
-            inputs=[root_input, init_name],
-            outputs=[f"{node_name}/output_0"],
-            name=node_name,
-        )
-        self.make_value(
-            f"{node_name}/output_0",
+        self.make_matmul_simple(
+            node_name,
+            [root_input, init_name],
             self.io_dtype,
-            shape=["batch_size", "sequence_length", num_experts],
+            ["batch_size", "sequence_length", num_experts],
         )
         return node_name
 
@@ -1481,15 +1448,13 @@ class DeepSeekV4Model(Model):
                        self.io_dtype,
                        ["batch_size", "sequence_length", inter])
 
-        silu_sig_name = f"{base}/SiluSigmoid"
-        self.make_node(
-            "Sigmoid",
-            inputs=[f"{gate_clamped_name}/output_0"],
-            outputs=[f"{silu_sig_name}/output_0"],
-            name=silu_sig_name,
+        silu_sig_name = f"{base}/silu/Sigmoid"
+        self.make_sigmoid(
+            silu_sig_name,
+            f"{gate_clamped_name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", inter],
         )
-        self.make_value(f"{silu_sig_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", inter])
 
         silu_name = f"{base}/Silu"
         self.make_mul(silu_name,
@@ -1556,15 +1521,13 @@ class DeepSeekV4Model(Model):
         # hc_head.hc_fn: [hc_mult, hc_mult * D] → store transposed
         self.make_initializer(hc_head.hc_fn.data.T.float(), hc_fn_w_name, to=ir.DataType.FLOAT)
 
-        fn_mm_name = f"{base}/FnMatMul"
-        self.make_node(
-            "MatMul",
-            inputs=[normed_name, hc_fn_w_name],
-            outputs=[f"{fn_mm_name}/output_0"],
-            name=fn_mm_name,
+        fn_mm_name = f"{base}/fn/MatMul"
+        self.make_matmul_simple(
+            fn_mm_name,
+            [normed_name, hc_fn_w_name],
+            ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", hc],
         )
-        self.make_value(f"{fn_mm_name}/output_0", ir.DataType.FLOAT,
-                        shape=["batch_size", "sequence_length", hc])
 
         # Scale and bias
         hc_scale_name = "model.hc_head.hc_scale"
@@ -1657,18 +1620,15 @@ class DeepSeekV4Model(Model):
             layer.input_layernorm.weight + self.layernorm_attrs["add_offset"],
             attn_ln_w, to=self.io_dtype
         )
-        attn_ln_name = f"/model/layers.{layer_id}/input_layernorm"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[collapsed_attn, attn_ln_w],
-            outputs=[f"{attn_ln_name}/output_0"],
-            name=attn_ln_name,
-            domain="com.microsoft",
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
+        attn_ln_name = f"/model/layers.{layer_id}/input_layernorm/SimplifiedLayerNorm"
+        self.make_simplified_layernorm(
+            attn_ln_name,
+            collapsed_attn,
+            attn_ln_w,
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hidden_size],
+            self.layernorm_attrs["epsilon"],
         )
-        self.make_value(f"{attn_ln_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", self.hidden_size])
 
         # ---- Attention ----
         attn_out = self.make_deepseek_attention(
@@ -1693,18 +1653,15 @@ class DeepSeekV4Model(Model):
             layer.post_attention_layernorm.weight + self.layernorm_attrs["add_offset"],
             ffn_ln_w, to=self.io_dtype
         )
-        ffn_ln_name = f"/model/layers.{layer_id}/post_attention_layernorm"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[collapsed_ffn, ffn_ln_w],
-            outputs=[f"{ffn_ln_name}/output_0"],
-            name=ffn_ln_name,
-            domain="com.microsoft",
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
+        ffn_ln_name = f"/model/layers.{layer_id}/post_attention_layernorm/SimplifiedLayerNorm"
+        self.make_simplified_layernorm(
+            ffn_ln_name,
+            collapsed_ffn,
+            ffn_ln_w,
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hidden_size],
+            self.layernorm_attrs["epsilon"],
         )
-        self.make_value(f"{ffn_ln_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", self.hidden_size])
 
         # ---- MoE / FFN ----
         moe_out = self.make_deepseek_moe(
@@ -1805,18 +1762,15 @@ class DeepSeekV4Model(Model):
             model_inner.norm.weight + self.layernorm_attrs["add_offset"],
             final_norm_w, to=self.io_dtype
         )
-        final_norm_name = "/model/final_norm"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[hc_head_out, final_norm_w],
-            outputs=[f"{final_norm_name}/output_0"],
-            name=final_norm_name,
-            domain="com.microsoft",
-            axis=-1,
-            epsilon=self.layernorm_attrs["epsilon"],
+        final_norm_name = "/model/final_norm/SimplifiedLayerNorm"
+        self.make_simplified_layernorm(
+            final_norm_name,
+            hc_head_out,
+            final_norm_w,
+            self.io_dtype,
+            ["batch_size", "sequence_length", d],
+            self.layernorm_attrs["epsilon"],
         )
-        self.make_value(f"{final_norm_name}/output_0", self.io_dtype,
-                        shape=["batch_size", "sequence_length", d])
 
         # Update layernorm tracking for LM head
         self.layernorm_attrs["output_0"] = f"{final_norm_name}/output_0"
