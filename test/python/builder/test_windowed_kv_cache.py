@@ -181,6 +181,7 @@ def _make_shape_model(ep, local_layers=()):
     model = Model.__new__(Model)
     model.ep = ep
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
     if local_layers is not None:
         model.is_local = lambda layer_id: layer_id in local_layers
     return model
@@ -252,6 +253,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     model.ep_attrs = {ep: {}}
     model.extra_options = {}
     model.use_paged_attention = False
+    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"
