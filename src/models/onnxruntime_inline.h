@@ -124,6 +124,7 @@ inline size_t SizeOf(ONNXTensorElementDataType type) {
     // FP8 KV caches are stored as single-byte elements. There is no Ort wrapper type for them,
     // so match the ONNX element type directly.
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
       return sizeof(uint8_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");

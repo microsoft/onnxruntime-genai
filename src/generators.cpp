@@ -677,6 +677,28 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
 }
 
+void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokensDevice"};
+
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.empty())
+    throw std::runtime_error("input_ids is empty");
+  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
+      state_->params_->search.max_length)
+    throw std::runtime_error("device input_ids + current sequence length exceeds max length");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  if (set_extra_inputs_) {
+    state_->SetExtraInputs(extra_inputs_);
+    set_extra_inputs_ = false;
+  }
+
+  search_->AppendTokens(input_ids);
+  computed_logits_ = false;
+  ComputeLogits(input_ids);
+}
+
 void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
@@ -924,6 +946,34 @@ DeviceSpan<float> Generator::GetLogits() {
     ComputeLogits(search_->GetNextTokens());
   }
   return search_->GetLogits();
+}
+
+void Generator::SnapshotState() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  state_->SnapshotState(search_->GetSequenceLength());
+}
+
+bool Generator::CanCropRecurrentState() const {
+  return state_->HasCroppableRecurrentState();
+}
+
+void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (new_length > search_->GetSequenceLength())
+    throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
+  search_->RewindTo(new_length);
+  state_->CropToAccepted(new_length, recurrent_position);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
+  computed_logits_ = false;
+  last_action_ = Action::rewound;
+}
+
+void Generator::SetHiddenStates(std::shared_ptr<Tensor> hidden_states) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  hidden_states_input_ = std::move(hidden_states);  // keep alive until the feeder copies it
+  state_->SetHiddenStates(hidden_states_input_ ? hidden_states_input_->GetOrtTensor() : nullptr);
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
