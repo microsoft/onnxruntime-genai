@@ -134,6 +134,13 @@ class DeepSeekV4FlashModel(Model):
         self.max_seq_len = int(extra_options.get("dsv4_max_seq_len", 4096))
         self.moe_impl = extra_options.get("dsv4_moe_impl", "qmoe")
 
+        # Opt-in: replace the dense window-plus-compressed attention with one
+        # `com.microsoft.PagedAttention` node per layer (kv_cache_layout='LATENT').  One flat
+        # paged cache per layer then holds both streams, updated in place, and the O(context)
+        # score tensor disappears.
+        self.paged = extra_options.get("dsv4_paged_attention", "0") not in ("0", 0, False)
+        self.block_size = int(extra_options.get("dsv4_block_size", 64))
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -211,6 +218,12 @@ class DeepSeekV4FlashModel(Model):
     def comp_capacity(self, ratio):
         return self.max_seq_len // ratio + 2
 
+    def group_blocks(self, ratio):
+        """Block-table width for a cache group: the window region uses absolute positions, so it
+        spans max_seq_len, and the compressor's rows sit directly above it."""
+        span = self.max_seq_len + (self.comp_capacity(ratio) if ratio else 0)
+        return (span + self.block_size - 1) // self.block_size
+
     def _make_dsv4_io(self):
         self.input_names = {"input_ids": "input_ids", "past_lens": "past_lens"}
         self.input_types = {"input_ids": ir.DataType.INT64, "past_lens": ir.DataType.INT64}
@@ -219,13 +232,28 @@ class DeepSeekV4FlashModel(Model):
         self.output_types = {"logits": ir.DataType.FLOAT}
         self.output_shapes = {"logits": [B, S, self.vocab_size]}
 
+        if self.paged:
+            # One block table per ratio group: layers do not share a logical position space, and
+            # sizing a single pool for the ratio-4 layers would cost more than the dense export.
+            for r in sorted(set(self.compress_ratios)):
+                n = f"block_table_{r}"
+                self.input_names[n] = n
+                self.input_types[n] = ir.DataType.INT32
+                self.input_shapes[n] = [B, self.group_blocks(r)]
+
         self.cache_spec = []  # (layer_id, key)
         for i, r in enumerate(self.compress_ratios):
-            entries = [("kv", self.io_dtype, [B, self.window, self.head_dim])]
+            if self.paged:
+                entries = [("kv", self.io_dtype,
+                            [f"num_blocks_{r}", self.block_size, 1, self.head_dim])]
+            else:
+                entries = [("kv", self.io_dtype, [B, self.window, self.head_dim])]
             if r:
                 st = [B, self.state_len(r), self.coff(r) * self.head_dim]
+                if not self.paged:
+                    # Paged mode keeps the compressed rows in the same flat cache as the window.
+                    entries.append(("comp", self.io_dtype, [B, self.comp_capacity(r), self.head_dim]))
                 entries += [
-                    ("comp", self.io_dtype, [B, self.comp_capacity(r), self.head_dim]),
                     ("cstate_kv", ir.DataType.FLOAT, st),
                     ("cstate_score", ir.DataType.FLOAT, st),
                 ]
@@ -762,6 +790,40 @@ class DeepSeekV4FlashModel(Model):
         kv_n = self.cast(f"{name}/kvnb", kv_n, io, [B, S, nd])
         kv = self.op("Concat", [kv_n, kv_r], f"{name}/kvq", io, [B, S, D], axis=-1)
 
+        if self.paged:
+            o, presents = self.make_paged_attention(name, layer_id, ratio, q, kv, x, ctx)
+        else:
+            o, presents = self.make_dense_attention(name, layer_id, ratio, q, kv, x, ctx)
+
+        o = rope_last(f"{name}/orope", o, [B, S, H, D], cos_q, sin_q, inverse=True)
+
+        # ---- grouped output projection ----
+        o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
+        o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
+        o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
+        wa = self.shard(self.sd[f"{p}.wo_a.weight"].reshape(self.o_groups, R, dh), 0)
+        o = self.op("MatMul", [o, self.init(wa.transpose(1, 2), f"{p}.wo_a/G", to=io)],
+                    f"{name}/oa", io, [G, None, R])
+        o = self.op("Transpose", [o], f"{name}/oat", io, [None, G, R], perm=[1, 0, 2])
+        o = self.reshape(f"{name}/oaf", o, [-1, G * R], io, [None, G * R])
+        o = self.proj(f"{name}/ob2", o, f"{p}.wo_b.weight", [None, self.dim], shard_axis=1)
+        # Each rank holds a column block of wo_b, so this is a partial sum.
+        o = self.all_reduce(f"{name}/ar", o, io, [None, self.dim])
+        o = self.dyn_reshape(f"{name}/out", o, ctx["bs"], [self.dim], io, [B, S, self.dim])
+        return o, presents
+
+    def make_dense_attention(self, name, layer_id, ratio, q, kv, x, ctx):
+        """Window ring plus compressed rows concatenated into one dense score tensor.
+
+        Returns ``(o [B, S, H, D] io_dtype, presents)``. The ring holds exactly ``window`` rows
+        and the fresh ``kv`` is read alongside it rather than through it, because a chunk of
+        ``S > 1`` tokens would otherwise overwrite rows its own earlier tokens still need.
+        """
+        p = f"layers.{layer_id}.attn"
+        H, D, W = self.n_heads_local, self.head_dim, self.window
+        F, I, BOOL = ir.DataType.FLOAT, ir.DataType.INT64, ir.DataType.BOOL
+        io = self.io_dtype
+
         # ---- sliding-window ring cache ----
         ring = f"past_kv_{layer_id}"
         j = self.init(torch.arange(W, dtype=torch.int64), "ring/arange")
@@ -853,23 +915,148 @@ class DeepSeekV4FlashModel(Model):
         denom = self.op("Add", [denom, sink_e], f"{name}/den2", F, [B, S, H, 1])
         o = self.op("Einsum", [pex, kf], f"{name}/ctx", F, [B, S, H, D], equation="bshn,bnd->bshd")
         o = self.op("Div", [o, denom], f"{name}/norm", F, [B, S, H, D])
-        o = self.cast(f"{name}/ob", o, io, [B, S, H, D])
-        o = rope_last(f"{name}/orope", o, [B, S, H, D], cos_q, sin_q, inverse=True)
+        return self.cast(f"{name}/ob", o, io, [B, S, H, D]), presents
 
-        # ---- grouped output projection ----
-        o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
-        o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
-        o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
-        wa = self.shard(self.sd[f"{p}.wo_a.weight"].reshape(self.o_groups, R, dh), 0)
-        o = self.op("MatMul", [o, self.init(wa.transpose(1, 2), f"{p}.wo_a/G", to=io)],
-                    f"{name}/oa", io, [G, None, R])
-        o = self.op("Transpose", [o], f"{name}/oat", io, [None, G, R], perm=[1, 0, 2])
-        o = self.reshape(f"{name}/oaf", o, [-1, G * R], io, [None, G * R])
-        o = self.proj(f"{name}/ob2", o, f"{p}.wo_b.weight", [None, self.dim], shard_axis=1)
-        # Each rank holds a column block of wo_b, so this is a partial sum.
-        o = self.all_reduce(f"{name}/ar", o, io, [None, self.dim])
-        o = self.dyn_reshape(f"{name}/out", o, ctx["bs"], [self.dim], io, [B, S, self.dim])
-        return o, presents
+    def make_paged_attention(self, name, layer_id, ratio, q, kv, x, ctx):
+        """The same attention as one ``com.microsoft.PagedAttention`` node (LATENT layout).
+
+        Returns ``(o [B, S, H, D] io_dtype, presents)``. One flat paged cache per layer holds
+        both KV streams, in a logical position space of
+
+            ``[0, max_seq_len)``                              one row per token
+            ``[max_seq_len, max_seq_len + comp_capacity)``    the compressor's row for slot ``c``
+
+        The window region deliberately is *not* a ring. The op stores every row of the step
+        before it attends, so a chunk of ``S > 1`` tokens would overwrite rows its own earlier
+        tokens still need. Positions are absolute instead and the block table recycles the
+        physical blocks behind them, which costs ``max_seq_len / block_size`` int32 per sequence
+        and nothing else.
+
+        The compressor's rows are appended to ``key`` beyond ``token_count`` (paged_attention.md
+        section 12.11): they are stored at their ``slot_mapping`` slots and are already visible to
+        this step's ``kv_indices``, which is what the model needs and what a chained ``ScatterND``
+        could not give, since ``key_cache`` may be touched by exactly one node.
+        """
+        p = f"layers.{layer_id}.attn"
+        H, D, W, L = self.n_heads_local, self.head_dim, self.window, self.max_seq_len
+        I, I32, BOOL = ir.DataType.INT64, ir.DataType.INT32, ir.DataType.BOOL
+        io = self.io_dtype
+        bsize = self.block_size
+        table = f"block_table_{ratio}"
+        table64 = self.cast(f"{name}/bt64", table, I, [B, self.group_blocks(ratio)])
+
+        def to_slot(tag, logical, shape, rows):
+            """Logical position -> flat cache slot, through this group's block table."""
+            blk = self.batched_gather(
+                f"{name}/{tag}/blk", table64,
+                self.op("Div", [logical, self.const("INT64", bsize)], f"{name}/{tag}/bi", I, shape),
+                rows, I, shape)
+            return self.op("Add",
+                           [self.op("Mul", [blk, self.const("INT64", bsize)],
+                                    f"{name}/{tag}/base", I, shape),
+                            self.op("Mod", [logical, self.const("INT64", bsize)],
+                                    f"{name}/{tag}/off", I, shape)],
+                           f"{name}/{tag}/slot", I, shape)
+
+        # ---- one stored KV row per token, at its own absolute position ----
+        keys = [self.reshape(f"{name}/kpack", kv, [-1, D], io, [None, D])]
+        slots = [self.reshape(f"{name}/tokslot", to_slot("tok", ctx["pos"], [B, S], S),
+                              [-1], I, [None])]
+
+        # ---- selection: the sliding window, as absolute positions ----
+        jw = self.init(torch.arange(W, dtype=torch.int64), f"paged/arange_{W}")
+        win = self.op("Add", [self.op("Sub", [ctx["qpos"], self.const("INT64", W - 1)],
+                                      f"{name}/wbase", I, [B, S, 1]), jw],
+                      f"{name}/win", I, [B, S, W])
+        # Positions above qpos cannot occur (the offsets stop at W-1); negative ones are the
+        # not-yet-full window and drop out as -1.
+        sel = [self.op("Where", [self.op("GreaterOrEqual", [win, self.const("INT64", 0)],
+                                         f"{name}/wge", BOOL, [B, S, W]),
+                                 win, self.const("INT64", -1)],
+                       f"{name}/winsel", I, [B, S, W])]
+        presents = {}
+
+        if ratio:
+            rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+                f"{name}/comp", layer_id, ratio, x, ctx)
+            C = self.comp_capacity(ratio)
+            presents.update(cstate_kv=pkv, cstate_score=psc)
+
+            # ---- surplus KV rows: the compressor's J candidate rows for this step ----
+            jr = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
+                         f"{name}/jr", I, [None])
+            c = self.op("Add", [jr, first_slot], f"{name}/c", I, [B, None])
+            live = self.op("LessOrEqual", [c, last_slot], f"{name}/clive", BOOL, [B, None])
+            # Clamped so a dead row still indexes the table in range; the -1 slot suppresses it.
+            clog = self.op("Clip", [self.op("Add", [c, self.const("INT64", L)],
+                                            f"{name}/clog", I, [B, None]),
+                                    self.const("INT64", L), self.const("INT64", L + C - 1)],
+                           f"{name}/clogc", I, [B, None])
+            cslot = self.op("Where", [live, to_slot("crow", clog, [B, None], None),
+                                      self.const("INT64", -1)],
+                            f"{name}/cslot", I, [B, None])
+            keys.append(self.reshape(f"{name}/rpack", rows, [-1, D], io, [None, D]))
+            slots.append(self.reshape(f"{name}/cslotf", cslot, [-1], I, [None]))
+
+            # ---- selection: every compressed row this token can see ----
+            # TODO: the Lightning Indexer's top-k. Attending to all valid rows is a superset of
+            # the model's choice for ratio 4 (exact for ratio 128), so it is correct but wide.
+            cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
+            qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
+                                          f"{name}/qp1", I, [B, S, 1]),
+                                  self.const("INT64", ratio)], f"{name}/qpr", I, [B, S, 1])
+            sel.append(self.op(
+                "Where",
+                [self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
+                         f"{name}/cmask", BOOL, [B, S, C]),
+                 self.op("Add", [cidx, self.const("INT64", L)], f"{name}/cabs", I, [C]),
+                 self.const("INT64", -1)],
+                f"{name}/csel", I, [B, S, C]))
+
+        width = W + (self.comp_capacity(ratio) if ratio else 0)
+        key = (keys[0] if len(keys) == 1 else
+               self.op("Concat", keys, f"{name}/key", io, [None, D], axis=0))
+        slot = (slots[0] if len(slots) == 1 else
+                self.op("Concat", slots, f"{name}/slot", I, [None], axis=0))
+        kvi = (sel[0] if len(sel) == 1 else
+               self.op("Concat", sel, f"{name}/sel", I, [B, S, width], axis=-1))
+
+        node = f"{name}/paged"
+        out, cache_out = f"{node}/output_0", f"{node}/cache_0"
+        self.make_node(
+            "PagedAttention",
+            inputs=[
+                self.reshape(f"{name}/qpack", q, [-1, H * D], io, [None, H * D]),
+                key,
+                "",                                  # value: absent, V is K
+                f"past_kv_{layer_id}",
+                "",                                  # value_cache: absent
+                ctx["cum"],
+                ctx["past32"],
+                table,
+                "", "",                              # cos/sin: RoPE is applied in the graph
+                self.cast(f"{name}/slot32", slot, I32, [None]),
+                self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(H),
+                          f"{p}.attn_sink", to=io),
+                "", "", "", "", "",                  # q/k norm, k/v scale, attention_metadata
+                self.cast(f"{name}/kvi32",
+                          self.reshape(f"{name}/kvi", kvi, [-1, width], I, [None, width]),
+                          I32, [None, width]),
+            ],
+            outputs=[out, cache_out],
+            name=node,
+            domain="com.microsoft",
+            num_heads=H,
+            kv_num_heads=1,
+            kv_cache_layout="LATENT",
+            v_head_size=D,
+        )
+        # softmax_scale is left at the op's default 1/sqrt(head_size), which is exactly
+        # DeepSeek's `self.softmax_scale = head_dim ** -0.5`.
+        self.make_value(out, io, shape=[None, H * D])
+        self.make_value(cache_out, io, shape=self.input_shapes[f"past_kv_{layer_id}"])
+        presents["kv"] = cache_out
+        return self.dyn_reshape(f"{name}/o4", out, ctx["bs"], [H, D], io, [B, S, H, D]), presents
 
     # ------------------------------------------------------------------ #
     # MoE
@@ -1109,6 +1296,17 @@ class DeepSeekV4FlashModel(Model):
         total3 = self.unsq("/total3", total2, [2], I, [B, 1, 1])
         ctx = {"bs": bs, "S": Sv, "pos": pos, "qpos": qpos, "past2": past2,
                "past3": past3, "total2": total2, "total3": total3}
+
+        if self.paged:
+            # PagedAttention speaks a packed [token_count] layout. input_ids is [B, S], so every
+            # sequence contributes the same S tokens and the packing is just a reshape: the
+            # cumulative lengths are 0, S, 2S, ...
+            bv = self.op("Gather", [bs, self.const("INT64", 0)], "/batch", I, [], axis=0)
+            tot = self.op("Mul", [self.op("Add", [bv, self.const("INT64", 1)], "/b1", I, []), Sv],
+                          "/cumend", I, [])
+            cum = self.op("Range", [self.const("INT64", 0), tot, Sv], "/cumrange", I, [None])
+            ctx["cum"] = self.cast("/cum32", cum, ir.DataType.INT32, [None])
+            ctx["past32"] = self.cast("/past32", "past_lens", ir.DataType.INT32, [B])
 
         emb = self.op("Gather", [self.init_w("embed.weight", to=io),
                                  "input_ids"], "/embed", io, [B, S, dim], axis=0)
