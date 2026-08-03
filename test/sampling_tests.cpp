@@ -568,7 +568,7 @@ TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   config->ClearProviders();
   config->AppendProvider("cuda");
-[[maybe_unused]] auto model = OgaModel::Create(*config);
+  [[maybe_unused]] auto model = OgaModel::Create(*config);
 
   auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   auto sampler = device->CreateBatchedSampler(3, vocab_size);
