@@ -162,20 +162,39 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
-  add_custom_command(TARGET python POST_BUILD
-    # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${GENERATE_TYPE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
-    # pybind11-stubgen and numpy must already be installed in the Python environment used for the
-    # build (see test/python/requirements.txt).
-    # --numpy-array-use-type-var makes stubgen emit valid `numpy.ndarray[Any, numpy.dtype[...]]`
-    # annotations (equivalent to numpy.typing.NDArray[...]) instead of the invalid
-    # `numpy.ndarray[numpy.<dtype>]` form that type checkers reject.
-    COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir "${WHEEL_TARGET_NAME}" --numpy-array-use-type-var
-    COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py" -i "${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi"
-    WORKING_DIRECTORY "${GENERATE_TYPE_DIR}"
-    COMMENT "Generate type stubs for onnxruntime_genai"
-  )
+  # pybind11-stubgen introspects the extension by importing it, so the freshly
+  # built module must be runnable on the build host. That is only true when the
+  # target architecture matches the host; cross-compiled wheels (e.g. arm64 built
+  # on an x64 host, or a macOS x86_64 wheel built on Apple Silicon) produce a
+  # module the host cannot load, which fails the packaging pipeline. Detect this
+  # and skip stub generation for cross builds.
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _genai_host_processor)
+  if(_genai_host_processor MATCHES "arm64|aarch64")
+    set(_genai_host_platform "arm64")
+  elseif(_genai_host_processor MATCHES "x86_64|amd64|x64")
+    set(_genai_host_platform "x64")
+  else()
+    set(_genai_host_platform "${_genai_host_processor}")
+  endif()
+
+  if(genai_target_platform STREQUAL _genai_host_platform)
+    add_custom_command(TARGET python POST_BUILD
+      # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${GENERATE_TYPE_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
+      # pybind11-stubgen and numpy must already be installed in the Python environment used for the
+      # build (see test/python/requirements.txt).
+      # --numpy-array-use-type-var makes stubgen emit valid `numpy.ndarray[Any, numpy.dtype[...]]`
+      # annotations (equivalent to numpy.typing.NDArray[...]) instead of the invalid
+      # `numpy.ndarray[numpy.<dtype>]` form that type checkers reject.
+      COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir "${WHEEL_TARGET_NAME}" --numpy-array-use-type-var
+      COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py" -i "${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi"
+      WORKING_DIRECTORY "${GENERATE_TYPE_DIR}"
+      COMMENT "Generate type stubs for onnxruntime_genai"
+    )
+  else()
+    message(STATUS "Skipping onnxruntime_genai type stub generation: cross-compiling for '${genai_target_platform}' on host '${_genai_host_platform}' (the built module cannot be imported on the build host).")
+  endif()
   set(auditwheel_exclude_list
     "libcuda.so.1"
     "libcublas.so.11"
