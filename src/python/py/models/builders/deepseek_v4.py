@@ -78,6 +78,7 @@ def pack_for_qmoe(blocks):
     return packed.permute(0, 2, 3, 4, 1).reshape(
         blocks.shape[0], blocks.shape[2] * 32, blocks.shape[1] // 2).contiguous()
 FP8_MAX = 448.0
+FP4_MAX = 6.0
 FP8_BLOCK = 128
 INT64_MAX = 9223372036854775807
 
@@ -141,6 +142,16 @@ class DeepSeekV4FlashModel(Model):
         self.paged = extra_options.get("dsv4_paged_attention", "0") not in ("0", 0, False)
         self.block_size = int(extra_options.get("dsv4_block_size", 64))
 
+        # Opt-in: the Lightning Indexer. Without it the paged path lets every query see every
+        # valid compressed row, so `kv_indices` is window + comp_capacity wide -- 128 + 262146
+        # at 1M context, which throws away the flat-latency property the paged op exists for.
+        # With it the width is window + index_topk. Only ratio-4 layers have one; ratio-128
+        # layers attend to all their (far fewer) rows by design.
+        self.indexer = extra_options.get("dsv4_indexer", "0") not in ("0", 0, False)
+        self.index_n_heads = getattr(c, "index_n_heads", 64)
+        self.index_head_dim = getattr(c, "index_head_dim", 128)
+        self.index_topk = getattr(c, "index_topk", 512)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -153,7 +164,11 @@ class DeepSeekV4FlashModel(Model):
                             ("experts", self.n_experts), ("moe_inter", self.moe_inter)):
                 if n % self.world:
                     raise ValueError(f"dsv4_tp_world={self.world} does not divide {what}={n}")
+            if self.indexer and self.index_n_heads % self.world:
+                raise ValueError(f"dsv4_tp_world={self.world} does not divide "
+                                 f"index_n_heads={self.index_n_heads}")
         self.n_heads_local = self.n_heads // self.world
+        self.index_n_heads_local = self.index_n_heads // self.world
         self.o_groups_local = self.o_groups // self.world
         self.n_experts_local = self.n_experts // self.world
         self.moe_inter_local = self.moe_inter // self.world
@@ -218,6 +233,14 @@ class DeepSeekV4FlashModel(Model):
     def comp_capacity(self, ratio):
         return self.max_seq_len // ratio + 2
 
+    def has_indexer(self, ratio):
+        return self.indexer and ratio == 4
+
+    def index_width(self, ratio):
+        """How many compressed rows a query may look at in a ratio group."""
+        C = self.comp_capacity(ratio)
+        return min(self.index_topk, C) if self.has_indexer(ratio) else C
+
     def group_blocks(self, ratio):
         """Block-table width for a cache group: the window region uses absolute positions, so it
         spans max_seq_len, and the compressor's rows sit directly above it."""
@@ -257,6 +280,16 @@ class DeepSeekV4FlashModel(Model):
                     ("cstate_kv", ir.DataType.FLOAT, st),
                     ("cstate_score", ir.DataType.FLOAT, st),
                 ]
+                if self.has_indexer(r):
+                    # The indexer's compressed cache is read densely by the scoring einsum, so
+                    # unlike the attention cache it gains nothing from being paged.
+                    ist = [B, self.state_len(r), self.coff(r) * self.index_head_dim]
+                    entries += [
+                        ("icache", self.io_dtype,
+                         [B, self.comp_capacity(r), self.index_head_dim]),
+                        ("icstate_kv", ir.DataType.FLOAT, ist),
+                        ("icstate_score", ir.DataType.FLOAT, ist),
+                    ]
             for k, dt, shape in entries:
                 self.cache_spec.append((i, k))
                 self.input_names[f"past_{k}_{i}"] = f"past_{k}_{i}"
@@ -488,6 +521,70 @@ class DeepSeekV4FlashModel(Model):
         q = self.op("Mul", [q, scale], f"{name}/mul", ir.DataType.FLOAT, blocked)
         return self.reshape(name, q, [0, 0, -1], ir.DataType.FLOAT, shape)
 
+    def make_rotate_fp4(self, name, x, shape, block=32):
+        """Hadamard rotation followed by a per-block FP4-E2M1 round trip.
+
+        The indexer applies this to *both* operands of its scoring einsum. The rotation on its
+        own is orthogonal and would cancel out; it is the FP4 rounding after it that moves the
+        ranking, so the two only make sense together. Dropping them fails parity against the
+        reference, which is why this is not optional.
+
+        ``x`` is FLOAT of any rank; only the last dimension (a power of two) is transformed.
+        """
+        F, BOOL = ir.DataType.FLOAT, ir.DataType.BOOL
+        n = shape[-1]
+        blocked = shape[:-1] + [n // block, block]
+        red = blocked[:-1] + [1]
+
+        h = torch.ones(1, 1, dtype=torch.float32)
+        while h.shape[0] < n:
+            h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
+        x = self.op("MatMul", [x, self.init(h * (n ** -0.5), f"hadamard_{n}")],
+                    f"{name}/had", F, shape)
+        # The reference rounds the rotated tensor to the activation dtype before quantising.
+        x = self.cast(f"{name}/hadb", x, self.io_dtype, shape)
+        x = self.cast(f"{name}/hadf", x, F, shape)
+
+        xf = self.reshape(f"{name}/rs", x, [0] * (len(shape) - 1) + [-1, block], F, blocked)
+        amax = self.op("ReduceMax", [self.op("Abs", [xf], f"{name}/abs", F, blocked),
+                                     self.const("INT64", [-1])],
+                       f"{name}/amax", F, red, keepdims=1)
+        r = self.op("Clip", [self.op("Div", [amax, self.const("FLOAT", FP4_MAX)],
+                                     f"{name}/norm", F, red),
+                             self.const("FLOAT", 1e-38)], f"{name}/clipmin", F, red)
+        lg = self.op("Div", [self.op("Log", [r], f"{name}/log", F, red),
+                             self.const("FLOAT", math.log(2.0))], f"{name}/log2", F, red)
+        scale = self.op("Pow", [self.const("FLOAT", 2.0),
+                                self.op("Ceil", [lg], f"{name}/ceil", F, red)],
+                        f"{name}/scale", F, red)
+        scale = self.op("Where", [self.op("Greater", [amax, self.const("FLOAT", 0.0)],
+                                          f"{name}/pos", BOOL, red),
+                                  scale, self.const("FLOAT", 1.0)], f"{name}/scale1", F, red)
+        v = self.op("Clip", [self.op("Div", [xf, scale], f"{name}/div", F, blocked),
+                             self.const("FLOAT", -FP4_MAX), self.const("FLOAT", FP4_MAX)],
+                    f"{name}/clip", F, blocked)
+
+        # Round onto the E2M1 grid {0,.5,1,1.5,2,3,4,6}: the step is 0.5 below 2, 1 below 4 and
+        # 2 above, and ties go toward zero -- which is `ceil(t - 0.5)`.
+        u = self.op("Abs", [v], f"{name}/u", F, blocked)
+        step = self.op("Where", [self.op("Less", [u, self.const("FLOAT", 2.0)],
+                                         f"{name}/lt2", BOOL, blocked),
+                                 self.const("FLOAT", 0.5),
+                                 self.op("Where", [self.op("Less", [u, self.const("FLOAT", 4.0)],
+                                                           f"{name}/lt4", BOOL, blocked),
+                                                   self.const("FLOAT", 1.0),
+                                                   self.const("FLOAT", 2.0)],
+                                         f"{name}/step2", F, blocked)],
+                       f"{name}/step", F, blocked)
+        t = self.op("Sub", [self.op("Div", [u, step], f"{name}/t", F, blocked),
+                            self.const("FLOAT", 0.5)], f"{name}/th", F, blocked)
+        q = self.op("Mul", [step, self.op("Ceil", [t], f"{name}/qceil", F, blocked)],
+                    f"{name}/q", F, blocked)
+        q = self.op("Mul", [self.op("Sign", [v], f"{name}/sign", F, blocked), q],
+                    f"{name}/qs", F, blocked)
+        q = self.op("Mul", [q, scale], f"{name}/mul", F, blocked)
+        return self.reshape(name, q, [0] * (len(shape) - 1) + [-1], F, shape)
+
     # ------------------------------------------------------------------ #
     # hyper-connections
     # ------------------------------------------------------------------ #
@@ -594,17 +691,24 @@ class DeepSeekV4FlashModel(Model):
     # KV compressor
     # ------------------------------------------------------------------ #
 
-    def make_compressor(self, name, layer_id, ratio, x, ctx):
+    def make_compressor(self, name, layer_id, ratio, x, ctx, prefix=None, head_dim=None,
+                        state="cstate", quant=True, rotate=False):
         """Gated pooling of ``ratio`` consecutive tokens into one latent row.
 
         Returns (rows [B, J, head_dim] io_dtype, first_slot [B, 1], last_slot [B, 1], J,
                  present_cstate_kv, present_cstate_score). ``J`` depends only on the
         sequence length, never on ``past_lens``, so the shape stays inferable even
         though the slots each row lands in differ.
+
+        The indexer owns a second, narrower compressor over the same tokens, hence the
+        ``prefix``/``head_dim``/``state`` parameters; it also rotates and rounds its rows to
+        FP4 instead of the FP8 round trip the attention cache uses.
         """
-        p = f"layers.{layer_id}.attn.compressor"
-        r, d, co, Lst = ratio, self.head_dim, self.coff(ratio), self.state_len(ratio)
-        rd, nd = self.rope_head_dim, self.nope_dim
+        p = prefix or f"layers.{layer_id}.attn.compressor"
+        d = head_dim or self.head_dim
+        r, co, Lst = ratio, self.coff(ratio), self.state_len(ratio)
+        rd = self.rope_head_dim
+        nd = d - rd
         F = ir.DataType.FLOAT
         I = ir.DataType.INT64
 
@@ -614,9 +718,9 @@ class DeepSeekV4FlashModel(Model):
         sc = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wgate.weight"].T, f"{p}.wgate/T",
                                               to=F)],
                      f"{name}/sc", F, [B, S, co * d])
-        full_kv = self.op("Concat", [f"past_cstate_kv_{layer_id}", kv], f"{name}/fkv",
+        full_kv = self.op("Concat", [f"past_{state}_kv_{layer_id}", kv], f"{name}/fkv",
                           F, [B, None, co * d], axis=1)
-        full_sc = self.op("Concat", [f"past_cstate_score_{layer_id}", sc], f"{name}/fsc",
+        full_sc = self.op("Concat", [f"past_{state}_score_{layer_id}", sc], f"{name}/fsc",
                           F, [B, None, co * d], axis=1)
 
         n_full = self.op("Add", [ctx["S"], self.const("INT64", Lst)], f"{name}/nfull", I, [])
@@ -718,8 +822,11 @@ class DeepSeekV4FlashModel(Model):
         nope = self.slice1(f"{name}/nope", normed, 0, nd, F, [B, None, nd])
         rope = self.slice1(f"{name}/ropep", normed, nd, INT64_MAX, F, [B, None, rd])
         rope = self.make_rope(f"{name}/rope", rope, cos, sin, [B, None, rd])
-        nope = self.make_act_quant(f"{name}/aq", nope, [B, None, nd])
+        if quant:
+            nope = self.make_act_quant(f"{name}/aq", nope, [B, None, nd])
         rows = self.op("Concat", [nope, rope], f"{name}/rows", F, [B, None, d], axis=-1)
+        if rotate:
+            rows = self.make_rotate_fp4(f"{name}/fp4", rows, [B, None, d])
         rows = self.cast(f"{name}/rows_b", rows, self.io_dtype, [B, None, d])
 
         st_shape = [B, Lst, co * d]
@@ -791,7 +898,8 @@ class DeepSeekV4FlashModel(Model):
         kv = self.op("Concat", [kv_n, kv_r], f"{name}/kvq", io, [B, S, D], axis=-1)
 
         if self.paged:
-            o, presents = self.make_paged_attention(name, layer_id, ratio, q, kv, x, ctx)
+            o, presents = self.make_paged_attention(name, layer_id, ratio, q, kv, x, ctx,
+                                                    qr=qn, cos_q=cos_q, sin_q=sin_q)
         else:
             o, presents = self.make_dense_attention(name, layer_id, ratio, q, kv, x, ctx)
 
@@ -917,7 +1025,100 @@ class DeepSeekV4FlashModel(Model):
         o = self.op("Div", [o, denom], f"{name}/norm", F, [B, S, H, D])
         return self.cast(f"{name}/ob", o, io, [B, S, H, D]), presents
 
-    def make_paged_attention(self, name, layer_id, ratio, q, kv, x, ctx):
+    def make_indexer(self, name, layer_id, ratio, x, qr, cos_q, sin_q, ctx):
+        """Lightning Indexer: which compressed rows each query is allowed to attend to.
+
+        Returns ``(csel [B, S, k] int64, presents)`` where ``csel`` holds logical cache
+        positions ready to concatenate into ``kv_indices`` (``-1`` == masked).
+
+        It scores every compressed row with its own narrower compressor and keeps the top
+        ``k = min(index_topk, comp_capacity)``. That ``k`` is a build-time constant, while the
+        reference recomputes ``min(index_topk, end_pos // ratio)`` each step -- but whenever the
+        latter is smaller, every query's visible row count is below it too, so both end up
+        selecting the whole visible set. The extra picks here are all invalid and get masked.
+
+        Its cache is a plain dense tensor, not a paged one: the scoring einsum reads all of it
+        every step, so paging would buy nothing.
+        """
+        p = f"layers.{layer_id}.attn.indexer"
+        NH, HD, rd = self.index_n_heads_local, self.index_head_dim, self.rope_head_dim
+        nd = HD - rd
+        C, L = self.comp_capacity(ratio), self.max_seq_len
+        k = self.index_width(ratio)
+        F, I, BOOL = ir.DataType.FLOAT, ir.DataType.INT64, ir.DataType.BOOL
+        io = self.io_dtype
+
+        # ---- q: heads are sharded, so each rank scores with its own slice ----
+        q = self.proj(f"{name}/qb", qr, f"{p}.wq_b.weight", [B, S, NH * HD], shard_axis=0)
+        q = self.cast(f"{name}/qf", self.reshape(f"{name}/q4", q, [0, 0, NH, HD], io,
+                                                 [B, S, NH, HD]), F, [B, S, NH, HD])
+        q = self.op("Concat",
+                    [self.slice1(f"{name}/qn", q, 0, nd, F, [B, S, NH, nd]),
+                     self.make_rope(f"{name}/qrot",
+                                    self.slice1(f"{name}/qr", q, nd, INT64_MAX, F,
+                                                [B, S, NH, rd]),
+                                    cos_q, sin_q, [B, S, NH, rd])],
+                    f"{name}/qcat", F, [B, S, NH, HD], axis=-1)
+        q = self.make_rotate_fp4(f"{name}/qfp4", q, [B, S, NH, HD])
+
+        # ---- this step's rows, written into the dense indexer cache ----
+        rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+            f"{name}/ic", layer_id, ratio, x, ctx, prefix=f"{p}.compressor",
+            head_dim=HD, state="icstate", quant=False, rotate=True)
+        cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
+        ksel = self.op("Sub", [cidx, first_slot], f"{name}/ksel", I, [B, C])
+        take = self.op("And",
+                       [self.op("GreaterOrEqual", [ksel, self.const("INT64", 0)],
+                                f"{name}/kge", BOOL, [B, C]),
+                        self.op("LessOrEqual", [cidx, last_slot], f"{name}/kle", BOOL, [B, C])],
+                       f"{name}/take", BOOL, [B, C])
+        kcl = self.op("Clip", [ksel, self.const("INT64", 0),
+                               self.op("Sub", [J, self.const("INT64", 1)], f"{name}/jm1", I, [])],
+                      f"{name}/kclip", I, [B, C])
+        present = self.op("Where",
+                          [self.unsq(f"{name}/take3", take, [2], BOOL, [B, C, 1]),
+                           self.batched_gather(f"{name}/newc", rows, kcl, C, io, [B, C, HD]),
+                           f"past_icache_{layer_id}"],
+                          f"{name}/icache", io, [B, C, HD])
+
+        # ---- score ----
+        w = self.proj(f"{name}/w", x, f"{p}.weights_proj.weight", [B, S, NH], shard_axis=0)
+        w = self.op("Mul", [self.cast(f"{name}/wf", w, F, [B, S, NH]),
+                            self.const("FLOAT", (HD ** -0.5) * self.index_n_heads ** -0.5)],
+                    f"{name}/ws", F, [B, S, NH])
+        score = self.op("Einsum", [q, self.cast(f"{name}/pf", present, F, [B, C, HD])],
+                        f"{name}/score", F, [B, S, NH, C], equation="bshd,btd->bsht")
+        score = self.op("Mul", [self.op("Relu", [score], f"{name}/relu", F, [B, S, NH, C]),
+                                self.unsq(f"{name}/w4", w, [3], F, [B, S, NH, 1])],
+                        f"{name}/wsc", F, [B, S, NH, C])
+        score = self.op("ReduceSum", [score, self.const("INT64", [2])], f"{name}/sum",
+                        F, [B, S, C], keepdims=0)
+        # Each rank holds a slice of the heads, so this is a partial sum.
+        score = self.all_reduce(f"{name}/ar", score, F, [B, S, C])
+
+        # ---- top-k over the rows this query can actually see ----
+        qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
+                                      f"{name}/qp1", I, [B, S, 1]), self.const("INT64", ratio)],
+                      f"{name}/qpr", I, [B, S, 1])
+        vis = self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
+                      f"{name}/vis", BOOL, [B, S, C])
+        score = self.op("Where", [vis, score, self.const("FLOAT", NEG_INF)],
+                        f"{name}/masked", F, [B, S, C])
+        node = f"{name}/topk"
+        vals, idx = f"{node}/output_0", f"{node}/output_1"
+        self.make_node("TopK", inputs=[score, self.const("INT64", [k])], outputs=[vals, idx],
+                       name=node, axis=-1, largest=1, sorted=1)
+        self.make_value(vals, F, shape=[B, S, k])
+        self.make_value(idx, I, shape=[B, S, k])
+        csel = self.op("Where",
+                       [self.op("Less", [idx, qpr], f"{name}/pick", BOOL, [B, S, k]),
+                        self.op("Add", [idx, self.const("INT64", L)], f"{name}/abs", I, [B, S, k]),
+                        self.const("INT64", -1)],
+                       f"{name}/csel", I, [B, S, k])
+        return csel, {"icache": present, "icstate_kv": pkv, "icstate_score": psc}
+
+    def make_paged_attention(self, name, layer_id, ratio, q, kv, x, ctx,
+                             qr=None, cos_q=None, sin_q=None):
         """The same attention as one ``com.microsoft.PagedAttention`` node (LATENT layout).
 
         Returns ``(o [B, S, H, D] io_dtype, presents)``. One flat paged cache per layer holds
@@ -998,22 +1199,27 @@ class DeepSeekV4FlashModel(Model):
             keys.append(self.reshape(f"{name}/rpack", rows, [-1, D], io, [None, D]))
             slots.append(self.reshape(f"{name}/cslotf", cslot, [-1], I, [None]))
 
-            # ---- selection: every compressed row this token can see ----
-            # TODO: the Lightning Indexer's top-k. Attending to all valid rows is a superset of
-            # the model's choice for ratio 4 (exact for ratio 128), so it is correct but wide.
-            cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
-            qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
-                                          f"{name}/qp1", I, [B, S, 1]),
-                                  self.const("INT64", ratio)], f"{name}/qpr", I, [B, S, 1])
-            sel.append(self.op(
-                "Where",
-                [self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
-                         f"{name}/cmask", BOOL, [B, S, C]),
-                 self.op("Add", [cidx, self.const("INT64", L)], f"{name}/cabs", I, [C]),
-                 self.const("INT64", -1)],
-                f"{name}/csel", I, [B, S, C]))
+            # ---- selection: which compressed rows this token may look at ----
+            if self.has_indexer(ratio):
+                csel, ipres = self.make_indexer(f"{name}/idx", layer_id, ratio, x, qr,
+                                                cos_q, sin_q, ctx)
+                presents.update(ipres)
+            else:
+                # Ratio-128 layers have no indexer: the model attends to all their valid rows.
+                cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
+                qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
+                                              f"{name}/qp1", I, [B, S, 1]),
+                                      self.const("INT64", ratio)], f"{name}/qpr", I, [B, S, 1])
+                csel = self.op(
+                    "Where",
+                    [self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
+                             f"{name}/cmask", BOOL, [B, S, C]),
+                     self.op("Add", [cidx, self.const("INT64", L)], f"{name}/cabs", I, [C]),
+                     self.const("INT64", -1)],
+                    f"{name}/csel", I, [B, S, C])
+            sel.append(csel)
 
-        width = W + (self.comp_capacity(ratio) if ratio else 0)
+        width = W + (self.index_width(ratio) if ratio else 0)
         key = (keys[0] if len(keys) == 1 else
                self.op("Concat", keys, f"{name}/key", io, [None, D], axis=0))
         slot = (slots[0] if len(slots) == 1 else
