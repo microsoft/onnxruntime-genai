@@ -122,6 +122,7 @@ def _load_builder_cli_module(monkeypatch):
         "Gemma3Model",
         "GemmaModel",
         "GPTOSSModel",
+        "GraniteMoeHybridModel",
         "GraniteModel",
         "HunyuanDenseV1Model",
         "InternLM2Model",
