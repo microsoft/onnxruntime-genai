@@ -25,6 +25,22 @@ DeepSeek V4 introduces several novel components compared to prior DeepSeek model
     ``heavily_compressed_attention`` are therefore built without their compressors
     (a warning is printed); they degrade gracefully to ordinary sliding-window
     attention.
+
+Reference implementation
+------------------------
+The numerics implemented here follow the HuggingFace ``DeepseekV4`` modeling code
+(``modeling_deepseek_v4.py``): ``DeepseekV4HyperConnection``, ``DeepseekV4Attention``,
+``DeepseekV4RotaryEmbedding`` / ``apply_rotary_pos_emb``, ``DeepseekV4SparseMoeBlock``
+and its two routers.  When updating this builder, diff against that file rather than
+against earlier DeepSeek generations, whose MLA/RoPE conventions differ.
+
+Fused operators are being added to ONNX Runtime in
+https://github.com/microsoft/onnxruntime/pull/31570 (``com.microsoft::DeepSeekV4Attention``,
+``GroupQueryAttention`` ``rotary_trailing`` / ``do_output_derotate`` attributes, and the
+optional ``router_weights`` input on ``MoE`` / ``QMoE``).  Those are not present in the
+ONNX Runtime version this repository currently pins, so this builder emits the
+decomposed form.  The rotary embedding is the one piece already expressible with a
+shipped kernel, and is emitted as ``com.microsoft::RotaryEmbedding``.
 """
 from __future__ import annotations
 
@@ -117,6 +133,11 @@ class DeepSeekV4Model(Model):
         # Track the name of the current HC-stream ONNX value (updated in make_layer)
         self.hc_streams = ""
 
+        # When True, RoPE is emitted as the decomposed reference subgraph instead of a
+        # com.microsoft::RotaryEmbedding node.  Only the parity test flips this; it is
+        # deliberately not exposed as an extra_option.
+        self.use_manual_deepseek_rope = False
+
     # ------------------------------------------------------------------ #
     # Override: force MultiHeadAttention so the correct 4D causal mask is
     # built by make_preprocessing_nodes.  DeepSeek V4 uses its own manual
@@ -183,33 +204,72 @@ class DeepSeekV4Model(Model):
     # Helpers: interleaved RoPE applied to the *trailing* rope_dim channels
     # ------------------------------------------------------------------ #
 
-    def build_deepseek_rope_caches(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def build_deepseek_rope_caches(self, expanded: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         """Return cos/sin caches for DeepSeek V4 interleaved RoPE.
 
-        V4 uses ``qk_rope_head_dim`` = 64 channels of RoPE at the END of each
-        head.  cos/sin are stored pre-expanded with ``repeat_interleave(2)``
-        so they have shape [context_length, qk_rope_head_dim] = [ctx, 64].
+        V4 rotates the trailing ``qk_rope_head_dim`` channels of each head using the
+        interleaved convention, so consecutive channel pairs ``(2i, 2i+1)`` share one
+        angle.  The caches are returned with one entry per rotated *pair*, i.e. shape
+        ``[cache_length, qk_rope_head_dim // 2]``.  That is the layout the
+        ``com.microsoft::RotaryEmbedding`` kernel expects (it does the pairing itself),
+        and it matches ``Model.make_rotary_embedding_caches`` in the base class, which
+        also halves the cache width.
+
+        When ``expanded`` is True the caches are ``repeat_interleave``-expanded to
+        ``[cache_length, qk_rope_head_dim]``, one entry per channel.  That is the layout
+        consumed by the decomposed reference subgraph in ``make_deepseek_rope_manual``.
         """
-        rope_dim_half = self.qk_rope_head_dim // 2  # 32
+        rope_dim = self.qk_rope_head_dim
         theta = self.rope_attrs["theta"]
-        arange = torch.arange(0, rope_dim_half, dtype=torch.float32)
-        inv_freq = 1.0 / (theta ** (arange / rope_dim_half / 2))  # [32]
+        # Matches DeepseekV4RotaryEmbedding.compute_default_rope_parameters, which uses
+        # dim = head_dim * partial_rotary_factor = qk_rope_head_dim.
+        inv_freq = 1.0 / (theta ** (torch.arange(0, rope_dim, 2, dtype=torch.float32) / rope_dim))
         ctx = self.rope_attrs["cache_length"]
         t = torch.arange(ctx, dtype=torch.float32)
-        freqs = torch.outer(t, inv_freq)  # [ctx, 32]
-        # repeat_interleave(2, dim=-1) → [ctx, 64]
-        cos_cache = freqs.cos().repeat_interleave(2, dim=-1).to(to_torch_dtype(self.io_dtype))
-        sin_cache = freqs.sin().repeat_interleave(2, dim=-1).to(to_torch_dtype(self.io_dtype))
-        return cos_cache, sin_cache
+        freqs = torch.outer(t, inv_freq)  # [ctx, rope_dim // 2]
+        cos_cache, sin_cache = freqs.cos(), freqs.sin()
+        if expanded:
+            cos_cache = cos_cache.repeat_interleave(2, dim=-1)
+            sin_cache = sin_cache.repeat_interleave(2, dim=-1)
+        torch_dtype = to_torch_dtype(self.io_dtype)
+        return cos_cache.to(torch_dtype), sin_cache.to(torch_dtype)
 
     def make_deepseek_rope_init(self):
-        """Create the cos/sin cache initializers (called once)."""
+        """Create the cos/sin cache initializers (called once).
+
+        A negated sine cache is created alongside the regular one so that the conjugate
+        de-rotation applied to the attention output costs no extra graph nodes.
+        """
         if hasattr(self, "deepseek_rope_inited"):
             return
-        cos_cache, sin_cache = self.build_deepseek_rope_caches()
+        cos_cache, sin_cache = self.build_deepseek_rope_caches(expanded=self.use_manual_deepseek_rope)
         self.make_initializer(cos_cache, "deepseek_cos_cache")
         self.make_initializer(sin_cache, "deepseek_sin_cache")
+        self.make_initializer(-sin_cache, "deepseek_sin_cache_neg")
         self.deepseek_rope_inited = True
+
+    def make_deepseek_rotary_embedding(
+        self, name: str, root_input: str, sin_cache: str, num_heads: int, rope_dim: int
+    ) -> str:
+        """Emit a ``com.microsoft::RotaryEmbedding`` node over a [B, H, S, rope_dim] tensor.
+
+        The kernel infers ``num_heads`` and ``head_size`` from the rank-4 input, and with
+        the default ``rotary_embedding_dim=0`` it rotates the full width of that input.
+        DeepSeek V4's partial rotation is therefore expressed by slicing the trailing
+        channels before the op rather than by the ``rotary_embedding_dim`` attribute,
+        which selects the *leading* channels.
+        """
+        output = f"{name}/output_0"
+        self.make_node(
+            "RotaryEmbedding",
+            inputs=[root_input, self.input_names["position_ids"], "deepseek_cos_cache", sin_cache],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            interleaved=1,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", num_heads, "sequence_length", rope_dim])
+        return output
 
     def make_deepseek_rope(
         self,
@@ -227,6 +287,71 @@ class DeepSeekV4Model(Model):
 
         When ``neg_sin=True``, the conjugate rotation (-sin) is applied.  This
         is used for the output projection's de-rotation step.
+        """
+        if self.use_manual_deepseek_rope:
+            return self.make_deepseek_rope_manual(name, root_input, num_heads, head_dim, rope_dim, neg_sin)
+
+        self.make_deepseek_rope_init()
+
+        nope_dim = head_dim - rope_dim
+        sin_cache = "deepseek_sin_cache_neg" if neg_sin else "deepseek_sin_cache"
+
+        if nope_dim == 0:
+            # Whole head is rotated; no slice/concat plumbing needed.
+            return self.make_deepseek_rotary_embedding(
+                f"{name}/RotaryEmbedding", root_input, sin_cache, num_heads, head_dim
+            )
+
+        rope_in_name = f"{name}/rope_in/Slice"
+        self.make_slice(
+            rope_in_name,
+            [root_input,
+             f"/model/constants/INT64/[{nope_dim}]",
+             f"/model/constants/INT64/[{head_dim}]",
+             "/model/constants/INT64/[3]"],
+            self.io_dtype,
+            ["batch_size", num_heads, "sequence_length", rope_dim],
+        )
+
+        rope_out = self.make_deepseek_rotary_embedding(
+            f"{name}/RotaryEmbedding", f"{rope_in_name}/output_0", sin_cache, num_heads, rope_dim
+        )
+
+        nope_name = f"{name}/nope/Slice"
+        self.make_slice(
+            nope_name,
+            [root_input,
+             "/model/constants/INT64/[0]",
+             f"/model/constants/INT64/[{nope_dim}]",
+             "/model/constants/INT64/[3]"],
+            self.io_dtype,
+            ["batch_size", num_heads, "sequence_length", nope_dim],
+        )
+
+        final_concat_name = f"{name}/final/Concat"
+        self.make_concat(
+            final_concat_name,
+            [f"{nope_name}/output_0", rope_out],
+            self.io_dtype,
+            ["batch_size", num_heads, "sequence_length", head_dim],
+            axis=3,
+        )
+        return f"{final_concat_name}/output_0"
+
+    def make_deepseek_rope_manual(
+        self,
+        name: str,
+        root_input: str,
+        num_heads: int,
+        head_dim: int,
+        rope_dim: int,
+        neg_sin: bool = False,
+    ) -> str:
+        """Decomposed reference implementation of ``make_deepseek_rope``.
+
+        Kept as the numerical reference that the ``com.microsoft::RotaryEmbedding``
+        emission is validated against.  It is not reachable from a normal build; only
+        the parity test sets ``use_manual_deepseek_rope``.
         """
         self.make_deepseek_rope_init()
 
