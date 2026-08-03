@@ -18,10 +18,6 @@ struct NemotronParseModel : Model {
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> prefill_session_options_;
-
-  SessionInfo encoder_session_info_;
-  SessionInfo prefill_session_info_;
-  SessionInfo decoder_session_info_;
 };
 
 }  // namespace Generators
