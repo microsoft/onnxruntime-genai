@@ -457,7 +457,9 @@ struct Config {
   } search;
 
   struct Speculative {
-    int max_draft_tokens{4};  // Number of tokens the draft proposes per round.
+    // Four is a conservative default that amortizes target verification without excessive draft
+    // work; the best value depends on the model pair and execution provider.
+    int max_draft_tokens{4};
   } speculative;
 
   struct Engine {

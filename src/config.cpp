@@ -1344,7 +1344,7 @@ struct Speculative_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
-      int k = static_cast<int>(JSON::Get<double>(value));
+      int k = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (k < kMinK || k > kMaxK)
         throw std::runtime_error(
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +

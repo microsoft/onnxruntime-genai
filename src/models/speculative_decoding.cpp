@@ -80,6 +80,26 @@ void ValidateLogitsDimensionsMatch(const DecoderOnly_Model& target,
         ". Target and draft must share the same vocabulary.");
 }
 
+const GeneratorParams& ValidateSpeculativeGeneratorParams(const GeneratorParams& params) {
+  if (params.search.batch_size != 1)
+    throw std::runtime_error(
+        "Speculative decoding does not support batch_size > 1 in this release. Got batch_size=" +
+        std::to_string(params.search.batch_size));
+
+  if (params.search.num_beams != 1)
+    throw std::runtime_error(
+        "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
+        std::to_string(params.search.num_beams) + ".");
+
+  if (params.search.no_repeat_ngram_size != 0)
+    throw std::runtime_error(
+        "Speculative decoding does not support no_repeat_ngram_size != 0 in this release. Got "
+        "no_repeat_ngram_size=" +
+        std::to_string(params.search.no_repeat_ngram_size) + ".");
+
+  return params;
+}
+
 }  // namespace
 
 // SpeculativeDecodingModel
@@ -130,27 +150,10 @@ std::unique_ptr<State> SpeculativeDecodingModel::CreateState(DeviceSpan<int32_t>
 SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
-    : State{params, model},
+    : State{ValidateSpeculativeGeneratorParams(params), model},
       model_{model},
       target_state_{model.target_model().CreateState(sequence_lengths, params)},
-      draft_state_{model.draft_model().CreateState(sequence_lengths, params)} {
-  // No support for batch_size > 1 in this release.
-  if (params.search.batch_size != 1)
-    throw std::runtime_error(
-        "Speculative decoding does not support batch_size > 1 in this release. Got batch_size=" +
-        std::to_string(params.search.batch_size));
-
-  // No support for num_beams > 1 (beam search) in the speculative loop in this release.
-  if (params.search.num_beams != 1)
-    throw std::runtime_error(
-        "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
-        std::to_string(params.search.num_beams) + ".");
-  if (params.search.no_repeat_ngram_size != 0)
-    throw std::runtime_error(
-        "Speculative decoding does not support no_repeat_ngram_size != 0 in this release. Got "
-        "no_repeat_ngram_size=" +
-        std::to_string(params.search.no_repeat_ngram_size) + ".");
-}
+      draft_state_{model.draft_model().CreateState(sequence_lengths, params)} {}
 
 // Run() - prefill path (called via Generator::AppendTokens -> ComputeLogits).
 // Runs both inner states on the prompt, saves draft's pending distribution for

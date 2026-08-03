@@ -3,9 +3,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
-#include <limits>
 #include <vector>
 #include "span.h"
 #include "sampling_distribution.h"
@@ -57,20 +55,6 @@ inline std::vector<float>& DensifyTargetTokenSelection(const TargetTokenSelectio
   for (size_t i = 0; i < selection.indices.size(); i++)
     dense[static_cast<size_t>(selection.indices[i])] = selection.probs[i];
   return dense;
-}
-
-// Inputs: probability vector probs (e.g. draft softmax), top_k, top_p, temperature
-// Output: full-vocab sampling distribution with zeros outside the kept set
-inline std::vector<float> SamplingDistributionFromProbs(std::span<const float> probs,
-                                                        int top_k, float top_p,
-                                                        float temperature) {
-  std::vector<float> scores(probs.size());
-  for (size_t i = 0; i < probs.size(); i++) {
-    scores[i] = std::log(std::max(probs[i], std::numeric_limits<float>::min()));
-  }
-  SampledCategorical c;
-  ComputeSampledCategorical({scores.data(), scores.size()}, top_k, top_p, temperature, c);
-  return ScatterToFullVocab(c, static_cast<int>(probs.size()));
 }
 
 // Inputs: two scalar probabilities p_target, p_draft
