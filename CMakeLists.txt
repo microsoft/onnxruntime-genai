@@ -10,6 +10,7 @@ endif()
 
 include(FetchContent)
 include(CMakeDependentOption)
+
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
@@ -26,74 +27,14 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
 endif()
 
 if(MSVC)
-  # Add compiler options for security standards
-  # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
-
-  # Explicitly enable (/GS) stack protection to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/GS>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/GS>")
-
-  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
-  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/guard:cf>")
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
-  add_link_options(/guard:cf /DYNAMICBASE)
-
-  # Determine the target platform (from MSBuild generator)
-  if (CMAKE_VS_PLATFORM_NAME)
-    set(onnxruntime_target_platform ${CMAKE_VS_PLATFORM_NAME})
-  else()
-    set(onnxruntime_target_platform ${CMAKE_SYSTEM_PROCESSOR})
-  endif()
-
-  # Enable CET shadow stack unless building for ARM64 (not supported there)
-  if (onnxruntime_target_platform STREQUAL "x64" OR
-      onnxruntime_target_platform STREQUAL "Win32" OR
-      onnxruntime_target_platform STREQUAL "x86")
-    add_link_options("/CETCOMPAT")
-    message(STATUS "CET shadow stack enabled (/CETCOMPAT).")
-  else()
-    message(STATUS "CET shadow stack skipped.")
-  endif()
-
-  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
-  add_compile_options(
-    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
-  )
+  # BinSkim-required security flags: /GS, /guard:cf, /DYNAMICBASE, /CETCOMPAT, /Qspectre.
+  # Factored into a shared module so standalone SDK sub-projects (src/python, src/java)
+  # can include the same flags without rebuilding the full core.
+  include(cmake/msvc_security.cmake)
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-
-  add_compile_options(
-    # Suppress warning C5038: data member will be initialized after another
-    # Common when member initializer list is written out-of-order vs. declaration
-    "$<$<COMPILE_LANGUAGE:C>:/w15038>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
-
-    # Suppress warning C4100: unreferenced formal parameter
-    # Often appears in template or virtual function overrides where a param is unused
-    "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
-
-    # Suppress warning C4819: file contains character that cannot be represented in current code page
-    "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
-
-    # Suppress warning C4996: use of deprecated function or variable
-    "$<$<COMPILE_LANGUAGE:C>:/wd4996>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
-
-    # Enable warning level 4 (more aggressive than default /W3)
-    # Captures more potential bugs or code smells
-    "$<$<COMPILE_LANGUAGE:C>:/W4>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
-
-    # Treat all warnings as errors (fail build on any warning)
-    # Combine carefully with /W4 — suppress any known false positives
-    "$<$<COMPILE_LANGUAGE:C>:/WX>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
-  )
 endif()
 
 include(cmake/ortlib.cmake)
@@ -104,8 +45,6 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
-# Checking if ROCm is supported
-include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
 
@@ -153,25 +92,114 @@ if(ENABLE_TRACING)
   add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
+if(ENABLE_TELEMETRY)
+  message(STATUS "Telemetry is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TELEMETRY)
+  include(cmake/telemetry.cmake)
+endif()
+
 find_package(Threads REQUIRED)
 
+# GenAI normally uses an OBJECT library so white-box tests (e.g. reinit_tests) can link its internal
+# symbols while consumers link only the shipped SHARED library. Xcode iOS and framework builds are
+# the exception: Xcode's link phase references the OBJECT target's per-architecture .o paths before
+# they exist. These builds disable tests, so compile the sources directly into the shared target.
+set(ORTGENAI_XCODE_DIRECT_SOURCES OFF)
+if(CMAKE_GENERATOR STREQUAL "Xcode" AND (BUILD_APPLE_FRAMEWORK OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+  set(ORTGENAI_XCODE_DIRECT_SOURCES ON)
+  if(ENABLE_TESTS)
+    message(FATAL_ERROR "Xcode iOS and Apple framework builds require ENABLE_TESTS=OFF.")
+  endif()
+  set(ORTGENAI_COMPILE_TARGET onnxruntime-genai)
+  set(ORTGENAI_USAGE_SCOPE PRIVATE)
+  add_library(onnxruntime-genai SHARED ${generator_srcs})
+else()
+  set(ORTGENAI_COMPILE_TARGET onnxruntime-genai-obj)
+  set(ORTGENAI_USAGE_SCOPE PUBLIC)
+  add_library(onnxruntime-genai-obj OBJECT ${generator_srcs})
+
+  if(WIN32)
+    add_library(onnxruntime-genai SHARED "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+  else()
+    add_library(onnxruntime-genai SHARED)
+  endif()
+
+  # Bring in the object library's compiled objects and usage requirements without re-exporting
+  # GenAI's private dependencies to DLL consumers.
+  target_link_libraries(onnxruntime-genai PRIVATE onnxruntime-genai-obj)
+endif()
+
+target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
+target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime_extensions)
+target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_LIB_DIR})
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Threads::Threads)
+
 if(WIN32)
-  add_library(onnxruntime-genai SHARED ${generator_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MINOR=${VERSION_MINOR})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
-else()
-  add_library(onnxruntime-genai SHARED ${generator_srcs})
 endif()
 
-target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
-target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
-target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
+target_compile_definitions(${ORTGENAI_COMPILE_TARGET} PRIVATE ORTGENAI_VERSION=\"${VERSION_INFO}\")
+
+if(ENABLE_TELEMETRY)
+  # cmake/telemetry.cmake defines an INTERFACE target around either a caller-supplied
+  # MSTelemetry::mat target or a FetchContent-built `mat`.
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime-genai-telemetry)
+  if(WIN32)
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Advapi32)
+  endif()
+
+  # Optional ingestion-token override written into a generated header in the build tree (kept off the
+  # compiler command line, so the token never appears in compile_commands.json or build logs). It may be
+  # supplied either as -DORTGENAI_TELEMETRY_TENANT_TOKEN=... or via an
+  # ORTGENAI_TELEMETRY_TENANT_TOKEN environment variable; when unset, telemetry.cpp uses the encoded
+  # in-repo default.
+  if(NOT ORTGENAI_TELEMETRY_TENANT_TOKEN AND DEFINED ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN})
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "$ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN}")
+  endif()
+  # Ignore an unexpanded build-system macro (e.g. the literal "$(ORTGENAI_TELEMETRY_TENANT_TOKEN)") so the
+  # build falls back to the in-repo default instead of embedding the macro text as a bogus token.
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN MATCHES "^\\$\\(")
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "")
+  endif()
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN)
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "#define ORTGENAI_TELEMETRY_TENANT_TOKEN \"${ORTGENAI_TELEMETRY_TENANT_TOKEN}\"")
+  else()
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "")
+  endif()
+  set(_ortgenai_telemetry_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/ortgenai_telemetry")
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ortgenai_telemetry_tenant_token.h.in"
+    "${_ortgenai_telemetry_gen_dir}/ortgenai_telemetry_tenant_token.h"
+    @ONLY)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE "${_ortgenai_telemetry_gen_dir}")
+
+  # The 1DS SDK is compiled with per-function and per-data sections, so let the linker
+  # dead-strip the (large) portion of the SDK that onnxruntime-genai never references. Combined
+  # with a static MAT library this keeps the binary-size added by telemetry minimal.
+  if(MSVC)
+    target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
+  elseif(APPLE)
+    target_link_options(onnxruntime-genai PRIVATE LINKER:-dead_strip)
+  else()
+    target_link_options(onnxruntime-genai PRIVATE LINKER:--gc-sections)
+  endif()
+
+endif()
+
+# Group the genai library targets under one Visual Studio solution folder so the object library and
+# the shared library it produces appear together rather than as loose entries at the solution root.
+# Cosmetic only (IDE generators); no effect on the build.
+if(ORTGENAI_XCODE_DIRECT_SOURCES)
+  set_target_properties(onnxruntime-genai PROPERTIES FOLDER "GenAI")
+else()
+  set_target_properties(onnxruntime-genai-obj onnxruntime-genai PROPERTIES FOLDER "GenAI")
+endif()
 
 # The genai library itself is always embedded in the shared library
 list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
@@ -181,14 +209,14 @@ list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
-  target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ONNXRUNTIME_LIB})
   if(USE_WINML)
     target_link_options(onnxruntime-genai PRIVATE "/DELAYLOAD:${ONNXRUNTIME_LIB}")
   endif()
 endif()
 
 if(APPLE)
-target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
+target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} "-framework Foundation" "-framework CoreML")
 endif()
 
 
@@ -227,6 +255,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(onnxruntime-genai-cuda PROPERTIES FOLDER "GenAI")
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
   source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
@@ -243,11 +272,11 @@ endif()
 
 
 if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  target_link_libraries(onnxruntime-genai PRIVATE llguidance)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} $<BUILD_INTERFACE:${llguidance_SOURCE_DIR}/parser/>)
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
-    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} bcrypt)
   endif()
   if(MSVC)
     # The Rust llguidance static library is always compiled against the release MSVC CRT
@@ -260,12 +289,14 @@ if(USE_GUIDANCE)
     # Fix: explicitly add the debug CRT import libraries in Debug builds. Explicitly specified
     # libraries are not affected by /NODEFAULTLIB directives (those only suppress /DEFAULTLIB
     # auto-linking). Also suppress the conflicting release CRT to avoid LNK4098 warnings.
-    target_link_libraries(onnxruntime-genai PRIVATE
+    # PUBLIC/INTERFACE so any binary linking the object library (the shared lib and white-box tests)
+    # gets the same fixups.
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE}
       $<$<CONFIG:Debug>:msvcrtd.lib>
       $<$<CONFIG:Debug>:ucrtd.lib>
       $<$<CONFIG:Debug>:vcruntimed.lib>
     )
-    target_link_options(onnxruntime-genai PRIVATE
+    target_link_options(${ORTGENAI_COMPILE_TARGET} INTERFACE
       $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
       $<$<CONFIG:Debug>:/NODEFAULTLIB:ucrt.lib>
       $<$<CONFIG:Debug>:/NODEFAULTLIB:vcruntime.lib>
@@ -277,37 +308,43 @@ if(USE_GUIDANCE)
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_compile_options(onnxruntime-genai PRIVATE "/sdl")
+  target_compile_options(${ORTGENAI_COMPILE_TARGET} PRIVATE "/sdl")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai PUBLIC dl)  # For dlopen & co
+  set_target_properties(${ORTGENAI_COMPILE_TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} dl)  # For dlopen & co
 endif()
 
 if(USE_DML)
   list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
-  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
-  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai PRIVATE ${DML_HEADER_DIR})
-  target_include_directories(onnxruntime-genai PRIVATE ${D3D12_HEADER_DIR})
-  target_link_directories(onnxruntime-genai PRIVATE ${DML_LIB_DIR})
-  target_link_directories(onnxruntime-genai PRIVATE ${D3D12_LIB_DIR})
-  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${DML_HEADER_DIR})
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${D3D12_HEADER_DIR})
+  target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${DML_LIB_DIR})
+  target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${D3D12_LIB_DIR})
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
-  set(NUGET_CONFIG ${PROJECT_SOURCE_DIR}/nuget.config)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
+  set(NUGET_RESTORE_COMMAND
+    ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore
+    ${PACKAGES_CONFIG}
+    -PackagesDirectory ${PACKAGES_DIR}
+  )
+  if(NUGET_PACKAGE_SOURCE)
+    list(APPEND NUGET_RESTORE_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+  endif()
 
   add_custom_command(
     OUTPUT
     ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
     DEPENDS
     ${PACKAGES_CONFIG}
-    ${NUGET_CONFIG}
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore ${PACKAGES_CONFIG} -PackagesDirectory ${PACKAGES_DIR} -ConfigFile ${NUGET_CONFIG}
+    COMMAND ${NUGET_RESTORE_COMMAND}
     VERBATIM
   )
 
@@ -318,7 +355,7 @@ if(USE_DML)
   )
 
   add_dependencies(RESTORE_PACKAGES nuget)
-  add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
+  add_dependencies(${ORTGENAI_COMPILE_TARGET} RESTORE_PACKAGES)
 endif()
 
 if(ANDROID)

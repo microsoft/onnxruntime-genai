@@ -49,11 +49,11 @@ std::vector<size_t> Block::SlotIds() const {
 BlockPool::BlockPool(size_t block_size, size_t num_blocks)
     : block_size_(block_size), capacity_(num_blocks) {}
 
-std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) {
-  const auto allocate_block = [this](size_t num_slots) {
+std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
+  const auto allocate_block = [this](size_t slots) {
     for (size_t i = 0; i < Capacity(); ++i) {
       if (blocks_[i] == nullptr) {
-        blocks_[i] = std::make_shared<Block>(i, num_slots, block_size_);
+        blocks_[i] = std::make_shared<Block>(i, slots, block_size_);
         return blocks_[i];
       }
     }
@@ -68,13 +68,21 @@ std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) 
 
   std::vector<std::shared_ptr<Block>> allocated_blocks;
   for (size_t i = 0; i < num_slots; i += block_size_) {
-    auto block = allocate_block(std::min(block_size_, num_slots - i));
+    auto block = allocate_block(mark_slots_used ? std::min(block_size_, num_slots - i) : 0);
     if (!block) {
       throw std::runtime_error("Failed to allocate a block.");
     }
     allocated_blocks.push_back(block);
   }
   return allocated_blocks;
+}
+
+std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) {
+  return AllocateBlocks(num_slots, /*mark_slots_used=*/true);
+}
+
+std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
+  return AllocateBlocks(num_slots, /*mark_slots_used=*/false);
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
@@ -93,6 +101,10 @@ size_t BlockPool::Size() const {
 
 size_t BlockPool::Capacity() const {
   return capacity_;
+}
+
+size_t BlockPool::BlockSize() const {
+  return block_size_;
 }
 
 size_t BlockPool::BlocksNeeded(size_t num_slots) {

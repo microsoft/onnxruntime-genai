@@ -6,6 +6,7 @@
 #include <array>
 #include <assert.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -33,6 +34,7 @@
 #include "config.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
@@ -73,7 +75,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  const Config& config;                  // The model outlives the GeneratorParams
+  // Co-owns the model so the aliased Config below cannot be freed while this
+  // params object is alive. Null for the benchmark-only Config constructor.
+  std::shared_ptr<const Model> model_;
+  const Config& config;                  // Aliases model-owned Config; kept alive by model_
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   // Query the params to get the value set for a param
@@ -99,6 +104,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
@@ -109,6 +115,7 @@ struct Generator : LeakChecked<Generator> {
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
+  void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
@@ -125,6 +132,13 @@ struct Generator : LeakChecked<Generator> {
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
  private:
+#if defined(_MSC_VER)
+  [[msvc::no_unique_address]]
+#else
+  [[no_unique_address]]
+#endif
+  GenerationTelemetry generation_telemetry_;
+  void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
@@ -145,14 +159,30 @@ struct Generator : LeakChecked<Generator> {
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 };
 
+// Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
+// add-on) are unloaded on teardown.
+struct LibraryHandle;
+
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
 
+  // Get-or-create the DeviceInterface for a device type. The interface is owned by this
+  // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
+  // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
+  DeviceInterface* GetDeviceInterface(DeviceType type);
+
   struct Allocator {
-    std::unique_ptr<Ort::Allocator> allocator_;
+    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
+    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
+    // does" -- see
+    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
+    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
+    // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
+    std::unique_ptr<Ort::Allocator> allocator_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
@@ -167,6 +197,19 @@ struct OrtGlobals {
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
+
+  DeviceInterface* LoadCudaInterface(DeviceType type);
+
+  std::mutex device_interfaces_mutex_;
+  // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
+  // module-owned interface (DML). Rebuilt each env cycle.
+  std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
+  // In-process interfaces owned directly by genai (CPU / WebGPU / QNN / OpenVINO / RyzenAI).
+  std::vector<std::unique_ptr<DeviceInterface>> owned_interfaces_;
+  // The genai CUDA add-on library (onnxruntime-genai-cuda). Holds the loaded library so that
+  // unloading it (on teardown) runs the add-on's static destructors. The interface pointer it
+  // provides is non-owning and lives in device_interfaces_.
+  std::unique_ptr<LibraryHandle> cuda_library_;
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();

@@ -13,12 +13,12 @@ concurrency:
 
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
-  AZCOPY_MSI_CLIENT_ID: f07143e5-63f7-4a7a-af08-c0418cc3f7fe
+  AZCOPY_MSI_CLIENT_ID: d712a4c7-a0cf-4e87-af75-31510eba0a8e
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
   binaryDir: 'build/cuda/win-x64'
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
+  ORT_NIGHTLY_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
@@ -56,11 +56,11 @@ jobs:
       - name: Download OnnxRuntime Nightly
         shell: pwsh
         run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = "1.26.0"
+          $ORT_NIGHTLY_VERSION = "1.28.0"
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
+          # -DependencyVersion Ignore: the feed only hosts ORT packages, so transitive deps like System.Memory cannot be resolved from it.
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -Source "${{ env.ORT_NIGHTLY_NUGET_SOURCE }}" -ExcludeVersion -NonInteractive -DependencyVersion Ignore
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
@@ -187,7 +187,7 @@ jobs:
 
       - name: Prepend CUDA to PATH and Run tests
         run: |-
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
-          echo "Current PATH variable is: $env:PATH" 
+          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
+          echo "Current PATH variable is: $env:PATH"
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe

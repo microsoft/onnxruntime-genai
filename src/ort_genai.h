@@ -342,6 +342,32 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
+  // Tool-calling and reasoning token IDs (bot/eot/bor/eor).
+  // Throws if the model does not define the token.
+  int32_t GetBotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEotTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEotTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetBorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBorTokenId(this, &token_id));
+    return token_id;
+  }
+
+  int32_t GetEorTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetEorTokenId(this, &token_id));
+    return token_id;
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
@@ -847,6 +873,18 @@ struct OgaEngine : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
 };
 
+/**
+ * \brief RAII wrapper that calls OgaShutdown() on destruction.
+ *
+ * \warning Without explicit shutdown, GenAI's globals are destroyed at static-destruction time in undefined order,
+ *          which may crash.
+ *
+ * \note Typical usage is to construct an instance early in the program so its destructor runs before process exit.
+ *
+ * \note Only one OgaHandle should be live in the process, and its scope must encompass all GenAI use. GenAI's globals
+ *       are not re-creatable after OgaShutdown(); a second OgaHandle whose lifetime starts after the first one's
+ *       destruction would leave subsequent GenAI calls broken.
+ */
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {
@@ -877,6 +915,10 @@ inline int GetCurrentGpuDeviceId() {
   int device_id;
   OgaCheckResult(OgaGetCurrentGpuDeviceId(&device_id));
   return device_id;
+}
+
+inline void SetTelemetryEnabled(bool enabled) {
+  OgaSetTelemetryEnabled(enabled);
 }
 
 }  // namespace Oga

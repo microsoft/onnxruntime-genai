@@ -13,18 +13,38 @@ This folder contains the model builder for quickly creating optimized and quanti
   - [Quantized PyTorch Model](#quantized-pytorch-model)
   - [GGUF Model](#gguf-model)
   - [Extra Options](#extra-options)
+    - [Number of Hidden Layers](#number-of-hidden-layers)
+    - [Filename](#filename)
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
-    - [Prune Language Modeling Head](@prune-language-modeling-head)
+    - [Prune Language Modeling Head](#prune-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
+    - [Build with Paged Attention](#build-with-paged-attention)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
+    - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
+    - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
-    - [Enable CUDA Graph](#enable-cuda-graph)
-    - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
-    - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
+    - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
+    - [Quantization Options](#quantization-options)
+      - [Accuracy Level](#accuracy-level)
+      - [MatMul Block Size](#matmul-block-size)
+      - [QMoE Block Size](#qmoe-block-size)
+      - [QMoE Weights Prepacked](#qmoe-weights-prepacked)
+      - [MatMulNBits Weights Prepacked](#matmulnbits-weights-prepacked)
+      - [Is Symmetric](#is-symmetric)
+      - [Op Types To Quantize](#op-types-to-quantize)
+      - [Nodes To Exclude](#nodes-to-exclude)
+      - [Algo Config](#algo-config)
+      - [Int8 Bit Placement](#int8-bit-placement)
+      - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
+      - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
+      - [Use FP4 Quantization in QMoE](#use-fp4-quantization-in-qmoe)
+      - [Quantize the KV Cache](#quantize-the-kv-cache)
+    - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
+    - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
     - [LoRA Models](#lora-models)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
@@ -42,6 +62,7 @@ The tool currently supports the following model architectures.
 - Gemma
 - gpt-oss
 - Granite
+- Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
 - Llama
@@ -60,7 +81,7 @@ It is intended for supporting the latest, popular state-of-the-art models.
 
 For all available options, please use the `-h/--help` flag.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder --help
 
@@ -72,7 +93,7 @@ python builder.py --help
 
 This scenario is where your PyTorch model is not downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk).
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_save_hf_files
 
@@ -84,7 +105,7 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk).
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 
@@ -96,7 +117,7 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 This scenario is where your PyTorch model has been customized or finetuned for one of the currently supported model architectures and your model can be loaded in Hugging Face.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 
@@ -108,7 +129,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is where your PyTorch model is one of the currently supported model architectures, has already been quantized to INT4 precision, and your model can be loaded in the Hugging Face style via [AutoGPTQ](https://github.com/AutoGPTQ/AutoGPTQ) or [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 
@@ -120,7 +141,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p in
 
 This scenario is where your float16/float32 GGUF model is already on disk.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -i path_to_gguf_file -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files
 
@@ -132,7 +153,7 @@ python builder.py -m model_name -i path_to_gguf_file -o path_to_output_folder -p
 
 This scenario is for when you want to have control over some specific settings. The below example shows how you can pass key-value arguments to `--extra_options`.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options filename=decoder.onnx
 
@@ -142,11 +163,35 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 To see all available options through `--extra_options`, please use the `help` commands in the `Full Usage` section above.
 
+#### Number of Hidden Layers
+
+This scenario is for when you want to manually set the number of hidden layers that the model builder exports.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
+```
+
+#### Filename
+
+This scenario is for when you want to use a custom ONNX filename instead of the default `model.onnx`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options filename=decoder.onnx
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options filename=decoder.onnx
+```
+
 #### Config Only
 
 This scenario is for when you already have your optimized and/or quantized ONNX model and you need to create the config files to run with ONNX Runtime GenAI.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
 
@@ -160,7 +205,7 @@ Afterwards, please open the `genai_config.json` file in the output folder and mo
 
 This scenario is for when you need to disable the Hugging Face authentication or use a different authentication token than the one stored in [huggingface-cli login](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli#huggingface-cli-login).
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
 
@@ -170,21 +215,21 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 #### Hugging Face Remote Code
 
-This scenario is for when you need to disable trusting remote code from a Hugging Face repo.
+This scenario is for when you need to enable trusting remote code from a Hugging Face repo. The default is `hf_remote=false`, which means `trust_remote_code=False` is used for `transformers.*.from_pretrained()` calls and any Python code shipped inside the repository (referenced by its `auto_map` field) will **not** be executed. Set `hf_remote=true` only for repositories you fully trust, because doing so is equivalent to running arbitrary code from that repository as the current user.
 
-```
+```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
+python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
 ```
 
 #### Exclude Embedding Layer
 
 This scenario is for when you want to exclude the embedding layer from your ONNX model.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_embeds=true
 
@@ -196,7 +241,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to exclude the language modeling head from your ONNX model.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
 
@@ -208,7 +253,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to prune the language modeling head to only compute the last token's logits.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options prune_lm_head=true
 
@@ -220,7 +265,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to include the last hidden states as an output to your ONNX model.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
 
@@ -230,39 +275,57 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
 
+#### Build with Paged Attention
+
+This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` and `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. An `engine` section is added to `genai_config.json`.
+
+Paged attention supports CUDA with `fp16` or `bf16` precision and cannot be combined with `exclude_embeds`, `exclude_lm_head`, or `prune_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true
+```
+
 #### Enable Shared Embeddings
 
-This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`. 
+This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are only valid for models with tied embeddings; setting `shared_embeddings=true` for a model with `tie_word_embeddings=false` will raise a `ValueError`. Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`.
 
-##### Option 1: INT4 (for RTN and K-Quant)
-```
+##### Example 1: INT4 weights + INT4 embeddings (for RTN and K-Quant)
+
+```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant
 ```
 
-##### Option 2: INT4 + INT8 embeddings (for RTN Last and K-Quant Last)
-```
+##### Example 2: INT4 weights + INT8 embeddings (for RTN Last and K-Quant Last)
+
+```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant_last
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=k_quant_last
 ```
 
-##### Option 3: INT4 embeddings + FP16 embeddings
-```
+##### Example 3: INT4 weights + FP16 embeddings
+
+```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=rtn nodes_to_exclude=/lm_head/MatMul
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true algo_config=rtn nodes_to_exclude=/lm_head/MatMul
 ```
 
-##### Option 4: FP16 embeddings
-```
+##### Example 4: FP16 weights + FP16 embeddings
+
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
 
@@ -270,23 +333,11 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
 ```
 
-#### Disable QKV Projections Fusion
+#### Enable CUDA Graph Capture
 
-This scenario is for when you want to keep Q/K/V projections in the attention layer separate instead of fusing them into a single packed MatMul operation. 
+This scenario is for when you want to enable CUDA graph capture for your ONNX model.
 
-```
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
-
-# From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
-```
-
-#### Enable CUDA Graph
-
-This scenario is for when you want to enable CUDA graph for your ONNX model.
-
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 
@@ -294,23 +345,189 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 ```
 
-#### Use 8 Bits Quantization in QMoE
+#### Enable WebGPU Graph Capture
 
-This scenario is for when you want to use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+This scenario is for when you want to enable WebGPU graph capture for your ONNX model.
 
-```
+```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_webgpu_graph=true
 
 # From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_webgpu_graph=true
 ```
 
-#### Use QDQ Pattern for Quantization
+#### Disable QKV Projections Fusion
 
-This scenario is for when you want to use the QDQ pattern when quantizing the model to 4 bits.
+This scenario is for when you want to keep Q/K/V projections in the attention layer separate instead of fusing them into a single packed MatMul operation.
 
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 ```
+
+#### Disable QK Norm GQA Fusion in CUDA or WebGPU
+
+QK Norm GQA fusion is enabled by default for CUDA and WebGPU when GroupQueryAttention is used and rotary embedding can be fused into the attention op. In this mode, Q/K norm weights are passed directly into GroupQueryAttention instead of emitting explicit Q/K normalization nodes.
+
+This scenario is for when you want to disable that fusion and keep explicit Q/K normalization nodes in the graph.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=false
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e webgpu -c cache_dir_to_store_temp_files --extra_options fuse_qk_norm_gqa=false
+```
+
+#### Quantization Options
+
+These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights (and quantizes MoE experts to 8-bit to match).
+
+> **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are still accepted as deprecated aliases and will be removed in a future release.
+
+
+##### Accuracy Level
+
+This scenario is for when you want to control the accuracy level used for MatMul activation handling.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options accuracy_level=4
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options accuracy_level=4
+```
+
+##### MatMul Block Size
+
+This scenario is for when you want to set the block size for MatMul quantization.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options block_size=32
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options block_size=32
+```
+
+##### QMoE Block Size
+
+This scenario is for when you want to set the block size for QMoE expert weights.
+Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. CUDA block-wise QMoE supports only `32`, `64`, or `128`; the default is `32` except for TRT-RTX, which defaults to `128`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options qmoe_block_size=128
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options qmoe_block_size=128
+```
+
+##### QMoE Weights Prepacked
+
+This scenario is for when you want to control the CUDA QMoE expert weight layout. The default value is `-1`, which lets the builder choose the layout automatically. Use `0` to export raw weights and let CUDA prepack them at runtime, or `1` to export CUTLASS-prepacked weights.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options qmoe_weights_prepacked=0
+```
+
+##### MatMulNBits Weights Prepacked
+
+This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP, and an offline-prepacked model must be run with `ORT_FPA_INTB_GEMM` enabling the relevant nbits.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+```
+
+##### Is Symmetric
+
+This scenario is for when you want to choose symmetric (`int4`) or asymmetric (`uint4`) weight quantization.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options is_symmetric=false
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options is_symmetric=false
+```
+
+##### Op Types To Quantize
+
+This scenario is for when you want to target specific operator types for quantization.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options op_types_to_quantize=MatMul/Gather
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options op_types_to_quantize=MatMul/Gather
+```
+
+##### Nodes To Exclude
+
+This scenario is for when you want to skip quantizing specific nodes.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather
+```
+
+##### Algo Config
+
+This scenario is for when you want to select the base quantization algorithm mode.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default
+```
+
+Supported base values are: `default`, `rtn`, `k_quant`.
+
+The legacy compound values `rtn_last`, `k_quant_last`, `k_quant_mixed`, and `k_quant_linear` are still accepted as aliases for a base method plus a `matmul_mixed_precision`.
+
+##### Mixed Precision
+
+This scenario is for when you want to quantize selected MatMul groups with a different quant type than the int4 body, independently from the base quantization algorithm.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=default matmul_mixed_precision=last_matmul:int8
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options algo_config=k_quant matmul_mixed_precision=last_matmul:int8,mixed_layers:int8
+```
+
+`matmul_mixed_precision` is a comma-separated list of `selector:quant_type` pairs. Supported selectors are:
+
+- `last_matmul`: The last MatMul, such as `/lm_head/MatMul` (the single largest, output-sensitive weight).
+- `mixed_layers`: The most quantization-sensitive layers, using the mixed strategy from llama.cpp.
+- `linear_attn`: Linear-attention projections and their MLPs, for hybrid attention models.
+
+Supported quant types are `int4` and `int8`. Using a quant-type name (rather than a bare bit count) lets new schemes such as `fp8`/`fp4` be added without introducing a new option. `matmul_mixed_precision` is orthogonal to `algo_config` and can be combined with any base method.
+
+##### Use QDQ Pattern for Quantization
+
+This scenario is for when you want to use the QDQ pattern when quantizing the model.
+
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 
@@ -318,11 +535,117 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=true
 ```
 
+This option is not supported with `-p int8` because 8-bit `MatMulNBits` is QOperator-only.
+
+##### Choose the MoE Quantization Type in QMoE
+
+This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values are `int4` (default), `int8`, and `mxfp4`:
+
+- `int4`: 4-bit integer QMoE weights (`expert_weight_bits=4`, `quant_type="int"`).
+- `int8`: 8-bit integer QMoE weights (`expert_weight_bits=8`, `quant_type="int"`).
+- `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` with symmetric INT4 quantization, and is only supported on the CUDA EP.
+
+This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
+
+```bash
+# From wheel (8-bit integer QMoE):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
+
+# From source (8-bit integer QMoE):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8
+```
+
+```bash
+# From wheel (MXFP4 QMoE on CUDA):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+
+# From source (MXFP4 QMoE on CUDA):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=mxfp4
+```
+
+##### Quantize the KV Cache
+
+This scenario is for when you want to quantize the KV cache via the `kv_cache_quant_type` option. Quantized KV cache is only supported for the CPU and CUDA execution providers. Supported values are:
+
+- `none` (default): no KV cache quantization.
+- `int8_per_tensor` / `int8_per_channel`: 8-bit integer KV cache.
+- `int4_per_tensor` / `int4_per_channel`: 4-bit integer KV cache.
+- `fp8_per_tensor` / `fp8_per_channel`: FP8 (float8e4m3fn) KV cache.
+
+The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
+
+The scales applied to the KV cache are supplied through a required calibration file:
+
+- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). This option is required when `kv_cache_quant_type` is enabled.
+
+The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
+
+```bash
+# 1. Build the baseline (no kv_cache_quant_type) used for calibration:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
+
+# 2. Calibrate the scales:
+python -m onnxruntime_genai.models.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
+```
+
+Then rebuild with the quantized KV cache:
+
+```bash
+# From wheel (int8 per-channel KV cache with calibrated scales):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+
+# From source (int8 per-channel KV cache with calibrated scales):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+```
+
+##### Quantize the KV Cache with Paged Attention
+
+`kv_cache_quant_type` can be combined with `use_paged_attention=true`. In that case the paged KV cache blocks
+(`[num_blocks, block_size, num_kv_heads, head_size]`) are allocated in the quantized element type and the
+`PagedAttention` op receives the `k_scale`/`v_scale` initializers plus the matching `k_quant_type`/`v_quant_type`
+attributes.
+
+Only `int8_*` and `fp8_*` are supported on the paged path; `int4_*` is rejected because `PagedAttention` has no
+sub-byte cache backend. Per-channel scales are emitted with the `(num_kv_heads, 1, head_size)` shape that
+`PagedAttention` requires.
+
+```bash
+# From wheel (paged attention + int8 per-channel KV cache):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+
+# From source (paged attention + fp8 per-tensor KV cache):
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=fp8_per_tensor kv_cache_scale_file=path_to_scales.json
+```
+
+#### FP32 I/O for WebGPU EP
+
+This scenario is for when you want to force FP32 model I/O for WebGPU (useful for GPUs without FP16 support on WebGPU, such as GTX 10xx).
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_webgpu_fp32=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_webgpu_fp32=true
+```
+
+#### BF16 I/O for CUDA EP
+
+This scenario is for when you want to use BF16 I/O precision in quantized ONNX models for CUDA / TRT-RTX.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_cuda_bf16=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_cuda_bf16=true
+```
+
 #### LoRA Models
 
 This scenario is where you have a finetuned model with LoRA adapters and your model can be loaded in the Hugging Face style via [PEFT](https://github.com/huggingface/peft).
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
 
@@ -336,7 +659,7 @@ Base weights should be located in `path_to_local_folder_on_disk` and adapter wei
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
 
-```
+```py
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_name = "your_model_name"
@@ -353,7 +676,7 @@ tokenizer.save_pretrained(cache_dir)
 
 This option is the simplest but it will download another copy of the PyTorch model onto disk to accommodate the change in the number of hidden layers.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider --extra_options num_hidden_layers=4
 
@@ -367,7 +690,7 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 2. Modify `num_hidden_layers` in `config.json` to your desired target (e.g. 4 layers).
 3. Run the below command for the model builder.
 
-```
+```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 

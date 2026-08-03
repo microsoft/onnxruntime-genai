@@ -29,11 +29,13 @@ _MAX_NEW_TOKENS = 64
 
 # Known (platform, device, model) combinations that don't fit on the
 # agent's GPU memory. TODO: re-enable these once the GPU agents have
-# more VRAM. The current Windows CUDA pool
-# (onnxruntime-Win2022-GPU-A10) only exposes ~4 GB to the job.
+# more VRAM. The Windows CUDA pool (onnxruntime-Win2022-GPU-A10) and the
+# Linux CUDA pool (onnxruntime-Linux-GPU-A10) only expose ~4 GB to the job.
 _VRAM_CONSTRAINED_SKIPS: set[tuple[str, str, str]] = {
     ("win32", "cuda", "ministral-3-3b-Instruct-2512"),
     ("win32", "cuda", "Phi-4-mini-instruct"),
+    ("linux", "cuda", "ministral-3-3b-Instruct-2512"),
+    ("linux", "cuda", "Phi-4-mini-instruct"),
 }
 
 
@@ -71,8 +73,7 @@ def test_generates_text(device, model, model_path):
         pytest.skip(f"Execution provider '{device}' is not available in this build.")
     if (sys.platform, device, model) in _VRAM_CONSTRAINED_SKIPS:
         pytest.skip(
-            f"Model '{model}' on device '{device}' ({sys.platform}) "
-            "is skipped pending more VRAM on the test agent."
+            f"Model '{model}' on device '{device}' ({sys.platform}) is skipped pending more VRAM on the test agent."
         )
 
     config = og.Config(str(model_path))
@@ -94,7 +95,7 @@ def test_generates_text(device, model, model_path):
     while not generator.is_done():
         generator.generate_next_token()
 
-    new_tokens = generator.get_sequence(0)[len(input_tokens):]
+    new_tokens = generator.get_sequence(0)[len(input_tokens) :]
     assert len(new_tokens) > 0, "generator produced no new tokens"
     assert len(new_tokens) <= _MAX_NEW_TOKENS
 
@@ -103,7 +104,6 @@ def test_generates_text(device, model, model_path):
 
     if _EXPECTED_SUBSTRING not in text.lower():
         warnings.warn(
-            f"[{model}/{device}] expected '{_EXPECTED_SUBSTRING}' in completion of "
-            f"{_PROMPT!r}; got {text!r}",
+            f"[{model}/{device}] expected '{_EXPECTED_SUBSTRING}' in completion of {_PROMPT!r}; got {text!r}",
             stacklevel=2,
         )

@@ -59,12 +59,25 @@ std::unique_ptr<OrtSessionOptions> BuildSelectionSessionOptions(const std::strin
 
 bool IsModelPackage(const fs::path& path) {
   constexpr const char* kManifestFilename = "manifest.json";
+  constexpr const char* kGenaiConfigFilename = "genai_config.json";
   std::error_code ec;
   const std::filesystem::path root = AsStdPath(path);
-  if (!std::filesystem::is_directory(root, ec) || ec) {
+  if (!std::filesystem::is_directory(root, ec)) {
     return false;
   }
-  return std::filesystem::is_regular_file(root / kManifestFilename, ec) && !ec;
+  if (!std::filesystem::is_regular_file(root / kManifestFilename, ec)) {
+    return false;
+  }
+  // A model package keeps genai_config.json inside each variant directory, never at the root.
+  // A flat model directory keeps it at the root and may carry an unrelated manifest.json, so a
+  // root genai_config.json means this is a flat directory, not a package. Only a genuinely
+  // absent file (not a probe error like EACCES) counts as "no root genai_config.json".
+  const std::filesystem::file_status genai_config_status =
+      std::filesystem::status(root / kGenaiConfigFilename, ec);
+  if (std::filesystem::is_regular_file(genai_config_status)) {
+    return false;
+  }
+  return genai_config_status.type() == std::filesystem::file_type::not_found;
 }
 
 #if ORT_GENAI_HAS_MODEL_PACKAGE
@@ -72,7 +85,7 @@ bool IsModelPackage(const fs::path& path) {
 PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
                                        const fs::path& package_root,
                                        const std::string& explicit_ep) {
-  auto pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
+  std::shared_ptr<OrtModelPackageContext> pkg_ctx = OrtModelPackageContext::Create(package_root.c_str());
 
   // Single-component restriction: the package author designates "the" genai component by
   // making it the only one.
@@ -123,6 +136,8 @@ PackageLoadResult OpenAndSelectVariant(OrtEnv& env,
   PackageLoadResult result;
   result.package_root = package_root;
   result.variant_dir = fs::path{component_ctx->GetSelectedVariantFolderPath()};
+  // Keep the package context alive so genai_config path references can be resolved later.
+  result.context = std::move(pkg_ctx);
   return result;
 }
 

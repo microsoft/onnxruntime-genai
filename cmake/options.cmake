@@ -6,6 +6,7 @@ option(USE_TRT_RTX "Build with TensorRT-RTX support" OFF)
 option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
+set(NUGET_PACKAGE_SOURCE "" CACHE STRING "Override the NuGet package source used by the build")
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
@@ -23,3 +24,11 @@ option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)
+
+# telemetry
+if(CMAKE_SYSTEM_NAME STREQUAL "AIX" OR MAC_CATALYST)
+  option(ENABLE_TELEMETRY "Enable telemetry data collection via 1DS SDK" OFF)
+else()
+  option(ENABLE_TELEMETRY "Enable telemetry data collection via 1DS SDK" ON)
+endif()
+set(ORTGENAI_TELEMETRY_TENANT_TOKEN "" CACHE STRING "Override the compiled-in 1DS telemetry ingestion token")

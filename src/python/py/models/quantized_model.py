@@ -1258,6 +1258,7 @@ class QuarkModel(QuantizedModel):
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
                 break
+            print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
             self_attn = getattr(layer, "self_attn", None) or getattr(layer, "self_attention", None)
