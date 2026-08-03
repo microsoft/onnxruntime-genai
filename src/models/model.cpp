@@ -1030,12 +1030,13 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (config->model.type == "lfm2_audio")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
-  if (config->model.type == "nemotron_parse")
-    return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (ModelType::IsVLM(config->model.type))
+  if (ModelType::IsVLM(config->model.type)) {
+    if (config->model.type == "nemotron_parse")
+      return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  }
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw

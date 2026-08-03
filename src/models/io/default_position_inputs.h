@@ -4,8 +4,26 @@
 
 namespace Generators {
 
+enum class AttentionMaskMode {
+  // Select static handling for graph capture or an EP's shared KV buffers.
+  Automatic,
+  // Resize the mask to the active sequence length as generation advances.
+  Dynamic,
+  // Keep one fixed-shape mask and update its active prefix in place.
+  Static,
+};
+
+struct AttentionMaskOptions {
+  AttentionMaskMode mode{AttentionMaskMode::Automatic};
+  // Overrides the static mask's second dimension; 0 uses generation max_length.
+  int static_mask_length_override{};
+};
+
 struct DefaultPositionInputs : PositionInputs {
-  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name);
+  DefaultPositionInputs(const Model& model, State& state,
+                        DeviceSpan<int32_t> sequence_lengths_unk,
+                        const std::string& attention_mask_name,
+                        AttentionMaskOptions attention_mask_options = {});
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -30,10 +48,12 @@ struct DefaultPositionInputs : PositionInputs {
 
   void RewindMask(size_t index);
   bool ShouldUseStaticMaskHandling() const;
+  int GetAttentionMaskCapacity() const;
 
   const Model& model_;
   State& state_;
   std::string attention_mask_name_;
+  AttentionMaskOptions attention_mask_options_;
   size_t mask_input_index_{~0U};
   size_t posid_input_index_{~0U};
   ONNXTensorElementDataType type_;
