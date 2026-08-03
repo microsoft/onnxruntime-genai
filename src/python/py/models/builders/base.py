@@ -1617,6 +1617,37 @@ class Model:
         self.make_node("Exp", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
+    def make_log(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Log", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_topk(self, name, inputs, dtype, values_shape, indices_shape, axis=-1, largest=1, sorted=1):
+        values_output = f"{name}/output_0"
+        indices_output = f"{name}/output_1"
+        self.make_node(
+            "TopK",
+            inputs=inputs,
+            outputs=[values_output, indices_output],
+            name=name,
+            axis=axis,
+            largest=largest,
+            sorted=sorted,
+        )
+        self.make_value(values_output, dtype, shape=values_shape)
+        self.make_value(indices_output, ir.DataType.INT64, shape=indices_shape)
+        return values_output, indices_output
+
+    def make_gather_elements(self, name, inputs, dtype, shape, axis):
+        output = f"{name}/output_0"
+        self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_scatter_elements(self, name, inputs, dtype, shape, axis):
+        output = f"{name}/output_0"
+        self.make_node("ScatterElements", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.make_value(output, dtype, shape=shape)
+
     def make_cos(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Cos", inputs=[root_input], outputs=[output], name=name)

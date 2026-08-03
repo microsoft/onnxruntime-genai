@@ -105,7 +105,11 @@ class DeepSeekV4Model(Model):
         self.n_shared_experts: int = getattr(config, "n_shared_experts", 1)
         self.swiglu_limit: float = getattr(config, "swiglu_limit", 10.0)
         self.routed_scaling_factor: float = getattr(config, "routed_scaling_factor", 1.5)
-        self.norm_topk_prob: bool = getattr(config, "norm_topk_prob", True)
+        # Router activation applied to the raw gate logits before top-k selection and
+        # weighting (`DeepseekV4TopKRouter`/`DeepseekV4HashRouter.score_fn` in the reference).
+        # `norm_topk_prob` is deliberately not read here: the reference router always
+        # renormalizes the selected weights to sum to 1, regardless of that config value.
+        self.scoring_func: str = getattr(config, "scoring_func", "sqrtsoftplus")
 
         # Per-layer type info
         raw_layer_types = getattr(config, "layer_types", None)
@@ -1381,74 +1385,169 @@ class DeepSeekV4Model(Model):
         )
         return node_name
 
+    def make_moe_router_scores(
+        self, layer_id: int, gate_weight: "torch.Tensor", root_input: str, base: str
+    ) -> str:
+        """Compute the router scores shared by both router types.
+
+        This is ``DeepseekV4{TopK,Hash}Router.score_fn(F.linear(hidden_states, gate.weight))``:
+        a raw (bias-free) Linear followed by ``config.scoring_func``.  Returns the flattened
+        ``[num_rows, num_experts]`` scores value name.
+        """
+        num_e = self.moe_attrs["num_experts"]
+
+        # gate.weight is a raw nn.Parameter, not an nn.Linear, so use make_raw_matmul.
+        logits_name = self.make_raw_matmul(
+            gate_weight,
+            f"model.layers.{layer_id}.moe.gate.weight",
+            f"{base}/router/MatMul",
+            root_input,
+        )
+        logits_shape = ["batch_size", "sequence_length", num_e]
+        if self.scoring_func == "sigmoid":
+            scores_name = f"{base}/router/Sigmoid"
+            self.make_sigmoid(scores_name, f"{logits_name}/output_0", self.io_dtype, logits_shape)
+        elif self.scoring_func == "sqrtsoftplus":
+            # Default: sqrt(softplus(x)).  Always strictly positive, which
+            # make_moe_masked_router_logits below relies on to take its log.
+            softplus_name = f"{base}/router/Softplus"
+            self.make_softplus(softplus_name, f"{logits_name}/output_0", self.io_dtype, logits_shape)
+            scores_name = f"{base}/router/Sqrt"
+            self.make_sqrt(scores_name, [f"{softplus_name}/output_0"], self.io_dtype, logits_shape)
+        else:
+            # `ACT2FN` in the HuggingFace reference only registers "sigmoid" and
+            # "sqrtsoftplus" for this purpose (`transformers/activations.py`); any other
+            # `config.scoring_func` value would raise a `KeyError` there too, so fail
+            # loudly here rather than silently emitting a graph with different numerics.
+            raise NotImplementedError(
+                f"Unsupported DeepSeek V4 scoring_func '{self.scoring_func}'; expected "
+                "'sigmoid' or 'sqrtsoftplus'."
+            )
+
+        # Reshape: [B, S, E] → [B*S, E]
+        flat_name = f"{base}/router/Reshape"
+        self.make_reshape(
+            flat_name,
+            [f"{scores_name}/output_0", f"/model/constants/INT64/[-1, {num_e}]"],
+            self.io_dtype,
+            [None, num_e],
+        )
+        return f"{flat_name}/output_0"
+
+    def make_moe_masked_router_logits(self, base: str, scores_flat: str, indices: str, top_k: int) -> str:
+        """Build the ``[num_rows, num_experts]`` router_probs input fed to the MoE op.
+
+        The reference computes ``weights = scores.gather(indices); weights /= weights.sum()``
+        (optionally scaled afterwards) — a plain renormalization of the *selected* scores, with
+        no softmax over the full expert set. The ``com.microsoft::MoE`` op instead always
+        applies its own softmax over all experts before selecting the top-k and (optionally)
+        renormalizing them. To reproduce the reference exactly through that op, this places
+        ``log(selected_score)`` at each selected column and a large negative fill everywhere
+        else: softmax normalizes any non-selected (~0-weight) columns away, so with
+        ``normalize_routing_weights=1`` the op's top-k selection lands on exactly these
+        columns and its output weights reduce to ``selected_score / sum(selected_scores)``.
+        """
+        num_e = self.moe_attrs["num_experts"]
+
+        selected_name = f"{base}/router/GatherElements"
+        self.make_gather_elements(
+            selected_name, [scores_flat, indices], self.io_dtype, [None, top_k], axis=-1
+        )
+        log_name = f"{base}/router/Log"
+        self.make_log(log_name, f"{selected_name}/output_0", self.io_dtype, [None, top_k])
+
+        # A [num_rows, num_experts] tensor filled with a large negative value (effectively -inf
+        # after softmax), the same shape as scores_flat.
+        shape_name = f"{base}/router/Shape"
+        self.make_shape(shape_name, scores_flat, shape=[2])
+        fill_name = f"{base}/router/NegFill"
+        self.make_expand(
+            fill_name,
+            [f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-10000.0", f"{shape_name}/output_0"],
+            self.io_dtype,
+            [None, num_e],
+        )
+
+        masked_name = f"{base}/router/ScatterElements"
+        self.make_scatter_elements(
+            masked_name,
+            [f"{fill_name}/output_0", indices, f"{log_name}/output_0"],
+            self.io_dtype,
+            [None, num_e],
+            axis=-1,
+        )
+        return f"{masked_name}/output_0"
+
     def make_topk_moe(
         self, layer_id: int, mlp, root_input: str, op_type: str, weight_type: str
     ) -> str:
         """Build the routed MoE block with learned top-k routing."""
         base = f"/model/layers.{layer_id}/moe"
+        num_e = self.moe_attrs["num_experts"]
+        top_k = self.moe_attrs["top_k"]
 
-        # Router (gate.weight): [num_experts, D] → bias-free Linear
-        # gate.weight is a raw nn.Parameter, not an nn.Linear, so use _make_raw_matmul.
-        router_name = self.make_raw_matmul(
-            mlp.gate.weight.data,
-            f"model.layers.{layer_id}.moe.gate.weight",
-            f"{base}/router/MatMul",
-            root_input,
-        )
-        # Apply e_score_correction_bias (buffer, trained)
+        scores_flat = self.make_moe_router_scores(layer_id, mlp.gate.weight.data, root_input, base)
+
+        # e_score_correction_bias (trained buffer) only perturbs which experts are
+        # *selected*; the routing weight itself is still the unbiased score (see
+        # DeepseekV4TopKRouter.forward: `weights = scores.gather(1, indices)`, not
+        # `(scores + bias).gather(...)`).
         bias_name = f"model.layers.{layer_id}.moe.gate.e_score_correction_bias"
         self.make_initializer(mlp.gate.e_score_correction_bias.data, bias_name, to=self.io_dtype)
-        router_bias_name = f"{base}/router/Add"
-        self.make_add(router_bias_name,
-                      [f"{router_name}/output_0", bias_name],
-                      self.io_dtype,
-                      ["batch_size", "sequence_length", self.moe_attrs["num_experts"]])
+        biased_name = f"{base}/router/BiasAdd"
+        self.make_add(biased_name, [scores_flat, bias_name], self.io_dtype, [None, num_e])
 
-        # Reshape: [B, S, E] → [B*S, E]
-        router_reshape_name = f"{base}/router/Reshape"
-        self.make_reshape(
-            router_reshape_name,
-            [f"{router_bias_name}/output_0",
-             f"/model/constants/INT64/[-1, {self.moe_attrs['num_experts']}]"],
+        _, indices_name = self.make_topk(
+            f"{base}/router/TopK",
+            [f"{biased_name}/output_0", f"/model/constants/INT64/[{top_k}]"],
             self.io_dtype,
-            [None, self.moe_attrs["num_experts"]],
+            [None, top_k],
+            [None, top_k],
+            axis=-1,
+            largest=1,
+            sorted=0,
         )
 
-        return self.make_deepseek_moe_op(
-            layer_id, mlp, root_input,
-            f"{router_reshape_name}/output_0",
-            op_type, weight_type, base
-        )
+        router_probs = self.make_moe_masked_router_logits(base, scores_flat, indices_name, top_k)
+        return self.make_deepseek_moe_op(layer_id, mlp, root_input, router_probs, op_type, weight_type, base)
 
     def make_hash_moe(
         self, layer_id: int, mlp, root_input: str, op_type: str, weight_type: str
     ) -> str:
         """Build the hash-routed MoE block (frozen token→expert lookup)."""
         base = f"/model/layers.{layer_id}/moe"
+        top_k = self.moe_attrs["top_k"]
 
-        # Hash router gate scores (for weighting, not routing).
-        # gate.weight is a raw nn.Parameter, not an nn.Linear, so use _make_raw_matmul.
-        gate_name = self.make_raw_matmul(
-            mlp.gate.weight.data,
-            f"model.layers.{layer_id}.moe.gate.weight",
-            f"{base}/hash_router/MatMul",
-            root_input,
-        )
-        # Reshape: [B, S, E] → [B*S, E]
-        gate_reshape_name = f"{base}/hash_router/Reshape"
+        scores_flat = self.make_moe_router_scores(layer_id, mlp.gate.weight.data, root_input, base)
+
+        # Frozen token-id → expert-id lookup table (DeepseekV4HashRouter.tid2eid): unlike
+        # the top-k router, *which* experts a token uses is a static function of its token id,
+        # not a learned argmax over the scores. The same gate scores computed above still
+        # weight the (statically) selected experts.
+        tid2eid_name = f"model.layers.{layer_id}.moe.gate.tid2eid"
+        self.make_initializer(mlp.gate.tid2eid.data, tid2eid_name, to=ir.DataType.INT64)
+
+        input_ids_flat_name = f"{base}/hash_router/input_ids_flat/Reshape"
         self.make_reshape(
-            gate_reshape_name,
-            [f"{gate_name}/output_0",
-             f"/model/constants/INT64/[-1, {self.moe_attrs['num_experts']}]"],
-            self.io_dtype,
-            [None, self.moe_attrs["num_experts"]],
+            input_ids_flat_name,
+            [self.input_names["input_ids"], "/model/constants/INT64/[-1]"],
+            ir.DataType.INT64,
+            [None],
         )
 
-        return self.make_deepseek_moe_op(
-            layer_id, mlp, root_input,
-            f"{gate_reshape_name}/output_0",
-            op_type, weight_type, base
+        indices_name = f"{base}/hash_router/Gather"
+        self.make_gather(
+            indices_name,
+            [tid2eid_name, f"{input_ids_flat_name}/output_0"],
+            ir.DataType.INT64,
+            [None, top_k],
+            axis=0,
         )
+
+        router_probs = self.make_moe_masked_router_logits(
+            base, scores_flat, f"{indices_name}/output_0", top_k
+        )
+        return self.make_deepseek_moe_op(layer_id, mlp, root_input, router_probs, op_type, weight_type, base)
 
     def make_deepseek_moe_op(
         self,
@@ -1504,14 +1603,19 @@ class DeepSeekV4Model(Model):
         )
 
         moe_name = f"{base}/{op_type}"
-        # Override MoE attrs for V4
+        # Override MoE attrs for V4.
+        # normalize_routing_weights=True is required (not merely config-dependent): it makes
+        # the op renormalize the weights among only the selected top-k experts, which is what
+        # turns the log(selected_score)/-inf router_probs built above into exactly
+        # `selected_score / sum(selected_scores)` — see make_moe_masked_router_logits. The
+        # reference always performs this renormalization unconditionally.
         saved_top_k = self.moe_attrs["top_k"]
         saved_swiglu = self.moe_attrs["swiglu_fusion"]
         saved_limit = self.moe_attrs["swiglu_limit"]
         saved_norm = self.moe_attrs["normalize_routing_weights"]
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["swiglu_limit"] = self.swiglu_limit
-        self.moe_attrs["normalize_routing_weights"] = self.norm_topk_prob
+        self.moe_attrs["normalize_routing_weights"] = True
 
         self.make_moe_op(
             moe_name,
@@ -1531,7 +1635,23 @@ class DeepSeekV4Model(Model):
         self.moe_attrs["swiglu_limit"] = saved_limit
         self.moe_attrs["normalize_routing_weights"] = saved_norm
 
-        return f"{moe_name}/output_0"
+        # `routed_scaling_factor` scales each selected expert's weight before it is combined
+        # with that expert's FFN output (see DeepseekV4{TopK,Hash}Router.forward); since the
+        # combine is linear in the weights, this is equivalent to scaling the MoE op's output.
+        scale_name = f"model.layers.{layer_id}.moe.routed_scaling_factor"
+        self.make_initializer(
+            torch.tensor(self.routed_scaling_factor, dtype=to_torch_dtype(self.io_dtype)),
+            scale_name, to=self.io_dtype,
+        )
+        scaled_name = f"{base}/routed_scale/Mul"
+        self.make_mul(
+            scaled_name,
+            [f"{moe_name}/output_0", scale_name],
+            self.io_dtype,
+            self.hidden_state_shape(),
+        )
+
+        return f"{scaled_name}/output_0"
 
     def make_shared_expert(
         self, layer_id: int, shared_expert, root_input: str
