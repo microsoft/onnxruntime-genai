@@ -164,11 +164,7 @@ class DeepSeekV4FlashModel(Model):
                             ("experts", self.n_experts), ("moe_inter", self.moe_inter)):
                 if n % self.world:
                     raise ValueError(f"dsv4_tp_world={self.world} does not divide {what}={n}")
-            if self.indexer and self.index_n_heads % self.world:
-                raise ValueError(f"dsv4_tp_world={self.world} does not divide "
-                                 f"index_n_heads={self.index_n_heads}")
         self.n_heads_local = self.n_heads // self.world
-        self.index_n_heads_local = self.index_n_heads // self.world
         self.o_groups_local = self.o_groups // self.world
         self.n_experts_local = self.n_experts // self.world
         self.moe_inter_local = self.moe_inter // self.world
@@ -1053,15 +1049,17 @@ class DeepSeekV4FlashModel(Model):
         every step, so paging would buy nothing.
         """
         p = f"layers.{layer_id}.attn.indexer"
-        NH, HD, rd = self.index_n_heads_local, self.index_head_dim, self.rope_head_dim
+        NH, HD, rd = self.index_n_heads, self.index_head_dim, self.rope_head_dim
         nd = HD - rd
         C, L = self.comp_capacity(ratio), self.max_seq_len
         k = self.index_width(ratio)
         F, I, BOOL = ir.DataType.FLOAT, ir.DataType.INT64, ir.DataType.BOOL
         io = self.io_dtype
 
-        # ---- q: heads are sharded, so each rank scores with its own slice ----
-        q = self.proj(f"{name}/qb", qr, f"{p}.wq_b.weight", [B, S, NH * HD], shard_axis=0)
+        # The heads are replicated, not sharded: the cache they read is already whole on
+        # every rank, so sharding would divide the arithmetic without dividing the traffic
+        # that bounds it, and would cost an all-reduce of the score per layer.
+        q = self.proj(f"{name}/qb", qr, f"{p}.wq_b.weight", [B, S, NH * HD])
         q = self.cast(f"{name}/qf", self.reshape(f"{name}/q4", q, [0, 0, NH, HD], io,
                                                  [B, S, NH, HD]), F, [B, S, NH, HD])
         q = self.op("Concat",
@@ -1094,7 +1092,7 @@ class DeepSeekV4FlashModel(Model):
                           f"{name}/icache", io, [B, C, HD])
 
         # ---- score ----
-        w = self.proj(f"{name}/w", x, f"{p}.weights_proj.weight", [B, S, NH], shard_axis=0)
+        w = self.proj(f"{name}/w", x, f"{p}.weights_proj.weight", [B, S, NH])
         w = self.op("Mul", [self.cast(f"{name}/wf", w, F, [B, S, NH]),
                             self.const("FLOAT", (HD ** -0.5) * self.index_n_heads ** -0.5)],
                     f"{name}/ws", F, [B, S, NH])
@@ -1105,8 +1103,6 @@ class DeepSeekV4FlashModel(Model):
                         f"{name}/wsc", F, [B, S, NH, C])
         score = self.op("ReduceSum", [score, self.const("INT64", [2])], f"{name}/sum",
                         F, [B, S, C], keepdims=0)
-        # Each rank holds a slice of the heads, so this is a partial sum.
-        score = self.all_reduce(f"{name}/ar", score, F, [B, S, C])
 
         # ---- top-k over the rows this query can actually see ----
         qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
