@@ -117,9 +117,18 @@ steps:
       cpTag="cp$(echo '${{ pyVer }}' | tr -d '.')"
       echo "$whl_name" | grep -q "$cpTag" || { echo "ASSERT FAIL: wheel for ${{ pyVer }} not tagged $cpTag: $whl_name"; exit 1; }
 
-      # Try the full runtime import test; skip gracefully if the onnxruntime runtime
-      # wheel for this platform is unavailable on Lotus (osx-arm64 gap).
-      if python3 -m pip install --user --break-system-packages "onnxruntime==${{ parameters.python_dependency_version }}"; then
+      # Try the full runtime import test; skip gracefully if this is a cross
+      # build or the onnxruntime runtime wheel for this platform is unavailable.
+      # The wheel is arm64-only, so importing it requires an arm64 host. The
+      # Microsoft-hosted macOS image may be x86_64, in which case the extension is
+      # cross-compiled for arm64 and cannot be imported here — detect that and
+      # fall back to the degraded assertion (mirrors the missing-ORT path below).
+      host_arch=$(uname -m)
+      if [ "$host_arch" != "arm64" ]; then
+        echo "WARNING: build host is '$host_arch' but the wheel is arm64 (cross build)"
+        echo "         — the arm64 extension cannot be imported here; skipping the runtime import test."
+        echo "ASSERT OK (degraded): wheel produced + arm64-tagged"
+      elif python3 -m pip install --user --break-system-packages "onnxruntime==${{ parameters.python_dependency_version }}"; then
         python3 -m pip install --user --break-system-packages --force-reinstall --no-deps "$whl"
         expected=$(tr -d '[:space:]' < "$(Build.SourcesDirectory)/VERSION_INFO")
         actual=$(python3 -c "import onnxruntime_genai as og; print(og.__version__)" | tr -d '[:space:]')
