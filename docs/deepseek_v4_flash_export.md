@@ -391,7 +391,51 @@ raises the token budget.
 
 ---
 
-## 7. Troubleshooting
+## 7. Benchmarking
+
+`dsv4_benchmark.py` measures TTFT and prefill/decode throughput using the same
+metric definitions as `benchmark/python/benchmark_e2e.py`: TTFT is prompt
+processing plus first-token sampling, and decode throughput excludes that first
+token. One engine is reused across every configuration, and EOS is disabled so
+that each repetition decodes exactly `--gen-length` tokens.
+
+```bash
+python examples/python/deepseek_v4_flash_0731/dsv4_benchmark.py \
+    --model ~/dsv4_onnx --gen-length 128 --reps 5
+```
+
+On 8x H200 at batch 1, with `max_seq_len=4096`:
+
+| prompt | gen | TTFT (ms) | prefill tps | decode tps | ms/token |
+|-------:|----:|----------:|------------:|-----------:|---------:|
+|    128 | 128 | 144.3 | 887 | 10.29 | 97.2 |
+|    512 | 128 | 227.1 | 2255 | 10.26 | 97.5 |
+|   1024 | 128 | 344.7 | 2971 | 10.25 | 97.6 |
+|   2048 | 128 | 593.4 | 3451 | 10.23 | 97.7 |
+|   3072 | 128 | 875.3 | 3510 | 10.26 | 97.5 |
+
+Decode latency is flat at ~97.5 ms/token across a 24x range of context length,
+so neither attention nor memory bandwidth is the constraint - the cost is
+per-pass kernel launch overhead spread over the graph's 25,757 nodes. Fitting
+the prompt sweep gives `TTFT = 97.5 ms + 0.253 ms/token`, and the intercept
+equals the decode latency: every forward pass pays a fixed ~97.5 ms, while real
+prefill compute is a quarter of a millisecond per token. Prefill amortizes that
+overhead (89% of TTFT is compute at 3072 tokens), decode does not amortize it at
+all. Fusing the hyper-connection, KV-compressor and attention subgraphs, or
+capturing the decode step as a CUDA graph, is what would move decode throughput.
+
+Because prompts are random token ids, the engine occasionally reports a rank
+argmax disagreement with a top-2 gap of exactly zero. That is a tie on nonsense
+input, not numerical drift.
+
+> Do not add a GPU-memory sampler thread to the benchmark process. Forking
+> `nvidia-smi` concurrently with the engine's `Popen(pass_fds=...)` rank spawn
+> corrupts NCCL bootstrap: rank 0 dies at the first `AllReduce` with
+> "NCCL failure 1: unhandled cuda error" and the other seven hang.
+
+---
+
+## 8. Troubleshooting
 
 **`Type Error: Type (tensor(float)) of output arg (...) does not match expected type (tensor(bfloat16))`**
 An initializer feeding an fp32 subgraph was registered in bf16. Register it with
@@ -429,7 +473,7 @@ the total export time.
 
 ---
 
-## 8. Known limitations
+## 9. Known limitations
 
 * The lightning indexer is exported as a dense `window ∪ all-compressed` read
   set rather than a top-512 gather. This is numerically exact below roughly 2 K
