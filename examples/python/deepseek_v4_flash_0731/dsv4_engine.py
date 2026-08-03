@@ -52,6 +52,9 @@ _FOREVER = 10 ** 9
 _MIN_COMPRESS_RATIO = 4
 _MAX_COMPRESS_RATIO = 128
 
+# Uncaptured decode runs per parity before the graph is recorded.
+_GRAPH_WARMUP = 3
+
 
 class ProtocolError(RuntimeError):
     pass
@@ -97,11 +100,12 @@ class _Chan:
 class _Worker:
     """One rank: owns a session, its KV cache, and the decode loop."""
 
-    def __init__(self, model_dir, rank, prefill_chunk=512, batch=1):
+    def __init__(self, model_dir, rank, prefill_chunk=512, batch=1, cuda_graph=False):
         import onnxruntime as ort
         import torch
 
         self.torch = torch
+        self.ort = ort
         t0 = time.time()
         so = ort.SessionOptions()
         so.log_severity_level = 3
@@ -109,7 +113,23 @@ class _Worker:
             so.enable_profiling = True
             so.profile_file_prefix = f"/tmp/dsv4_prof_rank{rank}"
         path = os.path.join(model_dir, f"rank_{rank}", "model.onnx")
-        self.sess = ort.InferenceSession(path, so, providers=["CUDAExecutionProvider"])
+        # A decode step launches ~23k kernels but keeps the GPU busy only ~28% of the
+        # step, so the wall clock is set by launch dispatch rather than by any kernel.
+        # Capturing the step collapses those launches into one graph replay.
+        #
+        # A replay re-runs the addresses it recorded, so every activation has to keep
+        # the address it had at capture time.  ORT has no allocator support for that:
+        # it simply relies on a run allocating the same sizes in the same order and so
+        # getting the same addresses back.  Leaving the memory pattern on is what makes
+        # that hold here -- a decode step then takes one pooled block of a fixed size
+        # instead of thousands of individual allocations whose placement depends on
+        # whatever the interleaved prefill runs did to the arena.  `kSameAsRequested`
+        # stops the arena doubling, which would move the block outright.
+        provider = (("CUDAExecutionProvider",
+                     {"enable_cuda_graph": "1", "arena_extend_strategy": "kSameAsRequested"})
+                    if cuda_graph else "CUDAExecutionProvider")
+        self.cuda_graph = cuda_graph
+        self.sess = ort.InferenceSession(path, so, providers=[provider])
         if "CUDAExecutionProvider" not in self.sess.get_providers():
             # Without it the session silently falls back to CPU, which has no
             # bfloat16 kernels, and the first failing node is blamed instead.
@@ -171,6 +191,68 @@ class _Worker:
                                     % sorted(set(caps)))
 
         self._logits = {}
+        self._graph_io = None
+        self._ro_skip = None
+        if cuda_graph:
+            self._init_graph_capture()
+
+    # -- cuda graph -------------------------------------------------------- #
+
+    def _init_graph_capture(self):
+        """Pin the decode step's buffers and pre-build one binding per cache parity.
+
+        A captured graph replays the addresses it was captured with, so every tensor
+        the decode step touches has to live at a fixed address.  The caches are
+        already allocated once, but they are *ping-ponged*: step N reads copy `cur`
+        and writes copy `1 - cur`.  Rather than give that up, capture both parities
+        as two separate graphs and select one per step with ORT's `gpu_graph_id`.
+        The paged kv entries are the same tensor in both copies, so only the
+        compressor and indexer caches actually alternate.
+
+        `input_ids` and `past_lens` become persistent buffers written in place; a
+        fresh `torch.full` every step would hand ORT a new address each time.
+        """
+        torch, ort = self.torch, self.ort
+        self.g_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
+        self.g_past = torch.zeros((self.batch,), dtype=torch.int64, device="cuda")
+        self.g_logits = self._logits_buf(1)
+
+        # Prefill is not capturable -- every chunk is a different shape -- so it runs
+        # under the reserved id that tells the EP to skip capture entirely.
+        self._ro_skip = ort.RunOptions()
+        self._ro_skip.add_run_config_entry("gpu_graph_id", "-1")
+        self._ro = []
+        self._graph_io = []
+        for parity in range(2):
+            ro = ort.RunOptions()
+            ro.add_run_config_entry("gpu_graph_id", str(parity + 1))
+            self._ro.append(ro)
+            io = self.sess.io_binding()
+            src, dst = self.cache[parity], self.cache[1 - parity]
+            for name, t in ([("input_ids", self.g_ids), ("past_lens", self.g_past)]
+                            + list(self.const_in.items()) + list(zip(self.cache_in, src))):
+                io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
+            for name, t in [("logits", self.g_logits)] + list(zip(self.cache_out, dst)):
+                io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
+            self._graph_io.append(io)
+
+        # Capture records allocations as-is, so anything the first runs do lazily --
+        # arena growth, cuBLAS handles, the MoE kernels' tactic search -- has to be
+        # done before the recording starts, or the graph replays against pointers
+        # that were never really reserved.  These runs use the skip id, so the EP
+        # executes them normally and captures nothing.
+        for parity in range(2):
+            for _ in range(_GRAPH_WARMUP):
+                self.sess.run_with_iobinding(self._graph_io[parity], self._ro_skip)
+
+        # Then record both graphs, so that the first real decode step replays rather
+        # than paying for a capture.  The EP wants `min_num_runs_before_cuda_graph
+        # _capture_` ordinary runs per id before it records, so drive each id until
+        # it stops executing and starts replaying.
+        for parity in range(2):
+            for _ in range(_GRAPH_WARMUP):
+                self.sess.run_with_iobinding(self._graph_io[parity], self._ro[parity])
+        self.torch.cuda.synchronize()
 
     # -- paged cache ------------------------------------------------------- #
 
@@ -253,6 +335,8 @@ class _Worker:
     def _step(self, ids, past):
         """One session run.  Returns the logits of the final position."""
         torch = self.torch
+        if self._graph_io is not None and ids.shape[1] == 1:
+            return self._step_captured(ids, past)
         src, dst = self.cache[self.cur], self.cache[1 - self.cur]
         seq_len = ids.shape[1]
         logits = self._logits_buf(seq_len)
@@ -267,10 +351,23 @@ class _Worker:
             io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
         for name, t in [("logits", logits)] + list(zip(self.cache_out, dst)):
             io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
-        self.sess.run_with_iobinding(io)
+        self.sess.run_with_iobinding(io, self._ro_skip)
 
         self.cur = 1 - self.cur
         return logits[0, -1]
+
+    def _step_captured(self, ids, past):
+        """One decode step through the captured graph for the current parity."""
+        torch = self.torch
+        parity = self.cur
+        self.g_ids.copy_(ids)
+        self.g_past.fill_(past)
+        # The two writes above are queued on torch's stream, the replay runs on ORT's.
+        # Nothing orders them, so publish them before handing over.
+        torch.cuda.current_stream().synchronize()
+        self.sess.run_with_iobinding(self._graph_io[parity], self._ro[parity])
+        self.cur = 1 - parity
+        return self.g_logits[0, -1]
 
     def generate(self, prompt, max_new_tokens, eos_token_ids, chan):
         """Decode under the engine's direction.
@@ -348,7 +445,8 @@ class _Worker:
 def _worker_main(a):
     chan = _Chan(socket.socket(fileno=int(os.environ["DSV4_FD"])))
     try:
-        w = _Worker(a.model, a.rank, prefill_chunk=a.prefill_chunk)
+        w = _Worker(a.model, a.rank, prefill_chunk=a.prefill_chunk,
+                    cuda_graph=a.cuda_graph)
     except Exception as e:  # report the failure instead of hanging the launcher
         import traceback
         traceback.print_exc()
@@ -415,12 +513,13 @@ class DSV4Engine:
     """Drives the eight rank processes as a single greedy-decoding model."""
 
     def __init__(self, model_dir, world=8, port=DEFAULT_PORT, log_dir="/tmp",
-                 startup_timeout=1800, quiet=False, prefill_chunk=512):
+                 startup_timeout=1800, quiet=False, prefill_chunk=512, cuda_graph=False):
         self.model_dir = os.path.abspath(os.path.expanduser(model_dir))
         self.world = world
         self.port = port
         self.log_dir = log_dir
         self.prefill_chunk = prefill_chunk
+        self.cuda_graph = cuda_graph
         self.procs, self.chans = [], []
         self.max_seq_len = 0
         self.vocab = 0
@@ -442,7 +541,8 @@ class DSV4Engine:
         proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "--worker",
              "--rank", str(rank), "--model", self.model_dir,
-             "--prefill-chunk", str(self.prefill_chunk)],
+             "--prefill-chunk", str(self.prefill_chunk)]
+            + (["--cuda-graph"] if self.cuda_graph else []),
             env=env, stdout=log, stderr=subprocess.STDOUT,
             pass_fds=(child_sock.fileno(),))
         child_sock.close()
@@ -575,6 +675,8 @@ def main():
     ap.add_argument("--prefill-chunk", type=int, default=512,
                     help="paged mode only: prompt tokens per forward pass.  The window"
                          " ring is sized for this, so it bounds the ring's memory")
+    ap.add_argument("--cuda-graph", action="store_true",
+                    help="capture the decode step as a CUDA graph and replay it")
     ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if not a.worker:

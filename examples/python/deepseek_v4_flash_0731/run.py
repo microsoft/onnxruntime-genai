@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--thinking-mode", default="chat", choices=("chat", "thinking"))
     ap.add_argument("--reasoning-effort", default="low", choices=("low", "high", "max"))
     ap.add_argument("--max-new-tokens", type=int, default=8)
+    ap.add_argument("--cuda-graph", action="store_true",
+                    help="replay a captured graph for the decode step")
     ap.add_argument("--log-dir", default="/tmp")
     a = ap.parse_args()
 
@@ -62,7 +64,8 @@ def main():
         ids = prompt.encode_messages(messages)
 
     eos = prompt.eos_token_ids if prompt else [1]
-    with DSV4Engine(a.model, world=a.world, port=a.port, log_dir=a.log_dir) as engine:
+    with DSV4Engine(a.model, world=a.world, port=a.port, log_dir=a.log_dir,
+                    cuda_graph=a.cuda_graph) as engine:
         out = engine.generate(ids, max_new_tokens=a.max_new_tokens, eos_token_ids=eos)
 
     print(f"prompt {out['prompt_len']} tokens, generated {len(out['tokens'])} "

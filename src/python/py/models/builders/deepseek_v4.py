@@ -704,9 +704,10 @@ class DeepSeekV4FlashModel(Model):
         """Gated pooling of ``ratio`` consecutive tokens into one latent row.
 
         Returns (rows [B, J, head_dim] io_dtype, first_slot [B, 1], last_slot [B, 1], J,
-                 present_cstate_kv, present_cstate_score). ``J`` depends only on the
+                 J_g, present_cstate_kv, present_cstate_score). ``J`` depends only on the
         sequence length, never on ``past_lens``, so the shape stays inferable even
-        though the slots each row lands in differ.
+        though the slots each row lands in differ.  ``J_g`` is the same value computed
+        on the device, for callers that feed it to a kernel instead of to a Range.
 
         The indexer owns a second, narrower compressor over the same tokens, hence the
         ``prefix``/``head_dim``/``state`` parameters; it also rotates and rounds its rows to
@@ -731,7 +732,10 @@ class DeepSeekV4FlashModel(Model):
         full_sc = self.op("Concat", [f"past_{state}_score_{layer_id}", sc], f"{name}/fsc",
                           F, [B, None, co * d], axis=1)
 
-        n_full = self.op("Add", [ctx["S"], self.const("INT64", Lst)], f"{name}/nfull", I, [])
+        # `n_full`/`n_max` are only ever read as data by the Less and Clip below, so they
+        # take the device-resident length; `jm1`/`jdiv`/`J` feed a Range and must stay on
+        # the host.  `J_g` is the same count for the Clip bounds our callers build.
+        n_full = self.op("Add", [ctx["Sg"], self.const("INT64", Lst)], f"{name}/nfull", I, [])
         n_max = self.op("Sub", [n_full, self.const("INT64", 1)], f"{name}/nmax", I, [])
         base = self.op("Sub", [ctx["past3"], self.const("INT64", Lst)], f"{name}/base", I, [B, 1, 1])
         first_slot = self.op("Div", [ctx["past2"], self.const("INT64", r)],
@@ -741,6 +745,9 @@ class DeepSeekV4FlashModel(Model):
         jm1 = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/jm1", I, [])
         jdiv = self.op("Div", [jm1, self.const("INT64", r)], f"{name}/jdiv", I, [])
         J = self.op("Add", [jdiv, self.const("INT64", 2)], f"{name}/J", I, [])
+        jm1_g = self.op("Sub", [ctx["Sg"], self.const("INT64", 1)], f"{name}/jm1g", I, [])
+        jdiv_g = self.op("Div", [jm1_g, self.const("INT64", r)], f"{name}/jdivg", I, [])
+        J_g = self.op("Add", [jdiv_g, self.const("INT64", 2)], f"{name}/Jg", I, [])
 
         rng = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
                       f"{name}/rng", I, [None])
@@ -844,7 +851,7 @@ class DeepSeekV4FlashModel(Model):
         psc = self.op("Slice", [full_sc, self.const("INT64", [-Lst]),
                                 self.const("INT64", [INT64_MAX]), self.const("INT64", [1])],
                       f"{name}/pstate_sc", F, st_shape)
-        return rows, first_slot, last_slot, J, pkv, psc
+        return rows, first_slot, last_slot, J, J_g, pkv, psc
 
     # ------------------------------------------------------------------ #
     # attention
@@ -984,7 +991,7 @@ class DeepSeekV4FlashModel(Model):
         presents = {"kv": present_kv}
 
         if ratio:
-            rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+            rows, first_slot, last_slot, _J, J_g, pkv, psc = self.make_compressor(
                 f"{name}/comp", layer_id, ratio, x, ctx)
             C = self.comp_capacity(ratio)
             cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
@@ -993,7 +1000,7 @@ class DeepSeekV4FlashModel(Model):
             n2 = self.op("LessOrEqual", [cidx, last_slot], f"{name}/n2", BOOL, [B, C])
             take_new = self.unsq(f"{name}/tn", self.op("And", [n1, n2], f"{name}/na", BOOL, [B, C]),
                                  [2], BOOL, [B, C, 1])
-            jmax = self.op("Sub", [J, self.const("INT64", 1)], f"{name}/jmax", I, [])
+            jmax = self.op("Sub", [J_g, self.const("INT64", 1)], f"{name}/jmax", I, [])
             kclip = self.op("Clip", [ksel, self.const("INT64", 0), jmax], f"{name}/kclip", I, [B, C])
             newc = self.batched_gather(f"{name}/newc", rows, kclip, C, io, [B, C, D])
             present_comp = self.op("Where", [take_new, newc, f"past_comp_{layer_id}"],
@@ -1072,7 +1079,7 @@ class DeepSeekV4FlashModel(Model):
         q = self.make_rotate_fp4(f"{name}/qfp4", q, [B, S, NH, HD])
 
         # ---- this step's rows, written into the dense indexer cache ----
-        rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+        rows, first_slot, last_slot, _J, J_g, pkv, psc = self.make_compressor(
             f"{name}/ic", layer_id, ratio, x, ctx, prefix=f"{p}.compressor",
             head_dim=HD, state="icstate", quant=False, rotate=True)
         cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
@@ -1083,7 +1090,7 @@ class DeepSeekV4FlashModel(Model):
                         self.op("LessOrEqual", [cidx, last_slot], f"{name}/kle", BOOL, [B, C])],
                        f"{name}/take", BOOL, [B, C])
         kcl = self.op("Clip", [ksel, self.const("INT64", 0),
-                               self.op("Sub", [J, self.const("INT64", 1)], f"{name}/jm1", I, [])],
+                               self.op("Sub", [J_g, self.const("INT64", 1)], f"{name}/jm1", I, [])],
                       f"{name}/kclip", I, [B, C])
         present = self.op("Where",
                           [self.unsq(f"{name}/take3", take, [2], BOOL, [B, C, 1]),
@@ -1186,7 +1193,7 @@ class DeepSeekV4FlashModel(Model):
         presents = {}
 
         if ratio:
-            rows, first_slot, last_slot, J, pkv, psc = self.make_compressor(
+            rows, first_slot, last_slot, J, _J_g, pkv, psc = self.make_compressor(
                 f"{name}/comp", layer_id, ratio, x, ctx)
             C = self.comp_capacity(ratio)
             presents.update(cstate_kv=pkv, cstate_score=psc)
@@ -1500,15 +1507,25 @@ class DeepSeekV4FlashModel(Model):
         Sv = self.op("Gather", [bs, self.const("INT64", 1)], "/seqlen", I, [], axis=0)
         rng = self.op("Range", [self.const("INT64", 0), Sv, self.const("INT64", 1)],
                       "/range", I, [S])
+        # The same sequence length again, but on the device.  `Sv` comes off `Shape`, so
+        # ORT keeps it and everything derived from it on the CPU; any device op that
+        # consumes one of those scalars as *data* then needs a MemcpyFromHost, and a
+        # single Memcpy node anywhere in the graph disqualifies the whole session from
+        # CUDA Graph capture.  `rng` is a real device tensor -- Range takes CPU scalars
+        # but does not produce one -- so reducing it recovers the length on the GPU for
+        # two extra nodes.  Scalars that feed shapes or another Range keep using `S`.
+        Sg = self.op("Add", [self.op("ReduceMax", [rng, self.const("INT64", [0])],
+                                     "/seqmaxg", I, [], keepdims=0),
+                             self.const("INT64", 1)], "/seqleng", I, [])
         # Every cache schedule below is per sequence, so each quantity derived from
         # past_lens is kept at the rank the consumer needs to broadcast against.
         past2 = self.unsq("/past2", "past_lens", [1], I, [B, 1])
         past3 = self.unsq("/past3", past2, [2], I, [B, 1, 1])
         pos = self.op("Add", [rng, past2], "/pos", I, [B, S])
         qpos = self.unsq("/qpos", pos, [2], I, [B, S, 1])
-        total2 = self.op("Add", [past2, Sv], "/total", I, [B, 1])
+        total2 = self.op("Add", [past2, Sg], "/total", I, [B, 1])
         total3 = self.unsq("/total3", total2, [2], I, [B, 1, 1])
-        ctx = {"bs": bs, "S": Sv, "pos": pos, "qpos": qpos, "past2": past2,
+        ctx = {"bs": bs, "S": Sv, "Sg": Sg, "pos": pos, "qpos": qpos, "past2": past2,
                "past3": past3, "total2": total2, "total3": total3}
 
         if self.paged:
