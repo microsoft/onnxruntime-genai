@@ -63,6 +63,7 @@ The tool currently supports the following model architectures.
 - Gemma
 - gpt-oss
 - Granite
+- Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
 - Llama

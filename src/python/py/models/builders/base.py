@@ -247,6 +247,8 @@ class Model:
         rope_theta = (
             config.rope_theta
             if hasattr(config, "rope_theta")
+            else config.rope_parameters.get("rope_theta", 10000)
+            if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict)
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
             else rope_params["rope_theta"]
