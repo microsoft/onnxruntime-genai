@@ -323,8 +323,12 @@ own cache in its own GPU's memory and binds it into the session with
 * Two such sets exist per rank. A step binds set *A* as the `past_*` inputs and
   set *B* as the `present_*` outputs, then swaps. Nothing is allocated or copied
   between steps; the only per-step host work is rebinding pointers.
-* `past_len` is a scalar input, so a request resets by zeroing the cache and
-  setting `past_len = 0`.
+* `past_lens` is a `[batch_size]` input holding each row's prior length, so a
+  request resets by zeroing that row's cache and setting its entry to `0`. Rows
+  in a batch are independent: they may sit at different points in their own
+  sequence, which is what a continuous-batching scheduler needs. Every row still
+  appends the same number of tokens per step, since `input_ids` is `[batch_size,
+  sequence_length]`.
 
 ### Why the ranks stay in lockstep
 

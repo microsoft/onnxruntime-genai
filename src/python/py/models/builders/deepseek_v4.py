@@ -212,9 +212,9 @@ class DeepSeekV4FlashModel(Model):
         return self.max_seq_len // ratio + 2
 
     def _make_dsv4_io(self):
-        self.input_names = {"input_ids": "input_ids", "past_len": "past_len"}
-        self.input_types = {"input_ids": ir.DataType.INT64, "past_len": ir.DataType.INT64}
-        self.input_shapes = {"input_ids": [B, S], "past_len": []}
+        self.input_names = {"input_ids": "input_ids", "past_lens": "past_lens"}
+        self.input_types = {"input_ids": ir.DataType.INT64, "past_lens": ir.DataType.INT64}
+        self.input_shapes = {"input_ids": [B, S], "past_lens": [B]}
         self.output_names = {"logits": "logits"}
         self.output_types = {"logits": ir.DataType.FLOAT}
         self.output_shapes = {"logits": [B, S, self.vocab_size]}
@@ -321,6 +321,11 @@ class DeepSeekV4FlashModel(Model):
     def slice1(self, name, x, start, end, dtype, shape, axis=-1):
         return self.op("Slice", [x, self.const("INT64", [start]), self.const("INT64", [end]),
                                  self.const("INT64", [axis])], name, dtype, shape)
+
+    def batched_gather(self, name, data, indices, rows, dtype, shape):
+        """Gather along axis 1 with a different index vector per batch row."""
+        idx = self.unsq(f"{name}/idx", indices, [2], ir.DataType.INT64, [B, rows, 1])
+        return self.op("GatherND", [data, idx], name, dtype, shape, batch_dims=1)
 
     def floordiv(self, name, num, den, shape):
         """Floor division for possibly negative int64 numerators (ONNX Div truncates)."""
@@ -564,9 +569,10 @@ class DeepSeekV4FlashModel(Model):
     def make_compressor(self, name, layer_id, ratio, x, ctx):
         """Gated pooling of ``ratio`` consecutive tokens into one latent row.
 
-        Returns (rows [B, J, head_dim] io_dtype, first_slot, last_slot, J,
+        Returns (rows [B, J, head_dim] io_dtype, first_slot [B, 1], last_slot [B, 1], J,
                  present_cstate_kv, present_cstate_score). ``J`` depends only on the
-        sequence length, never on ``past_len``, so the shape stays inferable.
+        sequence length, never on ``past_lens``, so the shape stays inferable even
+        though the slots each row lands in differ.
         """
         p = f"layers.{layer_id}.attn.compressor"
         r, d, co, Lst = ratio, self.head_dim, self.coff(ratio), self.state_len(ratio)
@@ -587,51 +593,54 @@ class DeepSeekV4FlashModel(Model):
 
         n_full = self.op("Add", [ctx["S"], self.const("INT64", Lst)], f"{name}/nfull", I, [])
         n_max = self.op("Sub", [n_full, self.const("INT64", 1)], f"{name}/nmax", I, [])
-        base = self.op("Sub", [ctx["past_len"], self.const("INT64", Lst)], f"{name}/base", I, [])
-        first_slot = self.op("Div", [ctx["past_len"], self.const("INT64", r)],
-                             f"{name}/first", I, [])
-        end = self.op("Sub", [ctx["total"], self.const("INT64", 1)], f"{name}/end", I, [])
-        last_slot = self.op("Div", [end, self.const("INT64", r)], f"{name}/last", I, [])
+        base = self.op("Sub", [ctx["past3"], self.const("INT64", Lst)], f"{name}/base", I, [B, 1, 1])
+        first_slot = self.op("Div", [ctx["past2"], self.const("INT64", r)],
+                             f"{name}/first", I, [B, 1])
+        end = self.op("Sub", [ctx["total2"], self.const("INT64", 1)], f"{name}/end", I, [B, 1])
+        last_slot = self.op("Div", [end, self.const("INT64", r)], f"{name}/last", I, [B, 1])
         jm1 = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/jm1", I, [])
         jdiv = self.op("Div", [jm1, self.const("INT64", r)], f"{name}/jdiv", I, [])
         J = self.op("Add", [jdiv, self.const("INT64", 2)], f"{name}/J", I, [])
 
         rng = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
                       f"{name}/rng", I, [None])
-        slot = self.op("Add", [rng, first_slot], f"{name}/slot", I, [None])
-        slot2 = self.unsq(f"{name}/slot2", slot, [1], I, [None, 1])
-        slot_r = self.op("Mul", [slot2, self.const("INT64", r)], f"{name}/slotr", I, [None, 1])
+        slot = self.op("Add", [rng, first_slot], f"{name}/slot", I, [B, None])
+        slot2 = self.unsq(f"{name}/slot2", slot, [2], I, [B, None, 1])
+        slot_r = self.op("Mul", [slot2, self.const("INT64", r)], f"{name}/slotr", I, [B, None, 1])
         off = self.unsq(f"{name}/off", self.init(torch.arange(r, dtype=torch.int64), f"{name}/arange"),
                         [0], I, [1, r])
-        pos_cur = self.op("Add", [slot_r, off], f"{name}/pos", I, [None, r])
+        pos_cur = self.op("Add", [slot_r, off], f"{name}/pos", I, [B, None, r])
 
         def window(tag, pos_t):
-            idx = self.op("Sub", [pos_t, base], f"{name}/{tag}/idx", I, [None, r])
+            idx = self.op("Sub", [pos_t, base], f"{name}/{tag}/idx", I, [B, None, r])
             ge0 = self.op("GreaterOrEqual", [idx, self.const("INT64", 0)],
-                          f"{name}/{tag}/ge0", ir.DataType.BOOL, [None, r])
-            lt = self.op("Less", [idx, n_full], f"{name}/{tag}/lt", ir.DataType.BOOL, [None, r])
-            inrange = self.op("And", [ge0, lt], f"{name}/{tag}/and", ir.DataType.BOOL, [None, r])
-            fut = self.op("Less", [pos_t, ctx["total"]], f"{name}/{tag}/fut",
-                          ir.DataType.BOOL, [None, r])
+                          f"{name}/{tag}/ge0", ir.DataType.BOOL, [B, None, r])
+            lt = self.op("Less", [idx, n_full], f"{name}/{tag}/lt", ir.DataType.BOOL, [B, None, r])
+            inrange = self.op("And", [ge0, lt], f"{name}/{tag}/and", ir.DataType.BOOL, [B, None, r])
+            fut = self.op("Less", [pos_t, ctx["total3"]], f"{name}/{tag}/fut",
+                          ir.DataType.BOOL, [B, None, r])
             valid = self.op("And", [inrange, fut], f"{name}/{tag}/valid",
-                            ir.DataType.BOOL, [None, r])
+                            ir.DataType.BOOL, [B, None, r])
             if tag == "prev":
                 nneg = self.op("GreaterOrEqual", [pos_t, self.const("INT64", 0)],
-                               f"{name}/{tag}/nneg", ir.DataType.BOOL, [None, r])
+                               f"{name}/{tag}/nneg", ir.DataType.BOOL, [B, None, r])
                 valid = self.op("And", [valid, nneg], f"{name}/{tag}/valid2",
-                                ir.DataType.BOOL, [None, r])
+                                ir.DataType.BOOL, [B, None, r])
             cl = self.op("Clip", [idx, self.const("INT64", 0), n_max],
-                         f"{name}/{tag}/clip", I, [None, r])
-            flat = self.reshape(f"{name}/{tag}/flat", cl, [-1], I, [None])
+                         f"{name}/{tag}/clip", I, [B, None, r])
+            # [B, J*r, 1]: GatherND index vectors, one per batch row.
+            flat = self.reshape(f"{name}/{tag}/flat", cl, [0, -1, 1], I, [B, None, 1])
             return flat, valid
 
         def gather(tag, src, flat):
-            g = self.op("Gather", [src, flat], f"{name}/{tag}/g", F, [B, None, co * d], axis=1)
+            g = self.op("GatherND", [src, flat], f"{name}/{tag}/g", F, [B, None, co * d],
+                        batch_dims=1)
             return self.reshape(f"{name}/{tag}/g4", g, [0, -1, r, co * d], F, [B, None, r, co * d])
 
         ape = self.init_w(f"{p}.ape")
         if co == 2:
-            pos_prev = self.op("Sub", [pos_cur, self.const("INT64", r)], f"{name}/posp", I, [None, r])
+            pos_prev = self.op("Sub", [pos_cur, self.const("INT64", r)], f"{name}/posp", I,
+                               [B, None, r])
             fc, vc = window("cur", pos_cur)
             fp_, vp = window("prev", pos_prev)
             kv_p = self.slice1(f"{name}/kvp", gather("kvprev", full_kv, fp_), 0, d, F,
@@ -649,7 +658,7 @@ class DeepSeekV4FlashModel(Model):
             pooled_kv = self.op("Concat", [kv_p, kv_c], f"{name}/pkv", F, [B, None, 2 * r, d], axis=2)
             pooled_sc = self.op("Concat", [sc_p, sc_c], f"{name}/psc", F, [B, None, 2 * r, d], axis=2)
             valid = self.op("Concat", [vp, vc], f"{name}/valid", ir.DataType.BOOL,
-                            [None, 2 * r], axis=1)
+                            [B, None, 2 * r], axis=2)
             span = 2 * r
         else:
             fc, valid = window("cur", pos_cur)
@@ -658,7 +667,7 @@ class DeepSeekV4FlashModel(Model):
                                 F, [B, None, r, d])
             span = r
 
-        vmask = self.unsq(f"{name}/vmask", valid, [0, 3], ir.DataType.BOOL, [1, None, span, 1])
+        vmask = self.unsq(f"{name}/vmask", valid, [3], ir.DataType.BOOL, [B, None, span, 1])
         masked = self.op("Where", [vmask, pooled_sc, self.const("FLOAT", NEG_INF)],
                          f"{name}/masked", F, [B, None, span, d])
         wsm = self.op("Softmax", [masked], f"{name}/wsm", F, [B, None, span, d], axis=2)
@@ -672,16 +681,12 @@ class DeepSeekV4FlashModel(Model):
                                                to=ir.DataType.FLOAT),
                                    [B, None, d])
 
-        pos_slot = self.op("Clip", [self.reshape(f"{name}/slotflat", slot_r, [-1], I, [None]),
+        pos_slot = self.op("Clip", [self.reshape(f"{name}/slotflat", slot_r, [0, -1], I, [B, None]),
                                     self.const("INT64", 0),
                                     self.const("INT64", self.max_seq_len - 1)],
-                           f"{name}/posslot", I, [None])
-        cos = self.unsq(f"{name}/cos", self.op("Gather", [f"rope/cos_1", pos_slot],
-                                               f"{name}/cosg", F, [None, rd], axis=0),
-                        [0], F, [1, None, rd])
-        sin = self.unsq(f"{name}/sin", self.op("Gather", [f"rope/sin_1", pos_slot],
-                                               f"{name}/sing", F, [None, rd], axis=0),
-                        [0], F, [1, None, rd])
+                           f"{name}/posslot", I, [B, None])
+        cos = self.op("Gather", [f"rope/cos_1", pos_slot], f"{name}/cosg", F, [B, None, rd], axis=0)
+        sin = self.op("Gather", [f"rope/sin_1", pos_slot], f"{name}/sing", F, [B, None, rd], axis=0)
         nope = self.slice1(f"{name}/nope", normed, 0, nd, F, [B, None, nd])
         rope = self.slice1(f"{name}/ropep", normed, nd, INT64_MAX, F, [B, None, rd])
         rope = self.make_rope(f"{name}/rope", rope, cos, sin, [B, None, rd])
@@ -716,12 +721,11 @@ class DeepSeekV4FlashModel(Model):
         io = self.io_dtype
         tbl = 1 if ratio else 0
 
-        cos = self.op("Gather", [f"rope/cos_{tbl}", ctx["pos"]], f"{name}/cos", F, [S, rd], axis=0)
-        sin = self.op("Gather", [f"rope/sin_{tbl}", ctx["pos"]], f"{name}/sin", F, [S, rd], axis=0)
-        cos_q = self.unsq(f"{name}/cosq", cos, [0, 2], F, [1, S, 1, rd])
-        sin_q = self.unsq(f"{name}/sinq", sin, [0, 2], F, [1, S, 1, rd])
-        cos_k = self.unsq(f"{name}/cosk", cos, [0], F, [1, S, rd])
-        sin_k = self.unsq(f"{name}/sink", sin, [0], F, [1, S, rd])
+        cos = self.op("Gather", [f"rope/cos_{tbl}", ctx["pos"]], f"{name}/cos", F, [B, S, rd], axis=0)
+        sin = self.op("Gather", [f"rope/sin_{tbl}", ctx["pos"]], f"{name}/sin", F, [B, S, rd], axis=0)
+        cos_q = self.unsq(f"{name}/cosq", cos, [2], F, [B, S, 1, rd])
+        sin_q = self.unsq(f"{name}/sinq", sin, [2], F, [B, S, 1, rd])
+        cos_k, sin_k = cos, sin
 
         def rope_last(tag, t, shape, c, s, inverse=False):
             n = self.slice1(f"{tag}/nope", t, 0, nd, io, shape[:-1] + [nd])
@@ -762,39 +766,39 @@ class DeepSeekV4FlashModel(Model):
         ring = f"past_kv_{layer_id}"
         j = self.init(torch.arange(W, dtype=torch.int64), "ring/arange")
         qpos = ctx["qpos"]
-        qposw = self.op("Sub", [qpos, self.const("INT64", W)], f"{name}/qposw", I, [S, 1])
+        qposw = self.op("Sub", [qpos, self.const("INT64", W)], f"{name}/qposw", I, [B, S, 1])
 
         def ring_pos(tag, endval):
-            t = self.op("Sub", [endval, j], f"{name}/{tag}/t", I, [W])
-            fd = self.floordiv(f"{name}/{tag}/fd", t, W, [W])
-            m = self.op("Mul", [fd, self.const("INT64", W)], f"{name}/{tag}/m", I, [W])
-            return self.op("Add", [m, j], f"{name}/{tag}/q", I, [W])
+            t = self.op("Sub", [endval, j], f"{name}/{tag}/t", I, [B, W])
+            fd = self.floordiv(f"{name}/{tag}/fd", t, W, [B, W])
+            m = self.op("Mul", [fd, self.const("INT64", W)], f"{name}/{tag}/m", I, [B, W])
+            return self.op("Add", [m, j], f"{name}/{tag}/q", I, [B, W])
 
-        pl_1 = self.op("Sub", [ctx["past_len"], self.const("INT64", 1)], f"{name}/pl1", I, [])
-        tot_1 = self.op("Sub", [ctx["total"], self.const("INT64", 1)], f"{name}/tot1", I, [])
+        pl_1 = self.op("Sub", [ctx["past2"], self.const("INT64", 1)], f"{name}/pl1", I, [B, 1])
+        tot_1 = self.op("Sub", [ctx["total2"], self.const("INT64", 1)], f"{name}/tot1", I, [B, 1])
         q_old = ring_pos("old", pl_1)
         q_new = ring_pos("new", tot_1)
 
-        q_old2 = self.unsq(f"{name}/qold2", q_old, [0], I, [1, W])
-        m1 = self.op("GreaterOrEqual", [q_old2, self.const("INT64", 0)], f"{name}/m1", BOOL, [1, W])
-        m2 = self.op("Less", [q_old2, ctx["past_len"]], f"{name}/m2", BOOL, [1, W])
-        m3 = self.op("Greater", [q_old2, qposw], f"{name}/m3", BOOL, [S, W])
-        ring_mask = self.op("And", [self.op("And", [m1, m2], f"{name}/m12", BOOL, [1, W]), m3],
-                            f"{name}/ringmask", BOOL, [S, W])
+        q_old2 = self.unsq(f"{name}/qold2", q_old, [1], I, [B, 1, W])
+        m1 = self.op("GreaterOrEqual", [q_old2, self.const("INT64", 0)], f"{name}/m1", BOOL, [B, 1, W])
+        m2 = self.op("Less", [q_old2, ctx["past3"]], f"{name}/m2", BOOL, [B, 1, W])
+        m3 = self.op("Greater", [q_old2, qposw], f"{name}/m3", BOOL, [B, S, W])
+        ring_mask = self.op("And", [self.op("And", [m1, m2], f"{name}/m12", BOOL, [B, 1, W]), m3],
+                            f"{name}/ringmask", BOOL, [B, S, W])
 
-        fpos = self.unsq(f"{name}/fpos", ctx["pos"], [0], I, [1, S])
-        f1 = self.op("LessOrEqual", [fpos, qpos], f"{name}/f1", BOOL, [S, S])
-        f2 = self.op("Greater", [fpos, qposw], f"{name}/f2", BOOL, [S, S])
-        fresh_mask = self.op("And", [f1, f2], f"{name}/freshmask", BOOL, [S, S])
+        fpos = self.unsq(f"{name}/fpos", ctx["pos"], [1], I, [B, 1, S])
+        f1 = self.op("LessOrEqual", [fpos, qpos], f"{name}/f1", BOOL, [B, S, S])
+        f2 = self.op("Greater", [fpos, qposw], f"{name}/f2", BOOL, [B, S, S])
+        fresh_mask = self.op("And", [f1, f2], f"{name}/freshmask", BOOL, [B, S, S])
 
-        tf1 = self.op("GreaterOrEqual", [q_new, ctx["past_len"]], f"{name}/tf1", BOOL, [W])
-        tf2 = self.op("GreaterOrEqual", [q_new, self.const("INT64", 0)], f"{name}/tf2", BOOL, [W])
-        take_fresh = self.unsq(f"{name}/tf", self.op("And", [tf1, tf2], f"{name}/tfa", BOOL, [W]),
-                               [0, 2], BOOL, [1, W, 1])
+        tf1 = self.op("GreaterOrEqual", [q_new, ctx["past2"]], f"{name}/tf1", BOOL, [B, W])
+        tf2 = self.op("GreaterOrEqual", [q_new, self.const("INT64", 0)], f"{name}/tf2", BOOL, [B, W])
+        take_fresh = self.unsq(f"{name}/tf", self.op("And", [tf1, tf2], f"{name}/tfa", BOOL, [B, W]),
+                               [2], BOOL, [B, W, 1])
         smax_idx = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/smaxidx", I, [])
-        gidx = self.op("Clip", [self.op("Sub", [q_new, ctx["past_len"]], f"{name}/gi", I, [W]),
-                                self.const("INT64", 0), smax_idx], f"{name}/gic", I, [W])
-        src = self.op("Gather", [kv, gidx], f"{name}/src", io, [B, W, D], axis=1)
+        gidx = self.op("Clip", [self.op("Sub", [q_new, ctx["past2"]], f"{name}/gi", I, [B, W]),
+                                self.const("INT64", 0), smax_idx], f"{name}/gic", I, [B, W])
+        src = self.batched_gather(f"{name}/src", kv, gidx, W, io, [B, W, D])
         present_kv = self.op("Where", [take_fresh, src, ring], f"{name}/present_kv", io, [B, W, D])
 
         keys = [ring, kv]
@@ -806,26 +810,26 @@ class DeepSeekV4FlashModel(Model):
                 f"{name}/comp", layer_id, ratio, x, ctx)
             C = self.comp_capacity(ratio)
             cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
-            ksel = self.op("Sub", [cidx, first_slot], f"{name}/ksel", I, [C])
-            n1 = self.op("GreaterOrEqual", [ksel, self.const("INT64", 0)], f"{name}/n1", BOOL, [C])
-            n2 = self.op("LessOrEqual", [cidx, last_slot], f"{name}/n2", BOOL, [C])
-            take_new = self.unsq(f"{name}/tn", self.op("And", [n1, n2], f"{name}/na", BOOL, [C]),
-                                 [0, 2], BOOL, [1, C, 1])
+            ksel = self.op("Sub", [cidx, first_slot], f"{name}/ksel", I, [B, C])
+            n1 = self.op("GreaterOrEqual", [ksel, self.const("INT64", 0)], f"{name}/n1", BOOL, [B, C])
+            n2 = self.op("LessOrEqual", [cidx, last_slot], f"{name}/n2", BOOL, [B, C])
+            take_new = self.unsq(f"{name}/tn", self.op("And", [n1, n2], f"{name}/na", BOOL, [B, C]),
+                                 [2], BOOL, [B, C, 1])
             jmax = self.op("Sub", [J, self.const("INT64", 1)], f"{name}/jmax", I, [])
-            kclip = self.op("Clip", [ksel, self.const("INT64", 0), jmax], f"{name}/kclip", I, [C])
-            newc = self.op("Gather", [rows, kclip], f"{name}/newc", io, [B, C, D], axis=1)
+            kclip = self.op("Clip", [ksel, self.const("INT64", 0), jmax], f"{name}/kclip", I, [B, C])
+            newc = self.batched_gather(f"{name}/newc", rows, kclip, C, io, [B, C, D])
             present_comp = self.op("Where", [take_new, newc, f"past_comp_{layer_id}"],
                                    f"{name}/present_comp", io, [B, C, D])
-            qp1 = self.op("Add", [qpos, self.const("INT64", 1)], f"{name}/qp1", I, [S, 1])
-            qpr = self.op("Div", [qp1, self.const("INT64", ratio)], f"{name}/qpr", I, [S, 1])
-            comp_mask = self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0], I, [1, C]), qpr],
-                                f"{name}/compmask", BOOL, [S, C])
+            qp1 = self.op("Add", [qpos, self.const("INT64", 1)], f"{name}/qp1", I, [B, S, 1])
+            qpr = self.op("Div", [qp1, self.const("INT64", ratio)], f"{name}/qpr", I, [B, S, 1])
+            comp_mask = self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
+                                f"{name}/compmask", BOOL, [B, S, C])
             keys.append(present_comp)
             masks.append(comp_mask)
             presents.update(comp=present_comp, cstate_kv=pkv, cstate_score=psc)
 
         k = self.op("Concat", keys, f"{name}/keys", io, [B, None, D], axis=1)
-        mask = self.op("Concat", masks, f"{name}/mask", BOOL, [S, None], axis=1)
+        mask = self.op("Concat", masks, f"{name}/mask", BOOL, [B, S, None], axis=2)
 
         qf = self.cast(f"{name}/qf", q, F, [B, S, H, D])
         kf = self.cast(f"{name}/kf", k, F, [B, None, D])
@@ -833,7 +837,7 @@ class DeepSeekV4FlashModel(Model):
                          equation="bshd,bnd->bshn")
         scores = self.op("Mul", [scores, self.const("FLOAT", self.softmax_scale)],
                          f"{name}/scaled", F, [B, S, H, None])
-        m4 = self.unsq(f"{name}/mask4", mask, [0, 2], BOOL, [1, S, 1, None])
+        m4 = self.unsq(f"{name}/mask4", mask, [2], BOOL, [B, S, 1, None])
         scores = self.op("Where", [m4, scores, self.const("FLOAT", NEG_INF)],
                          f"{name}/masked", F, [B, S, H, None])
         smx = self.op("ReduceMax", [scores, self.const("INT64", [-1])], f"{name}/smax",
@@ -1095,11 +1099,16 @@ class DeepSeekV4FlashModel(Model):
         Sv = self.op("Gather", [bs, self.const("INT64", 1)], "/seqlen", I, [], axis=0)
         rng = self.op("Range", [self.const("INT64", 0), Sv, self.const("INT64", 1)],
                       "/range", I, [S])
-        pos = self.op("Add", [rng, "past_len"], "/pos", I, [S])
-        qpos = self.unsq("/qpos", pos, [1], I, [S, 1])
-        total = self.op("Add", ["past_len", Sv], "/total", I, [])
-        ctx = {"bs": bs, "S": Sv, "pos": pos, "qpos": qpos, "past_len": "past_len",
-               "total": total}
+        # Every cache schedule below is per sequence, so each quantity derived from
+        # past_lens is kept at the rank the consumer needs to broadcast against.
+        past2 = self.unsq("/past2", "past_lens", [1], I, [B, 1])
+        past3 = self.unsq("/past3", past2, [2], I, [B, 1, 1])
+        pos = self.op("Add", [rng, past2], "/pos", I, [B, S])
+        qpos = self.unsq("/qpos", pos, [2], I, [B, S, 1])
+        total2 = self.op("Add", [past2, Sv], "/total", I, [B, 1])
+        total3 = self.unsq("/total3", total2, [2], I, [B, 1, 1])
+        ctx = {"bs": bs, "S": Sv, "pos": pos, "qpos": qpos, "past2": past2,
+               "past3": past3, "total2": total2, "total3": total3}
 
         emb = self.op("Gather", [self.init_w("embed.weight", to=io),
                                  "input_ids"], "/embed", io, [B, S, dim], axis=0)

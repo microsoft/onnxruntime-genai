@@ -10,7 +10,7 @@ this process allocates once (a `torch` tensor per cache tensor, in two copies)
 and binds into the session with `IOBinding`.  Nothing is copied to the host and
 nothing is reallocated per token: a step binds the *current* set as the `past_*`
 inputs and the *other* set as the `present_*` outputs, then swaps.  The cache is
-zeroed at the start of a request; within a request only `past_len` advances.
+zeroed at the start of a request; within a request only `past_lens` advances.
 
 **Sampling.**  Greedy, and decided centrally.  Every rank computes its own
 argmax, the engine takes rank 0's and broadcasts it back before the next step.
@@ -116,7 +116,7 @@ class _Worker:
         self.rank = rank
 
         ins, outs = self.sess.get_inputs(), self.sess.get_outputs()
-        if [i.name for i in ins[:2]] != ["input_ids", "past_len"]:
+        if [i.name for i in ins[:2]] != ["input_ids", "past_lens"]:
             raise ProtocolError("unexpected graph inputs: %s" % [i.name for i in ins[:3]])
         self.cache_in = [i.name for i in ins[2:]]
         self.cache_out = [o.name for o in outs[1:]]
@@ -159,10 +159,12 @@ class _Worker:
         src, dst = self.cache[self.cur], self.cache[1 - self.cur]
         seq_len = ids.shape[1]
         logits = self._logits_buf(seq_len)
-        past_t = torch.full((), past, dtype=torch.int64, device="cuda")
+        # past_lens carries one prior length per batch row; this engine runs a
+        # single sequence at a time, so it is a one-element vector.
+        past_t = torch.full((ids.shape[0],), past, dtype=torch.int64, device="cuda")
 
         io = self.sess.io_binding()
-        for name, t in [("input_ids", ids), ("past_len", past_t)] + list(zip(self.cache_in, src)):
+        for name, t in [("input_ids", ids), ("past_lens", past_t)] + list(zip(self.cache_in, src)):
             io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
         for name, t in [("logits", logits)] + list(zip(self.cache_out, dst)):
             io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
