@@ -66,6 +66,32 @@ struct Search : LeakChecked<Search> {
   virtual bool SupportsBatchedSampling() const { return false; }
   virtual void OnNextTokensSampled() {}
 
+  virtual void SaveStateForTransaction() {
+    if (transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is already active.");
+
+    transaction_sequence_length_ = sequences_.GetSequenceLength();
+    SaveStateForTransactionImpl();
+    transaction_checkpoint_active_ = true;
+  }
+
+  virtual void RestoreStateForTransaction() {
+    if (!transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is not active.");
+
+    sequences_.RewindTo(transaction_sequence_length_);
+    RestoreStateForTransactionImpl();
+    transaction_checkpoint_active_ = false;
+  }
+
+  virtual void CommitStateForTransaction() {
+    if (!transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is not active.");
+
+    CommitStateForTransactionImpl();
+    transaction_checkpoint_active_ = false;
+  }
+
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
@@ -89,6 +115,15 @@ struct Search : LeakChecked<Search> {
 
   std::shared_ptr<const GeneratorParams> params_;
   Sequences sequences_;
+
+ protected:
+  virtual void SaveStateForTransactionImpl() {}
+  virtual void RestoreStateForTransactionImpl() {}
+  virtual void CommitStateForTransactionImpl() {}
+
+ private:
+  bool transaction_checkpoint_active_{};
+  int transaction_sequence_length_{};
 };
 
 struct Search_Cpu : Search {
@@ -120,6 +155,14 @@ struct Search_Cpu : Search {
   std::vector<bool> repetition_penalty_visited_;
 
   bool done_{};
+
+ protected:
+  void SaveStateForTransactionImpl() override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  std::vector<int32_t> transaction_sequence_lengths_;
+  bool transaction_done_{};
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
@@ -152,6 +195,16 @@ struct GreedySearch_Cpu : Search_Cpu {
   int not_done_count_{params_->search.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 
   std::mt19937 gen_;
+
+ protected:
+  void SaveStateForTransactionImpl() override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  std::vector<int32_t> transaction_next_tokens_;
+  std::unique_ptr<bool[]> transaction_eos_seen_;
+  int transaction_not_done_count_{};
+  std::mt19937 transaction_gen_;
 };
 
 struct BeamSearch_Cpu : Search_Cpu {

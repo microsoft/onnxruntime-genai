@@ -154,6 +154,109 @@ TEST_F(SchedulerContractTest, DynamicScheduleWithNoRequestsThrows) {
   EXPECT_THROW(scheduler.Schedule(), std::runtime_error);
 }
 
+TEST_F(SchedulerContractTest, DynamicPlanningDoesNotMutateAdmissionState) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto first = Assigned(10);
+  auto second = Assigned(20);
+  scheduler.AddRequest(first);
+  scheduler.AddRequest(second);
+  StepPlan plan;
+  plan.transaction_id = 17;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, first);
+  EXPECT_EQ(plan.requests[0].packed_token_offset, 0u);
+  EXPECT_EQ(plan.requests[0].logits_row_index, 2u);
+  EXPECT_EQ(plan.requests[1].request, second);
+  EXPECT_EQ(plan.requests[1].packed_token_offset, 3u);
+  EXPECT_EQ(plan.requests[1].logits_row_index, 5u);
+  EXPECT_EQ(plan.prompt_token_count, 6u);
+  EXPECT_FALSE(plan.graph_capture_eligible);
+  EXPECT_EQ(first->status_, RequestStatus::Assigned);
+  EXPECT_EQ(second->status_, RequestStatus::Assigned);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_EQ(cache->allocate_calls, 0);
+}
+
+TEST_F(SchedulerContractTest, DynamicPlanningKeepsActiveWorkWhenNewAdmissionIsDeferred) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto active = Assigned(10);
+  scheduler.AddRequest(active);
+  scheduler.Schedule();
+  ASSERT_EQ(active->status_, RequestStatus::InProgress);
+
+  auto deferred = Assigned(20);
+  scheduler.AddRequest(deferred);
+  cache->SetCanAllocate(false);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, active);
+  EXPECT_FALSE(plan.requests[0].newly_admitted);
+  EXPECT_EQ(deferred->status_, RequestStatus::Assigned);
+  EXPECT_EQ(cache->AllocatedCount(), 1u);
+}
+
+TEST_F(SchedulerContractTest, DynamicPlanningReportsNoWorkWithoutMutation) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  StepPlan plan;
+  plan.transaction_id = 9;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  EXPECT_FALSE(result.executable);
+  EXPECT_EQ(result.terminal_outcome.kind, StepOutcomeKind::NoWork);
+  EXPECT_EQ(result.terminal_outcome.transaction_id, 9u);
+  EXPECT_TRUE(plan.Empty());
+}
+
+TEST_F(SchedulerContractTest, UnserviceableCandidateDoesNotBlockSmallerWork) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto too_large = Assigned(10);
+  auto fitting = Assigned(20);
+  scheduler.AddRequest(too_large);
+  scheduler.AddRequest(fitting);
+  cache->SetUnserviceableRequest(too_large);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_EQ(result.unserviceable_request_id, too_large.get());
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, fitting);
+  EXPECT_EQ(too_large->status_, RequestStatus::Assigned);
+}
+
+TEST_F(SchedulerContractTest, UnserviceableActiveGrowthIsNotDeferred) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto active = Assigned(10);
+  scheduler.AddRequest(active);
+  scheduler.Schedule();
+  cache->SetUnserviceableRequest(active);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  EXPECT_FALSE(result.executable);
+  EXPECT_FALSE(result.capacity_deferred);
+  EXPECT_EQ(result.terminal_outcome.kind,
+            StepOutcomeKind::UnserviceableRequest);
+  EXPECT_EQ(result.terminal_outcome.request_id, active.get());
+}
+
 }  // namespace
 }  // namespace test
 }  // namespace Generators

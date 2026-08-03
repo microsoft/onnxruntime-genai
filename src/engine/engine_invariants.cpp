@@ -36,15 +36,18 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     violations.push_back(InvariantViolation{std::move(message)});
   };
 
-  // Total accounting: every block is either free or owned by exactly one Request.
+  // Total accounting: every block is free, transaction-reserved, or committed to one Request.
   const size_t allocated = cache.AllocatedBlocks();
+  const size_t transaction_reserved = cache.TransactionReservedBlocks();
   if (cache.free_blocks > cache.total_blocks) {
     add("free_blocks (" + std::to_string(cache.free_blocks) + ") exceeds total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
-  if (cache.free_blocks + allocated != cache.total_blocks) {
-    add("free (" + std::to_string(cache.free_blocks) + ") + allocated (" + std::to_string(allocated) +
-        ") != total_blocks (" + std::to_string(cache.total_blocks) + ").");
+  if (cache.free_blocks + transaction_reserved + allocated != cache.total_blocks) {
+    add("free (" + std::to_string(cache.free_blocks) + ") + transaction_reserved (" +
+        std::to_string(transaction_reserved) + ") + allocated (" +
+        std::to_string(allocated) + ") != total_blocks (" +
+        std::to_string(cache.total_blocks) + ").");
   }
 
   // Single ownership: a physical block id appears in at most one Request's table.
@@ -94,6 +97,52 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
             std::to_string(capacity) + ").");
       }
     }
+  }
+
+  std::unordered_set<size_t> reserved_blocks;
+  for (const size_t block_id : cache.transaction_reserved_block_ids) {
+    if (block_id >= cache.total_blocks) {
+      add("Transaction reserves out-of-range block id " + std::to_string(block_id) + ".");
+    }
+    if (!reserved_blocks.insert(block_id).second) {
+      add("Transaction reserves block id " + std::to_string(block_id) + " more than once.");
+    }
+    if (owner_of_block.contains(block_id)) {
+      add("Transaction-reserved block id " + std::to_string(block_id) +
+          " is also committed to a Request.");
+    }
+  }
+
+  std::unordered_set<const void*> reservation_requests;
+  std::unordered_set<size_t> blocks_assigned_to_delta;
+  for (const auto& reservation : cache.reservations) {
+    if (!reservation_requests.insert(reservation.request_id).second) {
+      add("Request " + PtrId(reservation.request_id) +
+          " appears in more than one transaction reservation.");
+    }
+    if (reservation.target_slots < reservation.committed_slots) {
+      add("Request " + PtrId(reservation.request_id) +
+          " transaction target precedes its committed slot boundary.");
+    }
+    if (reservation.tail_slots_to_consume >
+        reservation.target_slots - reservation.committed_slots) {
+      add("Request " + PtrId(reservation.request_id) +
+          " transaction tail-slot growth exceeds total growth.");
+    }
+    for (const size_t block_id : reservation.reserved_block_ids) {
+      if (!reserved_blocks.contains(block_id)) {
+        add("Request " + PtrId(reservation.request_id) +
+            " references block id " + std::to_string(block_id) +
+            " that is not transaction-reserved.");
+      }
+      if (!blocks_assigned_to_delta.insert(block_id).second) {
+        add("Transaction-reserved block id " + std::to_string(block_id) +
+            " is assigned to more than one Request delta.");
+      }
+    }
+  }
+  if (blocks_assigned_to_delta != reserved_blocks) {
+    add("Not every transaction-reserved block belongs to exactly one Request delta.");
   }
 
   // The padded block-table width must be able to hold the widest Request's table.

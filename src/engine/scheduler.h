@@ -6,6 +6,7 @@
 #include "request.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
+#include "step_plan.h"
 
 /**
  * @file scheduler.h
@@ -50,6 +51,14 @@ struct Scheduler {
    * and returning any requests that have been scheduled.
    */
   virtual ScheduledRequests Schedule() = 0;
+
+  virtual StepPlanningResult PlanStep(StepPlan&) {
+    throw std::logic_error("Scheduler does not support transactional step planning.");
+  }
+
+  virtual void CommitStepPlan(const StepPlan&) {
+    throw std::logic_error("Scheduler does not support transactional step commit.");
+  }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.
@@ -98,9 +107,15 @@ struct DynamicBatchScheduler : Scheduler {
 
   ScheduledRequests Schedule() override;
 
+  StepPlanningResult PlanStep(StepPlan& plan) override;
+
+  void CommitStepPlan(const StepPlan& plan) override;
+
   bool HasPendingRequests() const override;
 
  private:
+  void ReapCompletedRequests();
+
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;

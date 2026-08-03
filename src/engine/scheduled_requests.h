@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "execution_context.h"
 #include "request.h"
 
 namespace Generators {
@@ -38,6 +39,8 @@ struct ScheduledRequests {
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
+  ExecutionContext& CreateExecutionContext();
+
   std::shared_ptr<GeneratorParams> Params();
 
   auto begin() const {
@@ -59,7 +62,11 @@ struct ScheduledRequests {
     return requests_[idx];
   }
 
+  const std::vector<std::shared_ptr<Request>>& Requests() const { return requests_; }
+
   void AddDecoderState(std::unique_ptr<DecoderIO> decoder_state);
+
+  std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens();
 
@@ -69,6 +76,7 @@ struct ScheduledRequests {
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
+  std::unique_ptr<ExecutionContext> execution_context_;
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};

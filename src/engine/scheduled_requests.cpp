@@ -42,6 +42,11 @@ std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
   return OrtRunOptions::Create();
 }
 
+ExecutionContext& ScheduledRequests::CreateExecutionContext() {
+  execution_context_ = std::make_unique<ExecutionContext>();
+  return *execution_context_;
+}
+
 std::shared_ptr<GeneratorParams> ScheduledRequests::Params() {
   if (!params_) {
     params_ = std::make_shared<GeneratorParams>(*model_);
@@ -59,10 +64,7 @@ void ScheduledRequests::GenerateNextTokens() {
   }
 
   try {
-    std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
-    if (logits.size() != requests_.size()) {
-      throw std::runtime_error("Logits size does not match the number of requests.");
-    }
+    auto logits = ProcessLogits();
 
     if (TryGenerateNextTokensBatched(logits))
       return;
@@ -90,6 +92,19 @@ void ScheduledRequests::GenerateNextTokens() {
     }
     std::rethrow_exception(error);
   }
+}
+
+std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
+  if (!decoder_state_) {
+    throw std::runtime_error("Cannot process logits without the decoder state.");
+  }
+
+  std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
+  if (logits.size() != requests_.size()) {
+    throw std::runtime_error("Logits size does not match the number of requests.");
+  }
+
+  return logits;
 }
 
 // Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace

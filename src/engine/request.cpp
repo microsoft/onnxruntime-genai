@@ -44,6 +44,9 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
+  if (prefill_input_ids_.empty()) {
+    throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
+  }
   engine_ = engine;
   status_ = RequestStatus::Assigned;
 
@@ -172,6 +175,71 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       search_->SampleTopP(search_params.top_p, search_params.temperature);
     }
   }
+}
+
+void Request::ValidateEngineCompatibility() const {
+  const auto& search = params_->search;
+  if (search.batch_size != 1 || search.num_beams != 1) {
+    throw std::runtime_error("Engine requests require batch_size and num_beams to both be 1.");
+  }
+  if (search.top_p < 0.0f || search.top_p > 1.0f) {
+    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  }
+  if (search.top_k < 0) {
+    throw std::runtime_error("top_k must be 0 or greater");
+  }
+}
+
+void Request::SaveStateForTransaction() {
+  search_->SaveStateForTransaction();
+}
+
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
+  return ApplyLogits(logits);
+}
+
+void Request::RestoreStateForTransaction() {
+  search_->RestoreStateForTransaction();
+}
+
+void Request::CommitStateForTransaction() {
+  search_->CommitStateForTransaction();
+}
+
+void Request::CommitStep(const RequestStepPlan& plan,
+                         const RequestStepResult& result) noexcept {
+  processed_sequence_length_ = plan.processed_sequence_length_after;
+  is_prefill_ = false;
+  status_ = result.status_after;
+}
+
+RequestStepResult Request::ApplyLogits(DeviceSpan<float> logits) {
+  const int64_t sequence_length_before = CurrentSequenceLength();
+  search_->SetLogits(logits);
+  auto& search_params = search_->params_->search;
+  search_->ApplyMinLength(search_params.min_length);
+  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+
+  if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
+    search_->SelectTop();
+  } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
+             search_params.top_k > 1) {
+    search_->SampleTopKTopP(search_params.top_k, search_params.top_p,
+                            search_params.temperature);
+  } else if (search_params.top_k > 1) {
+    search_->SampleTopK(search_params.top_k, search_params.temperature);
+  } else {
+    search_->SampleTopP(search_params.top_p, search_params.temperature);
+  }
+
+  search_->CompleteGeneration();
+  const bool done = search_->IsDone();
+  return RequestStepResult{
+      CurrentSequenceLength() > sequence_length_before,
+      done,
+      done ? RequestStatus::Completed : RequestStatus::InProgress,
+  };
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {

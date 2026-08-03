@@ -49,6 +49,15 @@ struct Search_Cuda : Search {
   cuda_host_unique_ptr<bool> done_cpu_;
   // Set when a device launch that may write done_cpu_ is outstanding.
   mutable bool done_pending_{false};
+
+ protected:
+  void SaveStateForTransactionImpl() override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  cuda_unique_ptr<int32_t> transaction_sequence_lengths_;
+  cuda_unique_ptr<bool> transaction_eos_seen_;
+  bool transaction_done_{};
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
@@ -84,6 +93,14 @@ struct GreedySearch_Cuda : Search_Cuda {
 
   void EnsureSamplingData();
   void LaunchNextTokensTail();
+
+ protected:
+  void SaveStateForTransactionImpl() override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  cuda_unique_ptr<int32_t> transaction_next_tokens_;
+  cuda_unique_ptr<curandState> transaction_curand_states_;
 };
 
 struct BeamSearch_Cuda : Search_Cuda {

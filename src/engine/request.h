@@ -6,6 +6,7 @@
 #include "../generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
+#include "step_plan.h"
 
 /**
  * @file request.h
@@ -14,6 +15,12 @@
  */
 
 namespace Generators {
+
+struct RequestStepResult {
+  bool token_appended{};
+  bool done{};
+  RequestStatus status_after{RequestStatus::InProgress};
+};
 
 /**
  * @class Request
@@ -103,6 +110,14 @@ struct Request : std::enable_shared_from_this<Request>,
    * scheduled request's token selection before it synchronizes with the device once.
    */
   void GenerateNextTokens(DeviceSpan<float> logits);
+
+  void ValidateEngineCompatibility() const;
+  void SaveStateForTransaction();
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
+  void RestoreStateForTransaction();
+  void CommitStateForTransaction();
+  void CommitStep(const RequestStepPlan& plan,
+                  const RequestStepResult& result) noexcept;
 
   /**
    * @brief Completes the generation started by GenerateNextTokens().
@@ -215,6 +230,8 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
+
+  RequestStepResult ApplyLogits(DeviceSpan<float> logits);
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };
