@@ -38,9 +38,15 @@ void ScheduledRequests::GenerateNextTokens() {
     throw std::runtime_error("Logits size does not match the number of requests.");
   }
 
+  const size_t active_request_count =
+      std::count_if(requests_.begin(), requests_.end(),
+                    [](const std::shared_ptr<Request>& request) {
+                      return request->status_ != RequestStatus::Completed;
+                    });
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
     if (requests_[request_idx]->status_ != RequestStatus::Completed) {
-      requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+      requests_[request_idx]->GenerateNextTokens(logits[request_idx],
+                                                 active_request_count);
     }
   }
 }

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "../generators.h"
+#include "../telemetry/engine_telemetry.h"
 
 /**
  * @file request.h
@@ -46,7 +47,8 @@ struct Request : std::enable_shared_from_this<Request>,
    *
    * Once assigned, the request will finalize the prefill tokens and prepare for scheduling.
    */
-  void Assign(std::shared_ptr<Engine> engine);
+  void Assign(std::shared_ptr<Engine> engine, uint32_t session_id, uint32_t engine_id,
+              bool dynamic_batching);
 
   /**
    * @brief Updates the status of the request to InProgress and prepares it for processing.
@@ -93,7 +95,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Generates the next set of tokens based on the provided logits.
    * @param logits DeviceSpan containing logits for token generation.
    */
-  void GenerateNextTokens(DeviceSpan<float> logits);
+  void GenerateNextTokens(DeviceSpan<float> logits, size_t batch_size);
 
   /**
    * @brief Checks if the termination condition for the request has been met.
@@ -147,6 +149,10 @@ struct Request : std::enable_shared_from_this<Request>,
   void* GetOpaqueData();
 
  private:
+  friend struct Engine;
+
+  void CompleteRemoval();
+
   std::vector<int32_t> prefill_input_ids_;
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
@@ -156,6 +162,12 @@ struct Request : std::enable_shared_from_this<Request>,
   bool is_prefill_{true};
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
+#if defined(_MSC_VER)
+  [[msvc::no_unique_address]]
+#else
+  [[no_unique_address]]
+#endif
+  EngineRequestTelemetry telemetry_;
 };
 
 }  // namespace Generators

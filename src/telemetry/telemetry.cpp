@@ -366,9 +366,6 @@ void GenAiTelemetry::LogProcessInfo() {
 
     MAT::EventProperties event("OnnxRuntimeGenAI.ProcessInfo");
     event.SetPopsample(100.0);
-    // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
-    // correlates with model/generate events via the AppSessionGuid logger context.
-    event.SetProperty("sessionId", static_cast<int64_t>(0));
     event.SetProperty("libraryVersion", ORTGENAI_VERSION);
     // Device id is sent as ext.device.localId by the SDK (desktop override in Initialize, platform id
     // on Android/iOS), so it is not duplicated as a custom property here.
@@ -510,6 +507,33 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
     end_event.SetProperty("totalTimeMs", info.total_time_ms);
     end_event.SetProperty("tokensPerSecond", info.tokens_per_second);
     impl_->logger->LogEvent(end_event);
+  });
+#endif
+}
+
+void GenAiTelemetry::LogEngineRequest(uint32_t session_id, uint32_t engine_id,
+                                      uint32_t request_id, const EngineRequestInfo& info,
+                                      int64_t end_timestamp_ms) {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  RunLocked([&] {
+    MAT::EventProperties event("OnnxRuntimeGenAI.EngineRequest");
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
+    event.SetTimestamp(end_timestamp_ms);
+    event.SetProperty("sessionId", static_cast<int64_t>(session_id));
+    event.SetProperty("engineId", static_cast<int64_t>(engine_id));
+    event.SetProperty("requestId", static_cast<int64_t>(request_id));
+    event.SetProperty("dynamicBatching", info.dynamic_batching);
+    event.SetProperty("promptTokens", info.prompt_tokens);
+    event.SetProperty("generatedTokens", info.generated_tokens);
+    event.SetProperty("stepCount", info.step_count);
+    event.SetProperty("averageBatchSize", info.average_batch_size);
+    event.SetProperty("maxBatchSize", info.max_batch_size);
+    event.SetProperty("queueTimeMs", info.queue_time_ms);
+    event.SetProperty("timeToFirstTokenMs", info.time_to_first_token_ms);
+    event.SetProperty("decodeTimeMs", info.decode_time_ms);
+    event.SetProperty("totalTimeMs", info.total_time_ms);
+    event.SetProperty("outcome", std::string{info.outcome});
+    impl_->logger->LogEvent(event);
   });
 #endif
 }

@@ -9,15 +9,26 @@ Engine::Engine(std::shared_ptr<Model> model)
     : model_{model},
       cache_manager_{CacheManager::Create(model)},
       scheduler_{Scheduler::Create(model, cache_manager_)},
-      model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {}
+      model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  telemetry_id_ = AllocateEngineTelemetryId();
+  dynamic_batching_ = cache_manager_->SupportsDynamicBatching();
+#endif
+}
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
-  request->Assign(shared_from_this());
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+  request->Assign(shared_from_this(), model_->telemetry_session_id_, telemetry_id_,
+                  dynamic_batching_);
+#else
+  request->Assign(shared_from_this(), 0, 0, false);
+#endif
   scheduler_->AddRequest(request);
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   scheduler_->RemoveRequest(request);
+  request->CompleteRemoval();
 }
 
 std::shared_ptr<Request> Engine::Step() {
