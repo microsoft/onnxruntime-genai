@@ -6,18 +6,19 @@ Provide a reproducible native benchmark harness for ONNX Runtime GenAI that runs
 ## High-Level Architecture
 ```mermaid
 flowchart LR
-	A[config.json] --> C[scenario_dispatcher.cpp]
+    A[config.json] --> C[scenario_dispatcher.cpp]
 
-	C --> D[decode_baseline.cpp]
+    C --> D[decode_baseline.cpp]
     C --> E[long_prefill.cpp]
     C --> G[other_scenarios.cpp]
 
-	D --> H[decode_baseline/results.json]
-	D --> I[decode_baseline/visualize.html]
-    E --> J[long_prefill/results.json]
-    E --> K[long_prefill/visualize.html]
-	G --> N[other_scenarios/results.json]
-	G --> O[other_scenarios/visualize.html]
+    D --> H[out/decode_baseline_results_ID.json]
+    E --> J[out/long_prefill_results_ID.json]
+    G --> N[out/SCENARIO_results_ID.json]
+
+    H --> V[out/visualize.html - tabbed]
+    J --> V
+    N --> V
 ```
 
 ## File Structure
@@ -53,35 +54,36 @@ Example prompts.json:
   "dataset": "RULER",
   "version": "subset_v1",
   "source_branch": "rulerv2-ns",
-  "description": "Single-file curated subset with 5 prompts per prompt-length bucket.",
+  "description": "Single-file curated subset with 5 prompts per prompt token-length bucket.",
   "length_buckets": {
     "4k": [
-      "[RULER 4K sample 0] Full prompt text goes here.",
-      "[RULER 4K sample 1] Full prompt text goes here.",
-      "[RULER 4K sample 2] Full prompt text goes here.",
-      "[RULER 4K sample 3] Full prompt text goes here.",
-      "[RULER 4K sample 4] Full prompt text goes here."
+      "[RULER 4K token length sample 0] Full prompt text goes here.",
+      "[RULER 4K token length sample 1] Full prompt text goes here.",
+      "[RULER 4K token length sample 2] Full prompt text goes here.",
+      "[RULER 4K token length sample 3] Full prompt text goes here.",
+      "[RULER 4K token length sample 4] Full prompt text goes here."
+    ],
+    "16k": [
+      "[RULER 16K token length sample 0] Full prompt text goes here.",
+      "..."
+    ],
+    "18k": [
+      "..."
     ],
     "32k": [
-      "[RULER 32K sample 0] Full prompt text goes here.",
-      "[RULER 32K sample 1] Full prompt text goes here.",
-      "[RULER 32K sample 2] Full prompt text goes here.",
-      "[RULER 32K sample 3] Full prompt text goes here.",
-      "[RULER 32K sample 4] Full prompt text goes here."
+      "..."
+    ],
+    "48k": [
+      "..."
     ],
     "64k": [
-      "[RULER 64K sample 0] Full prompt text goes here.",
-      "[RULER 64K sample 1] Full prompt text goes here.",
-      "[RULER 64K sample 2] Full prompt text goes here.",
-      "[RULER 64K sample 3] Full prompt text goes here.",
-      "[RULER 64K sample 4] Full prompt text goes here."
+      "..."
+    ],
+    "96k": [
+      "..."
     ],
     "128k": [
-      "[RULER 128K sample 0] Full prompt text goes here.",
-      "[RULER 128K sample 1] Full prompt text goes here.",
-      "[RULER 128K sample 2] Full prompt text goes here.",
-      "[RULER 128K sample 3] Full prompt text goes here.",
-      "[RULER 128K sample 4] Full prompt text goes here."
+      "..."
     ]
   }
 }
@@ -100,7 +102,13 @@ Each scenario implementation file (under `scenarios/`) is responsible for:
 
 - validating that inputs are valid for that scenario
 - running the benchmark and recording scenario-appropriate metrics
-- producing that scenario's results.json and visualize.html outputs
+- producing scenario JSON outputs under `out/` (no per-scenario HTML)
+
+The dispatcher/visualizer is responsible for:
+
+- generating one `out/visualize.html` per benchmark invocation
+- discovering `out/*_results_*.json` files and rendering each scenario in a tab
+- grouping multiple runs of the same scenario (different `{id}` values)
 
 ## Data Contract (ie. config.json)
 `model_uri` is used below as a short placeholder for the model location.
@@ -112,7 +120,7 @@ Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwe
 {
     "scenario": "decode_baseline", // choices=[other scenarios, ...]
     "concurrency": 1, // choices=[1, 2, 4, 8]
-    "prompt_length_k": 4, // choices=[4, 32, 64, 128]
+    "prompt_length_k": 4, // choices=[4, 16, 18, 32, 48, 64, 96, 128]
     "synthetic": false, // choices=[true, false]
     "model_path": $model_uri,
     "execution_provider": "cuda"
@@ -120,15 +128,29 @@ Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwe
 ```
 
 - Output artifacts:
-	- results.json: run status, summary percentiles, and raw request-level records.
-	- visualize.html: local chart/table view over results.json.
+  - `out/<scenario>_results_<id>.json`: run status, metadata, summary percentiles, and raw request-level records.
+  - `out/visualize.html`: single tabbed local chart/table view over all result files found in `out/`.
+
+- File naming convention:
+  - `<scenario>` is the scenario name from config (for example `decode_baseline`, `long_prefill`).
+  - `<id>` is a zero-padded 3-digit sequence based on scenario order in `config.json` (001, 002, 003, ...).
+  - Example output set for one invocation:
+
+```text
+out/
+|- decode_baseline_results_001.json
+|- long_prefill_results_002.json
+|- other_scenarios_results_003.json
+|- visualize.html
+```
 
 ## Metrics Strategy
 
 Core Metrics (all scenarios)
 
 - config metadata:
-	- scenario, model_path, execution_provider, concurrency, prompt length, synthetic
+    - scenario, model_path, execution_provider, concurrency, prompt length, synthetic
+    - ort_version, genai_version
 - run status:
 	- status, error (if any)
 - request-level latency/throughput:
@@ -146,13 +168,15 @@ Scenario-Specific Metrics (optional extensions)
 	- output text capture for correctness checks
 	- optional inter-token latency distribution details
 
-Example results.json shape (decode_baseline):
+Example `out/decode_baseline_results_001.json` shape:
 
 ```json
 {
     "scenario": "decode_baseline",
     "config_metadata": {
         "model_path": $model_uri,
+        "ort_version": "1.27.0",
+        "genai_version": "0.14.1",
         "execution_provider": "cuda",
         "concurrency": 4,
         "prompt_length_k": 4,
