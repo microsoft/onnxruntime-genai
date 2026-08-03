@@ -248,6 +248,18 @@ class DeepSeekV4FlashModel(Model):
         return (span + self.block_size - 1) // self.block_size
 
     def _make_dsv4_io(self):
+        # The serving layer has to size and recycle the block pools, and none of this
+        # geometry is recoverable from the graph's shapes alone.
+        self.model.metadata_props.update({
+            "dsv4_max_seq_len": str(self.max_seq_len),
+            "dsv4_window": str(self.window),
+            "dsv4_compress_ratios": ",".join(str(r) for r in self.compress_ratios),
+            "dsv4_paged": "1" if self.paged else "0",
+            "dsv4_block_size": str(self.block_size) if self.paged else "0",
+            "dsv4_indexer": "1" if self.indexer else "0",
+            "dsv4_index_topk": str(self.index_topk),
+        })
+
         self.input_names = {"input_ids": "input_ids", "past_lens": "past_lens"}
         self.input_types = {"input_ids": ir.DataType.INT64, "past_lens": ir.DataType.INT64}
         self.input_shapes = {"input_ids": [B, S], "past_lens": [B]}
