@@ -619,8 +619,6 @@ struct Decoder_Element : JSON::Element {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "prefill_filename") {
       v_.prefill_filename = JSON::Get<std::string_view>(value);
-    } else if (name == "cache_update_mode") {
-      v_.cache_update_mode = JSON::Get<std::string_view>(value);
     } else if (name == "prefill_sequence_length") {
       v_.prefill_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "hidden_size") {

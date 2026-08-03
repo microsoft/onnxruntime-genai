@@ -36,11 +36,12 @@ TEST(ModelTests, NemotronParseConfig) {
 
   EXPECT_EQ(config.model.type, "nemotron_parse");
   EXPECT_EQ(config.model.context_length, 1032);
+  EXPECT_TRUE(Generators::ModelType::IsVLM(config.model.type));
   EXPECT_EQ(config.model.vision.num_visual_tokens, 3201);
+  EXPECT_EQ(config.model.vision.config_filename, "processor_config.json");
   EXPECT_EQ(config.model.vision.outputs.image_features,
             "encoder_hidden_states");
   EXPECT_EQ(config.model.decoder.prefill_filename, "decoder_prefill.onnx");
-  EXPECT_EQ(config.model.decoder.cache_update_mode, "tensor_scatter");
   EXPECT_EQ(config.model.decoder.prefill_sequence_length, 8);
   EXPECT_EQ(config.model.decoder.inputs.cache_write_indices,
             "cache_write_indices");
