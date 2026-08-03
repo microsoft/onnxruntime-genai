@@ -23,29 +23,74 @@ std::unique_ptr<Config> CloneConfigForTarget(const Config& source) {
   return std::make_unique<Config>(source);
 }
 
-bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
-                                  const Config::SessionOptions& draft_options) {
-  if (target_options.providers != draft_options.providers) return false;
+}  // namespace
 
-  if (target_options.provider_options.size() != draft_options.provider_options.size()) return false;
+bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
+                                  const Config::SessionOptions& proposer_options) {
+  if (target_options.providers != proposer_options.providers) return false;
+
+  if (target_options.provider_options.size() != proposer_options.provider_options.size()) return false;
   for (size_t i = 0; i < target_options.provider_options.size(); ++i) {
     const auto& target_provider = target_options.provider_options[i];
-    const auto& draft_provider = draft_options.provider_options[i];
-    if (target_provider.name != draft_provider.name) return false;
-    if (target_provider.options != draft_provider.options) return false;
-    if (target_provider.device_filtering_options.has_value() != draft_provider.device_filtering_options.has_value()) return false;
+    const auto& proposer_provider = proposer_options.provider_options[i];
+    if (target_provider.name != proposer_provider.name) return false;
+    if (target_provider.options != proposer_provider.options) return false;
+    if (target_provider.device_filtering_options.has_value() != proposer_provider.device_filtering_options.has_value()) return false;
     if (target_provider.device_filtering_options) {
       const auto& target_device_filter = *target_provider.device_filtering_options;
-      const auto& draft_device_filter = *draft_provider.device_filtering_options;
-      if (target_device_filter.hardware_device_type != draft_device_filter.hardware_device_type ||
-          target_device_filter.hardware_device_id != draft_device_filter.hardware_device_id ||
-          target_device_filter.hardware_vendor_id != draft_device_filter.hardware_vendor_id)
+      const auto& proposer_device_filter = *proposer_provider.device_filtering_options;
+      if (target_device_filter.hardware_device_type != proposer_device_filter.hardware_device_type ||
+          target_device_filter.hardware_device_id != proposer_device_filter.hardware_device_id ||
+          target_device_filter.hardware_vendor_id != proposer_device_filter.hardware_vendor_id)
         return false;
     }
   }
 
   return true;
 }
+
+void ValidateSpeculativeModelCompatibility(const Model& model,
+                                          const Config::Model::Decoder* proposer) {
+  const auto& config = *model.config_;
+  if (!config.model.decoder.pipeline.empty() ||
+      (proposer && !proposer->pipeline.empty()))
+    throw std::runtime_error(
+        "Speculative decoding does not support pipeline models in this release; "
+        "target and proposer must be plain decoder-only LLMs.");
+  if (!config.model.vision.filename.empty() || !config.model.speech.filename.empty())
+    throw std::runtime_error(
+        "Speculative decoding does not support multimodal (vision/audio) models in this release; "
+        "target and proposer must be plain decoder-only LLMs.");
+
+  if (UsesNonRewindableWindowedKeyValueCache(model, config.model.decoder) ||
+      (proposer && UsesNonRewindableWindowedKeyValueCache(model, *proposer)))
+    throw std::runtime_error(
+        "Speculative decoding does not support physically sliding KV caches in this release; "
+        "WindowedKeyValueCache cannot rewind after discarding KV history.");
+  if (!config.model.decoder.layer_types.empty() ||
+      (proposer && !proposer->layer_types.empty()))
+    throw std::runtime_error(
+        "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
+        "their rolling convolution state cannot be rewound.");
+}
+
+void ValidateSpeculativeGeneratorParams(const GeneratorParams& params) {
+  if (params.search.batch_size != 1)
+    throw std::runtime_error(
+        "Speculative decoding does not support batch_size > 1 in this release. Got batch_size=" +
+        std::to_string(params.search.batch_size));
+  if (params.search.num_beams != 1)
+    throw std::runtime_error(
+        "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
+        std::to_string(params.search.num_beams) + ".");
+  if (params.search.no_repeat_ngram_size != 0)
+    throw std::runtime_error(
+        "Speculative decoding does not support no_repeat_ngram_size != 0 in this release. Got "
+        "no_repeat_ngram_size=" +
+        std::to_string(params.search.no_repeat_ngram_size) + ".");
+}
+
+namespace {
 
 int64_t GetLogitsVocabSize(const DecoderOnly_Model& model, const char* model_role) {
   const auto& logits_name = model.config_->model.decoder.outputs.logits;
@@ -96,24 +141,7 @@ SpeculativeDecodingModel::SpeculativeDecodingModel(std::unique_ptr<Config> confi
         "Target and draft must use the same execution provider. "
         "Cross-EP speculative decoding is not supported in this release.");
 
-  if (!config_->model.decoder.pipeline.empty() || !draft_config.pipeline.empty())
-    throw std::runtime_error(
-        "Speculative decoding does not support pipeline models in this release; "
-        "target and draft must be plain decoder-only LLMs.");
-  if (!config_->model.vision.filename.empty() || !config_->model.speech.filename.empty())
-    throw std::runtime_error(
-        "Speculative decoding does not support multimodal (vision/audio) models in this release; "
-        "target and draft must be plain decoder-only LLMs.");
-
-  if (UsesNonRewindableWindowedKeyValueCache(*this, config_->model.decoder) ||
-      UsesNonRewindableWindowedKeyValueCache(*this, draft_config))
-    throw std::runtime_error(
-        "Speculative decoding does not support physically sliding KV caches in this release; "
-        "WindowedKeyValueCache cannot rewind after discarding KV history.");
-  if (!config_->model.decoder.layer_types.empty() || !draft_config.layer_types.empty())
-    throw std::runtime_error(
-        "Speculative decoding does not support LFM2 (hybrid SSM/attention) models in this release; "
-        "their rolling convolution state cannot be rewound.");
+  ValidateSpeculativeModelCompatibility(*this, &draft_config);
 
   target_model_ = std::make_shared<DecoderOnly_Model>(CloneConfigForTarget(*config_), ort_env);
   draft_model_ = std::make_shared<DecoderOnly_Model>(
@@ -134,22 +162,7 @@ SpeculativeDecodingState::SpeculativeDecodingState(const SpeculativeDecodingMode
       model_{model},
       target_state_{model.target_model().CreateState(sequence_lengths, params)},
       draft_state_{model.draft_model().CreateState(sequence_lengths, params)} {
-  // No support for batch_size > 1 in this release.
-  if (params.search.batch_size != 1)
-    throw std::runtime_error(
-        "Speculative decoding does not support batch_size > 1 in this release. Got batch_size=" +
-        std::to_string(params.search.batch_size));
-
-  // No support for num_beams > 1 (beam search) in the speculative loop in this release.
-  if (params.search.num_beams != 1)
-    throw std::runtime_error(
-        "Speculative decoding does not support num_beams > 1 (beam search). Got num_beams=" +
-        std::to_string(params.search.num_beams) + ".");
-  if (params.search.no_repeat_ngram_size != 0)
-    throw std::runtime_error(
-        "Speculative decoding does not support no_repeat_ngram_size != 0 in this release. Got "
-        "no_repeat_ngram_size=" +
-        std::to_string(params.search.no_repeat_ngram_size) + ".");
+  ValidateSpeculativeGeneratorParams(params);
 }
 
 // Run() - prefill path (called via Generator::AppendTokens -> ComputeLogits).

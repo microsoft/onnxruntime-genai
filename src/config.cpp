@@ -315,6 +315,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_bias") {
+      v_.attention_bias = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
       v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_names") {
@@ -414,6 +416,129 @@ struct StringArray_Element : JSON::Element {
 
  private:
   std::vector<std::string>& v_;
+};
+
+struct EagleInputs_Element : JSON::Element {
+  explicit EagleInputs_Element(Config::Model::Eagle::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "target_hidden_states") {
+      v_.target_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "recurrent_hidden_states") {
+      v_.recurrent_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "use_target_hidden_states") {
+      v_.use_target_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_bias") {
+      v_.attention_bias = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key") {
+      v_.past_key = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value") {
+      v_.past_value = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Eagle::Inputs& v_;
+};
+
+struct EagleOutputs_Element : JSON::Element {
+  explicit EagleOutputs_Element(Config::Model::Eagle::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "draft_hidden_states") {
+      v_.draft_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "draft_logits") {
+      v_.draft_logits = JSON::Get<std::string_view>(value);
+    } else if (name == "draft_token_id") {
+      v_.draft_token_id = JSON::Get<std::string_view>(value);
+    } else if (name == "mapped_token_id") {
+      v_.mapped_token_id = JSON::Get<std::string_view>(value);
+    } else if (name == "draft_topk_ids") {
+      v_.draft_topk_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "draft_topk_log_scores") {
+      v_.draft_topk_log_scores = JSON::Get<std::string_view>(value);
+    } else if (name == "mapped_topk_ids") {
+      v_.mapped_topk_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key") {
+      v_.present_key = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value") {
+      v_.present_value = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Eagle::Outputs& v_;
+};
+
+struct Eagle_Element : JSON::Element {
+  explicit Eagle_Element(Config::Model::Eagle& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_size") {
+      v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "draft_vocab_size") {
+      v_.draft_vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "head_size") {
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "total_tokens") {
+      v_.total_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "depth") {
+      v_.depth = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "top_k") {
+      v_.top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      return session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "target_hidden_state_names") {
+      target_hidden_state_names_ =
+          std::make_unique<StringArray_Element>(v_.target_hidden_state_names);
+      return *target_hidden_state_names_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Eagle& v_;
+  SessionOptions_Element session_options_{v_.session_options};
+  std::unique_ptr<RunOptions_Element> run_options_;
+  EagleInputs_Element inputs_{v_.inputs};
+  EagleOutputs_Element outputs_{v_.outputs};
+  std::unique_ptr<StringArray_Element> target_hidden_state_names_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -1217,6 +1342,13 @@ struct Model_Element : JSON::Element {
         draft_ = std::make_unique<Decoder_Element>(*v_.draft);
       return *draft_;
     }
+    if (name == "eagle") {
+      if (!v_.eagle)
+        v_.eagle.emplace();
+      if (!eagle_)
+        eagle_ = std::make_unique<Eagle_Element>(*v_.eagle);
+      return *eagle_;
+    }
     if (name == "vision") {
       return vision_;
     }
@@ -1240,6 +1372,7 @@ struct Model_Element : JSON::Element {
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   std::unique_ptr<Decoder_Element> draft_;
+  std::unique_ptr<Eagle_Element> eagle_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
@@ -1902,6 +2035,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   if (model.draft) {
     for (const auto& provider_option : model.draft->session_options.provider_options) {
       model.draft->session_options.providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.eagle) {
+    for (const auto& provider_option : model.eagle->session_options.provider_options) {
+      model.eagle->session_options.providers.push_back(provider_option.name);
     }
   }
 

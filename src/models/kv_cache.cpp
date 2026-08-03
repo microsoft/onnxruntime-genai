@@ -619,6 +619,80 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   }
 }
 
+void DefaultKeyValueCache::CompactTree(size_t stable_length,
+                                       std::span<const size_t> tree_indices) {
+  if (past_present_share_buffer_)
+    throw std::runtime_error("Tree cache compaction does not support shared past/present buffers.");
+  if (tree_indices.empty())
+    throw std::runtime_error("Tree cache compaction requires at least the root node.");
+  if (!layer_shapes_.empty())
+    throw std::runtime_error("Tree cache compaction does not support per-layer cache shapes.");
+  if (shape_[0] != 1)
+    throw std::runtime_error("Tree cache compaction supports batch size 1 only.");
+
+  const auto first_shape = presents_.front()->GetTensorTypeAndShapeInfo()->GetShape();
+  if (first_shape.size() != 4 || stable_length > static_cast<size_t>(first_shape[2]))
+    throw std::runtime_error("Tree cache compaction received an invalid stable cache length.");
+  const size_t tree_width = static_cast<size_t>(first_shape[2]) - stable_length;
+  for (size_t index : tree_indices) {
+    if (index >= tree_width)
+      throw std::runtime_error("Tree cache compaction received an out-of-range tree index.");
+  }
+
+  const int64_t compacted_length =
+      static_cast<int64_t>(stable_length + tree_indices.size());
+  for (int tensor_index = 0; tensor_index < layer_count_ * 2; ++tensor_index) {
+    OrtValue& present = *presents_[tensor_index];
+    const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+    if (present_shape.size() != 4 || present_shape[0] != 1 ||
+        present_shape[2] != first_shape[2])
+      throw std::runtime_error("Tree cache compaction found inconsistent cache shapes.");
+
+    std::array<int64_t, 4> compacted_shape{
+        present_shape[0], present_shape[1], compacted_length, present_shape[3]};
+    auto compacted = OrtValue::CreateTensor(Allocator(), compacted_shape, type_);
+    auto source = ByteWrapTensor(Device(), present);
+    auto destination = ByteWrapTensor(Device(), *compacted);
+
+    const size_t element_size = Ort::SizeOf(type_);
+    const size_t row_bytes = static_cast<size_t>(present_shape[3]) * element_size;
+    const size_t source_head_bytes = static_cast<size_t>(present_shape[2]) * row_bytes;
+    const size_t destination_head_bytes =
+        static_cast<size_t>(compacted_length) * row_bytes;
+    const size_t prefix_bytes = stable_length * row_bytes;
+
+    for (int64_t head = 0; head < present_shape[1]; ++head) {
+      const size_t source_head_offset = static_cast<size_t>(head) * source_head_bytes;
+      const size_t destination_head_offset =
+          static_cast<size_t>(head) * destination_head_bytes;
+      if (prefix_bytes != 0) {
+        destination.subspan(destination_head_offset, prefix_bytes)
+            .CopyFrom(source.subspan(source_head_offset, prefix_bytes));
+      }
+      for (size_t row = 0; row < tree_indices.size(); ++row) {
+        const size_t source_offset =
+            source_head_offset + (stable_length + tree_indices[row]) * row_bytes;
+        const size_t destination_offset =
+            destination_head_offset + (stable_length + row) * row_bytes;
+        destination.subspan(destination_offset, row_bytes)
+            .CopyFrom(source.subspan(source_offset, row_bytes));
+      }
+    }
+
+    auto compacted_present =
+        OrtValue::CreateTensor(Allocator(), compacted_shape, type_);
+    ByteWrapTensor(Device(), *compacted_present).CopyFrom(destination);
+    pasts_[tensor_index] = std::move(compacted);
+    presents_[tensor_index] = std::move(compacted_present);
+    state_.inputs_[input_index_ + tensor_index] = pasts_[tensor_index].get();
+    state_.outputs_[output_index_ + tensor_index] =
+        presents_[tensor_index].get();
+  }
+
+  shape_[2] = compacted_length;
+  is_first_update_ = true;
+}
+
 template <typename T>
 void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && !past_present_share_buffer_);

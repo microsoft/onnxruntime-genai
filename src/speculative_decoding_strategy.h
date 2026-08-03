@@ -355,6 +355,19 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   virtual void PopulateProposerStats(SpeculativeStats& stats) const {}
 
+  virtual void RunRound(Generator& g);
+  virtual RoundState::Phase FinalizeRound(Generator& g);
+
+  RoundState& CurrentRound() { return round_; }
+  void BeginRound(int K, int evaluated, int accepted, size_t queued,
+                  bool formula_supported, bool filled_proposal_budget,
+                  float propose_ms, float target_ms, RoundState::Kind kind);
+  void ClearPendingExternalLogits();
+  DeviceSpan<float> GetFloatVerifyLogits(OrtValue& logits, DeviceInterface& device);
+  bool HasPendingAnchorToken() const { return pending_anchor_token_.has_value(); }
+  int32_t TakePendingAnchorToken();
+  void SetPendingAnchorToken(int32_t token) { pending_anchor_token_ = token; }
+
   State& target_state_;
   const Model& target_model_;
 
@@ -397,18 +410,11 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // Each Step emits one token. RunRound does a whole round's compute up front and buffers the
   // committed tokens; DrainOne hands them out one per call; FinalizeRound runs the deferred
   // re-anchor once the buffer empties (so hitting EOS mid-round skips the wasted target pass).
-  void RunRound(Generator& g);
   void DrainOne(Generator& g);
-  RoundState::Phase FinalizeRound(Generator& g);
   bool EmitToken(Generator& g, int32_t tok);
-  void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported,
-                  bool filled_proposal_budget, float propose_ms, float target_ms,
-                  RoundState::Kind kind);
   void FinishRound(RoundState::Phase final_phase);
   void DiscardPendingTokens();
-  void ClearPendingExternalLogits();
   void PrepareForCooldownStep(Generator& g);
-  DeviceSpan<float> GetFloatVerifyLogits(OrtValue& logits, DeviceInterface& device);
 
   // Runs one guidance round - check the draft's tokens against the grammar-masked target, tell the
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and

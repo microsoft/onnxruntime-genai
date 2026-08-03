@@ -81,6 +81,17 @@ DeviceSpan<float> Logits::Get() {
   return logits_;
 }
 
+DeviceSpan<float> Logits::GetAll() {
+  OrtValue* logits = output_raw_->GetOrtTensor();
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> ||
+      type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    Cast(*logits, logits_of_last_token_fp32_, *model_.p_device_inputs_,
+         Ort::TypeToTensorType<float>);
+    logits = logits_of_last_token_fp32_.get();
+  }
+  return WrapTensor<float>(*model_.p_device_inputs_, *logits);
+}
+
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
   if (trimmed_prefill_logits_) {
     new_kv_length = 1;

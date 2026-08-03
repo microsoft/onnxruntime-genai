@@ -1,5 +1,9 @@
 #include "../generators.h"
 #include "decoder_only.h"
+#include "utils.h"
+
+#include <cstring>
+#include <limits>
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -20,6 +24,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
+  AddAttentionBias();
   logits_.Add();
   if (kv_cache_)
     kv_cache_->Add();
@@ -82,12 +87,41 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   return logits_.Get();
 }
 
+DeviceSpan<float> DecoderOnly_State::RunTree(
+    int stable_length, DeviceSpan<int32_t>& tree_tokens,
+    std::span<const int64_t> position_ids,
+    std::span<const uint8_t> tree_mask) {
+  if (stable_length < 0)
+    throw std::runtime_error("Tree decoding received a negative stable cache length.");
+  const int tree_width = static_cast<int>(tree_tokens.size());
+  if (tree_width == 0)
+    throw std::runtime_error("Tree decoding requires at least one token.");
+  if (position_ids.size() != tree_tokens.size() ||
+      tree_mask.size() != tree_tokens.size() * tree_tokens.size())
+    throw std::runtime_error("Tree decoding tensors have inconsistent dimensions.");
+
+  UpdateInputsOutputs(tree_tokens, {}, stable_length + tree_width);
+  position_inputs_->SetPositionIDs(position_ids);
+  SetTreeAttentionBias(static_cast<size_t>(stable_length), tree_mask);
+  if (model_.config_->model.decoder.run_options.has_value())
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  State::Run(*model_.session_decoder_, false);
+  return logits_.GetAll();
+}
+
 void DecoderOnly_State::RewindTo(size_t index) {
   position_inputs_->RewindTo(index);
   if (kv_cache_)
     kv_cache_->RewindTo(index);
   if (recurrent_state_)
     recurrent_state_->RewindTo(index);
+}
+
+void DecoderOnly_State::CompactTreeCache(
+    size_t stable_length, std::span<const size_t> tree_indices) {
+  if (kv_cache_)
+    kv_cache_->CompactTree(stable_length, tree_indices);
+  position_inputs_->RewindTo(stable_length + tree_indices.size());
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
@@ -114,11 +148,84 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   }
 
   position_inputs_->Update(next_tokens, position_length, static_cast<int>(new_length));
+  UpdateAttentionBias(position_length, static_cast<int>(new_length));
   if (kv_cache_)
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
+}
+
+void DecoderOnly_State::AddAttentionBias() {
+  const std::string& name = model_.config_->model.decoder.inputs.attention_bias;
+  if (name.empty())
+    return;
+  if (!model_.session_info_.HasInput(name))
+    throw std::runtime_error("Configured attention_bias input '" + name +
+                             "' was not found in the decoder graph.");
+
+  attention_bias_type_ = model_.session_info_.GetInputDataType(name);
+  if (attention_bias_type_ != Ort::TypeToTensorType<float> &&
+      attention_bias_type_ != Ort::TypeToTensorType<Ort::BFloat16_t>)
+    throw std::runtime_error("attention_bias only supports float32 or bfloat16 tensors.");
+
+  attention_bias_ =
+      std::make_unique<Tensor>(model_.p_device_inputs_, attention_bias_type_);
+  attention_bias_shape_ = {params_->BatchBeamSize(), 1, 1, 1};
+  attention_bias_->CreateTensor(attention_bias_shape_);
+  attention_bias_->GetByteSpan().Zero();
+  attention_bias_input_index_ = inputs_.size();
+  inputs_.push_back(attention_bias_->GetOrtTensor());
+  input_names_.push_back(name.c_str());
+}
+
+void DecoderOnly_State::UpdateAttentionBias(int total_length, int new_length) {
+  if (!attention_bias_)
+    return;
+  attention_bias_shape_ = {
+      params_->BatchBeamSize(), 1, static_cast<int64_t>(new_length),
+      static_cast<int64_t>(total_length)};
+  attention_bias_->CreateTensor(attention_bias_shape_);
+  attention_bias_->GetByteSpan().Zero();
+  inputs_[attention_bias_input_index_] = attention_bias_->GetOrtTensor();
+}
+
+void DecoderOnly_State::SetTreeAttentionBias(
+    size_t stable_length, std::span<const uint8_t> tree_mask) {
+  if (!attention_bias_)
+    throw std::runtime_error("Tree decoding requires a configured attention_bias input.");
+  const size_t query_length = static_cast<size_t>(attention_bias_shape_[2]);
+  const size_t total_length = static_cast<size_t>(attention_bias_shape_[3]);
+  if (attention_bias_shape_[0] != 1 ||
+      total_length != stable_length + query_length ||
+      tree_mask.size() != query_length * query_length)
+    throw std::runtime_error("Tree attention bias has an invalid shape.");
+
+  auto bytes = attention_bias_->GetByteSpan();
+  auto cpu_bytes = bytes.CpuSpan();
+  if (attention_bias_type_ == Ort::TypeToTensorType<float>) {
+    auto* values = reinterpret_cast<float*>(cpu_bytes.data());
+    std::fill_n(values, total_length * query_length, 0.0f);
+    for (size_t query = 0; query < query_length; ++query) {
+      for (size_t key = 0; key < query_length; ++key) {
+        if (!tree_mask[query * query_length + key])
+          values[query * total_length + stable_length + key] =
+              std::numeric_limits<float>::lowest();
+      }
+    }
+  } else {
+    auto* values = reinterpret_cast<uint16_t*>(cpu_bytes.data());
+    std::fill_n(values, total_length * query_length, uint16_t{});
+    const uint16_t blocked =
+        Float32ToBFloat16(std::numeric_limits<float>::lowest());
+    for (size_t query = 0; query < query_length; ++query) {
+      for (size_t key = 0; key < query_length; ++key) {
+        if (!tree_mask[query * query_length + key])
+          values[query * total_length + stable_length + key] = blocked;
+      }
+    }
+  }
+  bytes.CopyCpuToDevice();
 }
 
 }  // namespace Generators

@@ -5,6 +5,7 @@
 #include <vector>
 #include <numeric>
 #include <cmath>  // For std::round
+#include <limits>
 
 namespace Generators {
 
@@ -167,6 +168,29 @@ void DefaultPositionInputs::RewindTo(size_t index) {
       RewindMask(index);
     } else
       throw std::runtime_error("DefaultPositionInputs::RewindTo - Unsupported batch size");
+  }
+}
+
+void DefaultPositionInputs::SetPositionIDs(std::span<const int64_t> position_ids) {
+  if (!has_posid_input_)
+    throw std::runtime_error("Custom position IDs require a position_ids graph input.");
+  if (position_ids.size() != static_cast<size_t>(position_ids_shape_[0] * position_ids_shape_[1]))
+    throw std::runtime_error("Custom position IDs do not match the current input shape.");
+
+  if (type_ == Ort::TypeToTensorType<int64_t>) {
+    auto device_position_ids = position_ids_->GetDeviceSpan<int64_t>();
+    std::copy(position_ids.begin(), position_ids.end(), device_position_ids.CpuSpan().begin());
+    device_position_ids.CopyCpuToDevice();
+  } else {
+    auto device_position_ids = position_ids_->GetDeviceSpan<int32_t>();
+    auto cpu_position_ids = device_position_ids.CpuSpan();
+    for (size_t i = 0; i < position_ids.size(); ++i) {
+      if (position_ids[i] < std::numeric_limits<int32_t>::min() ||
+          position_ids[i] > std::numeric_limits<int32_t>::max())
+        throw std::runtime_error("Custom position ID is outside the int32 range.");
+      cpu_position_ids[i] = static_cast<int32_t>(position_ids[i]);
+    }
+    device_position_ids.CopyCpuToDevice();
   }
 }
 

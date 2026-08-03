@@ -10,6 +10,7 @@
 #include "transducer_decoding_strategy.h"
 #include "base_speculative_strategy.h"
 #include "n_gram_decoding_strategy.h"
+#include "eagle_speculative_strategy.h"
 #include "models/model.h"
 #include "models/model_type.h"
 
@@ -26,6 +27,8 @@ std::unique_ptr<DecodingStrategy> MakeDecodingStrategy(Generator& generator) {
   if (ModelType::IsTransducer(model.type))
     return std::make_unique<TransducerDecodingStrategy>(generator);
   const bool uses_ngram = generator.search_->params_->speculative.ngram_size > 0;
+  if (model.eagle)
+    return std::make_unique<EagleSpeculativeStrategy>(generator);
   if (model.draft)
     return std::make_unique<BaseSpeculativeStrategy>(generator);
   if (uses_ngram)

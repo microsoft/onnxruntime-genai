@@ -262,6 +262,14 @@ void SpeculativeDecodingStrategy::ClearPendingExternalLogits() {
   round_.cached_direct_tokens = 0;
 }
 
+int32_t SpeculativeDecodingStrategy::TakePendingAnchorToken() {
+  if (!pending_anchor_token_)
+    throw std::runtime_error("Speculative decoding has no pending anchor token.");
+  const int32_t token = *pending_anchor_token_;
+  pending_anchor_token_.reset();
+  return token;
+}
+
 DeviceSpan<float> SpeculativeDecodingStrategy::GetFloatVerifyLogits(
     OrtValue& logits, DeviceInterface& device) {
   if (logits.GetTensorTypeAndShapeInfo()->GetElementType() == Ort::TypeToTensorType<float>)

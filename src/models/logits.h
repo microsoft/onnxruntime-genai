@@ -11,6 +11,8 @@ struct Logits {
   void Add();
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
   DeviceSpan<float> Get();
+  // Return every sequence row. Tree verification needs logits for all flattened nodes.
+  DeviceSpan<float> GetAll();
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);

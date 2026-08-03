@@ -182,6 +182,7 @@ struct Generator : LeakChecked<Generator> {
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
   friend struct BaseSpeculativeStrategy;
+  friend struct EagleSpeculativeStrategy;
   friend void RunStandardDecodingStep(Generator& g);
 };
 

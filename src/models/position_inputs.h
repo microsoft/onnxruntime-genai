@@ -7,6 +7,10 @@ struct PositionInputs {
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
+  virtual void SetPositionIDs(std::span<const int64_t> position_ids) {
+    (void)position_ids;
+    throw std::runtime_error("Custom position IDs are not supported by this model.");
+  }
 };
 
 struct DefaultPositionInputs : PositionInputs {
@@ -16,6 +20,7 @@ struct DefaultPositionInputs : PositionInputs {
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
 
   void RewindTo(size_t index) override;
+  void SetPositionIDs(std::span<const int64_t> position_ids) override;
 
  private:
   void AddAttentionMask();

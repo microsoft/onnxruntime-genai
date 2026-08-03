@@ -22,6 +22,8 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
+    - [Include Selected Pre-Layer Hidden States](#include-selected-pre-layer-hidden-states)
+    - [Include Additive Attention Bias](#include-additive-attention-bias)
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
@@ -274,11 +276,47 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
 
+#### Include Selected Pre-Layer Hidden States
+
+This scenario exposes the unnormalized residual stream entering selected decoder layers. Pass a non-empty, strictly increasing comma-separated list of unique zero-based layer indices. Every index must be smaller than the exported layer count. For example, layers `2`, `14`, and `25` produce outputs named `hidden_states_before_layer_2`, `hidden_states_before_layer_14`, and `hidden_states_before_layer_25`. This is independent of `include_hidden_states`, which exposes the final normalized hidden states.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options output_hidden_states_layers=2,14,25
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options output_hidden_states_layers=2,14,25
+```
+
+#### Include Additive Attention Bias
+
+This scenario adds a required `attention_bias` input to every
+`GroupQueryAttention` node. Its shape is
+`[batch_size, 1, sequence_length, total_sequence_length]`, and its dtype
+matches model I/O. Values are added to the attention scores: use zero for
+allowed attention and a large negative value for blocked attention. The
+operator's normal causal mask remains active, so an all-zero bias preserves
+ordinary prefill and cached decode.
+
+This option also keeps `position_ids` as a graph input and emits explicit
+`RotaryEmbedding` nodes. That permits non-consecutive logical positions, such
+as equal positions for sibling nodes in a speculative-decoding tree. The
+option requires `GroupQueryAttention` and cannot be combined with
+`use_paged_attention`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_attention_bias=true
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_attention_bias=true
+```
+
 #### Build with Paged Attention
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` and `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. An `engine` section is added to `genai_config.json`.
 
-Paged attention supports CUDA with `fp16` or `bf16` precision and cannot be combined with `exclude_embeds`, `exclude_lm_head`, or `prune_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`.
+Paged attention supports CUDA with `fp16` or `bf16` precision and cannot be combined with `exclude_embeds`, `exclude_lm_head`, `prune_lm_head`, or `include_attention_bias`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`.
 
 ```bash
 # From wheel:

@@ -27,6 +27,7 @@ Model = base_module.Model
 
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
+    make_attention_op = Model.make_attention_op
     make_group_query_attention = Model.make_group_query_attention
     make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
@@ -50,6 +51,11 @@ class _FakeGQAModel:
         }
         self.rope_attrs = {"interleaved": 0}
         self.io_dtype = None
+        self.input_names = {}
+        self.mask_attrs = {
+            "seqlens_k": "seqlens_k",
+            "total_seq_len": "total_seq_len",
+        }
         self.nodes = []
 
     def make_node(self, op_type, inputs, outputs, name, domain, **attributes):
@@ -70,6 +76,23 @@ def test_plain_gqa_omits_qk_norm_epsilon_attribute():
     model.make_group_query_attention("/gqa", q_path="q", k_path="k", v_path="v")
 
     assert "qk_norm_epsilon" not in model.nodes[-1]["attributes"]
+
+
+def test_gqa_attention_op_wires_optional_attention_bias():
+    model = _FakeGQAModel()
+    model.input_names["attention_bias"] = "attention_bias"
+
+    model.make_attention_op("/gqa", q_path="q", k_path="k", v_path="v")
+
+    assert model.nodes[-1]["inputs"][10] == "attention_bias"
+
+
+def test_gqa_attention_op_leaves_attention_bias_empty_by_default():
+    model = _FakeGQAModel()
+
+    model.make_attention_op("/gqa", q_path="q", k_path="k", v_path="v")
+
+    assert model.nodes[-1]["inputs"][10] == ""
 
 
 def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():

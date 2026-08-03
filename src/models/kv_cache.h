@@ -17,6 +17,12 @@ struct KeyValueCache {
 
   virtual void RewindTo(size_t index) = 0;
 
+  virtual void CompactTree(size_t stable_length, std::span<const size_t> tree_indices) {
+    (void)stable_length;
+    (void)tree_indices;
+    throw std::runtime_error("Tree cache compaction is not supported by this key-value cache.");
+  }
+
   // Note: PartialUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
   // part of the KV cache after running part of the pipeline.
   // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.
@@ -75,6 +81,7 @@ struct DefaultKeyValueCache : KeyValueCache {
   // Move present to past. Prepare present output for next generation iteration.
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
+  void CompactTree(size_t stable_length, std::span<const size_t> tree_indices) override;
 
  private:
   template <typename ScoreType>

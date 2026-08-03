@@ -361,6 +361,7 @@ struct Config {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string attention_mask{Defaults::AttentionMaskName};
+        std::string attention_bias;
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
@@ -432,6 +433,48 @@ struct Config {
     } decoder;
 
     std::optional<Decoder> draft;
+
+    struct Eagle {
+      std::string filename;
+      SessionOptions session_options;
+      std::optional<RunOptions> run_options;
+
+      int hidden_size{};
+      int draft_vocab_size{};
+      int num_key_value_heads{};
+      int head_size{};
+      int total_tokens{60};
+      int depth{7};
+      int top_k{10};
+
+      struct Inputs {
+        std::string input_ids{"input_ids"};
+        std::string target_hidden_states{"target_hidden_states"};
+        std::string recurrent_hidden_states{"recurrent_hidden_states"};
+        std::string use_target_hidden_states{"use_target_hidden_states"};
+        std::string attention_mask{"attention_mask"};
+        std::string attention_bias{"attention_bias"};
+        std::string position_ids{"position_ids"};
+        std::string past_key{"past_key"};
+        std::string past_value{"past_value"};
+      } inputs;
+
+      struct Outputs {
+        std::string draft_hidden_states{"draft_hidden_states"};
+        std::string draft_logits{"draft_logits"};
+        std::string draft_token_id{"draft_token_id"};
+        std::string mapped_token_id{"mapped_token_id"};
+        std::string draft_topk_ids{"draft_topk_ids"};
+        std::string draft_topk_log_scores{"draft_topk_log_scores"};
+        std::string mapped_topk_ids{"mapped_topk_ids"};
+        std::string present_key{"present_key"};
+        std::string present_value{"present_value"};
+      } outputs;
+
+      std::vector<std::string> target_hidden_state_names;
+    };
+
+    std::optional<Eagle> eagle;
 
   } model;
 

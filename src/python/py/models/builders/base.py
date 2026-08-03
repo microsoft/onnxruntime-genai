@@ -138,6 +138,7 @@ class Model:
         self.input_names = {
             "input_ids": "input_ids",
             "attention_mask": "attention_mask",
+            "attention_bias": "attention_bias",
             "position_ids": "position_ids",
             "inputs_embeds": "inputs_embeds",
             "past_key_values.key": [f"past_key_values.{i}.key" for i in range(self.num_layers)],
@@ -149,6 +150,7 @@ class Model:
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                      # For standard models
             "attention_mask": ir.DataType.INT64,                                                                 # For standard models
+            "attention_bias": self.io_dtype,                                                                     # Optional additive attention bias for GroupQueryAttention
             "position_ids": ir.DataType.INT64,                                                                   # For standard models
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
@@ -160,6 +162,7 @@ class Model:
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
             "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
+            "attention_bias": ["batch_size", 1, "sequence_length", "total_sequence_length"],                     # Optional additive attention bias for GroupQueryAttention
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
@@ -420,10 +423,14 @@ class Model:
 
     def make_inputs_init(self):
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
+        self.include_attention_bias = self.extra_options.get("include_attention_bias", False)
         if self.exclude_embeds:
             del self.input_names["input_ids"]
         else:
             del self.input_names["inputs_embeds"]
+
+        if not self.include_attention_bias:
+            del self.input_names["attention_bias"]
 
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
@@ -448,7 +455,14 @@ class Model:
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+        self.output_hidden_states_layers = self.extra_options.get("output_hidden_states_layers", [])
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
+
+        for layer_id in self.output_hidden_states_layers:
+            name = f"hidden_states_before_layer_{layer_id}"
+            self.output_names[name] = name
+            self.output_types[name] = self.io_dtype
+            self.output_shapes[name] = self.hidden_state_shape()
 
         if self.prune_lm_head and self.exclude_lm_head:
             print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
@@ -628,6 +642,13 @@ class Model:
             self.attention_attrs["op_type"] = "Attention"
             self.attention_attrs["use_matmul_in_attn"] = True
             print("Attention (packed) is used in this model.")
+
+        if self.include_attention_bias:
+            if self.attention_attrs["op_type"] != "GroupQueryAttention":
+                raise ValueError("include_attention_bias requires GroupQueryAttention.")
+            # Fused GQA RoPE cannot represent arbitrary logical tree positions.
+            self.attention_attrs["use_rope_in_attn"] = False
+            self.input_names.setdefault("position_ids", "position_ids")
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
@@ -882,6 +903,8 @@ class Model:
             inputs["inputs_embeds"] = self.input_names["inputs_embeds"]
         if "attention_mask" in self.input_names:
             inputs["attention_mask"] = self.input_names["attention_mask"]
+        if "attention_bias" in self.input_names:
+            inputs["attention_bias"] = self.input_names["attention_bias"]
         if "position_ids" in self.input_names:
             inputs["position_ids"] = self.input_names["position_ids"]
         if self.use_paged_attention:
@@ -2070,6 +2093,10 @@ class Model:
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value(outputs[3], new_io_dtype, shape=self.hidden_state_shape())
 
+        if location == "input" and layer_id in self.output_hidden_states_layers:
+            hidden_states = output_3 if skip else root_input
+            self.make_hidden_states_layer_output(layer_id, hidden_states)
+
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
         if skip and not self.layernorm_attrs["last_layernorm"]:
@@ -2077,6 +2104,12 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+    def make_hidden_states_layer_output(self, layer_id, hidden_states):
+        """Expose the unnormalized residual stream entering a decoder layer."""
+        output_name = f"hidden_states_before_layer_{layer_id}"
+        node_name = f"/model/layers.{layer_id}/hidden_states_before_layer/Identity"
+        self.make_node("Identity", inputs=[hidden_states], outputs=[output_name], name=node_name)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
@@ -2872,6 +2905,7 @@ class Model:
                 name,
                 seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0",
                 total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0",
+                attention_bias=self.input_names.get("attention_bias", ""),
                 **kwargs,
             )
         elif op_type == "SparseAttention":
@@ -2964,7 +2998,7 @@ class Model:
             kwargs.get("cos_cache", ""),
             kwargs.get("sin_cache", ""),
             "",  # position_ids
-            "",  # attention_bias
+            kwargs.get("attention_bias", ""),
             kwargs.get("sinks", ""),
         ]
         layer_id = kwargs.get("layer_id")

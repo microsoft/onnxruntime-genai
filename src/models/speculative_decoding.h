@@ -9,6 +9,12 @@ namespace Generators {
 
 struct Generator;
 
+bool ProviderConfigurationMatches(const Config::SessionOptions& target_options,
+                                  const Config::SessionOptions& proposer_options);
+void ValidateSpeculativeModelCompatibility(const Model& model,
+                                           const Config::Model::Decoder* proposer);
+void ValidateSpeculativeGeneratorParams(const GeneratorParams& params);
+
 // Composes two DecoderOnly_Model instances each with its own cloned Config
 // reused verbatim for session loading, KV cache, and logits I/O.
 struct SpeculativeDecodingModel : Model {

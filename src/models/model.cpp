@@ -23,6 +23,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "speculative_decoding.h"
+#include "eagle.h"
 #include "whisper.h"
 #include "parakeet.h"
 #include "parakeet_processor.h"
@@ -870,6 +871,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.eagle)
+    return std::make_shared<EagleModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured

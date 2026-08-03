@@ -135,6 +135,30 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     return hf_details
 
 
+def parse_output_hidden_states_layers(value, num_hidden_layers):
+    """Parse zero-based decoder layer indices whose input residuals become graph outputs."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("output_hidden_states_layers must be a non-empty comma-separated list of integers.")
+
+    try:
+        layer_ids = [int(layer_id.strip()) for layer_id in value.split(",")]
+    except ValueError as e:
+        raise ValueError("output_hidden_states_layers must be a non-empty comma-separated list of integers.") from e
+
+    if any(layer_id < 0 for layer_id in layer_ids):
+        raise ValueError("output_hidden_states_layers must contain only non-negative layer indices.")
+    if len(set(layer_ids)) != len(layer_ids):
+        raise ValueError("output_hidden_states_layers must not contain duplicate layer indices.")
+    if layer_ids != sorted(layer_ids):
+        raise ValueError("output_hidden_states_layers must be in strictly increasing order.")
+    if any(layer_id >= num_hidden_layers for layer_id in layer_ids):
+        raise ValueError(
+            f"output_hidden_states_layers indices must be less than the exported layer count ({num_hidden_layers})."
+        )
+
+    return layer_ids
+
+
 def check_extra_options(
     model_name,
     input_path,
@@ -154,6 +178,7 @@ def check_extra_options(
         "exclude_embeds",
         "exclude_lm_head",
         "include_hidden_states",
+        "include_attention_bias",
         "enable_cuda_graph",
         "enable_dml_graph",
         "enable_webgpu_graph",
@@ -181,7 +206,7 @@ def check_extra_options(
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head")
+            for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head", "include_attention_bias")
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -298,6 +323,17 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if "output_hidden_states_layers" in extra_options:
+        num_hidden_layers = int(
+            extra_options.get(
+                "num_hidden_layers",
+                getattr(config, "num_hidden_layers", getattr(config, "num_layers", 0)),
+            )
+        )
+        extra_options["output_hidden_states_layers"] = parse_output_hidden_states_layers(
+            extra_options["output_hidden_states_layers"], num_hidden_layers
+        )
 
     # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
     # embedding and the LM head. This is only valid when the model actually ties them.
@@ -709,6 +745,18 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                output_hidden_states_layers = Output the residual states entering selected decoder layers.
+                    The value is a non-empty, strictly increasing comma-separated list of unique zero-based layer
+                    indices (for example, output_hidden_states_layers=2,14,25). Each index must be smaller than the
+                    exported layer count. The outputs are named `hidden_states_before_layer_<index>` and contain the
+                    unnormalized residual stream immediately before that decoder layer. Default is unset (no
+                    intermediate hidden-state outputs).
+                include_attention_bias = Add a required additive attention_bias input to GroupQueryAttention. Default is false.
+                    The input shape is [batch_size, 1, sequence_length, total_sequence_length] and its dtype matches
+                    model I/O. Supply zero for allowed attention and a large negative value for blocked attention.
+                    The normal causal mask remains active, so an all-zero bias preserves ordinary prefill and decode.
+                    This option requires GroupQueryAttention, cannot be combined with use_paged_attention, and forces
+                    explicit RotaryEmbedding nodes so position_ids can contain arbitrary logical tree positions.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
@@ -716,7 +764,8 @@ def get_args():
                     `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
                     `past_sequence_lengths` metadata inputs. An `engine` section (block_size, gpu_utilization_factor,
                     max_batch_size) is added to genai_config.json. Currently only supported for the CUDA execution
-                    provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
+                    provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head,
+                    prune_lm_head, or include_attention_bias.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
