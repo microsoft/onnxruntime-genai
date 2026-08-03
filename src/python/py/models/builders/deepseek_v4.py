@@ -611,15 +611,6 @@ class DeepSeekV4FlashModel(Model):
         b = self.init(self.sd[f"{prefix}_base"][lo:hi], f"{prefix}_base/s{lo}_{hi}")
         return self.op("Add", [s, b], name, ir.DataType.FLOAT, out_shape)
 
-    def _sinkhorn(self, name, comb, shape, axis):
-        red = list(shape)
-        red[axis] = 1
-        s = self.op("ReduceSum", [comb, self.const("INT64", [axis])], f"{name}/sum",
-                    ir.DataType.FLOAT, red, keepdims=1)
-        s = self.op("Add", [s, self.const("FLOAT", self.hc_eps)], f"{name}/eps",
-                    ir.DataType.FLOAT, red)
-        return self.op("Div", [comb, s], name, ir.DataType.FLOAT, shape)
-
     def make_hc_pre(self, name, x, prefix, bs_shape):
         """Mix the ``hc`` residual streams into one and produce the re-expansion weights."""
         hc, dim = self.hc, self.dim
@@ -646,10 +637,11 @@ class DeepSeekV4FlashModel(Model):
         comb = self.op("Softmax", [comb], f"{name}/comb/sm", ir.DataType.FLOAT, comb_shape, axis=-1)
         comb = self.op("Add", [comb, self.const("FLOAT", self.hc_eps)], f"{name}/comb/eps",
                        ir.DataType.FLOAT, comb_shape)
-        comb = self._sinkhorn(f"{name}/comb/i0c", comb, comb_shape, -2)
-        for it in range(self.hc_iters - 1):
-            comb = self._sinkhorn(f"{name}/comb/i{it + 1}r", comb, comb_shape, -1)
-            comb = self._sinkhorn(f"{name}/comb/i{it + 1}c", comb, comb_shape, -2)
+        # 39 alternating row/column normalizations of a tiny hc*hc matrix: 117 nodes unrolled,
+        # so it is fused into one node to keep it off the dispatch path.
+        comb = self.op("SinkhornNormalize", [comb], f"{name}/comb/sk", ir.DataType.FLOAT,
+                       comb_shape, domain="com.microsoft",
+                       iterations=self.hc_iters, epsilon=self.hc_eps)
 
         pre_u = self.unsq(f"{name}/pre/u", pre, [-1], ir.DataType.FLOAT, pre_shape + [1])
         prod = self.op("Mul", [pre_u, xf], f"{name}/y/mul", ir.DataType.FLOAT, bs_shape + [hc, dim])
