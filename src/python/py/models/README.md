@@ -232,23 +232,37 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 #### Nemotron Parse Options
 
-Nemotron Parse exports separate encoder, decoder prefill, and decoder graphs. Its model-specific options are:
+Nemotron Parse exports a static RADIO encoder plus separate mBART prefill and
+decode graphs. The decoder graphs use the common ONNX IR builder; decode emits
+the standard main-domain `TensorScatter` operator from opset 24. Its
+model-specific options are:
 
-- `image_height` and `image_width`: fixed encoder input dimensions. Both default to `768`; the encoder graph is specialized to these dimensions.
+- `image_height` and `image_width`: fixed encoder input dimensions. They default to the checkpoint's `image_size` (or `768` when absent); the encoder graph is specialized to these dimensions.
 - `prefill_sequence_length`: fixed decoder prefill length. The default is `8`.
 - `export_components`: comma-separated components to export (`encoder`, `decoder`, or both). The default is `encoder,decoder`; selecting `decoder` also exports its prefill graph.
-- `decoder_cache_mode`: decoder KV-cache update mode. The only supported value is the default, `tensor_scatter`.
 - `cache_sequence_length`: static self-attention KV-cache and decoder attention-mask length. The default is the model's maximum sequence length and it must exceed `prefill_sequence_length`.
 - `export_device`: device used to load the model and create export inputs. Supported values are `cpu` (the default) and `cuda`.
 
-For models that provide custom Hugging Face code, explicitly set `hf_remote=true` only after verifying and trusting that code. For example, the following exports both components at a custom image and cache size:
+INT4 export uses the model builder's standard quantization options. For
+TRT-RTX, use `use_qdq=true block_size=32` to emit the
+`DequantizeLinear -> MatMul` weight-only pattern.
+
+For models that provide custom Hugging Face code, explicitly set
+`hf_remote=true` only after verifying and trusting that code. For example, the
+following exports a native-size INT4 package:
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_nemotron_parse_model -o path_to_output_folder -p fp16 -e cuda --extra_options hf_remote=true image_height=1024 image_width=1024 prefill_sequence_length=8 cache_sequence_length=4096 export_components=encoder,decoder decoder_cache_mode=tensor_scatter export_device=cuda
+python -m onnxruntime_genai.models.builder -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder export_device=cuda use_qdq=true block_size=32
 
 # From source:
-python builder.py -i path_to_nemotron_parse_model -o path_to_output_folder -p fp16 -e cuda --extra_options hf_remote=true image_height=1024 image_width=1024 prefill_sequence_length=8 cache_sequence_length=4096 export_components=encoder,decoder decoder_cache_mode=tensor_scatter export_device=cuda
+python builder.py -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder export_device=cuda use_qdq=true block_size=32
+```
+
+Run the exported package through the shared multimodal example:
+
+```bash
+python examples/python/model-mm.py -m path_to_output_folder --image_paths document.png --non_interactive
 ```
 
 #### Exclude Embedding Layer

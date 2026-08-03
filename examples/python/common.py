@@ -283,7 +283,11 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
     """
     content = None
     # Combine all image tags, audio tags, and text into one user content
-    if model_type == "phi3v":
+    if model_type == "nemotron_parse":
+        # Nemotron Parse is a document parser, not a chat model. Its task
+        # control tokens are passed directly to the native processor.
+        content = prompt
+    elif model_type == "phi3v":
         # Phi-3 vision, Phi-3.5 vision
         image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
         content = image_tags + prompt

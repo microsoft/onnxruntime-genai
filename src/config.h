@@ -356,7 +356,6 @@ struct Config {
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
 
-      std::string cache_update_mode;
       int prefill_sequence_length{};
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future

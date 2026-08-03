@@ -41,6 +41,8 @@ from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
+    external_data_size_threshold_bytes = 0
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.make_config_init(config)
@@ -1610,7 +1612,7 @@ class Model:
                 model,
                 out_path,
                 external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
+                size_threshold_bytes=self.external_data_size_threshold_bytes,
                 callback=callback,
             )
 
@@ -1923,6 +1925,35 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
+
+    def make_tensor_scatter(
+        self,
+        name,
+        data,
+        updates,
+        indices,
+        dtype,
+        shape,
+        *,
+        output=None,
+        axis=-2,
+        mode="linear",
+    ):
+        """Update slices of a tensor with the standard ONNX TensorScatter op."""
+        self.model.graph.opset_imports[""] = max(
+            self.model.graph.opset_imports.get("", 0), 24
+        )
+        output = output or f"{name}/output_0"
+        self.make_node(
+            "TensorScatter",
+            inputs=[data, updates, indices],
+            outputs=[output],
+            name=name,
+            axis=axis,
+            mode=mode,
+        )
+        self.make_value(output, dtype, shape=shape)
+        return output
 
     def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
         output = f"{name}/output_0"
