@@ -133,6 +133,25 @@ TEST(ModelPackage, RejectsFlatDirectory) {
   EXPECT_NE(message.find("is not a model package"), std::string::npos) << message;
 }
 
+TEST(ModelPackage, FlatDirectoryWithManifestIsNotAPackage) {
+  // A flat model directory may carry its own unrelated manifest.json. The root genai_config.json
+  // marks it as flat, so it must not be treated as a model package.
+  const auto root = MakeTempDir("flat_with_manifest");
+  WriteFile(root / "genai_config.json",
+            "{ \"model\": { \"type\": \"tiny-test-model\","
+            " \"vocab_size\": 16, \"context_length\": 32 }, \"search\": {} }");
+  WriteFile(root / "model.onnx", "placeholder");
+  WriteFile(root / "manifest.json", "{ \"unrelated\": true }");
+
+  // Passing an ep treats the path as a package; it must be rejected as a flat directory instead.
+  const std::string message = CaptureThrowMessage(
+      [&] { OgaConfig::CreateFromPackageEp(root.string().c_str(), "cpu"); });
+  EXPECT_NE(message.find("is not a model package"), std::string::npos) << message;
+
+  // Loading it as a flat directory (no ep) succeeds despite the manifest.json.
+  EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+}
+
 TEST(ModelPackage, RejectsMissingPath) {
   EXPECT_THROW(OgaConfig::CreateFromPackageEp("/this/path/does/not/exist/12345", "cpu"),
                std::runtime_error);

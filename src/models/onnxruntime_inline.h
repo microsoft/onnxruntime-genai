@@ -121,6 +121,10 @@ inline size_t SizeOf(ONNXTensorElementDataType type) {
       return sizeof(Ort::Float16_t);
     case Ort::TypeToTensorType<Ort::BFloat16_t>:
       return sizeof(Ort::BFloat16_t);
+    // FP8 KV caches are stored as single-byte elements. There is no Ort wrapper type for them,
+    // so match the ONNX element type directly.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+      return sizeof(uint8_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
@@ -721,11 +725,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const 
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA_V2(this, &provider_options));
-  return *this;
-}
-
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options) {
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_ROCM(this, &provider_options));
   return *this;
 }
 

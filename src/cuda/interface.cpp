@@ -7,7 +7,9 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"
+#include <charconv>
 #include <cstdarg>
+#include <system_error>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -81,13 +83,19 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
-    Ort::api = &api;
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
   }
 
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
+  }
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("Cuda",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -186,6 +194,27 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
+
+  bool SupportsPhi3RopeRewind(const Config& config) const override {
+    for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
+      if (provider_options.name != "NvTensorRtRtx")
+        continue;
+
+      for (const auto& [name, value] : provider_options.options) {
+        if (name != "multi_rotary_cache_concat_offset")
+          continue;
+
+        int offset{};
+        const auto* const value_begin = value.data();
+        const auto* const value_end = value_begin + value.size();
+        const auto [parse_end, error_code] = std::from_chars(value_begin, value_end, offset);
+        return error_code == std::errc{} && parse_end == value_end && offset > 0 &&
+               offset <= config.model.context_length;
+      }
+    }
+
+    return false;
+  }
 };
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
@@ -239,8 +268,11 @@ void operator delete(void* p, size_t /*size*/) noexcept {
 #endif
 
 extern "C" {
-Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
   Generators::gp_genai = p_genai;
+  // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
+  // initialization to CudaInterfaceImplBase::InitOrt would be inadequate, as GetMemoryInfo runs before InitOrt.
+  Ort::api = ort_api;
   if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {

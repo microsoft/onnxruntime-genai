@@ -4,8 +4,9 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generators.h"
+#include <algorithm>
+#include <cctype>
 #include <cstring>
-#include <cstdlib>
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
@@ -151,9 +152,32 @@ void Shutdown() {
 
   // Reset g_ort_globals directly (rather than through GetOrtGlobals(), which would lazily construct
   // the globals just to immediately tear them down). If genai was never initialized there is nothing
-  // to do. Delete now because on process exit is too late. ~OrtGlobals tears down the device
-  // interfaces (including the RyzenAI EP shutdown) and unloads the genai add-on libraries.
+  // to do. ~OrtGlobals clears the graph session cache and the device allocators, tears down the
+  // device interfaces (including the RyzenAI EP shutdown), unloads the genai add-on libraries, and
+  // finally releases the OrtEnv. All of that runs on both the runtime and the process-exit path; the
+  // only difference at process exit is that the OrtEnv itself is leaked rather than destroyed, for
+  // the reason described below.
   std::scoped_lock lock{g_ort_globals_mutex};
+
+  if (g_ort_globals && g_process_exiting) {
+    // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
+    // destroying the OrtEnv is unsafe: releasing it from within __cxa_finalize drives ORT's
+    // Environment/LoggingManager destructor to lock a mutex whose backing static may already be
+    // finalized, which throws "mutex lock failed: Invalid argument" -- and a throwing destructor at
+    // teardown is uncaught, so the process aborts via std::terminate. Nothing else ~OrtGlobals does
+    // (clearing the graph session cache, tearing down device interfaces including the RyzenAI EP
+    // shutdown, unloading the CUDA add-on library, or releasing the trivial-session allocators)
+    // touches that ORT static state, so only the env itself needs to be leaked: release it from the
+    // unique_ptr before ~OrtGlobals runs below, so the rest of teardown still happens in full. The
+    // released OrtEnv is simply never destructed -- it stays validly constructed in memory for as
+    // long as the remaining teardown code (or anything else) needs it, and the OS reclaims it when
+    // the process exits. The default OrtEnv owns no thread pools (genai never asks for global ones),
+    // so leaking it keeps no threads alive. g_process_exiting is also set when the genai module is
+    // unloaded at runtime (dlclose / FreeLibrary), where destroying the env would in fact be safe;
+    // the cost there is one leaked OrtEnv per load/unload cycle, which is preferable to aborting.
+    (void)g_ort_globals->env_.release();
+  }
+
   g_ort_globals.reset();
 }
 
@@ -288,9 +312,9 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
     return reinterpret_cast<decltype(&GetInterface)>(
-        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
+        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str(), Ort::api);
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }
@@ -459,12 +483,15 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return params.p_device->CreateGreedy(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+Generator::Generator(const Model& model, const GeneratorParams& params)
+    : model_{model.shared_from_this()},
+      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)} {
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
+    LogGeneratorCreate(params);
     return;
   }
 
@@ -509,17 +536,27 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
+  LogGeneratorCreate(params);
+}
+
+void Generator::LogGeneratorCreate(const GeneratorParams& params) {
+  generation_telemetry_.LogGeneratorCreate(
+      params.search.batch_size,
+      params.search.num_beams,
+      params.search.max_length,
+      params.search.top_k,
+      params.search.top_p,
+      params.search.temperature,
+      params.search.do_sample,
+      params.use_graph_capture,
+      !params.guidance_type.empty());
 }
 
 void Generator::InitializePhi3RopeThreshold(const GeneratorParams& params) {
-  // TRT-RTX and DML EPs use a single rope factor for all tokens, so no ROPE rewind is needed.
-  const bool ep_uses_single_rope_factor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-                                          model_->p_device_->GetType() == DeviceType::DML;
-
   // Phi3 ROPE factor rewind threshold: 4097 for phi3/phimoe, 8193 for phi3small, 0 otherwise
   // TODO: Extend to support batch size > 1, num beams > 1, and multimodal models
   const auto& model_type = model_->config_->model.type;
-  if (params.BatchBeamSize() == 1 && !ep_uses_single_rope_factor) {
+  if (params.BatchBeamSize() == 1 && model_->p_device_->SupportsPhi3RopeRewind(*model_->config_)) {
     if (model_type == "phi3" || model_type == "phimoe")
       phi3_rope_threshold_ = 4097;
     else if (model_type == "phi3small")
@@ -549,6 +586,8 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
     }
   }
 }
+
+Generator::~Generator() = default;
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
@@ -604,6 +643,25 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+  std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
+  if (generation_telemetry_.BeginAppend()) {
+    bool used_vision = false, used_audio = false;
+    for (const auto& extra : extra_inputs_) {
+      std::string name = extra.name;
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name.find("image") != std::string::npos || name.find("pixel") != std::string::npos ||
+          name.find("vision") != std::string::npos)
+        used_vision = true;
+      else if (name.find("audio") != std::string::npos)
+        used_audio = true;
+    }
+    append_input_modality = (used_vision && used_audio) ? "multimodal"
+                            : used_vision               ? "vision"
+                            : used_audio                ? "audio"
+                                                        : "text";
+  }
+
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
@@ -614,6 +672,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
+
+  generation_telemetry_.CompleteAppend(
+      input_ids.size(), state_->params_->search.num_beams, append_input_modality);
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -680,6 +741,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
         stream_ << std::endl;
       }
       SetLogits(logits);
+      generation_telemetry_.OnTokenGenerated(static_cast<int64_t>(ff_tokens.size()));
     }
   }
 
@@ -756,6 +818,9 @@ void Generator::GenerateNextToken() {
     state_->SetExtraInputs(extra_inputs_);
     extra_inputs_.clear();
     transducer_state_->StepToken();
+
+    generation_telemetry_.OnTokenGenerated(
+        static_cast<int64_t>(transducer_state_->GetStepTokens().size()));
     return;
   }
 
@@ -771,8 +836,12 @@ void Generator::GenerateNextToken() {
   // needs recomputation of Position IDs and KV Cache via rewind + re-append.
   if (phi3_rope_threshold_ != 0 && search_->GetSequenceLength() == phi3_rope_threshold_) {
     auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
-    RewindToLength(0);
-    AppendTokens(current_seq);
+    {
+      [[maybe_unused]] auto suppress_telemetry_append_tracking =
+          generation_telemetry_.SuppressAppendTracking();
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
   }
 
   if (!computed_logits_) {
@@ -789,6 +858,7 @@ void Generator::GenerateNextToken() {
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search.no_repeat_ngram_size);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -801,6 +871,10 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
+
+  generation_telemetry_.OnTokenGenerated(
+      static_cast<int64_t>(search_->params_->BatchBeamSize()));
+
   switch (sampling_method_) {
     case SamplingMethod::kGreedy:
       search_->SelectTop();
@@ -822,13 +896,19 @@ void Generator::GenerateNextToken() {
 void Generator::RewindToLength(size_t new_length) {
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
-  if (new_length > search_->GetSequenceLength())
+  const size_t current_length = search_->GetSequenceLength();
+  if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
-  if (new_length == search_->GetSequenceLength())
+  if (new_length == current_length)
     return;
   size_t batch_size = search_->params_->search.batch_size;
   if (batch_size > 1 && new_length != 0)
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+  if (search_->params_->search.num_beams > 1)
+    throw std::runtime_error("RewindToLength is not supported with beam search");
+  const int64_t rewound_token_count =
+      static_cast<int64_t>(current_length - new_length) *
+      static_cast<int64_t>(search_->params_->BatchBeamSize());
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {
@@ -836,6 +916,7 @@ void Generator::RewindToLength(size_t new_length) {
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
+  generation_telemetry_.OnRewind(rewound_token_count);
 }
 
 DeviceSpan<float> Generator::GetLogits() {

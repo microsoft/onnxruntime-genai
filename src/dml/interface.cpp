@@ -117,6 +117,8 @@ struct InterfaceImpl : DeviceInterface {
 
   DeviceType GetType() const override { return DeviceType::DML; }
 
+  bool SupportsPhi3RopeRewind(const Config& /*config*/) const override { return false; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);
@@ -135,6 +137,13 @@ struct InterfaceImpl : DeviceInterface {
 
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
+  }
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return OrtMemoryInfo::Create("DML",
+                                 OrtAllocatorType::OrtDeviceAllocator,
+                                 0,
+                                 OrtMemType::OrtMemTypeDefault);
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {

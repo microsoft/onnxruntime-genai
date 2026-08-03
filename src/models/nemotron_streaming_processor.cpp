@@ -9,6 +9,75 @@
 
 namespace Generators {
 
+template <typename T, typename Convert>
+void PopulateMelTensorImpl(T* output, std::span<const float> cache,
+                           int cache_pos, std::span<const float> mel,
+                           int num_frames, int num_mels, Convert convert) {
+  const int cache_frames = static_cast<int>(cache.size()) / num_mels;
+  for (int frame = 0; frame < cache_frames; ++frame) {
+    const int source_frame = (cache_pos + frame) % cache_frames;
+    for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+      output[frame * num_mels + mel_bin] = convert(cache[source_frame * num_mels + mel_bin]);
+  }
+
+  T* chunk_output = output + cache.size();
+  for (int frame = 0; frame < num_frames; ++frame) {
+    for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+      chunk_output[frame * num_mels + mel_bin] = convert(mel[mel_bin * num_frames + frame]);
+  }
+}
+
+void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
+                       int cache_pos, std::span<const float> mel,
+                       int num_frames, int num_mels) {
+  if (num_frames < 0 || num_mels <= 0 ||
+      cache.size() % static_cast<size_t>(num_mels) != 0 ||
+      mel.size() != static_cast<size_t>(num_frames * num_mels) ||
+      output.GetTensorTypeAndShapeInfo()->GetElementCount() != cache.size() + mel.size())
+    throw std::runtime_error("PopulateMelTensor: incompatible buffer dimensions");
+
+  auto output_type = output.GetTensorTypeAndShapeInfo()->GetElementType();
+  if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    auto* output_data = output.GetTensorMutableData<float>();
+    const int cache_frames = static_cast<int>(cache.size()) / num_mels;
+    const int first_run = cache_frames - cache_pos;
+    std::memcpy(output_data,
+                cache.data() + cache_pos * num_mels,
+                static_cast<size_t>(first_run * num_mels) * sizeof(float));
+    std::memcpy(output_data + first_run * num_mels,
+                cache.data(),
+                static_cast<size_t>((cache_frames - first_run) * num_mels) * sizeof(float));
+
+    auto* chunk_output = output_data + cache.size();
+    for (int frame = 0; frame < num_frames; ++frame) {
+      for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+        chunk_output[frame * num_mels + mel_bin] = mel[mel_bin * num_frames + frame];
+    }
+  } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    PopulateMelTensorImpl(output.GetTensorMutableData<Ort::Float16_t>(), cache, cache_pos,
+                          mel, num_frames, num_mels, [](float value) {
+                            return Ort::Float16_t{FastFloat32ToFloat16(value)};
+                          });
+  } else {
+    throw std::runtime_error("PopulateMelTensor: output must be float32 or float16");
+  }
+}
+
+void UpdateMelCache(std::span<float> cache, int& cache_pos,
+                    std::span<const float> mel, int num_frames, int num_mels) {
+  const int cache_frames = static_cast<int>(cache.size()) / num_mels;
+  const int frames_to_cache = std::min(num_frames, cache_frames);
+  const int first_frame_to_cache = num_frames - frames_to_cache;
+  for (int frame = 0; frame < frames_to_cache; ++frame) {
+    const int destination_frame = (cache_pos + frame) % cache_frames;
+    for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin) {
+      cache[destination_frame * num_mels + mel_bin] =
+          mel[mel_bin * num_frames + first_frame_to_cache + frame];
+    }
+  }
+  cache_pos = (cache_pos + frames_to_cache) % cache_frames;
+}
+
 NemotronStreamingProcessor::NemotronStreamingProcessor(Model& model)
     : model_{model} {
   auto* nemotron_model = dynamic_cast<NemotronSpeechModel*>(&model);
@@ -86,7 +155,7 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
 }
 
 std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {
-  auto& allocator = model_.allocator_cpu_;
+  auto& allocator = GetDeviceInterface(DeviceType::CPU)->GetAllocator();
 
   // Compute mel spectrogram for this chunk: returns [num_mels, num_frames] (frequency-major)
   auto [mel_data, num_frames] = mel_extractor_.Process(audio_chunk, chunk_samples);
@@ -97,48 +166,16 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
 
   // Create output tensor: [1, total_mel_frames, num_mels] (time-major)
   auto signal_type = model_.session_info_.GetInputDataType(nemotron_config_.enc_in_audio);
-
-  // TODO: Optimize for GPU/CUDA later, CPU always expects float32.
-  if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    throw std::runtime_error("NemotronStreamingProcessor only supports float32 encoder input. Got type: " + std::to_string(signal_type));
+  if (signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+      signal_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    throw std::runtime_error("NemotronStreamingProcessor only supports float32 or float16 encoder input. Got type: " + std::to_string(signal_type));
   }
   auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
-  float* signal_data = processed_signal->GetTensorMutableData<float>();
+  PopulateMelTensor(*processed_signal, mel_pre_encode_cache_, cache_pos_,
+                    mel_data, num_frames, num_mels);
 
-  // Materialize cache frames from ring buffer (oldest-first starting at cache_pos_)
-  // Use at most 2 memcpys instead of per-frame copies
-  int first_run = std::min(cache_size - cache_pos_, cache_size);
-  std::memcpy(signal_data,
-              mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
-              first_run * num_mels * sizeof(float));
-  if (first_run < cache_size) {
-    std::memcpy(signal_data + first_run * num_mels,
-                mel_pre_encode_cache_.data(),
-                (cache_size - first_run) * num_mels * sizeof(float));
-  }
-
-  // Transpose mel from [num_mels, num_frames] directly into output tensor after cache
-  float* out_ptr = signal_data + cache_size * num_mels;
-  for (int t = 0; t < num_frames; ++t) {
-    for (int m = 0; m < num_mels; ++m) {
-      out_ptr[t * num_mels + m] = mel_data[m * num_frames + t];
-    }
-  }
-
-  // Update ring buffer with the last cache_size frames (or all if fewer)
-  int frames_to_cache = std::min(num_frames, cache_size);
-  const float* cache_src = out_ptr + (num_frames - frames_to_cache) * num_mels;
-  int frames_to_end = std::min(frames_to_cache, cache_size - cache_pos_);
-  std::memcpy(mel_pre_encode_cache_.data() + cache_pos_ * num_mels,
-              cache_src,
-              frames_to_end * num_mels * sizeof(float));
-  if (frames_to_end < frames_to_cache) {
-    std::memcpy(mel_pre_encode_cache_.data(),
-                cache_src + frames_to_end * num_mels,
-                (frames_to_cache - frames_to_end) * num_mels * sizeof(float));
-  }
-  cache_pos_ = (cache_pos_ + frames_to_cache) % cache_size;
+  UpdateMelCache(mel_pre_encode_cache_, cache_pos_, mel_data, num_frames, num_mels);
 
   return processed_signal;
 }

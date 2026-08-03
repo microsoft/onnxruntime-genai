@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import os
+import re
 import shutil
 import sysconfig
 import tempfile
@@ -19,20 +22,17 @@ from _test_utils import register_plugin_providers
 
 logger = logging.getLogger(__name__)
 
-
-devices = ["cpu"]
-
 # Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
 register_plugin_providers(logger)
+
+has_accelerator_ep = og.is_cuda_available() or og.is_dml_available() or og.is_webgpu_available()
+devices = [] if has_accelerator_ep else ["cpu"]
 
 if og.is_cuda_available():
     devices.append("cuda")
 
 if og.is_dml_available():
     devices.append("dml")
-
-if og.is_rocm_available():
-    devices.append("rocm")
 
 if og.is_openvino_available():
     devices.append("openvino")
@@ -55,6 +55,11 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
+
+def test_telemetry_control():
+    og.disable_telemetry_events()
+    og.enable_telemetry_events()
 
 
 def test_log_callback(test_data_path):
@@ -113,7 +118,7 @@ def test_log_filename(test_data_path):
     og.set_log_callback(None)
 
 
-def test_NamedTensors():
+def test_named_tensors():
     named_tensors = og.NamedTensors()
     named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
     named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
@@ -161,7 +166,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
 
     assert int(search_params.get_search_options()["max_length"]) == 10
-    assert search_params.get_search_options()["early_stopping"] == True
+    assert search_params.get_search_options()["early_stopping"]
     assert int(generator.token_count()) == 4
 
     while not generator.is_done():
@@ -284,12 +289,6 @@ def test_rewind(test_data_path, relative_model_path):
 
 
 # Test Model Loading with No Chat Template
-
-
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])
 def test_tokenizer_encode_decode(device, phi2_for, batch):
@@ -316,10 +315,6 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
 
 
 # Test Chat Template Supported Model
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi3_chat_template(device, phi3_for):
     model_path = phi3_for(device)
@@ -332,14 +327,10 @@ def test_phi3_chat_template(device, phi3_for):
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to apply chat template: {e}"
+        raise AssertionError(f"Error while trying to apply chat template: {e}") from e
 
 
 # Test Chat Template Unsupported Model with Template String Override
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi2_chat_template(device, phi2_for):
     model_path = phi2_for(device)
@@ -355,13 +346,9 @@ def test_phi2_chat_template(device, phi2_for):
     try:
         tokenizer.apply_chat_template(template_str=template_string, messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to override chat template: {e}"
+        raise AssertionError(f"Error while trying to override chat template: {e}") from e
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_stream(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -383,10 +370,6 @@ def test_stream(device, phi2_for):
         assert decoded_string == prompt
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
     if device == "dml":
@@ -408,14 +391,10 @@ def test_batching(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_e2e(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -437,14 +416,10 @@ def test_e2e(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("wrapper_bytes_function", [lambda x: x, bytearray, memoryview])
 def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
@@ -470,7 +445,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -555,10 +530,6 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
@@ -722,10 +693,6 @@ def test_phi3v_preprocessing_multiple_images(test_data_path, relative_model_path
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize("multiple_adapters", [True, False])
 def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     def _prepare_adapter_model(test_data_path):
@@ -848,10 +815,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize(
     "extra_inputs",
     [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)],
@@ -999,9 +962,8 @@ def test_streaming_asr_create(nemotron_speech_model_path):
 
 def _load_streaming_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
-    import json
     config_path = os.path.join(model_path, "genai_config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
     return config["model"]["sample_rate"], config["model"]["chunk_samples"]
 
@@ -1144,7 +1106,6 @@ def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
 
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
-    import re
 
     def normalize(text):
         text = re.sub(r"[^\w\s]", "", text.lower())
@@ -1169,7 +1130,7 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
 def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
     """Test that transcription of a known audio file has acceptable WER."""
     try:
-        import soundfile as sf
+        sf = importlib.import_module("soundfile")
     except ImportError:
         pytest.skip("soundfile not installed")
         return
@@ -1185,9 +1146,10 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     if sr != sample_rate:
         try:
-            import scipy.signal
+            scipy_signal = importlib.import_module("scipy.signal")
+
             num_samples = int(len(audio) * sample_rate / sr)
-            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+            audio = scipy_signal.resample(audio, num_samples).astype(np.float32)
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
@@ -1215,8 +1177,77 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     )
 
     wer = _word_error_rate(reference, transcript)
-    assert wer < 0.15, (
-        f"WER too high: {wer:.1%}\n"
-        f"  Reference:  {reference}\n"
-        f"  Hypothesis: {transcript.lower()}"
-    )
+    assert wer < 0.15, f"WER too high: {wer:.1%}\n  Reference:  {reference}\n  Hypothesis: {transcript.lower()}"
+
+
+# ---------------------------------------------------------------------------
+# Graph capture tests
+# ---------------------------------------------------------------------------
+# Note: Graph capture tests use separate fixtures (qwen_graph_for) that resolve
+# to models stored under "-graph" aliases. This keeps them isolated from regular
+# unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.), which use
+# different fixtures (phi4_for, qwen_for) and thus won't accidentally run on
+# graph-capture-enabled models.
+#
+# Graph capture requires expensive recompilation and model generation, so we only
+# build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
+    """Verify that Qwen generates deterministically with graph capture across multiple runs."""
+    if device not in {"cuda", "webgpu"}:
+        # TODO: fix this for DML
+        pytest.skip(f"Graph capture is not supported for Qwen-2.5 on {device}.")
+
+    model = og.Model(qwen_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Qwen graph capture model produced different outputs across two identical greedy runs"
+
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_phi4_graph_capture_output_consistency(phi4_graph_for, device):
+    """Verify that Phi-4-mini generates deterministically with graph capture across multiple runs.
+
+    Graph capture CI is currently unstable on DML, so this test is restricted to WebGPU.
+    CUDA is excluded because If nodes break CUDA graph capture for Phi-4-mini.
+    """
+    if device not in {"webgpu"}:
+        # TODO: re-enable DML once graph-capture CI becomes stable on DML.
+        pytest.skip(f"Graph capture is not supported for Phi-4 mini on {device}.")
+    model = og.Model(phi4_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Phi-4-mini graph capture model produced different outputs across two identical greedy runs"

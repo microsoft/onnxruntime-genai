@@ -19,6 +19,7 @@ env:
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
   binaryDir: 'build/winml/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
@@ -65,7 +66,7 @@ jobs:
           # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
           # time and memory usage manageable. The preset's default arch list is for
           # release packaging, not CI validation.
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='2.1.1' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='2.1.1' -DNUGET_PACKAGE_SOURCE='${{ env.ORT_NIGHTLY_SOURCE }}' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real
 
       - name: Build with CMake
         run: |
