@@ -161,6 +161,9 @@ class _Worker:
         self.cache_out = [o.name for o in outs[1:]]
         if len(self.cache_in) != len(self.cache_out):
             raise ProtocolError("past/present count mismatch")
+        # Pooled entries are addressed by the block table, so their first dimension is
+        # blocks rather than rows and they must never be sliced per batch row.
+        self._pooled = [n in getattr(self, "pool_blocks", {}) for n in self.cache_in]
 
         # Two full copies of the cache, allocated once and ping-ponged.  The paged
         # kv cache is the exception: PagedAttention updates it in place and ORT
@@ -215,7 +218,7 @@ class _Worker:
         torch, ort = self.torch, self.ort
         self.g_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
         self.g_past = torch.zeros((self.batch,), dtype=torch.int64, device="cuda")
-        self.g_logits = self._logits_buf(1)
+        self.g_logits = self._logits_buf(1, self.batch)
 
         # Prefill is not capturable -- every chunk is a different shape -- so it runs
         # under the reserved id that tells the EP to skip capture entirely.
@@ -320,125 +323,173 @@ class _Worker:
         return self.torch.zeros(shape, dtype=getattr(self.torch, _DTYPE[spec.type]),
                                 device="cuda")
 
-    def _logits_buf(self, seq_len):
-        """Reuse one buffer per sequence length; decode only ever needs S=1."""
-        buf = self._logits.get(seq_len)
+    def _logits_buf(self, seq_len, rows):
+        """Reuse one buffer per (rows, sequence length); decode only ever needs S=1."""
+        buf = self._logits.get((rows, seq_len))
         if buf is None:
-            buf = self.torch.empty((self.batch, seq_len, self.vocab),
+            buf = self.torch.empty((rows, seq_len, self.vocab),
                                    dtype=self.torch.float32, device="cuda")
             # Prefill buffers are large (S x 129280 x 4B) and each prompt has its own
             # length, so keep only the decode buffer and the newest prefill buffer.
-            self._logits = {k: v for k, v in self._logits.items() if k == 1}
-            self._logits[seq_len] = buf
+            self._logits = {k: v for k, v in self._logits.items() if k[1] == 1}
+            self._logits[(rows, seq_len)] = buf
         return buf
 
-    def _step(self, ids, past):
-        """One session run.  Returns the logits of the final position."""
+    def _step(self, ids, past_t, row=None):
+        """One session run.  Returns the final position's logits, one row per sequence.
+
+        ``row`` restricts the run to a single batch row, which is how prefill works:
+        prompts have different lengths, so each sequence is filled independently.
+        Pooled kv entries are shared and reached through the block table, so only the
+        row-shaped caches and block tables get sliced.
+        """
         torch = self.torch
-        if self._graph_io is not None and ids.shape[1] == 1:
-            return self._step_captured(ids, past)
+        if row is None and self._graph_io is not None and ids.shape[1] == 1:
+            return self._step_captured(ids, past_t)
         src, dst = self.cache[self.cur], self.cache[1 - self.cur]
-        seq_len = ids.shape[1]
-        logits = self._logits_buf(seq_len)
-        # past_lens carries one prior length per batch row; this engine runs a
-        # single sequence at a time, so it is a one-element vector.
-        past_t = torch.full((ids.shape[0],), past, dtype=torch.int64, device="cuda")
+        sl = slice(None) if row is None else slice(row, row + 1)
+        rows = ids.shape[0]
+        logits = self._logits_buf(ids.shape[1], rows)
 
         io = self.sess.io_binding()
         inputs = ([("input_ids", ids), ("past_lens", past_t)]
-                  + list(self.const_in.items()) + list(zip(self.cache_in, src)))
+                  + [(n, t[sl]) for n, t in self.const_in.items()]
+                  + [(n, t if p else t[sl])
+                     for n, t, p in zip(self.cache_in, src, self._pooled)])
         for name, t in inputs:
             io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
-        for name, t in [("logits", logits)] + list(zip(self.cache_out, dst)):
+        outputs = ([("logits", logits)]
+                   + [(n, t if p else t[sl])
+                      for n, t, p in zip(self.cache_out, dst, self._pooled)])
+        for name, t in outputs:
             io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
         self.sess.run_with_iobinding(io, self._ro_skip)
 
         self.cur = 1 - self.cur
-        return logits[0, -1]
+        return logits[:, -1]
 
-    def _step_captured(self, ids, past):
+    def _prefill_row(self, b, prompt):
+        """Chunked prefill for one batch row.  Returns that row's final logits.
+
+        Rows run a different number of chunks and so end on different parities. The
+        batched decode loop reads one parity for the whole batch, so each row's fresh
+        state is mirrored into the other copy before the next row starts.
+        """
+        torch = self.torch
+        ids = torch.tensor([prompt], dtype=torch.int64, device="cuda")
+        chunk = self.prefill_chunk if self.paged else len(prompt)
+        past, logits = 0, None
+        while ids.shape[1] > 0:
+            take = min(chunk, ids.shape[1])
+            past_t = torch.full((1,), past, dtype=torch.int64, device="cuda")
+            logits = self._step(ids[:, :take], past_t, row=b)
+            past += take
+            ids = ids[:, take:]
+        for j, pooled in enumerate(self._pooled):
+            if not pooled:
+                self.cache[1 - self.cur][j][b].copy_(self.cache[self.cur][j][b])
+        return logits[0].clone()
+
+    def _step_captured(self, ids, past_t):
         """One decode step through the captured graph for the current parity."""
         torch = self.torch
         parity = self.cur
         self.g_ids.copy_(ids)
-        self.g_past.fill_(past)
+        self.g_past.copy_(past_t)
         # The two writes above are queued on torch's stream, the replay runs on ORT's.
         # Nothing orders them, so publish them before handing over.
         torch.cuda.current_stream().synchronize()
         self.sess.run_with_iobinding(self._graph_io[parity], self._ro[parity])
         self.cur = 1 - parity
-        return self.g_logits[0, -1]
+        return self.g_logits[:, -1]
 
-    def generate(self, prompt, max_new_tokens, eos_token_ids, chan):
-        """Decode under the engine's direction.
+    def generate(self, prompts, max_new_tokens, eos_token_ids, chan):
+        """Decode a batch of prompts under the engine's direction.
 
-        After every step the rank reports its own argmax and waits to be told
-        which token to append: the ranks' logits are *nearly* but not always
+        After every step the rank reports its own argmax for each row and waits to
+        be told what to append: the ranks' logits are *nearly* but not always
         bit-identical, and a single disagreement would desynchronize the group
         for good.
+
+        Every row steps on every iteration, finished ones included. The step costs
+        the same either way -- it is ~18k kernel launches whatever the rows contain --
+        and holding the batch shape fixed is what lets the step stay a replayable
+        graph.
         """
         torch = self.torch
+        if len(prompts) > self.batch:
+            raise ProtocolError("%d prompts for a batch-%d worker" % (len(prompts), self.batch))
         for buf in self.cache:
             for t in buf:
                 t.zero_()
         self.cur = 0
 
         eos = set(eos_token_ids)
-        budget = self.max_seq_len - len(prompt) if self.max_seq_len else max_new_tokens
-        limit = max(0, min(max_new_tokens, budget))
+        lens = [len(p) for p in prompts]
+        limits = [max(0, min(max_new_tokens, self.max_seq_len - n if self.max_seq_len
+                             else max_new_tokens)) for n in lens]
 
-        ids = torch.tensor([prompt], dtype=torch.int64, device="cuda")
-        past, produced, stop, finite = 0, [], None, True
-        t_prefill = t_decode = 0.0
-        # Chunked prefill.  Paged mode needs it for correctness -- the window ring is
-        # sized for `prefill_chunk` -- and it costs nothing anywhere else, since the
-        # only logits that matter are the final chunk's.
-        chunk = self.prefill_chunk if self.paged else len(prompt)
-        while ids.shape[1] > chunk:
-            t0 = time.time()
-            self._step(ids[:, :chunk], past)
-            t_prefill += time.time() - t0
-            past += chunk
-            ids = ids[:, chunk:]
-        for step in range(limit):
-            t0 = time.time()
-            logits = self._step(ids, past)
-            top = torch.topk(logits, 2)
-            local = int(top.indices[0])  # the D2H read also synchronizes the stream
-            gap = float(top.values[0] - top.values[1])
-            dt = time.time() - t0
-            if step == 0:
-                t_prefill += dt
-                finite = bool(torch.isfinite(logits).all())
-            else:
-                t_decode += dt
+        t0 = time.time()
+        rows = [self._prefill_row(b, p) for b, p in enumerate(prompts)]
+        # Unused rows still run; leave them empty so they only ever attend to their
+        # own current token and cannot produce NaNs out of the zeroed cache.
+        while len(rows) < self.batch:
+            rows.append(torch.zeros_like(rows[0]))
+            lens.append(0)
+            limits.append(0)
+        logits = torch.stack(rows)
+        t_prefill = time.time() - t0
+        finite = bool(torch.isfinite(logits[:len(prompts)]).all())
 
+        past_t = torch.tensor(lens, dtype=torch.int64, device="cuda")
+        step_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
+        produced = [[] for _ in prompts]
+        done = [limits[b] == 0 for b in range(len(prompts))]
+        stop = [("length" if limits[b] < max_new_tokens else "max_new_tokens")
+                for b in range(len(prompts))]
+        t_decode, steps = 0.0, 0
+
+        for step in range(max(limits) if limits else 0):
+            top = torch.topk(logits, 2, dim=-1)
+            local = top.indices[:, 0].tolist()  # the D2H read also synchronizes
+            gaps = (top.values[:, 0] - top.values[:, 1]).tolist()
             chan.send({"event": "token", "rank": self.rank, "step": step,
-                       "tok": local, "gap": gap})
+                       "toks": local, "gaps": gaps})
             reply = chan.recv(_FOREVER)
             if reply.get("cmd") == "abort":
-                stop = "abort"
+                for b in range(len(prompts)):
+                    if not done[b]:
+                        stop[b] = "abort"
                 break
-            nxt = reply["tok"]
+            nxt = reply["toks"]
 
-            past += ids.shape[1]
-            produced.append(nxt)
-            if nxt in eos:
-                stop = "eos"
+            for b in range(len(prompts)):
+                if done[b]:
+                    continue
+                produced[b].append(nxt[b])
+                if nxt[b] in eos:
+                    done[b], stop[b] = True, "eos"
+                elif len(produced[b]) >= limits[b]:
+                    done[b] = True
+            if all(done):
                 break
-            ids = torch.tensor([[nxt]], dtype=torch.int64, device="cuda")
 
-        if stop is None:
-            stop = "length" if limit < max_new_tokens else "max_new_tokens"
-        n = len(produced)
+            step_ids[:, 0] = torch.tensor(nxt, dtype=torch.int64, device="cuda")
+            t1 = time.time()
+            logits = self._step(step_ids, past_t)
+            t_decode += time.time() - t1
+            steps += 1
+            past_t += 1
+
         return {
             "tokens": produced,
             "stop_reason": stop,
             "finite": finite,
-            "prompt_len": len(prompt),
+            "prompt_lens": lens[:len(prompts)],
             "prefill_s": t_prefill,
             "decode_s": t_decode,
-            "decode_tok_s": (n - 1) / t_decode if n > 1 and t_decode > 0 else 0.0,
+            "decode_step_s": t_decode / steps if steps else 0.0,
+            "decode_tok_s": (steps * len(prompts)) / t_decode if steps and t_decode else 0.0,
         }
 
 
@@ -446,7 +497,7 @@ def _worker_main(a):
     chan = _Chan(socket.socket(fileno=int(os.environ["DSV4_FD"])))
     try:
         w = _Worker(a.model, a.rank, prefill_chunk=a.prefill_chunk,
-                    cuda_graph=a.cuda_graph)
+                    batch=a.batch, cuda_graph=a.cuda_graph)
     except Exception as e:  # report the failure instead of hanging the launcher
         import traceback
         traceback.print_exc()
@@ -469,7 +520,7 @@ def _worker_main(a):
             chan.send({"event": "generated", "error": "unknown command %r" % req.get("cmd")})
             continue
         try:
-            reply = w.generate(req["prompt"], req["max_new_tokens"],
+            reply = w.generate(req["prompts"], req["max_new_tokens"],
                                req.get("eos_token_ids") or [], chan)
         except Exception as e:
             import traceback
@@ -513,13 +564,15 @@ class DSV4Engine:
     """Drives the eight rank processes as a single greedy-decoding model."""
 
     def __init__(self, model_dir, world=8, port=DEFAULT_PORT, log_dir="/tmp",
-                 startup_timeout=1800, quiet=False, prefill_chunk=512, cuda_graph=False):
+                 startup_timeout=1800, quiet=False, prefill_chunk=512, cuda_graph=False,
+                 batch=1):
         self.model_dir = os.path.abspath(os.path.expanduser(model_dir))
         self.world = world
         self.port = port
         self.log_dir = log_dir
         self.prefill_chunk = prefill_chunk
         self.cuda_graph = cuda_graph
+        self.batch = batch
         self.procs, self.chans = [], []
         self.max_seq_len = 0
         self.vocab = 0
@@ -541,7 +594,8 @@ class DSV4Engine:
         proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "--worker",
              "--rank", str(rank), "--model", self.model_dir,
-             "--prefill-chunk", str(self.prefill_chunk)]
+             "--prefill-chunk", str(self.prefill_chunk),
+             "--batch", str(self.batch)]
             + (["--cuda-graph"] if self.cuda_graph else []),
             env=env, stdout=log, stderr=subprocess.STDOUT,
             pass_fds=(child_sock.fileno(),))
@@ -607,23 +661,35 @@ class DSV4Engine:
     # -- inference ---------------------------------------------------------- #
 
     def generate(self, prompt_ids, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
-        """Greedily continue ``prompt_ids``.  Returns rank 0's reply dict.
+        """Greedily continue one prompt.  Returns rank 0's reply dict."""
+        out = self.generate_batch([prompt_ids], max_new_tokens, eos_token_ids, timeout)
+        out["tokens"] = out["tokens"][0]
+        out["stop_reason"] = out["stop_reason"][0]
+        out["prompt_len"] = out["prompt_lens"][0]
+        return out
+
+    def generate_batch(self, prompts, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
+        """Greedily continue a batch of prompts.  Returns rank 0's reply dict.
 
         The engine drives the loop token by token: every rank reports its own
-        argmax, rank 0's wins, and the decision is broadcast back.  The ranks'
-        logits agree to the last bit almost always but not quite always, and one
-        divergence would leave the group permanently out of step - the losing
-        rank would feed a different token into the next `AllReduce`.  The count
-        of disagreements is returned as `rank_disagreements`.
+        argmax for every row, rank 0's wins, and the decision is broadcast back.
+        The ranks' logits agree to the last bit almost always but not quite always,
+        and one divergence would leave the group permanently out of step - the
+        losing rank would feed a different token into the next `AllReduce`.  The
+        count of disagreements is returned as `rank_disagreements`.
         """
         if not self.procs:
             raise ProtocolError("engine is closed")
-        prompt_ids = [int(t) for t in prompt_ids]
-        if self.max_seq_len and len(prompt_ids) >= self.max_seq_len:
-            raise ValueError(f"prompt of {len(prompt_ids)} tokens exceeds the export's "
-                             f"max_seq_len of {self.max_seq_len}")
+        if len(prompts) > self.batch:
+            raise ValueError(f"{len(prompts)} prompts for an engine built with "
+                             f"batch={self.batch}")
+        prompts = [[int(t) for t in p] for p in prompts]
+        for p in prompts:
+            if self.max_seq_len and len(p) >= self.max_seq_len:
+                raise ValueError(f"prompt of {len(p)} tokens exceeds the export's "
+                                 f"max_seq_len of {self.max_seq_len}")
         for chan in self.chans:
-            chan.send({"cmd": "generate", "prompt": prompt_ids,
+            chan.send({"cmd": "generate", "prompts": prompts,
                        "max_new_tokens": max_new_tokens,
                        "eos_token_ids": list(eos_token_ids)})
 
@@ -632,12 +698,14 @@ class DSV4Engine:
             msgs = [self._recv(rank, chan, timeout) for rank, chan in enumerate(self.chans)]
             kinds = {m.get("event") for m in msgs}
             if kinds == {"token"}:
-                toks = [m["tok"] for m in msgs]
-                if len(set(toks)) > 1:
-                    disagreements.append({"step": msgs[0]["step"], "tokens": toks,
-                                          "gap": min(m["gap"] for m in msgs)})
+                per_rank = [m["toks"] for m in msgs]
+                for row, votes in enumerate(zip(*per_rank)):
+                    if len(set(votes)) > 1:
+                        disagreements.append({"step": msgs[0]["step"], "row": row,
+                                              "tokens": list(votes),
+                                              "gap": min(m["gaps"][row] for m in msgs)})
                 for chan in self.chans:
-                    chan.send({"tok": toks[0]})
+                    chan.send({"toks": per_rank[0]})
                 continue
             if kinds == {"generated"}:
                 break
@@ -677,6 +745,9 @@ def main():
                          " ring is sized for this, so it bounds the ring's memory")
     ap.add_argument("--cuda-graph", action="store_true",
                     help="capture the decode step as a CUDA graph and replay it")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="sequences decoded in lockstep; fixed for the process because"
+                         " a captured graph has fixed shapes")
     ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if not a.worker:
