@@ -1577,11 +1577,6 @@ class Model:
         self.make_node("Neg", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_matmul_simple(self, name, inputs, dtype, shape):
-        output = f"{name}/output_0"
-        self.make_node("MatMul", inputs=inputs, outputs=[output], name=name)
-        self.make_value(output, dtype, shape=shape)
-
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
@@ -2218,19 +2213,6 @@ class Model:
     def make_layernorm_op(self, name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs):
         # Create the LayerNorm, SimplifiedLayerNorm, SkipLayerNorm, or SkipSimplifiedLayerNorm op
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-
-    def make_simplified_layernorm(self, name, root_input, weight, dtype, shape, epsilon, axis=-1):
-        output = f"{name}/output_0"
-        self.make_node(
-            "SimplifiedLayerNorm",
-            inputs=[root_input, weight],
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
-            axis=axis,
-            epsilon=epsilon,
-        )
-        self.make_value(output, dtype, shape=shape)
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:

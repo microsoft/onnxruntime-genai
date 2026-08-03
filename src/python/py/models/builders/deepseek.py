@@ -44,6 +44,8 @@ shipped kernel, and is emitted as ``com.microsoft::RotaryEmbedding``.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import onnx_ir as ir
 import torch
@@ -141,6 +143,24 @@ class DeepSeekV4Model(Model):
         # com.microsoft::RotaryEmbedding node.  Only the parity test flips this; it is
         # deliberately not exposed as an extra_option.
         self.use_manual_deepseek_rope = False
+
+    def make_layernorm_no_skip(self, layer_id: int, layernorm, root_input: str, location: str) -> str:
+        """Emit a no-skip SimplifiedLayerNorm via the base make_layernorm path."""
+        saved_root = self.layernorm_attrs["root_input"]
+        saved_skip = self.layernorm_attrs["skip_input"]
+        saved_output_0 = self.layernorm_attrs.get("output_0", "")
+        saved_output_3 = self.layernorm_attrs.get("output_3", "")
+
+        self.layernorm_attrs["root_input"] = root_input
+        self.layernorm_attrs["skip_input"] = root_input
+        self.make_layernorm(layer_id, layernorm, skip=False, simple=True, location=location)
+        output = self.layernorm_attrs["output_0"]
+
+        self.layernorm_attrs["root_input"] = saved_root
+        self.layernorm_attrs["skip_input"] = saved_skip
+        self.layernorm_attrs["output_0"] = saved_output_0
+        self.layernorm_attrs["output_3"] = saved_output_3
+        return output
 
     # ------------------------------------------------------------------ #
     # Override: force MultiHeadAttention so the correct 4D causal mask is
@@ -584,12 +604,9 @@ class DeepSeekV4Model(Model):
         self.make_initializer(hc_module.fn.data.T.float(), fn_weight, to=ir.DataType.FLOAT)
 
         fn_matmul_name = f"{base}/fn/MatMul"
-        self.make_matmul_simple(
-            fn_matmul_name,
-            [normed_name, fn_weight],
-            ir.DataType.FLOAT,
-            ["batch_size", "sequence_length", mix_out_dim],
-        )
+        fn_matmul_output = f"{fn_matmul_name}/output_0"
+        self.make_node("MatMul", inputs=[normed_name, fn_weight], outputs=[fn_matmul_output], name=fn_matmul_name)
+        self.make_value(fn_matmul_output, ir.DataType.FLOAT, shape=["batch_size", "sequence_length", mix_out_dim])
 
         # 4. Split into (pre_w, post_w, comb_w)
         pre_w_name = f"{base}/PreW"
@@ -872,12 +889,9 @@ class DeepSeekV4Model(Model):
 
         # matmul(comb_t, hidden_streams): [B, S, hc, hc] @ [B, S, hc, D] = [B, S, hc, D]
         mixed_name = f"{base}/mixed/MatMul"
-        self.make_matmul_simple(
-            mixed_name,
-            [f"{comb_t_name}/output_0", hc_streams],
-            self.io_dtype,
-            ["batch_size", "sequence_length", hc, d],
-        )
+        mixed_output = f"{mixed_name}/output_0"
+        self.make_node("MatMul", inputs=[f"{comb_t_name}/output_0", hc_streams], outputs=[mixed_output], name=mixed_name)
+        self.make_value(mixed_output, self.io_dtype, shape=["batch_size", "sequence_length", hc, d])
 
         # new_hidden = scaled_sub + mixed
         out_name = f"{base}/new_streams/Add"
@@ -917,24 +931,11 @@ class DeepSeekV4Model(Model):
         q_a_name = self.make_matmul(attn.q_a_proj, f"{base}/q_a_proj/MatMul", collapsed)
 
         # q_a_norm: RMSNorm with weight (standard SimplifiedLayerNorm subgraph)
-        q_a_norm_w_name = f"model.layers.{layer_id}.self_attn.q_a_norm.weight"
-        self.make_initializer(
-            attn.q_a_norm.weight + self.layernorm_attrs["add_offset"],
-            q_a_norm_w_name, to=self.io_dtype
-        )
-        q_a_normed_name = f"{base}/q_a_norm/SimplifiedLayerNorm"
-        self.make_simplified_layernorm(
-            q_a_normed_name,
-            f"{q_a_name}/output_0",
-            q_a_norm_w_name,
-            self.io_dtype,
-            ["batch_size", "sequence_length", q_lora],
-            self.layernorm_attrs["epsilon"],
-        )
+        q_a_norm_output = self.make_layernorm_no_skip(layer_id, attn.q_a_norm, f"{q_a_name}/output_0", "q_a")
 
         # q_b_proj: Linear(q_lora, H * head_dim)
         q_b_name = self.make_matmul(attn.q_b_proj, f"{base}/q_b_proj/MatMul",
-                                    f"{q_a_normed_name}/output_0")
+                                    q_a_norm_output)
 
         # Reshape for per-head q_b_norm: [B, S, H*head_dim] → [B, S, H, head_dim]
         q_b_4d_name = f"{base}/q_b/Reshape"
@@ -974,26 +975,13 @@ class DeepSeekV4Model(Model):
 
         kv_proj_name = self.make_matmul(attn.kv_proj, f"{base}/kv_proj/MatMul", collapsed)
 
-        kv_norm_w_name = f"model.layers.{layer_id}.self_attn.kv_norm.weight"
-        self.make_initializer(
-            attn.kv_norm.weight + self.layernorm_attrs["add_offset"],
-            kv_norm_w_name, to=self.io_dtype
-        )
-        kv_normed_name = f"{base}/kv_norm/SimplifiedLayerNorm"
-        self.make_simplified_layernorm(
-            kv_normed_name,
-            f"{kv_proj_name}/output_0",
-            kv_norm_w_name,
-            self.io_dtype,
-            ["batch_size", "sequence_length", head_dim],
-            self.layernorm_attrs["epsilon"],
-        )
+        kv_norm_output = self.make_layernorm_no_skip(layer_id, attn.kv_norm, f"{kv_proj_name}/output_0", "kv")
 
         # Unsqueeze kv from [B, S, head_dim] → [B, 1, S, head_dim] for RoPE + cache
         kv_u_name = f"{base}/kv/Unsqueeze"
         self.make_unsqueeze(
             kv_u_name,
-            [f"{kv_normed_name}/output_0", "/model/constants/INT64/[1]"],
+            [kv_norm_output, "/model/constants/INT64/[1]"],
             self.io_dtype,
             ["batch_size", 1, "sequence_length", head_dim],
         )
@@ -1059,12 +1047,9 @@ class DeepSeekV4Model(Model):
 
         # attn_raw = Q @ K^T * scale → [B, H, S, total_S]  (K broadcasts to H heads)
         attn_raw_name = f"{base}/attn_raw/MatMul"
-        self.make_matmul_simple(
-            attn_raw_name,
-            [q_rope_name, f"{k_t_name}/output_0"],
-            self.io_dtype,
-            ["batch_size", H, "sequence_length", "total_sequence_length"],
-        )
+        attn_raw_output = f"{attn_raw_name}/output_0"
+        self.make_node("MatMul", inputs=[q_rope_name, f"{k_t_name}/output_0"], outputs=[attn_raw_output], name=attn_raw_name)
+        self.make_value(attn_raw_output, self.io_dtype, shape=["batch_size", H, "sequence_length", "total_sequence_length"])
 
         # Scale
         scale_init_name = f"model.layers.{layer_id}.self_attn.scale"
@@ -1168,12 +1153,9 @@ class DeepSeekV4Model(Model):
         # ---- attn_output = scores @ V  [B, H, S, head_dim] ----
         # V = kv_total [B, 1, total_S, head_dim]; broadcasts to [B, H, ...]
         attn_out_name = f"{base}/attn_out/MatMul"
-        self.make_matmul_simple(
-            attn_out_name,
-            [f"{scores_name}/output_0", kv_total],
-            self.io_dtype,
-            ["batch_size", H, "sequence_length", head_dim],
-        )
+        attn_out_output = f"{attn_out_name}/output_0"
+        self.make_node("MatMul", inputs=[f"{scores_name}/output_0", kv_total], outputs=[attn_out_output], name=attn_out_name)
+        self.make_value(attn_out_output, self.io_dtype, shape=["batch_size", H, "sequence_length", head_dim])
 
         # Transpose to [B, S, H, head_dim]
         attn_t_name = f"{base}/attn/Transpose"
@@ -1300,12 +1282,9 @@ class DeepSeekV4Model(Model):
 
         # BatchMatMul: [n_groups, B*S, in_per_group] @ [n_groups, in_per_group, out_per_group]
         y_t_name = f"{base}/y_t/MatMul"
-        self.make_matmul_simple(
-            y_t_name,
-            [f"{x_t_name}/output_0", w_name],
-            self.io_dtype,
-            [n_groups, None, out_per_group],
-        )
+        y_t_output = f"{y_t_name}/output_0"
+        self.make_node("MatMul", inputs=[f"{x_t_name}/output_0", w_name], outputs=[y_t_output], name=y_t_name)
+        self.make_value(y_t_output, self.io_dtype, shape=[n_groups, None, out_per_group])
 
         # Transpose back: [n_groups, B*S, out_per_group] → [B*S, n_groups, out_per_group]
         y_name = f"{base}/y/Transpose"
@@ -1375,14 +1354,8 @@ class DeepSeekV4Model(Model):
         emits a MatMul node ``node_name``.  Returns the node's basename so that
         callers can access ``{node_name}/output_0``.
         """
-        num_experts = weight_tensor.shape[0]
-        self.make_initializer(weight_tensor.T.contiguous(), init_name, to=self.io_dtype)
-        self.make_matmul_simple(
-            node_name,
-            [root_input, init_name],
-            self.io_dtype,
-            ["batch_size", "sequence_length", num_experts],
-        )
+        raw_linear = SimpleNamespace(weight=weight_tensor)
+        self.make_matmul(raw_linear, node_name, root_input)
         return node_name
 
     def make_moe_router_scores(
@@ -1749,12 +1722,9 @@ class DeepSeekV4Model(Model):
         self.make_initializer(hc_head.hc_fn.data.T.float(), hc_fn_w_name, to=ir.DataType.FLOAT)
 
         fn_mm_name = f"{base}/fn/MatMul"
-        self.make_matmul_simple(
-            fn_mm_name,
-            [normed_name, hc_fn_w_name],
-            ir.DataType.FLOAT,
-            ["batch_size", "sequence_length", hc],
-        )
+        fn_mm_output = f"{fn_mm_name}/output_0"
+        self.make_node("MatMul", inputs=[normed_name, hc_fn_w_name], outputs=[fn_mm_output], name=fn_mm_name)
+        self.make_value(fn_mm_output, ir.DataType.FLOAT, shape=["batch_size", "sequence_length", hc])
 
         # Scale and bias
         hc_scale_name = "model.hc_head.hc_scale"
@@ -1842,24 +1812,11 @@ class DeepSeekV4Model(Model):
         )
 
         # ---- input_layernorm on collapsed ----
-        attn_ln_w = f"model.layers.{layer_id}.input_layernorm.weight"
-        self.make_initializer(
-            layer.input_layernorm.weight + self.layernorm_attrs["add_offset"],
-            attn_ln_w, to=self.io_dtype
-        )
-        attn_ln_name = f"/model/layers.{layer_id}/input_layernorm/SimplifiedLayerNorm"
-        self.make_simplified_layernorm(
-            attn_ln_name,
-            collapsed_attn,
-            attn_ln_w,
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.hidden_size],
-            self.layernorm_attrs["epsilon"],
-        )
+        attn_ln_output = self.make_layernorm_no_skip(layer_id, layer.input_layernorm, collapsed_attn, "input")
 
         # ---- Attention ----
         attn_out = self.make_deepseek_attention(
-            layer_id, layer.self_attn, f"{attn_ln_name}/output_0"
+            layer_id, layer.self_attn, attn_ln_output
         )
 
         # ---- HC combine for attention ----
@@ -1875,24 +1832,11 @@ class DeepSeekV4Model(Model):
         )
 
         # ---- post_attention_layernorm on collapsed ----
-        ffn_ln_w = f"model.layers.{layer_id}.post_attention_layernorm.weight"
-        self.make_initializer(
-            layer.post_attention_layernorm.weight + self.layernorm_attrs["add_offset"],
-            ffn_ln_w, to=self.io_dtype
-        )
-        ffn_ln_name = f"/model/layers.{layer_id}/post_attention_layernorm/SimplifiedLayerNorm"
-        self.make_simplified_layernorm(
-            ffn_ln_name,
-            collapsed_ffn,
-            ffn_ln_w,
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.hidden_size],
-            self.layernorm_attrs["epsilon"],
-        )
+        ffn_ln_output = self.make_layernorm_no_skip(layer_id, layer.post_attention_layernorm, collapsed_ffn, "post_attention")
 
         # ---- MoE / FFN ----
         moe_out = self.make_deepseek_moe(
-            layer_id, layer.mlp, f"{ffn_ln_name}/output_0"
+            layer_id, layer.mlp, ffn_ln_output
         )
 
         # ---- HC combine for FFN ----
@@ -1984,23 +1928,10 @@ class DeepSeekV4Model(Model):
         # ---- 5. Final norm (SkipSimplifiedLayerNorm style, but we treat as plain
         #         SimplifiedLayerNorm since HC head already collapsed) ----
         print("Reading final norm")
-        final_norm_w = "model.norm.weight"
-        self.make_initializer(
-            model_inner.norm.weight + self.layernorm_attrs["add_offset"],
-            final_norm_w, to=self.io_dtype
-        )
-        final_norm_name = "/model/final_norm/SimplifiedLayerNorm"
-        self.make_simplified_layernorm(
-            final_norm_name,
-            hc_head_out,
-            final_norm_w,
-            self.io_dtype,
-            ["batch_size", "sequence_length", d],
-            self.layernorm_attrs["epsilon"],
-        )
+        final_norm_output = self.make_layernorm_no_skip(self.num_layers, model_inner.norm, hc_head_out, "final")
 
         # Update layernorm tracking for LM head
-        self.layernorm_attrs["output_0"] = f"{final_norm_name}/output_0"
+        self.layernorm_attrs["output_0"] = final_norm_output
 
         # ---- 6. LM head ----
         print("Reading LM head")
