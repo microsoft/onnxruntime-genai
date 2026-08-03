@@ -510,7 +510,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 // for each component model in the pipeline.
 static void InheritParentProviderOptions(const std::vector<Config::ProviderOptions>& parent_provider_options,
                                          std::vector<Config::ProviderOptions>& child_provider_options) {
-  std::unordered_set<std::string> child_provider_option_names;
+  std::unordered_set<std::string> child_ep_option_keys;
   for (const auto& parent_provider_option : parent_provider_options) {
     auto child_provider_option_it = std::find_if(
         child_provider_options.begin(),
@@ -526,13 +526,13 @@ static void InheritParentProviderOptions(const std::vector<Config::ProviderOptio
       }
 
       // Merge parent EP provider options
-      child_provider_option_names.clear();
+      child_ep_option_keys.clear();
       for (const auto& opt : child_provider_option_it->options) {
-        child_provider_option_names.insert(opt.first);
+        child_ep_option_keys.insert(opt.first);
       }
 
       for (const auto& parent_opt : parent_provider_option.options) {
-        if (child_provider_option_names.find(parent_opt.first) == child_provider_option_names.end()) {
+        if (child_ep_option_keys.find(parent_opt.first) == child_ep_option_keys.end()) {
           child_provider_option_it->options.emplace_back(parent_opt);
         }
       }
