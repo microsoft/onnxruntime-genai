@@ -96,6 +96,9 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--prefill-chunk", type=int, default=512,
+                    help="paged exports only; set it above the longest prompt to"
+                         " prefill in one pass, as the dense export does")
     ap.add_argument("--out", default=None, help="write the raw measurements as JSON")
     a = ap.parse_args()
 
@@ -103,7 +106,7 @@ def main():
     rng = random.Random(a.seed)
 
     t0 = time.time()
-    engine = DSV4Engine(a.model, world=a.world)
+    engine = DSV4Engine(a.model, world=a.world, prefill_chunk=a.prefill_chunk)
     load_s = time.time() - t0
     print(f"engine up in {load_s:.0f}s  (max_seq_len={engine.max_seq_len}, "
           f"vocab={engine.vocab})\n", flush=True)

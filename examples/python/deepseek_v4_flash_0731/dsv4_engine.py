@@ -105,6 +105,9 @@ class _Worker:
         t0 = time.time()
         so = ort.SessionOptions()
         so.log_severity_level = 3
+        if os.environ.get("DSV4_PROFILE"):
+            so.enable_profiling = True
+            so.profile_file_prefix = f"/tmp/dsv4_prof_rank{rank}"
         path = os.path.join(model_dir, f"rank_{rank}", "model.onnx")
         self.sess = ort.InferenceSession(path, so, providers=["CUDAExecutionProvider"])
         if "CUDAExecutionProvider" not in self.sess.get_providers():
