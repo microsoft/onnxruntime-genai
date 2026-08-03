@@ -48,7 +48,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   status_ = RequestStatus::Assigned;
 
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
-  processed_sequence_length_ = CurrentSequenceLength();
+  processed_sequence_length_ = 0;
   search_->AppendTokens(device_tokens);
   seen_sequence_length_ = CurrentSequenceLength();
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
@@ -108,7 +108,7 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.current_sequence_length = current;
   snapshot.processed_sequence_length = processed_sequence_length_;
   snapshot.seen_sequence_length = seen_sequence_length_;
-  snapshot.is_prefill = is_prefill_;
+  snapshot.is_prefill = IsPrefill();
   return snapshot;
 }
 
@@ -147,7 +147,7 @@ bool Request::IsDone() const {
 }
 
 bool Request::IsPrefill() const {
-  return is_prefill_;
+  return processed_sequence_length_ == 0;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
@@ -180,7 +180,6 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
   processed_sequence_length_ = search_->GetSequence(0).size();
-  is_prefill_ = false;
 
   search_->SetLogits(logits);
   auto& search_params = search_->params_->search;

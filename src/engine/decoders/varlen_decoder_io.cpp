@@ -3,7 +3,6 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
-#include "../sequence_positions.h"
 
 namespace Generators {
 
@@ -105,10 +104,8 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     auto input_ids = request->UnprocessedTokensCpu();
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
-    // The operator writes this step's token j of sequence i at absolute position
-    // past_sequence_lengths[i] + j, so this has to be the number of tokens already in the cache.
-    // Deriving it from the sequence length instead is off by one on a decode step, where the
-    // search has already appended the token that is about to be processed.
+    // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
+    // number of tokens already in the cache and therefore the base position for this step.
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->ProcessedSequenceLength());
 
     running_length += input_ids.size();
@@ -162,7 +159,8 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   } else {
     for (auto& request : scheduled_requests) {
       const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      const int32_t kv_len = static_cast<int32_t>(SlotsAfterStep(request->ProcessedSequenceLength(), query_len));
+      // KV length after the step is past length plus query length, which is the current length.
+      const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
       max_query_len = std::max(max_query_len, query_len);
       max_kv_len = std::max(max_kv_len, kv_len);
     }
