@@ -1216,6 +1216,33 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct MultiGpu_Element : JSON::Element {
+  explicit MultiGpu_Element(Config::Model::MultiGpu& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "world_size") {
+      v_.world_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "rank_dir") {
+      v_.rank_dir = JSON::Get<std::string_view>(value);
+    } else if (name == "master_ip") {
+      v_.master_ip = JSON::Get<std::string_view>(value);
+    } else if (name == "master_port") {
+      v_.master_port = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "worker_executable") {
+      v_.worker_executable = JSON::Get<std::string_view>(value);
+    } else if (name == "log_dir") {
+      v_.log_dir = JSON::Get<std::string_view>(value);
+    } else if (name == "startup_timeout_s") {
+      v_.startup_timeout_s = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::MultiGpu& v_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -1330,6 +1357,9 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
+    if (name == "multi_gpu") {
+      return multi_gpu_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1345,6 +1375,7 @@ struct Model_Element : JSON::Element {
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
   Mtp_Element mtp_{v_.mtp};
+  MultiGpu_Element multi_gpu_{v_.multi_gpu};
 };
 
 int SafeDoubleToInt(double x, std::string_view name) {

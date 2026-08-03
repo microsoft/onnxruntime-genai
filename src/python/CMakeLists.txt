@@ -158,6 +158,17 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  # The multi-GPU rank worker has to sit next to the shared library: that is where
+  # TensorParallelGroup looks for it.
+  if(TARGET onnxruntime-genai-tp-worker)
+    add_custom_command(TARGET python POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy
+      $<TARGET_FILE:onnxruntime-genai-tp-worker>
+      ${WHEEL_TARGET_NAME}
+      COMMENT "Copying the tensor-parallel rank worker to ${WHEEL_TARGET_NAME}"
+    )
+    add_dependencies(python onnxruntime-genai-tp-worker)
+  endif()
   set(auditwheel_exclude_list
     "libcuda.so.1"
     "libcublas.so.11"

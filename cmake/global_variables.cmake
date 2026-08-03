@@ -89,6 +89,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/telemetry/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${MODELS_ROOT}/multi_gpu/*.h"
+  "${MODELS_ROOT}/multi_gpu/*.cpp"
   "${ENGINE_ROOT}/*.h"
   "${ENGINE_ROOT}/*.cpp"
   "${ENGINE_ROOT}/decoders/*.h"

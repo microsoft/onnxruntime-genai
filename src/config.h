@@ -190,6 +190,21 @@ struct Config {
     int right_context_samples{};
     std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
+    // Tensor/expert parallel execution across several GPUs. The export produces one ONNX graph
+    // per rank, and the ranks meet in the collective ops (com.microsoft.AllReduce) of every layer.
+    // ORT's NCCL context is a per-process singleton keyed off the LOCAL_RANK environment variable,
+    // so each rank needs its own process: rank 0 runs in this process and the rest are launched
+    // as worker processes.
+    struct MultiGpu {
+      int world_size{1};                        // 1 disables multi-GPU entirely
+      std::string rank_dir{"rank_%d"};          // per-rank subdirectory holding that rank's graph; %d is the rank
+      std::string master_ip{"127.0.0.1"};       // must be a literal address: ORT resolves it with AF_UNSPEC
+      int master_port{19555};                   // TCP port rank 0 uses to hand out the NCCL unique id
+      std::string worker_executable;            // empty means "look next to the GenAI shared library"
+      std::string log_dir;                      // empty means the workers inherit stdout/stderr
+      int startup_timeout_s{1800};              // how long a worker waits for rank 0 to start listening
+    } multi_gpu;
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;

@@ -15,6 +15,8 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # reinit_tests.cpp is a standalone executable (it calls OgaShutdown() to exercise re-initialization
 # and has its own main()), so keep it out of the unit_tests sources.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
+# tp_stub_worker.cpp is a separate executable that tensor_parallel_test.cpp launches.
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/tp_stub_worker.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -47,6 +49,15 @@ target_link_libraries(unit_tests PRIVATE
 set_target_properties(unit_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(tp_stub_worker "${CMAKE_CURRENT_SOURCE_DIR}/tp_stub_worker.cpp")
+  target_include_directories(tp_stub_worker PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  set_target_properties(tp_stub_worker PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  )
+  add_dependencies(unit_tests tp_stub_worker)
+endif()
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
   target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})

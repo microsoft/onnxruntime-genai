@@ -534,6 +534,15 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
+  tensor_parallel_ = model.tensor_parallel_.get();
+  if (tensor_parallel_) {
+    if (params.search.batch_size != 1 || params.search.num_beams != 1)
+      throw std::runtime_error("multi-GPU models currently require batch_size=1 and num_beams=1, got batch_size=" +
+                               std::to_string(params.search.batch_size) + " num_beams=" +
+                               std::to_string(params.search.num_beams));
+    tensor_parallel_->BeginGenerator(params.search.max_length, params.search.batch_size);
+  }
+
   InitializePhi3RopeThreshold(params);
   InitializeSamplingMethod(params);
   LogGeneratorCreate(params);
@@ -587,7 +596,15 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   }
 }
 
-Generator::~Generator() = default;
+Generator::~Generator() {
+  if (!tensor_parallel_)
+    return;
+  try {
+    tensor_parallel_->EndGenerator();
+  } catch (const std::exception& e) {
+    Log("warning", std::string{"failed to release the tensor-parallel ranks: "} + e.what());
+  }
+}
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
@@ -738,7 +755,13 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
+  // The ranks meet inside the session run, so they have to be started before rank 0 runs and
+  // collected after it returns.
+  if (tensor_parallel_)
+    tensor_parallel_->SendForward(next_tokens.CopyDeviceToCpu());
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
+  if (tensor_parallel_)
+    tensor_parallel_->Wait();
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -756,7 +779,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
       std::span<int32_t> new_next_token_span{ff_tokens};
       auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
+      if (tensor_parallel_)
+        tensor_parallel_->SendForward(new_next_token.CopyDeviceToCpu());
       logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      if (tensor_parallel_)
+        tensor_parallel_->Wait();
       if (g_log.enabled && g_log.model_logits) {
         auto& stream_ = Log("model_logits");
         DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -933,6 +960,10 @@ void Generator::RewindToLength(size_t new_length) {
       static_cast<int64_t>(search_->params_->BatchBeamSize());
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (tensor_parallel_) {
+    tensor_parallel_->SendRewind(new_length);
+    tensor_parallel_->Wait();
+  }
   if (guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
   }

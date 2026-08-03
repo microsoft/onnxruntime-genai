@@ -374,6 +374,19 @@ if(ENABLE_TESTS)
   add_subdirectory("${REPO_ROOT}/test")
 endif()
 
+# One rank of a tensor-parallel group other than rank 0. ORT's NCCL context is a per-process
+# singleton keyed off LOCAL_RANK, so ranks cannot share a process; this executable is what
+# TensorParallelGroup launches. It talks to the library through the public C API only.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(onnxruntime-genai-tp-worker "${MODELS_ROOT}/multi_gpu/worker/tp_worker_main.cpp")
+  target_include_directories(onnxruntime-genai-tp-worker PRIVATE "${SRC_ROOT}")
+  target_link_libraries(onnxruntime-genai-tp-worker PRIVATE onnxruntime-genai)
+  set_target_properties(onnxruntime-genai-tp-worker PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN"
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>")
+endif()
+
 if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
   add_subdirectory("${SRC_ROOT}/python")

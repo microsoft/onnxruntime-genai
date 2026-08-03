@@ -17,6 +17,7 @@
 #include "gemma4_multimodal_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
+#include "multi_gpu/tensor_parallel.h"
 
 namespace Generators {
 
@@ -213,6 +214,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+
+  // Non-null only on rank 0 of a multi-GPU group. Owns the worker processes running the other
+  // ranks; Generator mirrors its forward passes onto them so the collectives have a partner.
+  std::unique_ptr<TensorParallelGroup> tensor_parallel_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)

@@ -46,6 +46,7 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct TensorParallelGroup;
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -160,6 +161,9 @@ struct Generator : LeakChecked<Generator> {
   // Pre-computed per-token decisions: avoid repeated checks each token
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
   TransducerState* transducer_state_{nullptr};
+  // Non-null when the model is split across several GPUs; points into model_. Every forward pass
+  // has to be mirrored onto the other ranks or this one blocks forever in its first collective.
+  TensorParallelGroup* tensor_parallel_{nullptr};
   int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
   enum class SamplingMethod { kGreedy,
                               kTopK,

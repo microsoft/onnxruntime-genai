@@ -888,7 +888,21 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
   return std::make_unique<Config>(path, json_overlay);
 }
 
+static std::shared_ptr<Model> CreateModelForType(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  PrepareTensorParallelConfig(*config);
+  // The workers have to exist before rank 0's session does: rank 0 hands out the NCCL unique id
+  // from inside session creation and blocks there until all of them have connected.
+  auto tensor_parallel = TensorParallelGroup::Launch(*config);
+  auto model = CreateModelForType(ort_env, std::move(config));
+  if (tensor_parallel)
+    tensor_parallel->SessionCreated();
+  model->tensor_parallel_ = std::move(tensor_parallel);
+  return model;
+}
+
+static std::shared_ptr<Model> CreateModelForType(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
