@@ -36,7 +36,6 @@ struct RequestStateSnapshot {
   int64_t current_sequence_length{};    // Total tokens the Request's search currently holds.
   int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
   int64_t seen_sequence_length{};       // Tokens already streamed to (seen by) the application.
-  int64_t unprocessed_token_count{};    // Tokens produced/appended but not yet processed.
   bool is_prefill{};
 };
 

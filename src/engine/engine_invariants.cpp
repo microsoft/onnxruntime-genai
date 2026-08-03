@@ -114,7 +114,7 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
   const std::string id = PtrId(request.request_id);
 
   if (request.current_sequence_length < 0 || request.processed_sequence_length < 0 ||
-      request.seen_sequence_length < 0 || request.unprocessed_token_count < 0) {
+      request.seen_sequence_length < 0) {
     add("Request " + id + " has a negative sequence-length counter.");
   }
 
@@ -126,13 +126,6 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
   if (request.seen_sequence_length > request.current_sequence_length) {
     add("Request " + id + " seen length (" + std::to_string(request.seen_sequence_length) +
         ") exceeds current length (" + std::to_string(request.current_sequence_length) + ").");
-  }
-
-  if (request.unprocessed_token_count !=
-      request.current_sequence_length - request.processed_sequence_length) {
-    add("Request " + id + " unprocessed count (" + std::to_string(request.unprocessed_token_count) +
-        ") != current (" + std::to_string(request.current_sequence_length) + ") - processed (" +
-        std::to_string(request.processed_sequence_length) + ").");
   }
 
   return violations;

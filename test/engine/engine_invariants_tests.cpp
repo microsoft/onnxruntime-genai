@@ -49,7 +49,6 @@ RequestStateSnapshot MakeValidRequest(const void* id, RequestStatus status, int6
   request.current_sequence_length = current;
   request.processed_sequence_length = processed;
   request.seen_sequence_length = seen;
-  request.unprocessed_token_count = current - processed;
   request.is_prefill = false;
   return request;
 }
@@ -150,18 +149,11 @@ TEST(InvariantValidatorTest, ValidRequestHasNoViolations) {
 
 TEST(InvariantValidatorTest, ProcessedBeyondCurrentReported) {
   auto request = MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 12, 6);
-  request.unprocessed_token_count = 10 - 12;  // -2 keeps the arithmetic identity but is negative
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, SeenBeyondCurrentReported) {
   auto request = MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 4, 11);
-  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
-}
-
-TEST(InvariantValidatorTest, UnprocessedArithmeticMismatchReported) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 4, 6);
-  request.unprocessed_token_count = 5;  // should be 10 - 4 = 6
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
