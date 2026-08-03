@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,8 +37,10 @@ struct AttentionMaskBuffer {
   virtual void Rewind(Tensor& tensor, std::array<int64_t, 2>& shape, size_t index) = 0;
 };
 
+// An explicit capacity selects a static mask independently of generation max_length.
 std::unique_ptr<AttentionMaskBuffer> CreateAttentionMaskBuffer(
-    const Model& model, const GeneratorParams& params, DynamicMaskUpdate update = DynamicMaskUpdate::PreservePadding);
+    const Model& model, const GeneratorParams& params, DynamicMaskUpdate update = DynamicMaskUpdate::PreservePadding,
+    std::optional<int> static_mask_capacity = std::nullopt);
 
 std::unique_ptr<PositionInputs> CreateStandardPositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name);
 
