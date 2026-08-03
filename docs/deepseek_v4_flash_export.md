@@ -16,7 +16,9 @@ Scripts referenced here live in
 | --- | --- |
 | `check_weights.py` | validates the checkpoint adapter and the fp8 operator against reference math |
 | `export.py` | exports one graph per rank, all ranks in parallel by default |
-| `run.py` | launches one process per rank and generates tokens |
+| `dsv4_engine.py` | the serving layer: process launch, per-GPU KV cache, lockstep decode |
+| `dsv4_prompt.py` | tokenizer plus the checkpoint's own message encoder |
+| `run.py` | command-line front end for the engine |
 
 ---
 
@@ -116,6 +118,12 @@ export CKPT=~/DeepSeek-V4-Flash-0731
 export EX=$PWD/examples/python/deepseek_v4_flash_0731   # from the repo root
 cd /tmp                                                 # run from a neutral directory
 unset CUDA_VISIBLE_DEVICES                              # every script pins its own GPU
+
+# The CUDA EP needs cuDNN 9 and CUDA 13 on the loader path. Without them the
+# session silently falls back to CPU, which has no bfloat16 kernels, and the
+# first bf16 node is blamed instead ("Could not find an implementation for
+# Expand(13)"). `dsv4_engine.py` checks for this and says so.
+export LD_LIBRARY_PATH=$CUDNN_HOME/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 ```
 
 > Run Python from a directory such as `/tmp`. A checkout named `onnxruntime` in
@@ -253,28 +261,91 @@ python -m onnxruntime_genai.models.builder \
 ### Step 4 - run the model
 
 ```bash
-python $EX/run.py --model ~/dsv4_onnx --world 8 \
-  --tokenizer $CKPT --prompt "The capital city of France is called" \
-  --max-new-tokens 8
+python $EX/run.py --model ~/dsv4_onnx --world 8 --tokenizer $CKPT \
+  --prompt "The capital city of France is called" --raw --max-new-tokens 8
 ```
 
 Expected:
 
 ```
 rank 0 is listening; starting the remaining ranks
-[rank 0] session ready in 80s
-[rank 0] step 0: S=8 finite=True max=25.000 min=-37.500 argmax=11111
+all 8 ranks ready in 77s (max_seq_len=4096, kv cache 76.8 MiB/rank)
+prompt 8 tokens, generated 8 (max_new_tokens); prefill 8.02s, decode 2.23 tok/s
 tokens: [11111, 16, 983, 344, 270, 9152, 4593, 295]
-ranks exited with [0, 0, 0, 0, 0, 0, 0, 0]
 text: ' Paris. It is the largest city in'
+```
+
+`--raw` tokenizes the prompt verbatim, which is what you want for a plain
+continuation. Drop it to send the prompt as a user turn through the
+checkpoint's message encoder, optionally with `--system`, `--thinking-mode
+thinking` and `--reasoning-effort`:
+
+```bash
+python $EX/run.py --model ~/dsv4_onnx --tokenizer $CKPT \
+  --prompt "Why is the sky blue?" --thinking-mode thinking --max-new-tokens 512
 ```
 
 `--tokenizer` is optional: without it, `--prompt` must be a JSON list of token
 ids and the output is not decoded.
 
-#### How the launcher works
+---
 
-`run.py` forks one process per rank and sets, for rank `r`:
+## 5. Serving
+
+`run.py` is a thin shell over `dsv4_engine.DSV4Engine`, which is the piece to
+reuse:
+
+```python
+from dsv4_engine import DSV4Engine
+from dsv4_prompt import DSV4Prompt
+
+prompt = DSV4Prompt(CKPT, thinking_mode="chat")
+with DSV4Engine("~/dsv4_onnx", world=8) as engine:
+    ids = prompt.encode_messages([{"role": "user", "content": "2+2?"}])
+    out = engine.generate(ids, max_new_tokens=64, eos_token_ids=prompt.eos_token_ids)
+    print(prompt.decode(out["tokens"]), out["decode_tok_s"])
+```
+
+The engine stays resident across requests, so the 80 s of session creation is
+paid once.
+
+### KV cache across eight GPUs
+
+There is no cross-device cache and no host round trip. Each rank allocates its
+own cache in its own GPU's memory and binds it into the session with
+`IOBinding`:
+
+* Every `past_*` graph input gets a CUDA tensor allocated **once**, at session
+  start, from the shapes ORT reports. For `max_seq_len=4096` that is 38.4 MiB
+  per rank - the model is MQA with a single 512-wide latent KV row, a 128-slot
+  sliding window, and a compressed stream of `max_seq_len / ratio + 2` rows, so
+  the cache is three orders of magnitude smaller than the weights.
+* Two such sets exist per rank. A step binds set *A* as the `past_*` inputs and
+  set *B* as the `present_*` outputs, then swaps. Nothing is allocated or copied
+  between steps; the only per-step host work is rebinding pointers.
+* `past_len` is a scalar input, so a request resets by zeroing the cache and
+  setting `past_len = 0`.
+
+### Why the ranks stay in lockstep
+
+A rank cannot run alone - it blocks in the two `AllReduce` nodes of every layer
+until the other seven arrive. A request is therefore a collective: the engine
+sends the same prompt to all eight workers over a `socketpair` and drives the
+decode loop token by token.
+
+Greedy sampling is decided centrally. Every rank computes its own argmax, the
+engine takes rank 0's and broadcasts it back before the next step. `lm_head` is
+replicated on every rank and the inputs to it are post-`AllReduce`, so the
+logits agree bit for bit almost always - but **not quite always**, roughly once
+per several hundred low-confidence tokens. Letting each rank pick its own token
+desynchronizes the group permanently the first time that happens, because the
+losing rank feeds a different token into the next `AllReduce`. The engine counts
+these events and returns them as `rank_disagreements`; the round trip costs
+about 0.1 ms against a 100 ms step.
+
+### How the launcher works
+
+`DSV4Engine` forks one process per rank and sets, for rank `r`:
 
 | variable | value |
 | --- | --- |
@@ -282,7 +353,8 @@ ids and the output is not decoded.
 | `LOCAL_RANK` | `r` |
 | `LOCAL_WORLD_SIZE` | `world` |
 | `RANK0_IP` | `127.0.0.1` |
-| `RANK0_PORT` | `19555` (or `--port`) |
+| `RANK0_PORT` | `19555` (or `port=`) |
+| `DSV4_FD` | inherited socket used for the request protocol |
 
 Two details matter:
 
@@ -294,11 +366,32 @@ Two details matter:
   peers give up after 40 seconds. The launcher polls `/proc/net/tcp{,6}` until
   rank 0 is in state `0A` (listening) before starting ranks 1-7.
 
-Per-rank logs land in `/tmp/run_rank{r}.log` (`--log-dir` to change).
+Per-rank logs land in `/tmp/dsv4_rank{r}.log` (`log_dir=` to change).
 
 ---
 
-## 5. Troubleshooting
+## 6. Evaluating with the OpenAI evals harness
+
+`evals/completion_fns/dsv4.py` in the [evals](https://github.com/openai/evals)
+fork drives the engine, and `evals/registry/completion_fns/dsv4.yaml` registers
+three variants. The model owns every GPU on the node, so the engine is a
+process-wide singleton and the harness must run single-threaded:
+
+```bash
+OPENAI_API_KEY=dummy EVALS_THREADS=1 \
+  oaieval dsv4/flash-0731-mcq10 match_mmlu_pro_800 \
+    --record_path ~/dsv4_evals/mmlu_pro_800_chat.jsonl
+```
+
+`match_mmlu_pro_800` is a stratified 800-question subset of MMLU-Pro, drawn
+across all 14 categories by largest-remainder allocation. `flash-0731-mcq10`
+uses `thinking_mode=chat`, which closes the reasoning block immediately so the
+model answers with a bare letter; `flash-0731-think-mcq10` leaves it open and
+raises the token budget.
+
+---
+
+## 7. Troubleshooting
 
 **`Type Error: Type (tensor(float)) of output arg (...) does not match expected type (tensor(bfloat16))`**
 An initializer feeding an fp32 subgraph was registered in bf16. Register it with
@@ -336,7 +429,7 @@ the total export time.
 
 ---
 
-## 6. Known limitations
+## 8. Known limitations
 
 * The lightning indexer is exported as a dense `window ∪ all-compressed` read
   set rather than a top-512 gather. This is numerically exact below roughly 2 K
