@@ -50,13 +50,23 @@ struct BlockPool {
 
   size_t Capacity() const;
 
+  size_t BlockSize() const;
+
+  // Allocates enough blocks to hold `num_slots` and marks those slots used.
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots);
+
+  // Allocates enough blocks to hold `num_slots` but leaves every slot empty. Use this to
+  // reserve capacity for tokens that have not been processed yet; the caller marks the slots
+  // used via Block::AddSlot() as the tokens are actually written to the cache.
+  std::vector<std::shared_ptr<Block>> ReserveBlocks(size_t num_slots);
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
 
   size_t BlocksNeeded(size_t num_slots);
 
  private:
+  std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots, bool mark_slots_used);
+
   const size_t block_size_;
   const size_t capacity_;
   std::vector<std::shared_ptr<Block>> blocks_{capacity_};

@@ -24,6 +24,7 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
+    GraniteMoeHybridModel,
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
@@ -467,6 +468,8 @@ def create_model(
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GraniteMoeHybridForCausalLM":
+        onnx_model = GraniteMoeHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
@@ -754,6 +757,8 @@ def get_args():
                     Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
                     The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
                     Quantized KV cache is only supported for the CPU and CUDA execution providers.
+                    When combined with use_paged_attention=true, only the int8_* and fp8_* schemes are supported
+                    (PagedAttention has no sub-byte cache backend, so int4_* is rejected).
                 kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_type is enabled.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}} with one entry per layer.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).

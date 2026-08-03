@@ -50,10 +50,6 @@ struct SpeculativeDecodingState : State {
   State& draft_state() { return *draft_state_; }
 
   const std::vector<float>& draft_pending_logits() const { return draft_pending_logits_; }
-  void set_draft_pending_logits(std::vector<float> logits) {
-    draft_pending_logits_ = std::move(logits);
-    draft_pending_valid_ = true;
-  }
   // Copy count floats into the pending-logits buffer, reusing its existing capacity (no per-round
   // reallocation of a vocab-sized vector). Mirrors the assign() the prefill Run() uses.
   void assign_draft_pending_logits(const float* data, size_t count) {

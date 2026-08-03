@@ -10,7 +10,9 @@
 #   - PipAuthenticate@1  (pip)
 #   - the cargo:token credential provider + System.AccessToken  (cargo)
 #   - a Bearer System.AccessToken header  (ORT content download)
-#   - NuGetAuthenticate@1 (nuget restore — wired in with the C# SDK in Phase 3)
+#     ORT content downloads use an HTTP Authorization header populated from
+#     System.AccessToken by the download step.
+#   - NuGetAuthenticate@1 (NuGet and dotnet restore)
 # =============================================================================
 variables:
 # Feed name (org-scoped). Used by PipAuthenticate@1 (artifactFeeds) and the ORT
@@ -26,7 +28,7 @@ variables:
 - name: lotusCargoSparse
   value: 'sparse+https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/Cargo/index/'
 
-# NuGet v3 index — org-scoped Lotus (used by C# restore in Phase 3).
+# NuGet v3 index — org-scoped Lotus.
 - name: lotusNuGetFeed
   value: 'https://pkgs.dev.azure.com/aiinfra/_packaging/Lotus/nuget/v3/index.json'
 

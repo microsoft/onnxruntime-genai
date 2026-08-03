@@ -32,6 +32,7 @@ struct Config {
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
@@ -377,6 +378,7 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
         // RNNT decoder inputs
@@ -457,7 +459,9 @@ struct Config {
   } search;
 
   struct Speculative {
-    int max_draft_tokens{4};          // Maximum number of tokens proposed per round.
+    // Four is a conservative default that amortizes target verification without excessive draft
+    // work; the best value depends on the model pair and execution provider.
+    int max_draft_tokens{4};
     int ngram_size{};                 // 0 disables n-gram decoding; N matches the last N-1 tokens.
     int ngram_chained_lookup_bool{};  // 1 refills the proposal by repeatedly looking up synthetic context.
     int adaptive_k_bool{};            // 0 uses max_draft_tokens every round; 1 adapts up to the hard limit.

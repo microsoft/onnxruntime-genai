@@ -132,25 +132,6 @@ jobs:
   # 'version' stage), so no per-job version computation is needed here.
 
   # --- Feed isolation: NuGet restore → Lotus --------------------------------
-  # Write a dedicated Lotus nuget.config (cleared, Lotus-only) into src/csharp so
-  # `dotnet restore` uses it (auto-discovered by directory). It is generated at
-  # build time (not committed). NuGetAuthenticate wires the pipeline identity to it.
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $cfg = "$(Build.Repository.LocalPath)/src/csharp/nuget.config"
-      $lines = @(
-        '<?xml version="1.0" encoding="utf-8"?>',
-        '<configuration>',
-        '  <packageSources>',
-        '    <clear />',
-        '    <add key="Lotus" value="$(lotusNuGetFeed)" />',
-        '  </packageSources>',
-        '</configuration>'
-      )
-      Set-Content -Path $cfg -Value $lines -Encoding utf8
-      Write-Host "Wrote $cfg"
-    displayName: 'Configure NuGet feed isolation (Lotus)'
-
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to Lotus feed'
 
@@ -169,10 +150,10 @@ jobs:
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
-      # Explicit restore against the Lotus-only nuget.config, then build without
-      # an implicit restore so no public feed is ever contacted.
+      # Pass Lotus explicitly, then build without an implicit restore so no
+      # machine- or repository-level NuGet configuration can add another feed.
       dotnet restore Microsoft.ML.OnnxRuntimeGenAI.csproj `
-        --configfile "$(Build.Repository.LocalPath)/src/csharp/nuget.config" `
+        --source "$(lotusNuGetFeed)" `
         -p:IncludeMobileTargets=true
       if ($LASTEXITCODE -ne 0) { Write-Error "dotnet restore failed"; exit $LASTEXITCODE }
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj --no-restore `

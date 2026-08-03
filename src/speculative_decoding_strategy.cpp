@@ -586,7 +586,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     // No-op on CPU; on GPU/NPU it handles device and fp16/bf16 logits.
     auto& target_device = *target_model_.p_device_inputs_;
     DeviceSpan<float> verify_logits = GetFloatVerifyLogits(*raw_ort, target_device);
-    const float* data = verify_logits.CopyDeviceToCpu().data();
+    const auto verify_logits_cpu = verify_logits.CopyDeviceToCpu();
+    const float* data = verify_logits_cpu.data();
     // The anchor (when present) takes row 0, so the proposal rows start at 1; otherwise they
     // start at 0 and pos0 came from earlier. Row i ends up as "the target's prediction after
     // proposal token i", so the accept loop below is unchanged. Penalty context for row i is
@@ -965,7 +966,8 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   if (is_multiple_tokens) {
     auto& target_device = *target_model_.p_device_inputs_;
     DeviceSpan<float> verify_logits = GetFloatVerifyLogits(*raw_ort, target_device);
-    const float* data = verify_logits.CopyDeviceToCpu().data();
+    const auto verify_logits_cpu = verify_logits.CopyDeviceToCpu();
+    const float* data = verify_logits_cpu.data();
     for (int i = 0; i < K; i++)
       rows[static_cast<size_t>(i)].assign(data + static_cast<ptrdiff_t>(i) * vocab_size,
                                           data + static_cast<ptrdiff_t>(i + 1) * vocab_size);

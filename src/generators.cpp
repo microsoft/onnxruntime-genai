@@ -154,9 +154,32 @@ void Shutdown() {
 
   // Reset g_ort_globals directly (rather than through GetOrtGlobals(), which would lazily construct
   // the globals just to immediately tear them down). If genai was never initialized there is nothing
-  // to do. Delete now because on process exit is too late. ~OrtGlobals tears down the device
-  // interfaces (including the RyzenAI EP shutdown) and unloads the genai add-on libraries.
+  // to do. ~OrtGlobals clears the graph session cache and the device allocators, tears down the
+  // device interfaces (including the RyzenAI EP shutdown), unloads the genai add-on libraries, and
+  // finally releases the OrtEnv. All of that runs on both the runtime and the process-exit path; the
+  // only difference at process exit is that the OrtEnv itself is leaked rather than destroyed, for
+  // the reason described below.
   std::scoped_lock lock{g_ort_globals_mutex};
+
+  if (g_ort_globals && g_process_exiting) {
+    // At process exit (the EnsureShutdown static destructor sets g_process_exiting under this lock),
+    // destroying the OrtEnv is unsafe: releasing it from within __cxa_finalize drives ORT's
+    // Environment/LoggingManager destructor to lock a mutex whose backing static may already be
+    // finalized, which throws "mutex lock failed: Invalid argument" -- and a throwing destructor at
+    // teardown is uncaught, so the process aborts via std::terminate. Nothing else ~OrtGlobals does
+    // (clearing the graph session cache, tearing down device interfaces including the RyzenAI EP
+    // shutdown, unloading the CUDA add-on library, or releasing the trivial-session allocators)
+    // touches that ORT static state, so only the env itself needs to be leaked: release it from the
+    // unique_ptr before ~OrtGlobals runs below, so the rest of teardown still happens in full. The
+    // released OrtEnv is simply never destructed -- it stays validly constructed in memory for as
+    // long as the remaining teardown code (or anything else) needs it, and the OS reclaims it when
+    // the process exits. The default OrtEnv owns no thread pools (genai never asks for global ones),
+    // so leaking it keeps no threads alive. g_process_exiting is also set when the genai module is
+    // unloaded at runtime (dlclose / FreeLibrary), where destroying the env would in fact be safe;
+    // the cost there is one leaked OrtEnv per load/unload cycle, which is preferable to aborting.
+    (void)g_ort_globals->env_.release();
+  }
+
   g_ort_globals.reset();
 }
 

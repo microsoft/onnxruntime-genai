@@ -409,15 +409,6 @@ TEST(SpeculativeSamplingTest, SamplingDistTopKTopPCombined) {
   for (size_t i = 1; i < out.size(); ++i) EXPECT_FLOAT_EQ(out[i], 0.0f);
 }
 
-TEST(SpeculativeSamplingTest, SamplingDistFromProbsMatchesLogits) {
-  // SamplingDistributionFromProbs(p) must equal the dense distribution from log(p).
-  std::array<float, 4> probs{0.5f, 0.3f, 0.15f, 0.05f};
-  std::array<float, 4> logits{std::log(0.5f), std::log(0.3f), std::log(0.15f), std::log(0.05f)};
-  auto a = SamplingDistributionFromProbs(probs, /*top_k=*/3, /*top_p=*/0.0f, /*temperature=*/1.3f);
-  auto b = SampledDense(logits, /*top_k=*/3, /*top_p=*/0.0f, /*temperature=*/1.3f);
-  for (size_t i = 0; i < a.size(); ++i) EXPECT_NEAR(a[i], b[i], 1e-5f);
-}
-
 // TargetTokenSelection
 
 TEST(SpeculativeSamplingTest, TargetGreedySelectionAppliesMinLengthBeforeArgmax) {
