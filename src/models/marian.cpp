@@ -98,7 +98,7 @@ void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     throw std::runtime_error(
         "MarianInputIDs::Update: got " + std::to_string(new_tokens.size()) +
         " token(s) but the input tensor holds " + std::to_string(shape_[0]) +
-        " (batch_size * num_beams). Marian does not support batch_size > 1.");
+        " (batch_size * num_beams). Every batch entry needs exactly one token.");
   }
 
   value_->CreateTensor(shape_, state_.params_->use_graph_capture);
@@ -125,19 +125,54 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     encoder_attention_mask_.Add();
 
-    // Create a new DeviceSpan with one additional token (0) appended
-    auto original_cpu_span = next_tokens.CpuSpan();
-    auto extended_tokens = model_.p_device_inputs_->Allocate<int32_t>(original_cpu_span.size() + 1);
-    auto extended_cpu_span = extended_tokens.CpuSpan();
+    // Append eos per sequence at its own unpadded length. PadInputs right-pads,
+    // so appending once at the end of the flattened buffer would leave eos
+    // behind the padding for every row but the last.
+    //
+    // The prompt buffer is [batch_size, seq_len]: DefaultInputIDs and
+    // DefaultPositionInputs expand it over beams themselves, so only
+    // decoder-side tensors are sized batch*beam.
+    const size_t batch_size = static_cast<size_t>(params_->search.batch_size);
+    const int32_t pad_token_id = model_.config_->model.pad_token_id;
+    const int32_t eos_token_id = model_.config_->model.eos_token_id[0];
 
-    // Copy original tokens and append eos_token_id
-    std::copy(original_cpu_span.begin(), original_cpu_span.end(), extended_cpu_span.begin());
-    extended_cpu_span[original_cpu_span.size()] = model_.config_->model.eos_token_id[0];  // Append eos_token_id
+    auto original_cpu_span = next_tokens.CpuSpan();
+    if (batch_size == 0 || original_cpu_span.size() % batch_size != 0) {
+      throw std::runtime_error(
+          "MarianState::Run: prompt buffer holds " +
+          std::to_string(original_cpu_span.size()) +
+          " token(s), which is not a positive multiple of batch_size " +
+          std::to_string(batch_size) +
+          ". The buffer must be a padded [batch_size, sequence_length] block.");
+    }
+    const size_t src_width = original_cpu_span.size() / batch_size;
+    const size_t dst_width = src_width + 1;
+
+    auto extended_tokens = model_.p_device_inputs_->Allocate<int32_t>(batch_size * dst_width);
+    auto extended_cpu_span = extended_tokens.CpuSpan();
+    for (size_t b = 0; b < batch_size; b++) {
+      auto src = original_cpu_span.subspan(b * src_width, src_width);
+      auto dst = extended_cpu_span.subspan(b * dst_width, dst_width);
+
+      size_t length = src_width;
+      for (size_t i = 0; i < src_width; i++) {
+        if (src[i] == pad_token_id) {
+          length = i;
+          break;
+        }
+      }
+
+      std::copy(src.begin(), src.begin() + length, dst.begin());
+      dst[length] = eos_token_id;
+      std::fill(dst.begin() + length + 1, dst.end(), pad_token_id);
+    }
     extended_tokens.CopyCpuToDevice();
 
     encoder_input_ids_.Update(extended_tokens);
     const size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
-    encoder_attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
+    // The mask is built by scanning the token buffer over batch*seq_len, so it
+    // must see the extended buffer rather than the original padded one.
+    encoder_attention_mask_.Update(extended_tokens, current_length, static_cast<int>(new_length));
 
     const auto encoder_outputs_type = model_.session_info_.GetOutputDataType(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     const std::array<int64_t, 3> encoder_outputs_shape{encoder_input_ids_.GetShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
@@ -158,9 +193,14 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
     decoder_input_ids_.Add();
 
-    next_tokens.CpuSpan()[next_tokens.size() - 1] = model_.config_->model.bos_token_id;
+    // Every sequence in the batch starts decoding from bos. Decoder tensors are
+    // sized batch*beam because beam expansion has already happened by here.
+    auto decoder_start_tokens = model_.p_device_inputs_->Allocate<int32_t>(params_->BatchBeamSize());
+    std::fill(decoder_start_tokens.CpuSpan().begin(), decoder_start_tokens.CpuSpan().end(),
+              model_.config_->model.bos_token_id);
+    decoder_start_tokens.CopyCpuToDevice();
 
-    decoder_input_ids_.Update(next_tokens.subspan(next_tokens.size() - 1, 1));
+    decoder_input_ids_.Update(decoder_start_tokens);
 
     const std::array<int64_t, 1> past_key_values_length_shape{1};
     past_key_values_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_key_values_length_shape, model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_key_values_length));
@@ -171,7 +211,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // attention_mask_.attention_mask_name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
     attention_mask_.Add();
-    attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
+    attention_mask_.Update(extended_tokens, current_length, static_cast<int>(new_length));
 
     const auto hidden_states_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
     const std::array<int64_t, 3> encoder_hidden_states_shape{decoder_input_ids_.GetMarianInputsShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};

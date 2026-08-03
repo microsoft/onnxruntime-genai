@@ -6,6 +6,7 @@ option(USE_TRT_RTX "Build with TensorRT-RTX support" OFF)
 option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
+set(NUGET_PACKAGE_SOURCE "" CACHE STRING "Override the NuGet package source used by the build")
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
