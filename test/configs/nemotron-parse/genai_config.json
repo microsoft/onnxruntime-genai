@@ -8,6 +8,7 @@
     "vocab_size": 52352,
     "vision": {
       "filename": "encoder.onnx",
+      "config_filename": "processor_config.json",
       "inputs": {"pixel_values": "pixel_values"},
       "outputs": {"image_features": "encoder_hidden_states"},
       "num_visual_tokens": 3201
@@ -15,7 +16,6 @@
     "decoder": {
       "filename": "decoder.onnx",
       "prefill_filename": "decoder_prefill.onnx",
-      "cache_update_mode": "tensor_scatter",
       "prefill_sequence_length": 8,
       "hidden_size": 1024,
       "head_size": 64,
