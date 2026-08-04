@@ -826,7 +826,7 @@ class DeepSeekV4Model(Model):
     # HyperConnection
     # ------------------------------------------------------------------ #
 
-    def make_hyper_connection(
+    def make_hyper_connection_decomposed(
         self,
         layer_id: int,
         which: str,        # "attn" or "ffn"
@@ -1098,6 +1098,35 @@ class DeepSeekV4Model(Model):
                 to=ir.DataType.FLOAT,
             )
             self.node_names.add(name)
+
+    def make_hyper_connection(
+        self,
+        layer_id: int,
+        which: str,
+        hc_module,
+        hc_streams: str,
+    ) -> tuple[str, str, str]:
+        base = f"/model/layers.{layer_id}/{which}_hc/HyperConnection"
+        weight_name = f"model.layers.{layer_id}.{which}_hc.fn"
+        bias_name = f"model.layers.{layer_id}.{which}_hc.base"
+        scale_name = f"model.layers.{layer_id}.{which}_hc.scale"
+        self.make_initializer(hc_module.fn.data.float(), weight_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_module.base.data.float(), bias_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_module.scale.data.float(), scale_name, to=ir.DataType.FLOAT)
+        outputs = [f"{base}/output_{index}" for index in range(3)]
+        self.make_node(
+            "HyperConnection",
+            [hc_streams, weight_name, bias_name, scale_name],
+            outputs,
+            name=base,
+            domain="com.microsoft",
+            epsilon=self.hc_eps,
+            sinkhorn_iterations=self.hc_sinkhorn_iters,
+        )
+        self.make_value(outputs[0], self.io_dtype, ["batch_size", "sequence_length", self.hc_mult])
+        self.make_value(outputs[1], self.io_dtype, ["batch_size", "sequence_length", self.hc_mult, self.hc_mult])
+        self.make_value(outputs[2], self.io_dtype, ["batch_size", "sequence_length", self.hidden_size])
+        return outputs[0], outputs[1], outputs[2]
 
     def make_hc_combine(
         self,
@@ -1908,7 +1937,7 @@ class DeepSeekV4Model(Model):
     # HyperHead (collapse HC streams to [B, S, D])
     # ------------------------------------------------------------------ #
 
-    def make_hc_head(self, hc_head, hc_streams: str) -> str:
+    def make_hc_head_decomposed(self, hc_head, hc_streams: str) -> str:
         """Emit the HyperHead subgraph.  Returns [B, S, D] value name."""
         base = "/model/hc_head"
         hc = self.hc_mult
@@ -2009,6 +2038,26 @@ class DeepSeekV4Model(Model):
                        ["batch_size", "sequence_length", d])
         return f"{out_name}/output_0"
 
+    def make_hc_head(self, hc_head, hc_streams: str) -> str:
+        name = "/model/hc_head/HyperHead"
+        weight_name = "model.hc_head.hc_fn"
+        bias_name = "model.hc_head.hc_base"
+        scale_name = "model.hc_head.hc_scale"
+        self.make_initializer(hc_head.hc_fn.data.float(), weight_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_head.hc_base.data.float(), bias_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_head.hc_scale.data.float(), scale_name, to=ir.DataType.FLOAT)
+        output = f"{name}/output_0"
+        self.make_node(
+            "HyperHead",
+            [hc_streams, weight_name, bias_name, scale_name],
+            [output],
+            name=name,
+            domain="com.microsoft",
+            epsilon=self.hc_eps,
+        )
+        self.make_value(output, self.io_dtype, ["batch_size", "sequence_length", self.hidden_size])
+        return output
+
     # ------------------------------------------------------------------ #
     # Decoder layer
     # ------------------------------------------------------------------ #
@@ -2018,7 +2067,6 @@ class DeepSeekV4Model(Model):
 
         Updates ``self.hc_streams`` and ``self.layernorm_attrs``.
         """
-        self.ensure_shared_hc_eps()
         hc = self.hc_mult
 
         # ---- Attention HC: compute (post, comb, collapsed) ----

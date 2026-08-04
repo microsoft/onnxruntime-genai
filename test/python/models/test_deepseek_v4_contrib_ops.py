@@ -65,6 +65,9 @@ def _make_builder(layer_types: list[str]) -> DeepSeekV4Model:
     model.index_head_dim = 4
     model.index_topk = 3
     model.rms_norm_epsilon = 1e-6
+    model.hc_mult = 2
+    model.hc_eps = 1e-6
+    model.hc_sinkhorn_iters = 3
     model.layer_types = layer_types
     model.num_layers = len(layer_types)
     model.rope_attrs = {"cache_length": 16}
@@ -78,6 +81,7 @@ def _make_builder(layer_types: list[str]) -> DeepSeekV4Model:
     model.initialize_compression_states()
     model.make_value("hidden", ir.DataType.FLOAT, ["batch_size", "sequence_length", 8])
     model.make_value("q_residual", ir.DataType.FLOAT, ["batch_size", "sequence_length", 3])
+    model.make_value("hc_streams", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2, 8])
     return model
 
 
@@ -119,3 +123,27 @@ def test_emits_compressed_attention_contract():
     proto = ir.to_proto(model.model)
     node = next(node for node in proto.graph.node if node.op_type == "CompressedAttention")
     assert (len(node.input), len(node.output)) == (6, 1)
+
+
+def test_emits_hyper_connection_and_head_contracts():
+    model = _make_builder(["sliding_attention"])
+    connection = SimpleNamespace(
+        fn=SimpleNamespace(data=torch.randn(8, 16)),
+        base=SimpleNamespace(data=torch.randn(8)),
+        scale=SimpleNamespace(data=torch.randn(3)),
+    )
+    head = SimpleNamespace(
+        hc_fn=SimpleNamespace(data=torch.randn(2, 16)),
+        hc_base=SimpleNamespace(data=torch.randn(2)),
+        hc_scale=SimpleNamespace(data=torch.randn(1)),
+    )
+
+    model.make_hyper_connection(0, "attn", connection, "hc_streams")
+    model.make_hc_head(head, "hc_streams")
+
+    proto = ir.to_proto(model.model)
+    contracts = {
+        node.op_type: (len(node.input), len(node.output)) for node in proto.graph.node if node.domain == "com.microsoft"
+    }
+    assert contracts["HyperConnection"] == (4, 3)
+    assert contracts["HyperHead"] == (4, 1)
