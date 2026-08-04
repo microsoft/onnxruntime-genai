@@ -646,6 +646,71 @@ TEST(SamplingTests, SchedulerOwnedSamplerPreservesRngAcrossBatchReorderCuda) {
   }
 }
 
+// A batch where every row shares the same sampling parameters and the same allocation takes the
+// contiguous fast path, which samples in place and therefore requires the packed RNG state indices
+// to stay in original row order. The batch is deliberately larger than 16 rows because that is where
+// libstdc++ introsort starts reordering elements that compare equal.
+TEST(SamplingTests, SchedulerOwnedSamplerKeepsRngRowsAlignedForContiguousBatchCuda) {
+  constexpr int batch_size = 20;
+  constexpr int vocab_size = 8;
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  auto model = OgaModel::Create(*config);
+
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto contiguous_sampler = device->CreateBatchedSampler(batch_size, vocab_size);
+  auto separate_sampler = device->CreateBatchedSampler(batch_size, vocab_size);
+  ASSERT_NE(contiguous_sampler, nullptr);
+  ASSERT_NE(separate_sampler, nullptr);
+
+  const std::array<float, vocab_size> logits{{0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f}};
+
+  // One allocation covering the whole batch, so rows are views into contiguous device memory.
+  auto packed = device->Allocate<float>(static_cast<size_t>(batch_size) * vocab_size);
+  auto packed_cpu = packed.CpuSpan();
+  for (int row = 0; row < batch_size; ++row)
+    std::copy(logits.begin(), logits.end(), packed_cpu.begin() + static_cast<size_t>(row) * vocab_size);
+  packed.CopyCpuToDevice();
+
+  std::vector<Generators::DeviceSpan<float>> contiguous_rows;
+  std::vector<Generators::DeviceSpan<float>> separate_rows;
+  for (int row = 0; row < batch_size; ++row) {
+    contiguous_rows.push_back(packed.subspan(static_cast<size_t>(row) * vocab_size, vocab_size));
+    auto separate_row = device->Allocate<float>(vocab_size);
+    std::copy(logits.begin(), logits.end(), separate_row.CpuSpan().begin());
+    separate_row.CopyCpuToDevice();
+    separate_rows.push_back(std::move(separate_row));
+  }
+
+  const std::vector<Generators::BatchedSamplingParams> params(
+      batch_size, Generators::BatchedSamplingParams{4, 1.0f, 1.0f});
+
+  std::vector<std::unique_ptr<Generators::BatchedSamplerState>> contiguous_owned, separate_owned;
+  std::vector<Generators::BatchedSamplerState*> contiguous_states, separate_states;
+  for (int row = 0; row < batch_size; ++row) {
+    const int seed = 1000 + 7 * row;
+    contiguous_owned.push_back(contiguous_sampler->CreateState(seed));
+    separate_owned.push_back(separate_sampler->CreateState(seed));
+    contiguous_states.push_back(contiguous_owned.back().get());
+    separate_states.push_back(separate_owned.back().get());
+  }
+
+  bool saw_distinct_tokens = false;
+  for (int step = 0; step < 4; ++step) {
+    auto sampled = contiguous_sampler->Sample(contiguous_rows, params, contiguous_states, vocab_size).CopyDeviceToCpu();
+    const std::vector<int32_t> contiguous_tokens(sampled.begin(), sampled.end());
+    auto separate_tokens = separate_sampler->Sample(separate_rows, params, separate_states, vocab_size).CopyDeviceToCpu();
+    for (int row = 0; row < batch_size; ++row) {
+      EXPECT_EQ(contiguous_tokens[row], separate_tokens[row])
+          << "RNG stream leaked across rows at step " << step << ", row " << row;
+      saw_distinct_tokens = saw_distinct_tokens || contiguous_tokens[row] != contiguous_tokens[0];
+    }
+  }
+  // Guards against the comparison passing trivially because every seed picked the same token.
+  EXPECT_TRUE(saw_distinct_tokens) << "Sampling was degenerate, so the row/RNG alignment was not exercised.";
+}
+
 TEST(SamplingTests, SchedulerOwnedSamplerCachesTopKPerBucketSizeCuda) {
   constexpr int batch_size = 3;
   constexpr int vocab_size = 100001;

@@ -146,9 +146,15 @@ struct CudaBatchedSamplerState final : BatchedSamplerState {
 };
 
 struct CudaBatchedSampler final : BatchedSampler {
-  CudaBatchedSampler(int max_batch_size, int vocab_size)
-      : state_pool_{std::make_shared<CudaSamplerStatePool>(max_batch_size)} {
-    EnsureCapacity(max_batch_size, vocab_size);
+  CudaBatchedSampler(int max_batch_size, int /*vocab_size*/)
+      : state_pool_{std::make_shared<CudaSamplerStatePool>(max_batch_size)},
+        max_batch_size_{std::max(max_batch_size, 1)} {
+    // The GPU workspace scales with max_batch_size * vocab_size, so it is grown on demand from the
+    // first observed batch rather than reserved at model load. Only the cheap host-side planning
+    // vectors are sized up front.
+    row_order_.reserve(max_batch_size_);
+    bucket_offsets_.reserve(static_cast<size_t>(max_batch_size_) + 1);
+    bucket_params_.reserve(max_batch_size_);
   }
 
   std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
@@ -189,7 +195,9 @@ struct CudaBatchedSampler final : BatchedSampler {
         return params[lhs].p < params[rhs].p;
       return params[lhs].temperature < params[rhs].temperature;
     };
-    std::sort(row_order_.begin(), row_order_.end(), params_less);
+    // Stable so that rows with identical parameters keep their original relative order, which
+    // keeps each request bound to its own RNG state regardless of batch composition.
+    std::stable_sort(row_order_.begin(), row_order_.end(), params_less);
 
     for (int packed_row = 0; packed_row < batch_size; ++packed_row) {
       const int row = row_order_[packed_row];
@@ -215,9 +223,13 @@ struct CudaBatchedSampler final : BatchedSampler {
     output_indices_.CopyCpuToDevice();
     state_indices_.CopyCpuToDevice();
 
+    // The fast path samples scores[0] in place, so the packed RNG state indices must line up with
+    // the original rows. The stable sort guarantees that for a single bucket; check it explicitly so
+    // a future ordering change falls back to gather/scatter instead of silently swapping RNG streams.
     bool rows_are_contiguous = bucket_params_.size() == 1;
     for (int row = 0; row < batch_size && rows_are_contiguous; ++row) {
-      rows_are_contiguous = scores[row].SameBufferAs(scores[0]) &&
+      rows_are_contiguous = row_order_[row] == row &&
+                            scores[row].SameBufferAs(scores[0]) &&
                             scores[row].Span().data() == scores[0].Span().data() +
                                                              static_cast<size_t>(row) * vocab_size;
     }
@@ -253,7 +265,7 @@ struct CudaBatchedSampler final : BatchedSampler {
     if (batch_size <= batch_capacity_ && vocab_size == vocab_capacity_)
       return;
 
-    batch_capacity_ = std::max(batch_size, std::max(4, batch_capacity_ * 2));
+    batch_capacity_ = std::max(batch_size, std::min(max_batch_size_, std::max(4, batch_capacity_ * 2)));
     vocab_capacity_ = vocab_size;
     score_ptrs_ = AllocateCudaSpan<const float*>(batch_capacity_);
     output_indices_ = AllocateCudaSpan<int>(batch_capacity_);
@@ -270,9 +282,6 @@ struct CudaBatchedSampler final : BatchedSampler {
     sampling_buffer_ = AllocateCudaSpan<uint8_t>(buffer_size);
     sampling_data_ = std::make_unique<cuda::SamplingData>(std::random_device{}(), batch_capacity_, vocab_size,
                                                           GetStream(), sampling_buffer_.Span().data(), buffer_size);
-    row_order_.reserve(batch_capacity_);
-    bucket_offsets_.reserve(static_cast<size_t>(batch_capacity_) + 1);
-    bucket_params_.reserve(batch_capacity_);
   }
 
   std::shared_ptr<CudaSamplerStatePool> state_pool_;
@@ -287,6 +296,7 @@ struct CudaBatchedSampler final : BatchedSampler {
   std::vector<int> row_order_;
   std::vector<int> bucket_offsets_;
   std::vector<BatchedSamplingParams> bucket_params_;
+  int max_batch_size_{};
   int batch_capacity_{};
   int vocab_capacity_{};
 };
