@@ -139,6 +139,16 @@ def test_emits_hyper_connection_and_head_contracts():
     )
 
     model.make_hyper_connection(0, "attn", connection, "hc_streams")
+    model.make_hyper_connection_mix(
+        0,
+        "ffn",
+        connection,
+        _norm(8),
+        "hidden",
+        "hc_streams",
+        "post",
+        "comb",
+    )
     model.make_hc_head(head, "hc_streams")
 
     proto = ir.to_proto(model.model)
@@ -146,4 +156,30 @@ def test_emits_hyper_connection_and_head_contracts():
         node.op_type: (len(node.input), len(node.output)) for node in proto.graph.node if node.domain == "com.microsoft"
     }
     assert contracts["HyperConnection"] == (4, 3)
+    assert contracts["HyperConnectionMix"] == (8, 4)
     assert contracts["HyperHead"] == (4, 1)
+    mix_weight = next(
+        initializer
+        for initializer in proto.graph.initializer
+        if initializer.name == "model.layers.0.ffn_hc.fn"
+    )
+    assert list(mix_weight.dims) == [16, 8]
+
+
+def test_casts_hyper_connection_state_between_activation_and_mix_types():
+    model = _make_builder(["sliding_attention"])
+    model.io_dtype = ir.DataType.FLOAT16
+    model.make_value("post_fp16", ir.DataType.FLOAT16, ["batch_size", "sequence_length", 2])
+    model.make_value("post_fp32", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2])
+
+    fp32_state = model.cast_hyper_mix_state(
+        "post_fp16", ["batch_size", "sequence_length", 2], ir.DataType.FLOAT
+    )
+    fp16_state = model.cast_hyper_mix_state(
+        "post_fp32", ["batch_size", "sequence_length", 2], ir.DataType.FLOAT16
+    )
+
+    proto = ir.to_proto(model.model)
+    casts = {node.output[0]: node for node in proto.graph.node if node.op_type == "Cast"}
+    assert fp32_state in casts
+    assert fp16_state in casts

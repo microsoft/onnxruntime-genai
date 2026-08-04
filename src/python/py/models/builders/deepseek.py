@@ -30,9 +30,9 @@ The numerics implemented here follow the HuggingFace ``DeepseekV4`` modeling cod
 and its two routers.  When updating this builder, diff against that file rather than
 against earlier DeepSeek generations, whose MLA/RoPE conventions differ.
 
-The compression, attention, and hash-routing kernels are provided by ONNX Runtime
-contrib ops. Remaining projections and hyper-connections are emitted as standard
-ONNX subgraphs.
+The compression, attention, hash-routing, and hyper-connection kernels are provided
+by ONNX Runtime contrib ops. Remaining projections are emitted as standard ONNX
+subgraphs.
 """
 
 from __future__ import annotations
@@ -1128,6 +1128,56 @@ class DeepSeekV4Model(Model):
         self.make_value(outputs[2], self.io_dtype, ["batch_size", "sequence_length", self.hidden_size])
         return outputs[0], outputs[1], outputs[2]
 
+    def make_hyper_connection_mix(
+        self,
+        layer_id: int,
+        which: str,
+        hc_module,
+        layernorm,
+        sublayer_out: str,
+        hc_streams: str,
+        post: str,
+        comb: str,
+    ) -> tuple[str, str, str, str]:
+        base = f"/model/layers.{layer_id}/{which}_hc/HyperConnectionMix"
+        weight_name = f"model.layers.{layer_id}.{which}_hc.fn"
+        scale_name = f"model.layers.{layer_id}.{which}_hc.scale"
+        bias_name = f"model.layers.{layer_id}.{which}_hc.base"
+        norm_weight_name = f"model.layers.{layer_id}.{which}_hc.norm_weight"
+        self.make_initializer(hc_module.fn.data.T.contiguous().float(), weight_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_module.scale.data.float(), scale_name, to=ir.DataType.FLOAT)
+        self.make_initializer(hc_module.base.data.float(), bias_name, to=ir.DataType.FLOAT)
+        self.make_initializer(layernorm.weight.data.float(), norm_weight_name, to=ir.DataType.FLOAT)
+        outputs = [f"{base}/output_{index}" for index in range(4)]
+        self.make_node(
+            "HyperConnectionMix",
+            [sublayer_out, hc_streams, post, comb, weight_name, scale_name, bias_name, norm_weight_name],
+            outputs,
+            name=base,
+            domain="com.microsoft",
+            sinkhorn_iterations=self.hc_sinkhorn_iters,
+            epsilon=self.rms_norm_epsilon,
+            hc_epsilon=self.hc_eps,
+            sinkhorn_epsilon=self.hc_eps,
+            post_alpha=2.0,
+        )
+        self.make_value(outputs[0], self.io_dtype, ["batch_size", "sequence_length", self.hc_mult, self.hidden_size])
+        self.make_value(outputs[1], ir.DataType.FLOAT, ["batch_size", "sequence_length", self.hc_mult])
+        self.make_value(
+            outputs[2],
+            ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", self.hc_mult, self.hc_mult],
+        )
+        self.make_value(outputs[3], self.io_dtype, ["batch_size", "sequence_length", self.hidden_size])
+        return outputs[0], outputs[1], outputs[2], outputs[3]
+
+    def cast_hyper_mix_state(self, name: str, shape: list, to: ir.DataType) -> str:
+        if self.io_dtype == ir.DataType.FLOAT:
+            return name
+        cast_name = f"{name}/to_{self.to_str_dtype(to).lower()}/Cast"
+        self.make_cast(cast_name, name, to, shape)
+        return f"{cast_name}/output_0"
+
     def make_hc_combine(
         self,
         layer_id: int,
@@ -2062,57 +2112,73 @@ class DeepSeekV4Model(Model):
     # Decoder layer
     # ------------------------------------------------------------------ #
 
-    def make_layer(self, layer_id: int, layer) -> None:
+    def make_layer(
+        self,
+        layer_id: int,
+        layer,
+        post_attn: str,
+        comb_attn: str,
+        attn_ln_output: str,
+        next_layer=None,
+    ) -> tuple[str, str, str] | None:
         """Build one DeepSeek V4 decoder block.
 
         Updates ``self.hc_streams`` and ``self.layernorm_attrs``.
         """
-        hc = self.hc_mult
-
-        # ---- Attention HC: compute (post, comb, collapsed) ----
-        post_attn, comb_attn, collapsed_attn = self.make_hyper_connection(
-            layer_id, "attn", layer.attn_hc, self.hc_streams
-        )
-
-        # ---- input_layernorm on collapsed ----
-        attn_ln_output = self.make_layernorm_no_skip(layer_id, layer.input_layernorm, collapsed_attn, "input")
-
         # ---- Attention ----
         attn_out = self.make_deepseek_attention(
             layer_id, layer.self_attn, attn_ln_output
         )
 
-        # ---- HC combine for attention ----
-        self.hc_streams = self.make_hc_combine(
-            layer_id, "attn",
-            post_attn, comb_attn,
-            self.hc_streams, attn_out
+        # ---- Attention residual update + FFN HC + post-attention norm ----
+        self.hc_streams, post_ffn, comb_ffn, ffn_ln_output = self.make_hyper_connection_mix(
+            layer_id,
+            "ffn",
+            layer.ffn_hc,
+            layer.post_attention_layernorm,
+            attn_out,
+            self.hc_streams,
+            post_attn,
+            comb_attn,
         )
-
-        # ---- FFN HC: compute (post, comb, collapsed) ----
-        post_ffn, comb_ffn, collapsed_ffn = self.make_hyper_connection(
-            layer_id, "ffn", layer.ffn_hc, self.hc_streams
-        )
-
-        # ---- post_attention_layernorm on collapsed ----
-        ffn_ln_output = self.make_layernorm_no_skip(layer_id, layer.post_attention_layernorm, collapsed_ffn, "post_attention")
 
         # ---- MoE / FFN ----
         moe_out = self.make_deepseek_moe(
             layer_id, layer.mlp, ffn_ln_output
         )
 
-        # ---- HC combine for FFN ----
-        self.hc_streams = self.make_hc_combine(
-            layer_id, "ffn",
-            post_ffn, comb_ffn,
-            self.hc_streams, moe_out
-        )
+        if next_layer is not None:
+            # ---- FFN residual update + next attention HC + next input norm ----
+            self.hc_streams, next_post, next_comb, next_attn_input = self.make_hyper_connection_mix(
+                layer_id + 1,
+                "attn",
+                next_layer.attn_hc,
+                next_layer.input_layernorm,
+                moe_out,
+                self.hc_streams,
+                post_ffn,
+                comb_ffn,
+            )
+            next_state = (next_post, next_comb, next_attn_input)
+        else:
+            post_ffn = self.cast_hyper_mix_state(
+                post_ffn, ["batch_size", "sequence_length", self.hc_mult], self.io_dtype
+            )
+            comb_ffn = self.cast_hyper_mix_state(
+                comb_ffn,
+                ["batch_size", "sequence_length", self.hc_mult, self.hc_mult],
+                self.io_dtype,
+            )
+            self.hc_streams = self.make_hc_combine(
+                layer_id, "ffn", post_ffn, comb_ffn, self.hc_streams, moe_out
+            )
+            next_state = None
 
         # Mark as not the first layernorm anymore (for skip tracking)
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
             self.layernorm_attrs["last_layernorm"] = True
+        return next_state
 
     # ------------------------------------------------------------------ #
     # Model assembly
@@ -2179,9 +2245,22 @@ class DeepSeekV4Model(Model):
         self.layer_id = 0
         self.layernorm_attrs["first_layernorm"] = True
         self.layernorm_attrs["last_layernorm"] = False
-        for layer in model_inner.layers[: self.num_layers]:
+        layers = model_inner.layers[: self.num_layers]
+        post_attn, comb_attn, collapsed_attn = self.make_hyper_connection(
+            0, "attn", layers[0].attn_hc, self.hc_streams
+        )
+        post_attn = self.cast_hyper_mix_state(
+            post_attn, ["batch_size", "sequence_length", hc], ir.DataType.FLOAT
+        )
+        comb_attn = self.cast_hyper_mix_state(
+            comb_attn, ["batch_size", "sequence_length", hc, hc], ir.DataType.FLOAT
+        )
+        attn_ln_output = self.make_layernorm_no_skip(0, layers[0].input_layernorm, collapsed_attn, "input")
+        attn_state = (post_attn, comb_attn, attn_ln_output)
+        for layer_index, layer in enumerate(layers):
             print(f"Reading layer {self.layer_id}")
-            self.make_layer(self.layer_id, layer)
+            next_layer = layers[layer_index + 1] if layer_index + 1 < len(layers) else None
+            attn_state = self.make_layer(self.layer_id, layer, *attn_state, next_layer=next_layer)
             self.layer_id += 1
 
         # ---- 4. HC Head ----
