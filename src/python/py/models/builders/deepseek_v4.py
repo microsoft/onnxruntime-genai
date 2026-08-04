@@ -168,6 +168,12 @@ class DeepSeekV4FlashModel(Model):
         # of the 21 ratio-4 layers. One operator covers everything after its two projections.
         self.index_fused = extra_options.get("dsv4_index_fused", "1") not in ("0", 0, False)
 
+        # The attention path spends 66 nodes per layer on plumbing that never leaves a token:
+        # two RMS norms, two partial rotations, the FP8 round trip on the latent KV row, the
+        # inverse rotation on the way out and the regrouping for the output projection.  Two
+        # operators cover all of it -- one on each side of the attention kernel.
+        self.qkv_fused = extra_options.get("dsv4_qkv_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -963,38 +969,59 @@ class DeepSeekV4FlashModel(Model):
                                            to=ir.DataType.FLOAT),
                                [B, S, self.q_lora_rank])
         qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
-        q = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
-        q = self.reshape(f"{name}/q4", q, [0, 0, H, D], io, [B, S, H, D])
-        q = self.make_weightless_rmsnorm(f"{name}/qrms", q, [B, S, H, D], io)
-        q = rope_last(f"{name}/qrope", q, [B, S, H, D], cos_q, sin_q)
+        q_raw = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
 
         # ---- KV (single latent row shared by all heads) ----
-        kv = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
-        kv = self.make_rmsnorm(f"{name}/kvnorm", kv,
-                               self.init_w(f"{p}.kv_norm.weight",
-                                           to=ir.DataType.FLOAT),
-                               [B, S, D])
-        kv = self.cast(f"{name}/kvnorm_b", kv, io, [B, S, D])
-        kv = rope_last(f"{name}/kvrope", kv, [B, S, D], cos_k, sin_k)
-        kv_n = self.slice1(f"{name}/kvn", kv, 0, nd, io, [B, S, nd])
-        kv_r = self.slice1(f"{name}/kvr", kv, nd, INT64_MAX, io, [B, S, rd])
-        kv_n = self.make_act_quant(f"{name}/kvaq",
-                                   self.cast(f"{name}/kvnf", kv_n, F, [B, S, nd]), [B, S, nd])
-        kv_n = self.cast(f"{name}/kvnb", kv_n, io, [B, S, nd])
-        kv = self.op("Concat", [kv_n, kv_r], f"{name}/kvq", io, [B, S, D], axis=-1)
+        kv_raw = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
+        kv_w = self.init_w(f"{p}.kv_norm.weight", to=ir.DataType.FLOAT)
+
+        if self.qkv_fused:
+            outs = [f"{name}/qkv_0", f"{name}/qkv_1"]
+            self.make_node(
+                "DSV4QKVNormRope",
+                inputs=[q_raw, kv_raw, kv_w, cos, sin],
+                outputs=outs, name=f"{name}/qkv", domain="com.microsoft",
+                num_heads=H, head_dim=D, rope_head_dim=rd, epsilon=self.eps, act_quant=1)
+            self.make_value(outs[0], io, shape=[B, S, H, D])
+            self.make_value(outs[1], io, shape=[B, S, D])
+            q, kv = outs
+        else:
+            q = self.reshape(f"{name}/q4", q_raw, [0, 0, H, D], io, [B, S, H, D])
+            q = self.make_weightless_rmsnorm(f"{name}/qrms", q, [B, S, H, D], io)
+            q = rope_last(f"{name}/qrope", q, [B, S, H, D], cos_q, sin_q)
+
+            kv = self.make_rmsnorm(f"{name}/kvnorm", kv_raw, kv_w, [B, S, D])
+            kv = self.cast(f"{name}/kvnorm_b", kv, io, [B, S, D])
+            kv = rope_last(f"{name}/kvrope", kv, [B, S, D], cos_k, sin_k)
+            kv_n = self.slice1(f"{name}/kvn", kv, 0, nd, io, [B, S, nd])
+            kv_r = self.slice1(f"{name}/kvr", kv, nd, INT64_MAX, io, [B, S, rd])
+            kv_n = self.make_act_quant(f"{name}/kvaq",
+                                       self.cast(f"{name}/kvnf", kv_n, F, [B, S, nd]),
+                                       [B, S, nd])
+            kv_n = self.cast(f"{name}/kvnb", kv_n, io, [B, S, nd])
+            kv = self.op("Concat", [kv_n, kv_r], f"{name}/kvq", io, [B, S, D], axis=-1)
 
         if self.paged:
+            # `o` is still flat here -- (tokens, H * D) -- because the fused tail below wants
+            # it that way and the unfused tail has to reshape it anyway.
             o, presents = self.make_paged_attention(name, layer_id, ratio, q, kv, x, ctx,
                                                     qr=qn, cos_q=cos_q, sin_q=sin_q)
+            if self.qkv_fused:
+                o = self.op("DSV4InvRopeGroup", [o, cos, sin], f"{name}/of", io, [G, None, dh],
+                            domain="com.microsoft", num_heads=H, head_dim=D, rope_head_dim=rd,
+                            num_groups=G)
+            else:
+                o = self.dyn_reshape(f"{name}/o4", o, ctx["bs"], [H, D], io, [B, S, H, D])
         else:
             o, presents = self.make_dense_attention(name, layer_id, ratio, q, kv, x, ctx)
 
-        o = rope_last(f"{name}/orope", o, [B, S, H, D], cos_q, sin_q, inverse=True)
+        if not (self.paged and self.qkv_fused):
+            o = rope_last(f"{name}/orope", o, [B, S, H, D], cos_q, sin_q, inverse=True)
+            o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
+            o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
+            o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
 
         # ---- grouped output projection ----
-        o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
-        o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
-        o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
         wa = self.shard(self.sd[f"{p}.wo_a.weight"].reshape(self.o_groups, R, dh), 0)
         o = self.op("MatMul", [o, self.init(wa.transpose(1, 2), f"{p}.wo_a/G", to=io)],
                     f"{name}/oa", io, [G, None, R])
@@ -1364,7 +1391,7 @@ class DeepSeekV4FlashModel(Model):
         self.make_value(out, io, shape=[None, H * D])
         self.make_value(cache_out, io, shape=self.input_shapes[f"past_kv_{layer_id}"])
         presents["kv"] = cache_out
-        return self.dyn_reshape(f"{name}/o4", out, ctx["bs"], [H, D], io, [B, S, H, D]), presents
+        return out, presents
 
     # ------------------------------------------------------------------ #
     # MoE
