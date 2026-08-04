@@ -242,8 +242,12 @@ struct LibraryHandle {
 #elif defined(__linux__) && !defined(__ANDROID__)
 struct LibraryHandle {
   LibraryHandle(const char* filename) {
-    auto path = Ort::GetCurrentModuleDir() + "/" + filename;
-    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    // Hosts such as Foundry Local may preload the add-on from a managed bundle outside this module's directory.
+    handle_ = dlopen(filename, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    if (!handle_) {
+      auto path = Ort::GetCurrentModuleDir() + "/" + filename;
+      handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    }
     if (!handle_)
       throw std::runtime_error(std::string("Failed to load library: ") + dlerror());  // dlerror() includes the path
   }
@@ -313,8 +317,11 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
       throw std::runtime_error("Shared library load failure (see first error)");
 
     Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
-    return reinterpret_cast<decltype(&GetInterface)>(
-        cuda_library_->GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str(), Ort::api);
+    auto get_interface = reinterpret_cast<decltype(&GetInterface)>(cuda_library_->GetSymbol("GetInterface"));
+    if (!get_interface)
+      throw std::runtime_error("CUDA add-on library does not export GetInterface");
+
+    return get_interface(&g_genai, to_string(type).c_str(), Ort::api);
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
   }

@@ -219,12 +219,12 @@ steps:
       $args += '--use_cuda', '--cuda_home', $cudaHome
       if ('${{ parameters.cuda_version }}' -like '13.*') {
         if ('${{ parameters.arch }}' -eq 'arm64') {
-          $cudaArchs = '110-real;120-real;121-real;120-virtual'
+          $cudaArchs = '120-real;121-real'
         } else {
-          $cudaArchs = '75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+          $cudaArchs = '75-real;80-real;86-real;89-real;120-real'
         }
       } else {
-        $cudaArchs = '61-real;75-real;86-real;89-real;120-real;120-virtual'
+        $cudaArchs = '61-real;75-real;86-real;89-real;120-real'
       }
       $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
     }
