@@ -182,7 +182,7 @@ std::unique_ptr<OrtValue> MakeTensor(OrtAllocator& allocator,
                                      std::span<const T> values) {
   auto tensor = OrtValue::CreateTensor<T>(allocator, shape);
   if (!values.empty())
-    std::copy(values.begin(), values.end(), tensor->GetTensorMutableData<T>());
+    std::copy(values.begin(), values.end(), tensor->template GetTensorMutableData<T>());
   return tensor;
 }
 
