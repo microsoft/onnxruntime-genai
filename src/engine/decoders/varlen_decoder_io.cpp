@@ -3,7 +3,6 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
-#include "../sequence_positions.h"
 
 namespace Generators {
 
@@ -163,7 +162,7 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   } else {
     for (auto& request : scheduled_requests) {
       const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      const int32_t kv_len = static_cast<int32_t>(SlotsAfterStep(request->ProcessedSequenceLength(), query_len));
+      const int32_t kv_len = static_cast<int32_t>(request->ProcessedSequenceLength()) + query_len;
       max_query_len = std::max(max_query_len, query_len);
       max_kv_len = std::max(max_kv_len, kv_len);
     }

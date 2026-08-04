@@ -67,7 +67,6 @@ struct GreedySearch_Cuda : Search_Cuda {
   void DeferCompletion(bool defer) override { defer_completion_ = defer; }
   void CompleteGeneration() override;
   bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override;
-  bool SupportsBatchedSampling() const override { return params_->BatchBeamSize() == 1; }
   void OnNextTokensSampled() override;
 
  private:
@@ -82,7 +81,6 @@ struct GreedySearch_Cuda : Search_Cuda {
   // host itself, so CompleteGeneration() must not copy again.
   bool external_host_copy_{false};
 
-  void EnsureSamplingData();
   void LaunchNextTokensTail();
 };
 

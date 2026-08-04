@@ -167,7 +167,7 @@ struct Request : std::enable_shared_from_this<Request>,
   bool IsChunkComplete() const;
 
   /**
-   * @brief Moves the cursor past the tokens this step processed.
+   * @brief Moves the cursor past a chunk that produced no token.
    */
   void AdvanceChunk();
 
@@ -187,8 +187,6 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   bool BindNextTokensSlot(DeviceSpan<int32_t> slot);
 
-  bool SupportsBatchedSampling() const;
-
   /**
    * @brief Runs everything token selection needs before the sampler: sequence bookkeeping,
    *        handing the logits to the search, and applying the logits processors.
@@ -199,11 +197,6 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
    */
   void OnNextTokensSampled();
-
-  /**
-   * @brief Returns this request's persistent random state for the given batched sampler.
-   */
-  BatchedSamplerState& SamplingState(BatchedSampler& sampler);
 
   /**
    * @brief Retrieves the generator parameters associated with this request.
@@ -244,7 +237,6 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
-  std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
 

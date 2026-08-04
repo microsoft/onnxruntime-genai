@@ -2,8 +2,7 @@
 
 Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
 "Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.
-"Phase 3" is [PR #2361](https://github.com/microsoft/onnxruntime-genai/pull/2361), stacked on Phase 2.
-All three are described here as built.
+Both are described here as built.
 
 This document explains how batching works in the two generation paths in onnxruntime-genai, why
 they differ, and what was changed to close most of the remaining throughput gap between them.
@@ -348,42 +347,7 @@ The remaining gap is the two per-request tail launches per step (`CheckForEOSAnd
 
 ---
 
-## 6. Phase 3 ([PR #2361](https://github.com/microsoft/onnxruntime-genai/pull/2361)): scheduler-owned batched sampler
-
-Phase 2 proves the performance value of batching, but its CUDA workspace is cached on the process-
-global device interface and its fast path requires uniform parameters, contiguous logits, and no
-pinned random seeds. Phase 3 makes batching the scheduler's normal sampling architecture:
-
-- Each `Scheduler` owns one `BatchedSampler` and its reusable CUDA workspace. Separate Engines do
-  not share mutable sampling state.
-- Each `Request` owns a sampler state initialized from its configured seed. The state remains with
-  the request when the scheduler reorders rows or requests join and leave, preserving its random
-  stream independently of batch position.
-- The sampler groups rows by resolved `(k, p, temperature)`. It runs one existing `GetSample` call
-  per distinct group, so launch complexity is proportional to the number of parameter groups, not
-  the number of requests.
-- Noncontiguous logits rows, including mixed prefill/decode steps, are gathered into one reusable
-  packed tensor and sampled by group. Results are scattered back to request order before the
-  per-request EOS and sequence tails run.
-- The scheduler and sampler reserve host planning arrays and CUDA workspace from the configured
-  maximum batch size. Steady-state decoding does not allocate memory on the sampling path.
-
-The CUDA top-k local algorithm cache is keyed by both `k` and bucket batch size. This matters for
-heterogeneous batches: an algorithm selected for a single-row bucket is not necessarily valid for
-a multi-row bucket with the same `k`.
-
-The control flow remains device-neutral. `DeviceInterface::CreateBatchedSampler()` returns null on
-providers without a batched implementation, and `ScheduledRequests` retains the Phase 1 fallback.
-Per-request `Search` objects still own sequences, EOS state, and logits processors; Phase 3 does not
-turn ragged request lifecycle into one fixed-width `Search`.
-
-The remaining opportunity is to batch the EOS/pad and sequence-append tails using per-row pointer
-descriptors. Those two launches still run once per request, but sampling itself no longer falls back
-because of heterogeneous parameters, pinned seeds, batch size one, or ragged logits layout.
-
----
-
-## 7. Rejected alternatives
+## 6. Rejected alternatives
 
 **Give the Engine one `Search` sized to max_batch, with per-row state.** This is the "just use the
 Generator design" option in its strongest form. It was rejected because it requires reworking
@@ -403,7 +367,7 @@ batching, for a fraction of the win. Deferred.
 
 ---
 
-## 8. Testing
+## 7. Testing
 
 The gate makes this a behaviour-preserving optimization, so the bar is bit-exactness against the
 pre-change build plus coverage of the fallback path.

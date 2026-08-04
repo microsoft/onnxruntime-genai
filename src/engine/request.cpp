@@ -4,7 +4,6 @@
 #include "request.h"
 
 #include "engine.h"
-#include "sequence_positions.h"
 #include "../search.h"
 
 namespace Generators {
@@ -101,28 +100,6 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
-int64_t Request::ProcessedSequenceLength() const {
-  return processed_sequence_length_;
-}
-
-size_t Request::ScheduledTokenCount() const {
-  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
-  return std::min(scheduled_token_count_, unprocessed);
-}
-
-void Request::ScheduleTokens(bool allow_chunking) {
-  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
-  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size, allow_chunking);
-}
-
-bool Request::IsChunkComplete() const {
-  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
-}
-
-void Request::AdvanceChunk() {
-  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
-}
-
 int32_t Request::UnseenToken() {
   if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
@@ -145,7 +122,32 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   if (end > tokens_host_.size())
     throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
 
-  return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
+  return std::span<const int32_t>{tokens_host_}.subspan(begin, ScheduledTokenCount());
+}
+
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
+}
+
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens(bool allow_chunking) {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  const auto& chunk_size = params_->search.chunk_size;
+  scheduled_token_count_ = (allow_chunking && chunk_size.has_value() && *chunk_size > 0)
+                               ? std::min(*chunk_size, unprocessed)
+                               : unprocessed;
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
 }
 
 bool Request::IsDone() const {
@@ -185,8 +187,7 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
-  // Chunk-aware: with chunked prefill only part of the prompt was processed this step.
-  AdvanceChunk();
+  processed_sequence_length_ = search_->GetSequence(0).size();
   is_prefill_ = false;
 
   search_->SetLogits(logits);
@@ -204,18 +205,8 @@ bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
   return search_->BindNextTokensSlot(slot);
 }
 
-bool Request::SupportsBatchedSampling() const {
-  return search_->SupportsBatchedSampling();
-}
-
 void Request::OnNextTokensSampled() {
   search_->OnNextTokensSampled();
-}
-
-BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
-  if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
-    batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
-  return *batched_sampler_state_;
 }
 
 void Request::CompleteGeneration() {
