@@ -157,6 +157,12 @@ class DeepSeekV4FlashModel(Model):
         # layer norm that reads its result: ~44 nodes per site down to 1, 85 sites.
         self.hc_fused = extra_options.get("dsv4_hc_fused", "1") not in ("0", 0, False)
 
+        # The compressor is ~100 nodes of window arithmetic, a masked softmax and two simulated
+        # quantisation grids, all of it producing two rows per sequence at decode: 62 sites,
+        # ~5,900 nodes, and almost no arithmetic. One operator covers everything after the two
+        # raw projections.
+        self.comp_fused = extra_options.get("dsv4_comp_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -761,6 +767,32 @@ class DeepSeekV4FlashModel(Model):
         sc = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wgate.weight"].T, f"{p}.wgate/T",
                                               to=F)],
                      f"{name}/sc", F, [B, S, co * d])
+
+        if self.comp_fused:
+            # `J` stays on the host: it feeds a Range, and `row_count` is the same count on the
+            # device for the Clip bounds our callers build.
+            jm1 = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{name}/jm1", I, [])
+            jdiv = self.op("Div", [jm1, self.const("INT64", r)], f"{name}/jdiv", I, [])
+            J = self.op("Add", [jdiv, self.const("INT64", 2)], f"{name}/J", I, [])
+            outs = [f"{name}/output_{i}" for i in range(6)]
+            self.make_node(
+                "DSV4Compressor",
+                inputs=[kv, sc, f"past_{state}_kv_{layer_id}", f"past_{state}_score_{layer_id}",
+                        self.init_w(f"{p}.ape", to=F),
+                        self.init_w(f"{p}.norm.weight", to=F),
+                        "rope/cos_1", "rope/sin_1", "past_lens"],
+                outputs=outs, name=name, domain="com.microsoft",
+                ratio=r, coff=co, head_dim=d, rope_head_dim=rd, max_seq_len=self.max_seq_len,
+                epsilon=self.eps, act_quant=int(bool(quant)), rotate_fp4=int(bool(rotate)),
+                dtype=int(self.io_dtype))
+            self.make_value(outs[0], self.io_dtype, shape=[B, None, d])
+            self.make_value(outs[1], I, shape=[B, 1])
+            self.make_value(outs[2], I, shape=[B, 1])
+            self.make_value(outs[3], I, shape=[])
+            self.make_value(outs[4], F, shape=[B, Lst, co * d])
+            self.make_value(outs[5], F, shape=[B, Lst, co * d])
+            return outs[0], outs[1], outs[2], J, outs[3], outs[4], outs[5]
+
         full_kv = self.op("Concat", [f"past_{state}_kv_{layer_id}", kv], f"{name}/fkv",
                           F, [B, None, co * d], axis=1)
         full_sc = self.op("Concat", [f"past_{state}_score_{layer_id}", sc], f"{name}/fsc",
