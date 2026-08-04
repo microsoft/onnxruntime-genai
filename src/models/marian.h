@@ -70,6 +70,7 @@ struct MarianState : State {
 
  private:
   const MarianModel& model_;
+  void UpdateRnnStates(DeviceSpan<int32_t> next_indices);
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
 
   // Encoder IOs
