@@ -75,7 +75,9 @@ def _make_builder(scoring_func: str) -> DeepSeekV4Model:
     model.values = {}
     model.node_names = set()
     model.io_dtype = ir.DataType.FLOAT
+    model.onnx_dtype = ir.DataType.FLOAT
     model.hidden_size = HIDDEN_SIZE
+    model.routed_scaling_factor = 1.5
     model.moe_attrs = {
         "op_type": "MoE",
         "num_experts": NUM_EXPERTS,
@@ -94,7 +96,9 @@ def _make_builder(scoring_func: str) -> DeepSeekV4Model:
     return model
 
 
-def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.InferenceSession:
+def _build_router_session(
+    *, is_hash: bool, scoring_func: str, return_proto: bool = False
+) -> onnxruntime.InferenceSession:
     """Emit ``make_topk_moe``/``make_hash_moe`` with an identity FFN in place of the real one.
 
     ``make_deepseek_moe_op`` is monkeypatched to skip real expert weights and instead emit an
@@ -104,7 +108,7 @@ def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.In
     """
     model = _make_builder(scoring_func)
 
-    def identity_moe_op(layer_id, mlp, root_input, router_probs, op_type, weight_type, base):
+    def identity_moe_op(layer_id, mlp, root_input, router_probs, op_type, weight_type, base, router_weights=""):
         del layer_id, mlp, op_type, weight_type
         eye = torch.eye(HIDDEN_SIZE)
         w1_name = f"{base}/identity/weight1"
@@ -116,9 +120,12 @@ def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.In
             moe_name,
             root_input=root_input,
             router_probs=router_probs,
+            router_weights=router_weights,
             weight1=w1_name,
             weight2=w2_name,
         )
+        if router_weights:
+            return f"{moe_name}/output_0"
         return f"{moe_name}/output_0"
 
     model.make_deepseek_moe_op = identity_moe_op
@@ -130,7 +137,9 @@ def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.In
     gate_weight = torch.from_numpy(rng.standard_normal((NUM_EXPERTS, HIDDEN_SIZE), dtype=np.float32))
     if is_hash:
         tid2eid = torch.from_numpy(rng.integers(0, NUM_EXPERTS, size=(VOCAB_SIZE, TOP_K)).astype(np.int64))
-        mlp = SimpleNamespace(gate=SimpleNamespace(weight=SimpleNamespace(data=gate_weight), tid2eid=SimpleNamespace(data=tid2eid)))
+        mlp = SimpleNamespace(
+            gate=SimpleNamespace(weight=SimpleNamespace(data=gate_weight), tid2eid=SimpleNamespace(data=tid2eid))
+        )
         input_ids = model.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
         model.graph.inputs.append(input_ids)
         output_name = model.make_hash_moe(0, mlp, "hidden", "MoE", "weight")
@@ -138,7 +147,9 @@ def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.In
     else:
         bias = torch.from_numpy(rng.standard_normal((NUM_EXPERTS,), dtype=np.float32))
         mlp = SimpleNamespace(
-            gate=SimpleNamespace(weight=SimpleNamespace(data=gate_weight), e_score_correction_bias=SimpleNamespace(data=bias))
+            gate=SimpleNamespace(
+                weight=SimpleNamespace(data=gate_weight), e_score_correction_bias=SimpleNamespace(data=bias)
+            )
         )
         output_name = model.make_topk_moe(0, mlp, "hidden", "MoE", "weight")
         extra = {"e_score_correction_bias": bias.numpy()}
@@ -146,12 +157,22 @@ def _build_router_session(*, is_hash: bool, scoring_func: str) -> onnxruntime.In
     model.graph.outputs.append(model.make_value(output_name))
 
     proto = ir.to_proto(model.model)
+    hash_router_nodes = [node for node in proto.graph.node if node.op_type == "HashRouter"]
+    assert len(hash_router_nodes) == (1 if is_hash else 0)
+    if return_proto:
+        return proto
     session = onnxruntime.InferenceSession(proto.SerializeToString(), providers=["CPUExecutionProvider"])
     return session, gate_weight.numpy(), extra
 
 
 def _reference_weighted_combine(
-    hidden: np.ndarray, gate_weight: np.ndarray, *, is_hash: bool, scoring_func: str, extra: dict, input_ids: np.ndarray | None
+    hidden: np.ndarray,
+    gate_weight: np.ndarray,
+    *,
+    is_hash: bool,
+    scoring_func: str,
+    extra: dict,
+    input_ids: np.ndarray | None,
 ) -> np.ndarray:
     """Compute ``sum_k weight_k * hidden`` using HuggingFace's real router forward.
 
@@ -183,7 +204,8 @@ def _reference_weighted_combine(
         router.e_score_correction_bias.data = torch.from_numpy(extra["e_score_correction_bias"])
         _, weights, indices = router(hidden_t)
 
-    weights = weights / config.routed_scaling_factor  # undo the post-hoc scale applied elsewhere
+    if not is_hash:
+        weights = weights / config.routed_scaling_factor  # top-k scaling is applied after the router subgraph
     del indices  # only affects which expert runs; identity experts make this irrelevant here
 
     batch, seq_len, hidden_dim = hidden.shape
@@ -204,6 +226,14 @@ CASES = [
 
 
 class TestDeepSeekV4MoeRouter:
+    def test_hash_router_contrib_contract(self):
+        proto = _build_router_session(is_hash=True, scoring_func="sqrtsoftplus", return_proto=True)
+        hash_router = next(node for node in proto.graph.node if node.op_type == "HashRouter")
+        moe = next(node for node in proto.graph.node if node.op_type == "MoE")
+        assert (len(hash_router.input), len(hash_router.output)) == (4, 3)
+        assert len(moe.input) == 9
+        assert moe.input[8].endswith("/hash_router/router_weights/ScatterElements/output_0")
+
     @pytest.mark.parametrize(("is_hash", "scoring_func"), CASES)
     def test_matches_huggingface_reference(self, is_hash, scoring_func):
         session, gate_weight, extra = _build_router_session(is_hash=is_hash, scoring_func=scoring_func)

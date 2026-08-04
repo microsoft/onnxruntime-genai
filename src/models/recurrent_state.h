@@ -7,16 +7,17 @@
 
 namespace Generators {
 
-// Manages recurrent state tensors (conv_state + recurrent_state) for hybrid models.
-// Auto-discovers recurrent layers by probing session inputs.
+// Manages recurrent state tensors for hybrid and compressed-attention models.
+// State names can be declared in config; legacy recurrent layers are auto-discovered.
 struct RecurrentState {
   RecurrentState(State& state);
+  ~RecurrentState();
 
   void Add();
   void Update();
   void RewindTo(size_t index);
 
-  bool IsEmpty() const { return layer_indices_.empty(); }
+  bool IsEmpty() const { return input_name_strings_.empty(); }
 
  private:
   void ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states);
@@ -24,11 +25,9 @@ struct RecurrentState {
   State& state_;
   const Model& model_{state_.model_};
 
-  std::vector<int> layer_indices_;
-
-  // Interleaved as [conv_0, recurrent_0, conv_1, recurrent_1, ...]
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
+  bool dynamic_states_{false};
 
   // Mirrors past_present_share_buffer config: true means inputs alias outputs (same allocation,
   // stable handles for graph capture). False uses separate past/present buffers with per-step swap.
@@ -40,11 +39,8 @@ struct RecurrentState {
   std::vector<std::string> input_name_strings_;
   std::vector<std::string> output_name_strings_;
 
-  ONNXTensorElementDataType conv_type_{};
-  ONNXTensorElementDataType recurrent_type_{};
-
-  std::vector<int64_t> conv_shape_;
-  std::vector<int64_t> recurrent_shape_;
+  std::vector<ONNXTensorElementDataType> types_;
+  std::vector<std::vector<int64_t>> shapes_;
 };
 
 // Factory: returns nullptr if no recurrent layers are found in the session.

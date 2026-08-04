@@ -19,12 +19,8 @@ DeepSeek V4 introduces several novel components compared to prior DeepSeek model
   * MoE blocks with two router types: ``DeepseekV4HashRouter`` (frozen lookup by
     token-id) and ``DeepseekV4TopKRouter`` (learned), plus one always-active shared
     expert.
-  * Two compression mechanisms (CSA and HCA) used by a subset of attention layers.
-    These require stateful buffers that cannot be represented in a standard ONNX
-    graph.  Layers of type ``compressed_sparse_attention`` or
-    ``heavily_compressed_attention`` are therefore built without their compressors
-    (a warning is printed); they degrade gracefully to ordinary sliding-window
-    attention.
+    * Stateful Heavily Compressed Attention (HCA) and Compressed Sparse Attention
+        (CSA), including the Lightning Indexer used by CSA.
 
 Reference implementation
 ------------------------
@@ -34,14 +30,11 @@ The numerics implemented here follow the HuggingFace ``DeepseekV4`` modeling cod
 and its two routers.  When updating this builder, diff against that file rather than
 against earlier DeepSeek generations, whose MLA/RoPE conventions differ.
 
-Fused operators are being added to ONNX Runtime in
-https://github.com/microsoft/onnxruntime/pull/31570 (``com.microsoft::DeepSeekV4Attention``,
-``GroupQueryAttention`` ``rotary_trailing`` / ``do_output_derotate`` attributes, and the
-optional ``router_weights`` input on ``MoE`` / ``QMoE``).  Those are not present in the
-ONNX Runtime version this repository currently pins, so this builder emits the
-decomposed form.  The rotary embedding is the one piece already expressible with a
-shipped kernel, and is emitted as ``com.microsoft::RotaryEmbedding``.
+The compression, attention, and hash-routing kernels are provided by ONNX Runtime
+contrib ops. Remaining projections and hyper-connections are emitted as standard
+ONNX subgraphs.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -101,6 +94,19 @@ class DeepSeekV4Model(Model):
         self.qk_nope_head_dim: int = self.head_size - self.qk_rope_head_dim
         self.o_groups: int = getattr(config, "o_groups", 8)
         self.o_lora_rank: int = getattr(config, "o_lora_rank", 1024)
+        self.compress_rates: dict[str, int] = getattr(
+            config,
+            "compress_rates",
+            {
+                "compressed_sparse_attention": 4,
+                "heavily_compressed_attention": 128,
+            },
+        )
+        self.compress_rope_theta: float = getattr(config, "compress_rope_theta", 160000.0)
+        self.index_n_heads: int = getattr(config, "index_n_heads", 64)
+        self.index_head_dim: int = getattr(config, "index_head_dim", 128)
+        self.index_topk: int = getattr(config, "index_topk", 512)
+        self.rms_norm_epsilon: float = getattr(config, "rms_norm_eps", 1e-6)
 
         # MoE
         self.moe_intermediate_size: int = getattr(config, "moe_intermediate_size", config.intermediate_size)
@@ -121,20 +127,8 @@ class DeepSeekV4Model(Model):
         self.layer_types = raw_layer_types or [default_layer_type] * self.num_layers
         self.mlp_layer_types = raw_mlp_layer_types or [default_mlp_layer_type] * self.num_layers
 
-        # Warn once if any layers are not the sliding_attention baseline
-        non_sliding = [
-            i for i, lt in enumerate(self.layer_types) if lt != "sliding_attention"
-        ]
-        if non_sliding:
-            layer_list = non_sliding[:5]
-            suffix = " ..." if len(non_sliding) > 5 else ""
-            print(
-                f"WARNING: DeepSeek V4 has {len(non_sliding)} non-sliding layer(s) "
-                f"(e.g. layers {layer_list}{suffix}).  The compressor components of "
-                f"compressed_sparse_attention / heavily_compressed_attention cannot "
-                f"be represented in standard ONNX and are skipped.  Attention for "
-                f"those layers degrades to plain sliding-window attention."
-            )
+        self.compression_state_names: list[tuple[str, str]] = []
+        self.initialize_compression_states()
 
         # Track the name of the current HC-stream ONNX value (updated in make_layer)
         self.hc_streams = ""
@@ -143,6 +137,276 @@ class DeepSeekV4Model(Model):
         # com.microsoft::RotaryEmbedding node.  Only the parity test flips this; it is
         # deliberately not exposed as an extra_option.
         self.use_manual_deepseek_rope = False
+
+    def add_compression_state(self, layer_id: int, name: str, shape: list) -> tuple[str, str]:
+        past_name = f"past_compression.{layer_id}.{name}"
+        present_name = f"present_compression.{layer_id}.{name}"
+        self.input_names[past_name] = past_name
+        self.input_types[past_name] = self.io_dtype
+        self.input_shapes[past_name] = shape
+        self.output_names[present_name] = present_name
+        self.output_types[present_name] = self.io_dtype
+        self.output_shapes[present_name] = shape
+        self.compression_state_names.append((past_name, present_name))
+        return past_name, present_name
+
+    def initialize_compression_states(self) -> None:
+        for layer_id, layer_type in enumerate(self.layer_types):
+            if layer_type == "heavily_compressed_attention":
+                self.add_compression_state(layer_id, "pending_kv", ["batch_size", "pending_length", self.head_size])
+                self.add_compression_state(layer_id, "pending_gate", ["batch_size", "pending_length", self.head_size])
+                self.add_compression_state(layer_id, "entries", ["batch_size", 1, "compressed_length", self.head_size])
+            elif layer_type == "compressed_sparse_attention":
+                rate = self.compress_rates[layer_type]
+                for prefix, width, rank4 in (
+                    ("compressor", self.head_size, True),
+                    ("indexer", self.index_head_dim, False),
+                ):
+                    self.add_compression_state(
+                        layer_id, f"{prefix}_pending_kv", ["batch_size", "pending_length", 2 * width]
+                    )
+                    self.add_compression_state(
+                        layer_id, f"{prefix}_pending_gate", ["batch_size", "pending_length", 2 * width]
+                    )
+                    entries_shape = (
+                        ["batch_size", 1, "compressed_length", width]
+                        if rank4
+                        else ["batch_size", "compressed_length", width]
+                    )
+                    self.add_compression_state(layer_id, f"{prefix}_entries", entries_shape)
+                    self.add_compression_state(layer_id, f"{prefix}_overlap_kv", ["batch_size", rate, width])
+                    self.add_compression_state(layer_id, f"{prefix}_overlap_gate", ["batch_size", rate, width])
+
+    def update_genai_config(self, genai_config):
+        if self.compression_state_names:
+            decoder = genai_config["model"]["decoder"]
+            decoder["inputs"]["past_state_names"] = [names[0] for names in self.compression_state_names]
+            decoder["outputs"]["present_state_names"] = [names[1] for names in self.compression_state_names]
+
+    def compression_state(self, layer_id: int, name: str) -> tuple[str, str]:
+        return f"past_compression.{layer_id}.{name}", f"present_compression.{layer_id}.{name}"
+
+    def make_compression_weight(self, tensor, name: str) -> str:
+        self.make_initializer(tensor.data.T.contiguous(), name, to=self.io_dtype)
+        return name
+
+    def make_compression_rope_caches(self) -> None:
+        if hasattr(self, "compression_rope_inited"):
+            return
+        rope_dim = self.qk_rope_head_dim
+        inv_freq = 1.0 / (self.compress_rope_theta ** (torch.arange(0, rope_dim, 2, dtype=torch.float32) / rope_dim))
+        positions = torch.arange(self.rope_attrs["cache_length"], dtype=torch.float32)
+        frequencies = torch.outer(positions, inv_freq)
+        dtype = to_torch_dtype(self.io_dtype)
+        self.make_initializer(frequencies.cos().to(dtype), "deepseek_compress_cos_cache")
+        self.make_initializer(frequencies.sin().to(dtype), "deepseek_compress_sin_cache")
+        self.compression_rope_inited = True
+
+    def make_compressor(self, layer_id: int, attn, collapsed: str, q_residual: str) -> tuple[str, str, str]:
+        layer_type = self.layer_types[layer_id]
+        if layer_type == "sliding_attention":
+            return "", "", ""
+
+        self.make_compression_rope_caches()
+        base = f"/model/layers.{layer_id}/attn/compressor"
+        compressor = attn.compressor
+        common_inputs = [
+            collapsed,
+            self.input_names["position_ids"],
+            "deepseek_compress_cos_cache",
+            "deepseek_compress_sin_cache",
+        ]
+        common_attrs = {
+            "compress_rate": self.compress_rates[layer_type],
+            "rotary_dim": self.qk_rope_head_dim,
+            "rms_norm_epsilon": self.rms_norm_epsilon,
+        }
+
+        if layer_type == "heavily_compressed_attention":
+            weight_names = [
+                self.make_compression_weight(
+                    compressor.kv_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.kv_proj.weight"
+                ),
+                self.make_compression_weight(
+                    compressor.gate_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.gate_proj.weight"
+                ),
+            ]
+            position_bias = f"model.layers.{layer_id}.self_attn.compressor.position_bias"
+            norm_weight = f"model.layers.{layer_id}.self_attn.compressor.kv_norm.weight"
+            self.make_initializer(compressor.position_bias.data, position_bias, to=self.io_dtype)
+            self.make_initializer(compressor.kv_norm.weight.data, norm_weight, to=self.io_dtype)
+            states = [self.compression_state(layer_id, name) for name in ("pending_kv", "pending_gate", "entries")]
+            outputs = [f"{base}/output_0", f"{base}/output_1"] + [state[1] for state in states]
+            self.make_node(
+                "HeavilyCompressedAttention",
+                common_inputs + weight_names + [position_bias, norm_weight] + [state[0] for state in states],
+                outputs,
+                name=base,
+                domain="com.microsoft",
+                **common_attrs,
+            )
+            self.make_value(outputs[0], self.io_dtype, ["batch_size", 1, "compressed_length", self.head_size])
+            self.make_value(outputs[1], self.io_dtype, ["batch_size", 1, "sequence_length", "compressed_length"])
+            return outputs[0], outputs[1], ""
+
+        states = [
+            self.compression_state(layer_id, f"compressor_{name}")
+            for name in ("pending_kv", "pending_gate", "entries", "overlap_kv", "overlap_gate")
+        ]
+        weight_names = [
+            self.make_compression_weight(
+                compressor.kv_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.kv_proj.weight"
+            ),
+            self.make_compression_weight(
+                compressor.gate_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.gate_proj.weight"
+            ),
+        ]
+        position_bias = f"model.layers.{layer_id}.self_attn.compressor.position_bias"
+        norm_weight = f"model.layers.{layer_id}.self_attn.compressor.kv_norm.weight"
+        self.make_initializer(compressor.position_bias.data, position_bias, to=self.io_dtype)
+        self.make_initializer(compressor.kv_norm.weight.data, norm_weight, to=self.io_dtype)
+        outputs = [f"{base}/output_0"] + [state[1] for state in states]
+        self.make_node(
+            "CompressedSparseAttention",
+            common_inputs + weight_names + [position_bias, norm_weight] + [state[0] for state in states],
+            outputs,
+            name=base,
+            domain="com.microsoft",
+            **common_attrs,
+        )
+        self.make_value(outputs[0], self.io_dtype, ["batch_size", 1, "compressed_length", self.head_size])
+
+        indexer = compressor.indexer
+        index_base = f"{base}/indexer"
+        index_states = [
+            self.compression_state(layer_id, f"indexer_{name}")
+            for name in ("pending_kv", "pending_gate", "entries", "overlap_kv", "overlap_gate")
+        ]
+        index_weights = [
+            self.make_compression_weight(
+                indexer.kv_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.indexer.kv_proj.weight"
+            ),
+            self.make_compression_weight(
+                indexer.gate_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.indexer.gate_proj.weight"
+            ),
+        ]
+        index_position_bias = f"model.layers.{layer_id}.self_attn.compressor.indexer.position_bias"
+        index_norm_weight = f"model.layers.{layer_id}.self_attn.compressor.indexer.kv_norm.weight"
+        q_weight = self.make_compression_weight(
+            indexer.q_b_proj.weight, f"model.layers.{layer_id}.self_attn.compressor.indexer.q_b_proj.weight"
+        )
+        score_weight = self.make_compression_weight(
+            indexer.scorer.weights_proj.weight,
+            f"model.layers.{layer_id}.self_attn.compressor.indexer.scorer.weights_proj.weight",
+        )
+        self.make_initializer(indexer.position_bias.data, index_position_bias, to=self.io_dtype)
+        self.make_initializer(indexer.kv_norm.weight.data, index_norm_weight, to=self.io_dtype)
+        index_outputs = [f"{index_base}/output_0"] + [state[1] for state in index_states]
+        self.make_node(
+            "DeepSeekV4Indexer",
+            [
+                collapsed,
+                q_residual,
+                self.input_names["position_ids"],
+                "deepseek_compress_cos_cache",
+                "deepseek_compress_sin_cache",
+            ]
+            + index_weights
+            + [index_position_bias, index_norm_weight, q_weight, score_weight]
+            + [state[0] for state in index_states],
+            index_outputs,
+            name=index_base,
+            domain="com.microsoft",
+            num_heads=self.index_n_heads,
+            head_size=self.index_head_dim,
+            index_topk=self.index_topk,
+            **common_attrs,
+        )
+        self.make_value(index_outputs[0], ir.DataType.INT64, ["batch_size", "sequence_length", self.index_topk])
+        return outputs[0], "", index_outputs[0]
+
+    def make_compressed_attention_bias(self, layer_id: int, compressed_kv: str, block_bias: str) -> str:
+        local_bias = f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] else ""
+        if not compressed_kv:
+            return local_bias
+        if not block_bias:
+            base = f"/model/layers.{layer_id}/attn/compressed_bias"
+            compressed_shape = f"{base}/compressed/Shape"
+            query_shape = f"{base}/query/Shape"
+            self.make_shape(compressed_shape, compressed_kv, shape=[4])
+            self.make_shape(query_shape, self.input_names["position_ids"], shape=[2])
+            batch_name = f"{base}/batch/Gather"
+            sequence_name = f"{base}/sequence/Gather"
+            entries_name = f"{base}/entries/Gather"
+            self.make_gather(
+                batch_name,
+                [f"{compressed_shape}/output_0", "/model/constants/INT64/[0]"],
+                ir.DataType.INT64,
+                [1],
+                axis=0,
+            )
+            self.make_gather(
+                sequence_name, [f"{query_shape}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0
+            )
+            self.make_gather(
+                entries_name,
+                [f"{compressed_shape}/output_0", "/model/constants/INT64/[2]"],
+                ir.DataType.INT64,
+                [1],
+                axis=0,
+            )
+            bias_shape = f"{base}/shape/Concat"
+            self.make_concat(
+                bias_shape,
+                [
+                    f"{batch_name}/output_0",
+                    "/model/constants/INT64/[1]",
+                    f"{sequence_name}/output_0",
+                    f"{entries_name}/output_0",
+                ],
+                ir.DataType.INT64,
+                [4],
+                axis=0,
+            )
+            zeros_name = f"{base}/ConstantOfShape"
+            self.make_constant_of_shape(
+                zeros_name,
+                f"{bias_shape}/output_0",
+                ir.tensor([0.0], dtype=self.io_dtype),
+                self.io_dtype,
+                ["batch_size", 1, "sequence_length", "compressed_length"],
+            )
+            block_bias = f"{zeros_name}/output_0"
+        if not local_bias:
+            return block_bias
+        combined_name = f"/model/layers.{layer_id}/attn/combined_bias/Concat"
+        self.make_concat(
+            combined_name, [local_bias, block_bias], self.io_dtype, ["batch_size", 1, "sequence_length", None], axis=-1
+        )
+        return f"{combined_name}/output_0"
+
+    def make_compressed_attention(
+        self,
+        layer_id: int,
+        query: str,
+        local_kv: str,
+        compressed_kv: str,
+        attention_bias: str,
+        selected_indices: str,
+        head_sink: str,
+    ) -> str:
+        name = f"/model/layers.{layer_id}/attn/CompressedAttention"
+        output = f"{name}/output_0"
+        self.make_node(
+            "CompressedAttention",
+            [query, local_kv, compressed_kv, attention_bias, selected_indices, head_sink],
+            [output],
+            name=name,
+            domain="com.microsoft",
+            scale=self.head_size**-0.5,
+        )
+        self.make_value(output, self.io_dtype, ["batch_size", self.num_attn_heads, "sequence_length", self.head_size])
+        return output
 
     def make_layernorm_no_skip(self, layer_id: int, layernorm, root_input: str, location: str) -> str:
         """Emit a no-skip SimplifiedLayerNorm via the base make_layernorm path."""
@@ -1031,136 +1295,27 @@ class DeepSeekV4Model(Model):
             output_name=present_v,
         )
 
-        # ---------------------------------------------------------------- #
-        # Scaled dot-product attention with sinks
-        # ---------------------------------------------------------------- #
-        scale = self.head_size ** -0.5
+        compressed_kv, block_bias, selected_indices = self.make_compressor(layer_id, attn, collapsed, q_a_norm_output)
+        attention_bias = self.make_compressed_attention_bias(layer_id, compressed_kv, block_bias)
 
-        # Q: [B, H, S, head_dim]; K: [B, 1, total_S, head_dim]
-        # K^T: [B, 1, head_dim, total_S]
-        k_t_name = f"{base}/k/Transpose"
-        self.make_transpose(
-            k_t_name, kv_total, self.io_dtype,
-            ["batch_size", 1, head_dim, "total_sequence_length"],
-            perm=[0, 1, 3, 2],
-        )
-
-        # attn_raw = Q @ K^T * scale → [B, H, S, total_S]  (K broadcasts to H heads)
-        attn_raw_name = f"{base}/attn_raw/MatMul"
-        attn_raw_output = f"{attn_raw_name}/output_0"
-        self.make_node("MatMul", inputs=[q_rope_name, f"{k_t_name}/output_0"], outputs=[attn_raw_output], name=attn_raw_name)
-        self.make_value(attn_raw_output, self.io_dtype, shape=["batch_size", H, "sequence_length", "total_sequence_length"])
-
-        # Scale
-        scale_init_name = f"model.layers.{layer_id}.self_attn.scale"
-        self.make_initializer(
-            torch.tensor(scale, dtype=to_torch_dtype(self.io_dtype)),
-            scale_init_name, to=self.io_dtype
-        )
-        attn_scaled_name = f"{base}/attn_scale/Mul"
-        self.make_mul(attn_scaled_name,
-                      [f"{attn_raw_name}/output_0", scale_init_name],
-                      self.io_dtype,
-                      ["batch_size", H, "sequence_length", "total_sequence_length"])
-
-        # Add causal attention mask [B, 1, S, total_S] (from MHA mask subgraph)
-        mask_output = f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] else ""
-        if mask_output:
-            attn_masked_name = f"{base}/attn_mask/Add"
-            self.make_add(attn_masked_name,
-                          [f"{attn_scaled_name}/output_0", mask_output],
-                          self.io_dtype,
-                          ["batch_size", H, "sequence_length", "total_sequence_length"])
-            attn_logits = f"{attn_masked_name}/output_0"
-        else:
-            attn_logits = f"{attn_scaled_name}/output_0"
-
-        # ---- Sink-aware softmax (no Concat; explicit denominator) ----
-        # sinks: [H] initializer
         sinks_init_name = f"model.layers.{layer_id}.self_attn.sinks"
         self.make_initializer(attn.sinks.data, sinks_init_name, to=self.io_dtype)
-
-        # Reshape sinks to [1, H, 1, 1] for broadcasting
-        sinks_4d_name = f"{base}/sinks/Reshape"
-        self.make_reshape(
-            sinks_4d_name,
-            [sinks_init_name, f"/model/constants/INT64/[1, {H}, 1, 1]"],
-            self.io_dtype,
-            [1, H, 1, 1],
+        attn_out_output = self.make_compressed_attention(
+            layer_id,
+            q_rope_name,
+            kv_total,
+            compressed_kv,
+            attention_bias,
+            selected_indices,
+            sinks_init_name,
         )
-
-        # max_val = max(attn_logits, axis=-1, keepdim=True)  [B, H, S, 1]
-        max_val_name = f"{base}/stable_max/ReduceMax"
-        self.make_reduce_max(max_val_name,
-                             [attn_logits, "/model/constants/INT64/[-1]"],
-                             self.io_dtype,
-                             ["batch_size", H, "sequence_length", 1], keepdims=True)
-
-        # stable_logits = attn_logits - max_val  [B, H, S, total_S]
-        stable_name = f"{base}/stable/Sub"
-        self.make_sub(stable_name,
-                      [attn_logits, f"{max_val_name}/output_0"],
-                      self.io_dtype,
-                      ["batch_size", H, "sequence_length", "total_sequence_length"])
-
-        # stable_sinks = sinks_4d - max_val  [B, H, S, 1]
-        stable_sinks_name = f"{base}/stable_sinks/Sub"
-        self.make_sub(stable_sinks_name,
-                      [f"{sinks_4d_name}/output_0", f"{max_val_name}/output_0"],
-                      self.io_dtype,
-                      ["batch_size", H, "sequence_length", 1])
-
-        # exp_logits = exp(stable_logits)  [B, H, S, total_S]
-        exp_logits_name = f"{base}/exp_logits/Exp"
-        self.make_exp(
-            exp_logits_name,
-            f"{stable_name}/output_0",
-            self.io_dtype,
-            ["batch_size", H, "sequence_length", "total_sequence_length"],
-        )
-
-        # exp_sinks = exp(stable_sinks)  [B, H, S, 1]
-        exp_sinks_name = f"{base}/exp_sinks/Exp"
-        self.make_exp(
-            exp_sinks_name,
-            f"{stable_sinks_name}/output_0",
-            self.io_dtype,
-            ["batch_size", H, "sequence_length", 1],
-        )
-
-        # sum_exp = sum(exp_logits, axis=-1, keepdim=True)  [B, H, S, 1]
-        sum_exp_name = f"{base}/sum_exp/ReduceSum"
-        self.make_reduce_sum(sum_exp_name,
-                             [f"{exp_logits_name}/output_0",
-                              "/model/constants/INT64/[-1]"],
-                             self.io_dtype,
-                             ["batch_size", H, "sequence_length", 1], keepdims=True)
-
-        # denom = sum_exp + exp_sinks  [B, H, S, 1]
-        denom_name = f"{base}/denom/Add"
-        self.make_add(denom_name,
-                      [f"{sum_exp_name}/output_0", f"{exp_sinks_name}/output_0"],
-                      self.io_dtype,
-                      ["batch_size", H, "sequence_length", 1])
-
-        # scores = exp_logits / denom  [B, H, S, total_S]
-        scores_name = f"{base}/scores/Div"
-        self.make_div(scores_name,
-                      [f"{exp_logits_name}/output_0", f"{denom_name}/output_0"],
-                      self.io_dtype,
-                      ["batch_size", H, "sequence_length", "total_sequence_length"])
-
-        # ---- attn_output = scores @ V  [B, H, S, head_dim] ----
-        # V = kv_total [B, 1, total_S, head_dim]; broadcasts to [B, H, ...]
-        attn_out_name = f"{base}/attn_out/MatMul"
-        attn_out_output = f"{attn_out_name}/output_0"
-        self.make_node("MatMul", inputs=[f"{scores_name}/output_0", kv_total], outputs=[attn_out_output], name=attn_out_name)
-        self.make_value(attn_out_output, self.io_dtype, shape=["batch_size", H, "sequence_length", head_dim])
 
         # Transpose to [B, S, H, head_dim]
         attn_t_name = f"{base}/attn/Transpose"
         self.make_transpose(
-            attn_t_name, f"{attn_out_name}/output_0", self.io_dtype,
+            attn_t_name,
+            attn_out_output,
+            self.io_dtype,
             ["batch_size", "sequence_length", H, head_dim],
             perm=[0, 2, 1, 3],
         )
@@ -1489,38 +1644,93 @@ class DeepSeekV4Model(Model):
     ) -> str:
         """Build the hash-routed MoE block (frozen token→expert lookup)."""
         base = f"/model/layers.{layer_id}/moe"
+        num_e = self.moe_attrs["num_experts"]
         top_k = self.moe_attrs["top_k"]
-
-        scores_flat = self.make_moe_router_scores(layer_id, mlp.gate.weight.data, root_input, base)
-
-        # Frozen token-id → expert-id lookup table (DeepseekV4HashRouter.tid2eid): unlike
-        # the top-k router, *which* experts a token uses is a static function of its token id,
-        # not a learned argmax over the scores. The same gate scores computed above still
-        # weight the (statically) selected experts.
+        gate_weight_name = f"model.layers.{layer_id}.moe.gate.weight"
         tid2eid_name = f"model.layers.{layer_id}.moe.gate.tid2eid"
+        self.make_initializer(mlp.gate.weight.data, gate_weight_name, to=self.io_dtype)
         self.make_initializer(mlp.gate.tid2eid.data, tid2eid_name, to=ir.DataType.INT64)
 
-        input_ids_flat_name = f"{base}/hash_router/input_ids_flat/Reshape"
-        self.make_reshape(
-            input_ids_flat_name,
-            [self.input_names["input_ids"], "/model/constants/INT64/[-1]"],
-            ir.DataType.INT64,
-            [None],
+        hash_name = f"{base}/HashRouter"
+        hash_outputs = [f"{hash_name}/output_{index}" for index in range(3)]
+        self.make_node(
+            "HashRouter",
+            [root_input, self.input_names["input_ids"], gate_weight_name, tid2eid_name],
+            hash_outputs,
+            name=hash_name,
+            domain="com.microsoft",
+            score_function=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
+        self.make_value(hash_outputs[0], self.io_dtype, ["batch_size", "sequence_length", num_e])
+        self.make_value(hash_outputs[1], self.io_dtype, ["batch_size", "sequence_length", top_k])
+        self.make_value(hash_outputs[2], ir.DataType.INT64, ["batch_size", "sequence_length", top_k])
 
-        indices_name = f"{base}/hash_router/Gather"
-        self.make_gather(
-            indices_name,
-            [tid2eid_name, f"{input_ids_flat_name}/output_0"],
+        logits_flat_name = f"{base}/hash_router/logits/Reshape"
+        self.make_reshape(
+            logits_flat_name,
+            [hash_outputs[0], f"/model/constants/INT64/[-1, {num_e}]"],
+            self.io_dtype,
+            [None, num_e],
+        )
+        weights_flat_name = f"{base}/hash_router/weights/Reshape"
+        indices_flat_name = f"{base}/hash_router/indices/Reshape"
+        self.make_reshape(
+            weights_flat_name,
+            [hash_outputs[1], f"/model/constants/INT64/[-1, {top_k}]"],
+            self.io_dtype,
+            [None, top_k],
+        )
+        self.make_reshape(
+            indices_flat_name,
+            [hash_outputs[2], f"/model/constants/INT64/[-1, {top_k}]"],
             ir.DataType.INT64,
             [None, top_k],
-            axis=0,
         )
 
-        router_probs = self.make_moe_masked_router_logits(
-            base, scores_flat, f"{indices_name}/output_0", top_k
+        shape_name = f"{base}/hash_router/Shape"
+        fill_name = f"{base}/hash_router/NegFill"
+        self.make_shape(shape_name, f"{logits_flat_name}/output_0", shape=[2])
+        self.make_expand(
+            fill_name,
+            [f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-10000.0", f"{shape_name}/output_0"],
+            self.io_dtype,
+            [None, num_e],
         )
-        return self.make_deepseek_moe_op(layer_id, mlp, root_input, router_probs, op_type, weight_type, base)
+        router_probs_name = f"{base}/hash_router/router_probs/ScatterElements"
+        router_weights_name = f"{base}/hash_router/router_weights/ScatterElements"
+        self.make_scatter_elements(
+            router_probs_name,
+            [f"{fill_name}/output_0", f"{indices_flat_name}/output_0", f"{weights_flat_name}/output_0"],
+            self.io_dtype,
+            [None, num_e],
+            axis=-1,
+        )
+        zeros_name = f"{base}/hash_router/ZeroFill"
+        self.make_constant_of_shape(
+            zeros_name,
+            f"{shape_name}/output_0",
+            ir.tensor([0.0], dtype=self.io_dtype),
+            self.io_dtype,
+            [None, num_e],
+        )
+        self.make_scatter_elements(
+            router_weights_name,
+            [f"{zeros_name}/output_0", f"{indices_flat_name}/output_0", f"{weights_flat_name}/output_0"],
+            self.io_dtype,
+            [None, num_e],
+            axis=-1,
+        )
+        return self.make_deepseek_moe_op(
+            layer_id,
+            mlp,
+            root_input,
+            f"{router_probs_name}/output_0",
+            op_type,
+            weight_type,
+            base,
+            router_weights=f"{router_weights_name}/output_0",
+        )
 
     def make_deepseek_moe_op(
         self,
@@ -1531,6 +1741,7 @@ class DeepSeekV4Model(Model):
         op_type: str,
         weight_type: str,
         base: str,
+        router_weights: str = "",
     ) -> str:
         """Emit MoE/QMoE op and return output value name."""
         num_e = self.moe_attrs["num_experts"]
@@ -1588,7 +1799,7 @@ class DeepSeekV4Model(Model):
         saved_norm = self.moe_attrs["normalize_routing_weights"]
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["swiglu_limit"] = self.swiglu_limit
-        self.moe_attrs["normalize_routing_weights"] = True
+        self.moe_attrs["normalize_routing_weights"] = not router_weights
 
         self.make_moe_op(
             moe_name,
@@ -1600,6 +1811,7 @@ class DeepSeekV4Model(Model):
             weight2=down_proj_weight,
             scales2=down_proj_scales if op_type == "QMoE" else "",
             bias2=down_proj_bias,
+            router_weights=router_weights,
         )
 
         # Restore
@@ -1607,6 +1819,9 @@ class DeepSeekV4Model(Model):
         self.moe_attrs["swiglu_fusion"] = saved_swiglu
         self.moe_attrs["swiglu_limit"] = saved_limit
         self.moe_attrs["normalize_routing_weights"] = saved_norm
+
+        if router_weights:
+            return f"{moe_name}/output_0"
 
         # `routed_scaling_factor` scales each selected expert's weight before it is combined
         # with that expert's FFN output (see DeepseekV4{TopK,Hash}Router.forward); since the

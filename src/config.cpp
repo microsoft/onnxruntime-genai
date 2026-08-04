@@ -305,8 +305,27 @@ struct EncoderOutputs_Element : JSON::Element {
   Config::Model::Encoder::Outputs& v_;
 };
 
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct DecoderInputs_Element : JSON::Element {
   explicit DecoderInputs_Element(Config::Model::Decoder::Inputs& v) : v_{v} {}
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "past_state_names") {
+      past_state_names_ = std::make_unique<StringArray_Element>(v_.past_state_names);
+      return *past_state_names_;
+    }
+    throw JSON::unknown_value_error{};
+  }
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "input_ids") {
@@ -370,10 +389,19 @@ struct DecoderInputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Inputs& v_;
+  std::unique_ptr<StringArray_Element> past_state_names_;
 };
 
 struct DecoderOutputs_Element : JSON::Element {
   explicit DecoderOutputs_Element(Config::Model::Decoder::Outputs& v) : v_{v} {}
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "present_state_names") {
+      present_state_names_ = std::make_unique<StringArray_Element>(v_.present_state_names);
+      return *present_state_names_;
+    }
+    throw JSON::unknown_value_error{};
+  }
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
@@ -405,17 +433,7 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
+  std::unique_ptr<StringArray_Element> present_state_names_;
 };
 
 struct IntArray_Element : JSON::Element {

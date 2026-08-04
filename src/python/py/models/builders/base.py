@@ -3903,6 +3903,8 @@ class Model:
             kwargs.get("weight3", ""),
             kwargs.get("bias3", ""),
         ]
+        if kwargs.get("router_weights"):
+            inputs.append(kwargs["router_weights"])
         output = f"{name}/output_0"
 
         extra_kwargs = (
@@ -4012,6 +4014,11 @@ class Model:
                 kwargs.get("zero_points2", ""),
                 kwargs.get("zero_points3", ""),
             ])
+
+        if kwargs.get("router_weights"):
+            while len(inputs) < 15:
+                inputs.append("")
+            inputs[14] = kwargs["router_weights"]
 
         is_fp4 = self.moe_attrs.get("quant_type") == "fp4"
         if is_fp4:
