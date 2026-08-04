@@ -6,6 +6,7 @@
 // model, cache, scheduler, or GPU: they construct snapshots directly and assert which invariant
 // violations are (and are not) reported.
 
+#include <algorithm>
 #include <string>
 #include <vector>
 

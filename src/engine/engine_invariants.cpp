@@ -107,7 +107,7 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     if (!reserved_blocks.insert(block_id).second) {
       add("Transaction reserves block id " + std::to_string(block_id) + " more than once.");
     }
-    if (owner_of_block.contains(block_id)) {
+    if (owner_of_block.find(block_id) != owner_of_block.end()) {
       add("Transaction-reserved block id " + std::to_string(block_id) +
           " is also committed to a Request.");
     }
@@ -130,7 +130,7 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
           " transaction tail-slot growth exceeds total growth.");
     }
     for (const size_t block_id : reservation.reserved_block_ids) {
-      if (!reserved_blocks.contains(block_id)) {
+      if (reserved_blocks.find(block_id) == reserved_blocks.end()) {
         add("Request " + PtrId(reservation.request_id) +
             " references block id " + std::to_string(block_id) +
             " that is not transaction-reserved.");

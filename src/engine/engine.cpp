@@ -228,6 +228,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
         }
       }
     } catch (...) {
+      const auto post_processing_error = std::current_exception();
       try {
         for (const auto& entry : step_plan_.requests) {
           entry.request->RestoreStateForTransaction();
@@ -243,11 +244,21 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       }
       ++transaction_metrics_.post_processing_aborts;
       ++transaction_metrics_.retryable_aborts;
+      std::string message =
+          "Request post-processing failed; the batch was rolled back.";
+      try {
+        std::rethrow_exception(post_processing_error);
+      } catch (const std::exception& error) {
+        message += " Cause: ";
+        message += error.what();
+      } catch (...) {
+        message += " Cause: non-standard exception.";
+      }
       throw EngineStepError{
           {StepOutcomeKind::RetryableBatchAbort,
            step_plan_.transaction_id,
            nullptr},
-          "Request post-processing failed; the batch was rolled back.",
+          std::move(message),
       };
     }
 

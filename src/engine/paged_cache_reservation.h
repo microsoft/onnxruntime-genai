@@ -6,9 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <span>
 #include <vector>
 
+#include "../span.h"
 #include "block.h"
 
 namespace Generators {

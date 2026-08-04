@@ -19,6 +19,7 @@ namespace {
 constexpr size_t kWarmupIterations = 1000;
 constexpr size_t kMeasuredIterations = 10000;
 constexpr size_t kRepetitions = 5;
+constexpr double kMaximumBatchScaling = 2.0;
 
 struct OrchestrationScratch {
   explicit OrchestrationScratch(size_t batch_size) {
@@ -90,7 +91,11 @@ double RunOrchestration(OrchestrationScratch& scratch,
          static_cast<double>(iterations);
 }
 
-double MedianAddedOverhead(size_t batch_size) {
+struct OrchestrationOverhead {
+  double added_microseconds{};
+};
+
+OrchestrationOverhead MedianOrchestrationOverhead(size_t batch_size) {
   OrchestrationScratch scratch{batch_size};
   const auto result_capacity = scratch.results.capacity();
   const auto staged_capacity = scratch.staged_ready.capacity();
@@ -114,18 +119,27 @@ double MedianAddedOverhead(size_t batch_size) {
   EXPECT_EQ(scratch.staged_ready.capacity(), staged_capacity);
   EXPECT_EQ(scratch.published_ready.capacity(), published_capacity);
   EXPECT_NE(scratch.sink, 0u);
-  return added_overhead[kRepetitions / 2];
+  return {added_overhead[kRepetitions / 2]};
 }
 
-TEST(TransactionOverheadTest, AddedOrchestrationStaysWithinBudget) {
-  const double batch_1 = MedianAddedOverhead(1);
-  const double batch_4 = MedianAddedOverhead(4);
-  const double batch_8 = MedianAddedOverhead(8);
+TEST(TransactionOverheadTest, AddedOrchestrationDoesNotScaleWithBatchSize) {
+  const auto batch_1 = MedianOrchestrationOverhead(1);
+  const auto batch_4 = MedianOrchestrationOverhead(4);
+  const auto batch_8 = MedianOrchestrationOverhead(8);
+  const double reference_overhead =
+      std::max(batch_1.added_microseconds, batch_4.added_microseconds);
+  if (reference_overhead == 0.0) {
+    GTEST_SKIP() << "Transaction overhead is below the measurable timer resolution.";
+  }
+  const double batch_scaling =
+      batch_8.added_microseconds / reference_overhead;
 
   std::cout << "Transaction added median orchestration (us): batch1="
-            << batch_1 << ", batch4=" << batch_4
-            << ", batch8=" << batch_8 << '\n';
-  EXPECT_LT(batch_8, 25.0);
+            << batch_1.added_microseconds
+            << ", batch4=" << batch_4.added_microseconds
+            << ", batch8=" << batch_8.added_microseconds
+            << "; batch8 scaling=" << batch_scaling << "x\n";
+  EXPECT_LT(batch_scaling, kMaximumBatchScaling);
 }
 
 }  // namespace

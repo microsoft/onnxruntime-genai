@@ -215,6 +215,9 @@ TEST_F(EngineStepTest, PostProcessingFailureRestoresSearchAndCanRetry) {
     FAIL() << "Expected post-processing failure.";
   } catch (const EngineStepError& error) {
     EXPECT_EQ(error.Outcome().kind, StepOutcomeKind::RetryableBatchAbort);
+    EXPECT_NE(std::string{error.what()}.find(
+                  "Injected post-processing failure."),
+              std::string::npos);
   }
 
   const auto rolled_back = request->Snapshot();
