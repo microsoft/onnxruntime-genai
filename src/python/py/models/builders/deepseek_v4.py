@@ -152,6 +152,11 @@ class DeepSeekV4FlashModel(Model):
         self.index_head_dim = getattr(c, "index_head_dim", 128)
         self.index_topk = getattr(c, "index_topk", 512)
 
+        # A block's hyper-connection post mix is always followed by the next block's pre mix,
+        # and the post output is also the next residual, so one operator covers both plus the
+        # layer norm that reads its result: ~44 nodes per site down to 1, 85 sites.
+        self.hc_fused = extra_options.get("dsv4_hc_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -667,6 +672,43 @@ class DeepSeekV4FlashModel(Model):
                         ir.DataType.FLOAT, out_shape, keepdims=0)
         out = self.op("Add", [term1, term2], f"{name}/sum", ir.DataType.FLOAT, out_shape)
         return self.cast(name, out, self.io_dtype, out_shape)
+
+    def make_hc_norm(self, name, y, norm_key, bs_shape):
+        return self.cast(f"{name}_b",
+                         self.make_rmsnorm(name, y, self.init_w(norm_key, to=ir.DataType.FLOAT),
+                                           bs_shape + [self.dim]),
+                         self.io_dtype, bs_shape + [self.dim])
+
+    def make_hc_mix(self, name, x, residual, post, comb, nxt, bs_shape):
+        """Post mix of the block that just ran, then the next block's pre mix and norm.
+
+        ``nxt`` is ``(pre_name, norm_name, prefix, norm_key)`` for the pre mix that follows.
+        """
+        pre_name, norm_name, prefix, norm_key = nxt
+        hc, dim = self.hc, self.dim
+        if not self.hc_fused:
+            h = self.make_hc_post(name, x, residual, post, comb, bs_shape)
+            y, post, comb = self.make_hc_pre(pre_name, h, prefix, bs_shape)
+            return h, post, comb, self.make_hc_norm(norm_name, y, norm_key, bs_shape)
+
+        F = ir.DataType.FLOAT
+        outs = [f"{name}/output_{i}" for i in range(4)]
+        self.make_node(
+            "HyperConnectionMix",
+            inputs=[x, residual, post, comb,
+                    self.init(self.sd[f"{prefix}_fn"].T, f"{prefix}_fn/T", to=F),
+                    self.init(self.sd[f"{prefix}_scale"].reshape(-1)[:3], f"{prefix}_scale/v", to=F),
+                    self.init(self.sd[f"{prefix}_base"].reshape(-1)[:self.hc_mix_dim],
+                              f"{prefix}_base/v", to=F),
+                    self.init_w(norm_key, to=F)],
+            outputs=outs, name=name, domain="com.microsoft",
+            sinkhorn_iterations=self.hc_iters, epsilon=self.eps, hc_epsilon=self.hc_eps,
+            sinkhorn_epsilon=self.hc_eps, post_alpha=2.0)
+        self.make_value(outs[0], self.io_dtype, shape=bs_shape + [hc, dim])
+        self.make_value(outs[1], F, shape=bs_shape + [hc])
+        self.make_value(outs[2], F, shape=bs_shape + [hc, hc])
+        self.make_value(outs[3], self.io_dtype, shape=bs_shape + [dim])
+        return outs[0], outs[1], outs[2], outs[3]
 
     def make_hc_head(self, name, x, prefix, bs_shape):
         hc, dim = self.hc, self.dim
@@ -1460,32 +1502,32 @@ class DeepSeekV4FlashModel(Model):
     # block / model
     # ------------------------------------------------------------------ #
 
-    def make_block(self, layer_id, h, ctx):
+    def make_block(self, layer_id, h, y, post, comb, ctx):
+        """``y``, ``post`` and ``comb`` come from the pre mix the previous block already ran.
+
+        Returns the same carried triple for the next block; the last block has no following
+        pre mix, so it ends on a bare post and returns ``None`` for the three.
+        """
         n = f"/layers.{layer_id}"
         bs = [B, S]
-        io = self.io_dtype
         p = f"layers.{layer_id}"
 
-        residual = h
-        y, post, comb = self.make_hc_pre(f"{n}/hc_attn", h, f"{p}.hc_attn", bs)
-        y = self.cast(f"{n}/attn_norm_b",
-                      self.make_rmsnorm(f"{n}/attn_norm", y,
-                                        self.init_w(f"{p}.attn_norm.weight",
-                                                    to=ir.DataType.FLOAT), bs + [self.dim]),
-                      io, bs + [self.dim])
         a, presents = self.make_attention(f"{n}/attn", layer_id, y, ctx)
-        h = self.make_hc_post(f"{n}/hc_attn_post", a, residual, post, comb, bs)
+        h, post, comb, y = self.make_hc_mix(
+            f"{n}/hc_attn_post", a, h, post, comb,
+            (f"{n}/hc_ffn", f"{n}/ffn_norm", f"{p}.hc_ffn", f"{p}.ffn_norm.weight"), bs)
 
-        residual = h
-        y, post, comb = self.make_hc_pre(f"{n}/hc_ffn", h, f"{p}.hc_ffn", bs)
-        y = self.cast(f"{n}/ffn_norm_b",
-                      self.make_rmsnorm(f"{n}/ffn_norm", y,
-                                        self.init_w(f"{p}.ffn_norm.weight",
-                                                    to=ir.DataType.FLOAT), bs + [self.dim]),
-                      io, bs + [self.dim])
         f_ = self.make_moe(f"{n}/ffn", layer_id, y, ctx)
-        h = self.make_hc_post(f"{n}/hc_ffn_post", f_, residual, post, comb, bs)
-        return h, presents
+        nxt = layer_id + 1
+        if nxt < self.num_layers:
+            h, post, comb, y = self.make_hc_mix(
+                f"{n}/hc_ffn_post", f_, h, post, comb,
+                (f"/layers.{nxt}/hc_attn", f"/layers.{nxt}/attn_norm",
+                 f"layers.{nxt}.hc_attn", f"layers.{nxt}.attn_norm.weight"), bs)
+        else:
+            h = self.make_hc_post(f"{n}/hc_ffn_post", f_, h, post, comb, bs)
+            y = post = comb = None
+        return h, y, post, comb, presents
 
     def make_dsv4_graph(self):
         F, I = ir.DataType.FLOAT, ir.DataType.INT64
@@ -1538,8 +1580,13 @@ class DeepSeekV4FlashModel(Model):
         eshape = self.op("Concat", [bs, tail], "/hc_expand_shape", I, [4], axis=0)
         h = self.op("Expand", [h, eshape], "/hc_expand", io, [B, S, hc, dim])
 
+        # Every other pre mix is fused into the post mix that precedes it; the first block has
+        # no preceding post, so it keeps the unrolled pre.
+        y, post, comb = self.make_hc_pre("/layers.0/hc_attn", h, "layers.0.hc_attn", [B, S])
+        y = self.make_hc_norm("/layers.0/attn_norm", y, "layers.0.attn_norm.weight", [B, S])
+
         for layer_id in range(self.num_layers):
-            h, presents = self.make_block(layer_id, h, ctx)
+            h, y, post, comb, presents = self.make_block(layer_id, h, y, post, comb, ctx)
             for key, val in presents.items():
                 out = f"present_{key}_{layer_id}"
                 self.make_node("Identity", inputs=[val], outputs=[out], name=f"/out/{out}")
