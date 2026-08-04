@@ -174,6 +174,16 @@ class DeepSeekV4FlashModel(Model):
         # operators cover all of it -- one on each side of the attention kernel.
         self.qkv_fused = extra_options.get("dsv4_qkv_fused", "1") not in ("0", 0, False)
 
+        # The routing decision reads a token's own 256 gate scores and writes back its six
+        # weights, but the graph spells it as nineteen nodes: sqrtsoftplus, a top-k, a
+        # normalisation and then two scatters into dense expert-wide rows purely to hand QMoE
+        # its log-domain router input and to recover this rank's share of the weight.
+        self.route_fused = extra_options.get("dsv4_route_fused", "1") not in ("0", 0, False)
+
+        # The shared expert's gated activation is eight elementwise passes over the same
+        # buffer, one of which exists only to widen to float and one only to narrow back.
+        self.swiglu_fused = extra_options.get("dsv4_swiglu_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -1408,11 +1418,13 @@ class DeepSeekV4FlashModel(Model):
         g = self.op("Mul", [gate, s], f"{name}/silu", F, shape)
         return self.op("Mul", [g, up], name, F, shape)
 
-    def make_routing(self, name, layer_id, xf, nvec, ctx):
-        """sqrtsoftplus scores + noaux_tc selection bias (or hash routing).
+    def make_routing(self, name, layer_id, xf, ctx):
+        """The gate GEMM, plus the fixed expert choice on the hash-routed layers.
 
-        Returns (idx [N, k] int64, weights [N, k] FLOAT already normalised, i.e.
-        summing to 1 before ``routed_scaling_factor``).
+        Returns ``(scores [N, E] FLOAT, expert_ids [N, k] int64 or None)``.  Both
+        routing paths below start here: hash routing already knows *which* experts a
+        token uses and needs the scores only for their weights, while ``noaux_tc``
+        derives the choice from the scores as well.
         """
         p = f"layers.{layer_id}.ffn"
         E, k = self.n_experts, self.topk
@@ -1420,14 +1432,26 @@ class DeepSeekV4FlashModel(Model):
         gw = self.init(self.sd[f"{p}.gate_weight"].T, f"{p}.gate_weight/T",
                        to=ir.DataType.FLOAT)
         scores = self.op("MatMul", [xf, gw], f"{name}/scores", F, [None, E])
+        if layer_id >= self.n_hash_layers:
+            return scores, None
+        flat_ids = self.reshape(f"{name}/ids", "input_ids", [-1], I, [None])
+        return scores, self.op("Gather", [self.init_w(f"{p}.tid2eid"), flat_ids],
+                               f"{name}/idx", I, [None, k], axis=0)
+
+    def make_topk_weights(self, name, layer_id, scores, expert_ids):
+        """sqrtsoftplus affinities, the noaux_tc selection and the normalised weights.
+
+        Returns (idx [N, k] int64, weights [N, k] FLOAT already normalised, i.e.
+        summing to 1 before ``routed_scaling_factor``).
+        """
+        p = f"layers.{layer_id}.ffn"
+        E, k = self.n_experts, self.topk
+        F, I = ir.DataType.FLOAT, ir.DataType.INT64
         sp = self.op("Softplus", [scores], f"{name}/softplus", F, [None, E])
         orig = self.op("Sqrt", [sp], f"{name}/sqrt", F, [None, E])
 
-        if layer_id < self.n_hash_layers:
-            flat_ids = self.reshape(f"{name}/ids", "input_ids", [-1], I, [None])
-            idx = self.op("Gather", [self.init_w(f"{p}.tid2eid"), flat_ids],
-                          f"{name}/idx", I, [None, k], axis=0)
-        else:
+        idx = expert_ids
+        if idx is None:
             bias = self.init_w(f"{p}.gate_bias")
             sel = self.op("Add", [orig, bias], f"{name}/sel", F, [None, E])
             vals = f"{name}/topk/output_0"
@@ -1451,11 +1475,7 @@ class DeepSeekV4FlashModel(Model):
 
         xflat = self.reshape(f"{name}/flat", x, [-1, dim], io, [None, dim])
         xf = self.cast(f"{name}/flatf", xflat, F, [None, dim])
-        idx, wn = self.make_routing(f"{name}/route", layer_id, xf, None, ctx)
-
-        nrow = self.op("Shape", [xflat], f"{name}/nshape", I, [1], start=0, end=1)
-        eshape = self.op("Concat", [nrow, self.const("INT64", [E])],
-                         f"{name}/eshape", I, [2], axis=0)
+        scores, expert_ids = self.make_routing(f"{name}/route", layer_id, xf, ctx)
 
         # Expert parallel: this rank owns experts [lo, lo + E_loc).  It sees only
         # the matching column block of the router, so the kernel's softmax hands
@@ -1464,6 +1484,48 @@ class DeepSeekV4FlashModel(Model):
         # expert get an all -inf row, whose degenerate uniform softmax is
         # annihilated by W_local == 0.
         E_loc, lo = self.n_experts_local, self.expert_lo
+
+        if self.moe_impl == "qmoe" and self.route_fused:
+            # One operator for the whole decision.  Everything the unfused chain
+            # below builds -- the affinities, the selection, the normalisation, the
+            # two dense E-wide scatters and the two reductions over them -- is
+            # per-token work over 256 scores, so it collapses into one block per
+            # token that never spills the row out of shared memory.
+            outs = [f"{name}/router", f"{name}/wlocs"]
+            self.make_node(
+                "DSV4MoERouter",
+                inputs=[scores,
+                        "" if expert_ids is not None else self.init_w(f"{p}.gate_bias"),
+                        expert_ids if expert_ids is not None else ""],
+                outputs=outs, name=f"{name}/route/pick", domain="com.microsoft",
+                topk=k, local_expert_start=lo, local_expert_count=E_loc,
+                route_scale=float(self.route_scale), dtype=int(io))
+            self.make_value(outs[0], io, shape=[None, E_loc])
+            self.make_value(outs[1], F, shape=[None, 1])
+            router, wloc = outs
+            fc1_w, fc1_s, fc2_w, fc2_s = self.moe_qweights(p)
+            out = f"{name}/qmoe/output_0"
+            inputs = [xflat, router,
+                      fc1_w, fc1_s, "",
+                      fc2_w, fc2_s, "",
+                      "", "", "", "", "", "", "",
+                      self.g_moe(p, "fc1"), self.g_moe(p, "fc2")]
+            self.make_node("QMoE", inputs=inputs, outputs=[out], name=f"{name}/qmoe",
+                           domain="com.microsoft", activation_type="swiglu",
+                           expert_weight_bits=4, k=min(k, E_loc), normalize_routing_weights=0,
+                           swiglu_fusion=1, swiglu_limit=self.swiglu_limit,
+                           activation_alpha=1.0, activation_beta=0.0,
+                           use_sparse_mixer=0, quant_type="fp4", block_size=32)
+            self.make_value(out, io, shape=[None, dim])
+            y = self.cast(f"{name}/qmoef", out, F, [None, dim])
+            y = self.op("Mul", [y, wloc], f"{name}/scaled", F, [None, dim])
+            return self.make_moe_shared(name, layer_id, xflat, y, ctx)
+
+        idx, wn = self.make_topk_weights(f"{name}/route", layer_id, scores, expert_ids)
+
+        nrow = self.op("Shape", [xflat], f"{name}/nshape", I, [1], start=0, end=1)
+        eshape = self.op("Concat", [nrow, self.const("INT64", [E])],
+                         f"{name}/eshape", I, [2], axis=0)
         zeros = self.op("ConstantOfShape", [eshape], f"{name}/zeros", F, [None, E],
                         value=ir.tensor([0.0], dtype=ir.DataType.FLOAT))
         dense_w = self.op("ScatterElements", [zeros, idx, wn], f"{name}/densew", F,
@@ -1519,15 +1581,32 @@ class DeepSeekV4FlashModel(Model):
             act = self.op("Mul", [act, gu], f"{name}/gated", F, [None, E_loc, mi])
             y = self.op("Einsum", [act, w2], f"{name}/y", F, [None, dim], equation="nei,edi->nd")
 
-        # shared expert, tensor-parallel over the intermediate dim
-        mil = self.moe_inter_local
+        return self.make_moe_shared(name, layer_id, xflat, y, ctx)
+
+    def make_moe_shared(self, name, layer_id, xflat, y, ctx):
+        """The shared expert, added to the routed output and all-reduced.
+
+        Tensor-parallel over the intermediate dim, so one collective at the end
+        covers both this split and the expert-parallel one above it.
+        """
+        p = f"layers.{layer_id}.ffn"
+        F = ir.DataType.FLOAT
+        io, dim, mil = self.io_dtype, self.dim, self.moe_inter_local
+
         sg = self.proj(f"{name}/sg", xflat, f"{p}.sw1.weight", [None, mil], shard_axis=0)
         su = self.proj(f"{name}/su", xflat, f"{p}.sw3.weight", [None, mil], shard_axis=0)
-        sact = self._swiglu(f"{name}/sact",
-                            self.cast(f"{name}/sgf", sg, F, [None, mil]),
-                            self.cast(f"{name}/suf", su, F, [None, mil]), [None, mil])
-        sy = self.proj(f"{name}/sy", self.cast(f"{name}/sactb", sact, io, [None, mil]),
-                       f"{p}.sw2.weight", [None, dim], shard_axis=1)
+        if self.swiglu_fused:
+            # The activation stays in the io dtype end to end: the operator widens to
+            # float internally, so the two casts around it -- and the six elementwise
+            # passes between them -- leave the graph.
+            sactb = self.op("DSV4SwiGLU", [sg, su], f"{name}/sact", io, [None, mil],
+                            domain="com.microsoft", limit=float(self.swiglu_limit or 0.0))
+        else:
+            sact = self._swiglu(f"{name}/sact",
+                                self.cast(f"{name}/sgf", sg, F, [None, mil]),
+                                self.cast(f"{name}/suf", su, F, [None, mil]), [None, mil])
+            sactb = self.cast(f"{name}/sactb", sact, io, [None, mil])
+        sy = self.proj(f"{name}/sy", sactb, f"{p}.sw2.weight", [None, dim], shard_axis=1)
         y = self.op("Add", [y, self.cast(f"{name}/syf", sy, F, [None, dim])],
                     f"{name}/total", F, [None, dim])
         y = self.cast(f"{name}/tob", y, io, [None, dim])

@@ -565,7 +565,7 @@ class DSV4Engine:
 
     def __init__(self, model_dir, world=8, port=DEFAULT_PORT, log_dir="/tmp",
                  startup_timeout=1800, quiet=False, prefill_chunk=512, cuda_graph=False,
-                 batch=1):
+                 batch=1, devices=None):
         self.model_dir = os.path.abspath(os.path.expanduser(model_dir))
         self.world = world
         self.port = port
@@ -573,6 +573,15 @@ class DSV4Engine:
         self.prefill_chunk = prefill_chunk
         self.cuda_graph = cuda_graph
         self.batch = batch
+        # Which physical GPUs the ranks land on. Naming them lets a second engine
+        # take the other half of the node; give it its own `port` and `log_dir` too.
+        if devices is None:
+            env_devices = os.environ.get("DSV4_DEVICES")
+            devices = ([int(d) for d in env_devices.split(",") if d != ""]
+                       if env_devices else list(range(world)))
+        if len(devices) < world:
+            raise ValueError(f"{len(devices)} devices for a world of {world}")
+        self.devices = devices[:world]
         self.procs, self.chans = [], []
         self.max_seq_len = 0
         self.vocab = 0
@@ -587,7 +596,8 @@ class DSV4Engine:
 
     def _spawn(self, rank):
         parent_sock, child_sock = socket.socketpair()
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(rank), LOCAL_RANK=str(rank),
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.devices[rank]),
+                   LOCAL_RANK=str(rank),
                    LOCAL_WORLD_SIZE=str(self.world), RANK0_IP="127.0.0.1",
                    RANK0_PORT=str(self.port), DSV4_FD=str(child_sock.fileno()))
         log = open(os.path.join(self.log_dir, f"dsv4_rank{rank}.log"), "w")
