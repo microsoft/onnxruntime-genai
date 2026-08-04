@@ -13,11 +13,23 @@ inputs and the *other* set as the `present_*` outputs, then swaps.  The cache is
 zeroed at the start of a request; within a request only `past_lens` advances.
 
 **Sampling.**  Greedy, and decided centrally.  Every rank computes its own
-argmax, the engine takes rank 0's and broadcasts it back before the next step.
-`lm_head` is replicated, so the ranks' logits agree bit for bit almost always -
-but not quite always, and a single disagreement would desynchronize the group
-permanently, because the losing rank would feed a different token into the next
-`AllReduce`.  Disagreements are counted and reported, not tolerated silently.
+argmax and rank 0's wins.  `lm_head` is replicated, so the ranks' logits agree
+bit for bit almost always - but not quite always, and a single disagreement
+would desynchronize the group permanently, because the losing rank would feed a
+different token into the next `AllReduce`.  Disagreements are counted and
+reported, not tolerated silently.
+
+The agreement itself happens *on the device*.  The ranks hold a second NCCL
+communicator (a `torch.distributed` group, rendezvous handed out by the engine)
+and each step is one `all_gather` of a 2*batch+1 float vector - every rank's
+argmax, its top-2 gap, and its abort flag.  Rank 0's slot of the result is
+written straight into the next step's `input_ids` without the host ever seeing
+it, so the next graph replay is launched immediately.  A non-blocking D2H of the
+agreed token runs alongside the replay and the host does its EOS / length
+bookkeeping *one step late*, which costs at most one extra decode step per
+request, whose logits are then discarded.  `DSV4_HOST_TOKEN_SYNC=1` restores the
+older path, where every rank round-tripped its argmax through the engine process
+once per token.
 
 Usage::
 
@@ -54,6 +66,11 @@ _MAX_COMPRESS_RATIO = 128
 
 # Uncaptured decode runs per parity before the graph is recorded.
 _GRAPH_WARMUP = 3
+
+# Decode steps between the worker's liveness pings.  Nothing is expected back;
+# they exist so the engine's bounded `recv` still notices a dead rank now that a
+# step no longer talks to it.
+_PROGRESS_EVERY = 16
 
 
 class ProtocolError(RuntimeError):
@@ -196,8 +213,53 @@ class _Worker:
         self._logits = {}
         self._graph_io = None
         self._ro_skip = None
+        # Second communicator, established later by `init_dist`; until then the
+        # rank falls back to routing every token through the engine process.
+        self.dist = None
+        self.dist_ready = False
+        self.world = 1
+        self._abort = False
         if cuda_graph:
             self._init_graph_capture()
+
+    # -- token agreement communicator -------------------------------------- #
+
+    def init_dist(self, rendezvous, world):
+        """Join the ranks' own NCCL group, used only to agree on the next token.
+
+        ORT already owns a communicator for the in-graph `AllReduce`, and two
+        communicators in one process are safe only while every rank issues their
+        collectives in the same order.  That holds here for two reasons.  ORT
+        synchronizes its stream at the end of `Run`, so a step is strictly
+        replay -> agree -> replay with nothing in flight across the boundary;
+        and the agreement is a single unconditional `all_gather` per decode
+        iteration whose result is the *only* thing the loop branches on, so no
+        rank can reach a different iteration count from another.
+
+        The rendezvous is a file rather than a socket on purpose: rank 0 already
+        binds the ORT NCCL rendezvous port inside session creation and the
+        engine probes that port by reading /proc precisely because a stray
+        connection corrupts the handshake.  A `FileStore` adds no listener to
+        collide with, and NCCL's own bootstrap picks its ports itself.
+        """
+        import torch.distributed as dist
+        torch = self.torch
+        if self.vocab >= 2 ** 24:
+            # Votes ride in a float32 payload; ids have to survive it exactly.
+            raise ProtocolError("vocab %d is too large for the float32 vote"
+                                % self.vocab)
+        torch.cuda.set_device(0)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", init_method=rendezvous,
+                                    world_size=world, rank=self.rank)
+        self.dist = dist
+        self.world = world
+        # Build the communicator here, at a point every rank reaches with no ORT
+        # work in flight, rather than lazily inside the first decode step.
+        buf = torch.zeros((world, 2 * self.batch + 1), dtype=torch.float32, device="cuda")
+        dist.all_gather_into_tensor(buf, buf[0].clone())
+        torch.cuda.synchronize()
+        self.dist_ready = True
 
     # -- cuda graph -------------------------------------------------------- #
 
@@ -403,19 +465,8 @@ class _Worker:
         self.cur = 1 - parity
         return self.g_logits[:, -1]
 
-    def generate(self, prompts, max_new_tokens, eos_token_ids, chan):
-        """Decode a batch of prompts under the engine's direction.
-
-        After every step the rank reports its own argmax for each row and waits to
-        be told what to append: the ranks' logits are *nearly* but not always
-        bit-identical, and a single disagreement would desynchronize the group
-        for good.
-
-        Every row steps on every iteration, finished ones included. The step costs
-        the same either way -- it is ~18k kernel launches whatever the rows contain --
-        and holding the batch shape fixed is what lets the step stay a replayable
-        graph.
-        """
+    def _prefill(self, prompts, max_new_tokens):
+        """Zero the caches, fill every row, and size the decode budget."""
         torch = self.torch
         if len(prompts) > self.batch:
             raise ProtocolError("%d prompts for a batch-%d worker" % (len(prompts), self.batch))
@@ -423,8 +474,8 @@ class _Worker:
             for t in buf:
                 t.zero_()
         self.cur = 0
+        self._abort = False
 
-        eos = set(eos_token_ids)
         lens = [len(p) for p in prompts]
         limits = [max(0, min(max_new_tokens, self.max_seq_len - n if self.max_seq_len
                              else max_new_tokens)) for n in lens]
@@ -438,9 +489,190 @@ class _Worker:
             lens.append(0)
             limits.append(0)
         logits = torch.stack(rows)
-        t_prefill = time.time() - t0
-        finite = bool(torch.isfinite(logits[:len(prompts)]).all())
+        return (logits, lens, limits, time.time() - t0,
+                bool(torch.isfinite(logits[:len(prompts)]).all()))
 
+    @staticmethod
+    def _reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps):
+        return {
+            "tokens": produced,
+            "stop_reason": stop,
+            "finite": finite,
+            "prompt_lens": lens[:n],
+            "prefill_s": t_prefill,
+            "decode_s": t_decode,
+            "decode_step_s": t_decode / steps if steps else 0.0,
+            "decode_tok_s": (steps * n) / t_decode if steps and t_decode else 0.0,
+        }
+
+    def generate(self, prompts, max_new_tokens, eos_token_ids, chan):
+        """Decode a batch of prompts.  The ranks agree on every token they emit.
+
+        Every row steps on every iteration, finished ones included. The step costs
+        the same either way -- it is ~18k kernel launches whatever the rows contain --
+        and holding the batch shape fixed is what lets the step stay a replayable
+        graph.
+        """
+        if self.dist_ready and os.environ.get("DSV4_HOST_TOKEN_SYNC") != "1":
+            return self._generate_device(prompts, max_new_tokens, eos_token_ids, chan)
+        return self._generate_host(prompts, max_new_tokens, eos_token_ids, chan)
+
+    # -- decode: agreement on the device ------------------------------------ #
+
+    def _abort_pending(self, chan):
+        """Drain the engine channel without blocking.  Rank-local on purpose: the
+        flag only takes effect after the all-gather has made it unanimous."""
+        if self._abort:
+            return True
+        try:
+            while b"\n" in chan.buf or select.select([chan.sock], [], [], 0)[0]:
+                if chan.recv(1.0).get("cmd") == "abort":
+                    self._abort = True
+                    break
+        except (TimeoutError, ProtocolError, OSError):
+            pass
+        return self._abort
+
+    def _disagreements(self, hist, n_steps):
+        """Every (step, row) where the ranks' argmax differed, with all the votes.
+
+        Reconstructed at the end from the gathered history rather than reported
+        per step, so the decode loop never has to move a vote to the host.
+        """
+        B = self.batch
+        h = hist[:n_steps].cpu()
+        votes = h[:, :, :B]
+        out = []
+        for s, b in (votes != votes[:, :1, :]).any(dim=1).nonzero().tolist():
+            out.append({"step": s, "row": b,
+                        "tokens": [int(v) for v in votes[s, :, b].tolist()],
+                        "gap": float(h[s, :, B + b].min())})
+        return out
+
+    def _generate_device(self, prompts, max_new_tokens, eos_token_ids, chan):
+        """Decode with the token decided by an on-device all-gather.
+
+        The host never sees a token before the step that consumes it is launched.
+        It reads step ``s``'s token while step ``s+1`` is already running, so a row
+        that hits EOS is noticed one iteration late: the replay for the step after
+        the last kept token has already gone out, and its logits are dropped.  The
+        tokens themselves are exactly the ones the host-synchronous path returns,
+        because the same number of argmaxes is taken and the same prefix of them
+        is committed.  Stopping by length needs no token at all, so that case runs
+        exactly as many replays as before.
+        """
+        torch, dist = self.torch, self.dist
+        logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
+        n, B, W = len(prompts), self.batch, self.world
+        eos = set(eos_token_ids)
+        max_steps = max(limits) if limits else 0
+
+        past_t = torch.tensor(lens, dtype=torch.int64, device="cuda")
+        # `agreed` is the step's decision: B token ids plus the abort flag.  The
+        # ids double as the next `input_ids`, so the same buffer is both the
+        # all-gather's landing pad and the graph's input -- nothing copies between.
+        agreed = torch.zeros(B + 1, dtype=torch.int64, device="cuda")
+        step_ids = agreed[:B].view(B, 1)
+        produced = [[] for _ in prompts]
+        done = [limits[b] == 0 for b in range(n)]
+        stop = [("length" if limits[b] < max_new_tokens else "max_new_tokens")
+                for b in range(n)]
+        t_decode, steps, last = 0.0, 0, -1
+
+        if max_steps:
+            # [my argmax | my top-2 gap | my abort flag], gathered into `hist` so
+            # the whole vote history is on the device for the post-mortem.
+            send = torch.zeros(2 * B + 1, dtype=torch.float32, device="cuda")
+            hist = torch.zeros((max_steps, W, 2 * B + 1), dtype=torch.float32,
+                               device="cuda")
+            hpin = torch.zeros((max_steps, B + 1), dtype=torch.int64).pin_memory()
+            poll = self.rank == 0        # only rank 0's abort slot is ever read
+            uncaptured = self._graph_io is None
+
+            def commit(s):
+                """Apply step ``s``'s agreed token.  True if the loop must stop."""
+                nonlocal last
+                last = s
+                row = hpin[s].tolist()
+                if row[B]:
+                    for b in range(n):
+                        if not done[b]:
+                            stop[b] = "abort"
+                    return True
+                for b in range(n):
+                    if done[b]:
+                        continue
+                    produced[b].append(row[b])
+                    if row[b] in eos:
+                        done[b], stop[b] = True, "eos"
+                    elif len(produced[b]) >= limits[b]:
+                        done[b] = True
+                return all(done)
+
+            stopped = False
+            for step in range(max_steps):
+                # Step `step - 1`'s token, copied out while `step - 1` was still
+                # running: `_step` synchronizes torch's stream on its way into the
+                # replay, which publishes the copy issued just before it.  This sits
+                # ahead of the sampling so that a stop costs exactly one extra
+                # replay -- the one already launched -- and no more.
+                if step:
+                    if commit(step - 1):
+                        stopped = True
+                        break
+                if step % _PROGRESS_EVERY == 0:
+                    chan.send({"event": "progress", "rank": self.rank, "step": step})
+                top = torch.topk(logits, 2, dim=-1)
+                send[:B].copy_(top.indices[:, 0])
+                torch.sub(top.values[:, 0], top.values[:, 1], out=send[B:2 * B])
+                if poll and self._abort_pending(chan):
+                    send[2 * B] = 1.0
+                # The one collective of the step.  Unconditional on every rank, and
+                # everything the loop branches on below is derived from its result,
+                # which is identical on all ranks -- so the ranks cannot diverge.
+                dist.all_gather_into_tensor(hist[step], send)
+                g = hist[step]
+                agreed[:B].copy_(g[0, :B])      # rank 0's argmax wins, and is also
+                agreed[B].copy_(g[0, 2 * B])    # already the next step's input_ids
+                hpin[step].copy_(agreed, non_blocking=True)
+
+                # Launched without the host having seen the token it consumes.
+                # The last iteration is skipped: no token can outlive it.
+                if step + 1 < max_steps:
+                    if uncaptured:
+                        # The captured path synchronizes torch's stream itself; the
+                        # uncaptured one binds `step_ids` straight into the session,
+                        # so the writes above have to be published by hand.
+                        torch.cuda.current_stream().synchronize()
+                    t1 = time.time()
+                    logits = self._step(step_ids, past_t)
+                    t_decode += time.time() - t1
+                    steps += 1
+                    past_t += 1
+            if not stopped:
+                # Nothing replayed after the last iteration, so publish its copy.
+                torch.cuda.current_stream().synchronize()
+                commit(max_steps - 1)
+
+        out = self._reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps)
+        # Only rank 0's copy is read, and it is the same on every rank anyway.
+        if self.rank == 0:
+            out["disagreements"] = (self._disagreements(hist, last + 1)
+                                    if max_steps and last >= 0 else [])
+        return out
+
+    # -- decode: agreement through the engine process ----------------------- #
+
+    def _generate_host(self, prompts, max_new_tokens, eos_token_ids, chan):
+        """The original path: every rank ships its argmax to the engine and waits.
+
+        Kept behind `DSV4_HOST_TOKEN_SYNC=1` as the reference for A/B and as the
+        fallback when the second communicator could not be established.
+        """
+        torch = self.torch
+        logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
+
+        eos = set(eos_token_ids)
         past_t = torch.tensor(lens, dtype=torch.int64, device="cuda")
         step_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
         produced = [[] for _ in prompts]
@@ -481,16 +713,8 @@ class _Worker:
             steps += 1
             past_t += 1
 
-        return {
-            "tokens": produced,
-            "stop_reason": stop,
-            "finite": finite,
-            "prompt_lens": lens[:len(prompts)],
-            "prefill_s": t_prefill,
-            "decode_s": t_decode,
-            "decode_step_s": t_decode / steps if steps else 0.0,
-            "decode_tok_s": (steps * len(prompts)) / t_decode if steps and t_decode else 0.0,
-        }
+        return self._reply(produced, stop, finite, lens, len(prompts),
+                           t_prefill, t_decode, steps)
 
 
 def _worker_main(a):
@@ -515,7 +739,20 @@ def _worker_main(a):
         except (ProtocolError, TimeoutError):
             return 0
         if req.get("cmd") == "quit":
-            return 0
+            break
+        if req.get("cmd") == "init_dist":
+            try:
+                w.init_dist(req["rendezvous"], req["world"])
+                chan.send({"event": "dist_ready"})
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                chan.send({"event": "dist_ready", "error": f"{type(e).__name__}: {e}"})
+            continue
+        if req.get("cmd") == "host_sync":
+            # Some rank could not join the group; nobody may use it.
+            w.dist_ready = False
+            continue
         if req.get("cmd") != "generate":
             chan.send({"event": "generated", "error": "unknown command %r" % req.get("cmd")})
             continue
@@ -528,6 +765,10 @@ def _worker_main(a):
             reply = {"error": f"{type(e).__name__}: {e}"}
         reply["event"] = "generated"
         chan.send(reply)
+
+    if w.dist is not None and w.dist.is_initialized():
+        w.dist.destroy_process_group()
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -586,6 +827,11 @@ class DSV4Engine:
         self.max_seq_len = 0
         self.vocab = 0
         self._quiet = quiet
+        # Rendezvous for the ranks' own NCCL group.  A file, not a port: rank 0
+        # already owns the ORT NCCL rendezvous port and anything else listening
+        # near it is a hazard (see `wait_for_listen`).
+        self._pg_file = os.path.join(log_dir, f"dsv4_pg_{os.getpid()}_{port}")
+        self.device_token_sync = False
         self._start(startup_timeout)
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -639,6 +885,38 @@ class DSV4Engine:
         self._log(f"all {self.world} ranks ready in {time.time() - t0:.0f}s "
                   f"(max_seq_len={self.max_seq_len}, "
                   f"kv cache {self._kv_bytes / 2**20:.1f} MiB/rank)")
+        self._init_dist(timeout)
+
+    def _init_dist(self, timeout):
+        """Give the ranks a rendezvous so they can agree on tokens themselves.
+
+        Done after every rank has answered `ready`: rank 0 blocks inside session
+        creation until the peers join ORT's own communicator, so a collective
+        issued any earlier would deadlock against a rank that has not spawned.
+        """
+        if os.environ.get("DSV4_HOST_TOKEN_SYNC") == "1":
+            self._log("DSV4_HOST_TOKEN_SYNC=1: tokens round-trip through the engine")
+            return
+        try:
+            os.unlink(self._pg_file)
+        except OSError:
+            pass
+        for chan in self.chans:
+            chan.send({"cmd": "init_dist", "rendezvous": "file://" + self._pg_file,
+                       "world": self.world})
+        errors = []
+        for rank, chan in enumerate(self.chans):
+            msg = self._recv(rank, chan, timeout)
+            if msg.get("event") != "dist_ready" or msg.get("error"):
+                errors.append(f"rank {rank}: {msg.get('error')}")
+        if errors:
+            # Half the ranks in a group they cannot all use is worse than none.
+            for chan in self.chans:
+                chan.send({"cmd": "host_sync"})
+            self._log("note: on-device token agreement unavailable (%s); falling "
+                      "back to the host round-trip" % "; ".join(errors))
+            return
+        self.device_token_sync = True
 
     def close(self):
         for chan in self.chans:
@@ -654,6 +932,10 @@ class DSV4Engine:
         for chan in self.chans:
             chan.close()
         self.procs, self.chans = [], []
+        try:
+            os.unlink(self._pg_file)
+        except OSError:
+            pass
 
     def _kill(self):
         for proc in self.procs:
@@ -681,12 +963,14 @@ class DSV4Engine:
     def generate_batch(self, prompts, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
         """Greedily continue a batch of prompts.  Returns rank 0's reply dict.
 
-        The engine drives the loop token by token: every rank reports its own
-        argmax for every row, rank 0's wins, and the decision is broadcast back.
-        The ranks' logits agree to the last bit almost always but not quite always,
-        and one divergence would leave the group permanently out of step - the
-        losing rank would feed a different token into the next `AllReduce`.  The
-        count of disagreements is returned as `rank_disagreements`.
+        The ranks agree on every token they emit, because their logits agree to
+        the last bit almost always but not quite always, and one divergence would
+        leave the group permanently out of step - the losing rank would feed a
+        different token into the next `AllReduce`.  Normally that agreement is an
+        all-gather on the ranks' own communicator and this loop only drains
+        liveness pings; under `DSV4_HOST_TOKEN_SYNC=1` the ranks report their
+        argmax here every step and are told rank 0's.  Either way the count of
+        disagreements is returned as `rank_disagreements`.
         """
         if not self.procs:
             raise ProtocolError("engine is closed")
@@ -707,6 +991,8 @@ class DSV4Engine:
         while True:
             msgs = [self._recv(rank, chan, timeout) for rank, chan in enumerate(self.chans)]
             kinds = {m.get("event") for m in msgs}
+            if kinds == {"progress"}:
+                continue
             if kinds == {"token"}:
                 per_rank = [m["toks"] for m in msgs]
                 for row, votes in enumerate(zip(*per_rank)):
@@ -728,11 +1014,15 @@ class DSV4Engine:
                 self._kill()
                 raise ProtocolError(f"rank {rank}: {msg['error']}")
         out = dict(msgs[0])
-        out["rank_disagreements"] = disagreements
-        if disagreements:
-            self._log(f"note: {len(disagreements)} step(s) where the ranks' argmax "
+        # With on-device agreement the votes never reach this process, so rank 0
+        # reconstructs them from the gathered history and reports them at the end.
+        worker_dis = out.pop("disagreements", None)
+        out["rank_disagreements"] = disagreements if worker_dis is None else worker_dis
+        if out["rank_disagreements"]:
+            d = out["rank_disagreements"]
+            self._log(f"note: {len(d)} step(s) where the ranks' argmax "
                       f"differed (smallest top-2 gap "
-                      f"{min(d['gap'] for d in disagreements):.2e}); rank 0 won")
+                      f"{min(x['gap'] for x in d):.2e}); rank 0 won")
         return out
 
     def _recv(self, rank, chan, timeout):
