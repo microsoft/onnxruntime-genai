@@ -163,6 +163,11 @@ class DeepSeekV4FlashModel(Model):
         # raw projections.
         self.comp_fused = extra_options.get("dsv4_comp_fused", "1") not in ("0", 0, False)
 
+        # Likewise for what is left of the indexer once its compressor is fused: a rotation, a
+        # cache refresh, a scoring einsum over every cached row and a top-k, ~60 nodes on each
+        # of the 21 ratio-4 layers. One operator covers everything after its two projections.
+        self.index_fused = extra_options.get("dsv4_index_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -1132,8 +1137,29 @@ class DeepSeekV4FlashModel(Model):
         # The heads are replicated, not sharded: the cache they read is already whole on
         # every rank, so sharding would divide the arithmetic without dividing the traffic
         # that bounds it, and would cost an all-reduce of the score per layer.
-        q = self.proj(f"{name}/qb", qr, f"{p}.wq_b.weight", [B, S, NH * HD])
-        q = self.cast(f"{name}/qf", self.reshape(f"{name}/q4", q, [0, 0, NH, HD], io,
+        q_raw = self.proj(f"{name}/qb", qr, f"{p}.wq_b.weight", [B, S, NH * HD])
+        w_raw = self.proj(f"{name}/w", x, f"{p}.weights_proj.weight", [B, S, NH])
+
+        # ---- this step's rows, written into the dense indexer cache ----
+        rows, first_slot, last_slot, _J, J_g, pkv, psc = self.make_compressor(
+            f"{name}/ic", layer_id, ratio, x, ctx, prefix=f"{p}.compressor",
+            head_dim=HD, state="icstate", quant=False, rotate=True)
+
+        if self.index_fused:
+            outs = [f"{name}/output_0", f"{name}/output_1"]
+            self.make_node(
+                "LightningIndexer",
+                inputs=[q_raw, cos_q, sin_q, rows, first_slot, last_slot,
+                        f"past_icache_{layer_id}", w_raw, "past_lens"],
+                outputs=outs, name=name, domain="com.microsoft",
+                num_heads=NH, head_dim=HD, rope_head_dim=rd, ratio=ratio, topk=k,
+                max_seq_len=L, rotate_fp4=1,
+                scale=(HD ** -0.5) * self.index_n_heads ** -0.5)
+            self.make_value(outs[0], I, shape=[B, S, k])
+            self.make_value(outs[1], io, shape=[B, C, HD])
+            return outs[0], {"icache": outs[1], "icstate_kv": pkv, "icstate_score": psc}
+
+        q = self.cast(f"{name}/qf", self.reshape(f"{name}/q4", q_raw, [0, 0, NH, HD], io,
                                                  [B, S, NH, HD]), F, [B, S, NH, HD])
         q = self.op("Concat",
                     [self.slice1(f"{name}/qn", q, 0, nd, F, [B, S, NH, nd]),
@@ -1144,10 +1170,6 @@ class DeepSeekV4FlashModel(Model):
                     f"{name}/qcat", F, [B, S, NH, HD], axis=-1)
         q = self.make_rotate_fp4(f"{name}/qfp4", q, [B, S, NH, HD])
 
-        # ---- this step's rows, written into the dense indexer cache ----
-        rows, first_slot, last_slot, _J, J_g, pkv, psc = self.make_compressor(
-            f"{name}/ic", layer_id, ratio, x, ctx, prefix=f"{p}.compressor",
-            head_dim=HD, state="icstate", quant=False, rotate=True)
         cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
         ksel = self.op("Sub", [cidx, first_slot], f"{name}/ksel", I, [B, C])
         take = self.op("And",
@@ -1165,8 +1187,7 @@ class DeepSeekV4FlashModel(Model):
                           f"{name}/icache", io, [B, C, HD])
 
         # ---- score ----
-        w = self.proj(f"{name}/w", x, f"{p}.weights_proj.weight", [B, S, NH])
-        w = self.op("Mul", [self.cast(f"{name}/wf", w, F, [B, S, NH]),
+        w = self.op("Mul", [self.cast(f"{name}/wf", w_raw, F, [B, S, NH]),
                             self.const("FLOAT", (HD ** -0.5) * self.index_n_heads ** -0.5)],
                     f"{name}/ws", F, [B, S, NH])
         score = self.op("Einsum", [q, self.cast(f"{name}/pf", present, F, [B, C, HD])],
