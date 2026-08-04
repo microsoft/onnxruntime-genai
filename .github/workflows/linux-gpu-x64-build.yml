@@ -115,7 +115,7 @@ jobs:
             --multiple_repos \
             --repository onnxruntimecudabuildx64
 
-      - name: Config with CMake in Docker
+      - name: Build with build.py in Docker
         run: |
           set -e -x
           docker run \
@@ -124,24 +124,29 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --preset linux_gcc_cuda_release \
-                -DMANYLINUX=ON \
-                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
-                -DENABLE_JAVA=ON \
-                -DUSE_GUIDANCE=ON \
-                -DTEST_PHI2=True \
-                -DTEST_QWEN_2_5=True"
-
-      - name: Build with CMake in Docker
-        run: |
-          set -e -x
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 \
-            bash -c " \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
+              CC=gcc CXX=g++ ${{ env.PYTHON_EXECUTABLE }} build.py \
+                --config Release \
+                --build_dir build/cuda \
+                --cmake_generator Ninja \
+                --build_java \
+                --use_cuda \
+                --cuda_home /usr/local/cuda \
+                --use_guidance \
+                --update --build \
+                --skip_examples \
+                --cmake_path /usr/bin/cmake \
+                --ctest_path /usr/bin/ctest \
+                --cmake_extra_defines \
+                  MANYLINUX=ON \
+                  PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
+                  TEST_PHI2=True \
+                  TEST_QWEN_2_5=True \
+                  'CMAKE_CUDA_ARCHITECTURES=60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120' \
+                  'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_C_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe' \
+                  'CMAKE_CXX_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe'"
 
       - name: Build the C Examples in Docker
         run: |
@@ -157,7 +162,7 @@ jobs:
                 -DORT_INCLUDE_DIR=/ort_genai_src/ort/include \
                 -DORT_LIB_DIR=/ort_genai_src/ort/lib \
                 -DOGA_INCLUDE_DIR=/ort_genai_src/src \
-                -DOGA_LIB_DIR=/ort_genai_src/build/cuda && \
+                -DOGA_LIB_DIR=/ort_genai_src/build/cuda/Release && \
               /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Run the Java tests in Docker
@@ -168,7 +173,7 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              /usr/bin/ctest --test-dir build/cuda/src/java --build-config Release --verbose --timeout 10800"
+              /usr/bin/ctest --test-dir build/cuda/Release/src/java --build-config Release --verbose --timeout 10800"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
@@ -182,7 +187,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
       # TODO: Enable this by adding dotnet to the docker image
@@ -194,7 +199,7 @@ jobs:
       #       --rm \
       #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
       #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
-      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
+      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/Release/'"
 
       - name: Docker -- Run unit tests
         run: |
@@ -204,4 +209,4 @@ jobs:
             --rm \
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests && ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/engine_unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/unit_tests && ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/engine_unit_tests"

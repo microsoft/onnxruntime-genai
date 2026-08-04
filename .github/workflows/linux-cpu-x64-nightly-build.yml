@@ -97,18 +97,29 @@ jobs:
         run: |
           git submodule update --init --recursive
 
-      - name: Build with CMake and GCC
+      - name: Build with build.py and GCC
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
-          cmake --build --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
+          CC=gcc CXX=g++ python3 build.py \
+            --config Release \
+            --build_dir build/cpu \
+            --cmake_generator Ninja \
+            --build_java \
+            --use_guidance \
+            --update --build \
+            --skip_examples \
+            --cmake_extra_defines \
+              'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_C_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe' \
+              'CMAKE_CXX_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe'
 
       - name: Build the C Examples
         run: |
           set -e -x
-          ORT_EXAMPLE_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native
+          ORT_EXAMPLE_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/runtimes/linux-x64/native
           if [ -f "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" ] && [ ! -e "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" ]; then
             ln -s libonnxruntime.so "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" || \
             cp "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1"
@@ -116,10 +127,10 @@ jobs:
 
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/build/native/include \
             -DORT_LIB_DIR=$ORT_EXAMPLE_LIB_DIR \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
-            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
+            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release
           cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
@@ -127,7 +138,7 @@ jobs:
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
-          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
+          python3 -m pip install build/cpu/Release/wheel/onnxruntime_genai*.whl --no-deps
 
       - name: Verify Build Artifacts
         if: always()
@@ -137,7 +148,7 @@ jobs:
       - name: Run the Java tests
         run: |
           set -e -x
-          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
+          ctest --test-dir build/cpu/Release/src/java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python tests
         run: |
@@ -148,7 +159,7 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/Release/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
 
       - name: Build the C# Examples
         run: |

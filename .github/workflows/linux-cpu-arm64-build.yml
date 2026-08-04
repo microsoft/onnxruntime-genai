@@ -85,17 +85,26 @@ jobs:
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
           --repository ort_genai_linux_arm64_gha
 
-      - name: Docker -- Configure with CMake and GCC
+      - name: Docker -- Build with build.py and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON"
-
-      - name: Docker -- Build with CMake and GCC
-        run: |
-          docker run --rm \
-          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            CC=gcc CXX=g++ python3 build.py \
+              --config Release \
+              --build_dir build/cpu \
+              --cmake_generator Ninja \
+              --use_guidance \
+              --update --build \
+              --skip_examples \
+              --cmake_path /usr/bin/cmake \
+              --ctest_path /usr/bin/ctest \
+              --cmake_extra_defines \
+                'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                'CMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                'CMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                'CMAKE_C_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe' \
+                'CMAKE_CXX_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe'"
 
       - name: Docker -- Build the C Examples
         run: |
@@ -104,23 +113,23 @@ jobs:
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             /usr/bin/cmake -S examples/c -B examples/c/build \
               -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-              -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/build/native/include \
-              -DORT_LIB_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/runtimes/linux-arm64/native \
+              -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/Release/_deps/ortlib-src/build/native/include \
+              -DORT_LIB_DIR=/onnxruntime_src/build/cpu/Release/_deps/ortlib-src/runtimes/linux-arm64/native \
               -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
-              -DOGA_LIB_DIR=/onnxruntime_src/build/cpu && \
+              -DOGA_LIB_DIR=/onnxruntime_src/build/cpu/Release && \
             /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Docker -- Check test directory
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/cpu/test/"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/cpu/Release/test/"
 
       - name: Docker -- Run tests
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/unit_tests"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/Release/unit_tests"
 
       - name: Docker -- Install Python Wheel and Run Python Tests
         run: |
@@ -130,7 +139,7 @@ jobs:
             python3 -m pip install -r test/python/requirements.txt --user && \
             python3 -m pip install -r test/python/cpu/torch/requirements.txt --user && \
             python3 -m pip install -r test/python/cpu/ort/requirements.txt --user && \
-            python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai && \
+            python3 -m pip install --user --no-index --no-deps --find-links build/cpu/Release/wheel onnxruntime_genai && \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib && \
             python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models"
@@ -146,7 +155,7 @@ jobs:
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /onnxruntime_src/test/csharp && \
-            dotnet test /p:Configuration=Release /p:NativeBuildOutputDir=../../build/cpu/ /p:OrtLibDir=../../ort/lib/ --verbosity normal"
+            dotnet test /p:Configuration=Release /p:NativeBuildOutputDir=../../build/cpu/Release/ /p:OrtLibDir=../../ort/lib/ --verbosity normal"
 
       - name: Docker -- Build the C# Examples
         run: |

@@ -93,23 +93,34 @@ jobs:
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
-      - name: Build with CMake and GCC
+      - name: Build with build.py and GCC
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
-          cmake --build --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
+          CC=gcc CXX=g++ python3 build.py \
+            --config Release \
+            --build_dir build/cpu \
+            --cmake_generator Ninja \
+            --build_java \
+            --use_guidance \
+            --update --build \
+            --skip_examples \
+            --cmake_extra_defines \
+              'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now' \
+              'CMAKE_C_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe' \
+              'CMAKE_CXX_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe'
 
       - name: Build the C Examples
         run: |
           set -e -x
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
-            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/build/native/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/runtimes/linux-x64/native \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
-            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
+            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release
           cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
@@ -117,19 +128,19 @@ jobs:
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
-          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
+          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/Release/wheel onnxruntime_genai
 
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/cpu
-          ls -l ${{ github.workspace }}/build/cpu/wheel
+          ls -l ${{ github.workspace }}/build/cpu/Release
+          ls -l ${{ github.workspace }}/build/cpu/Release/wheel
 
       - name: Run the Java tests
         run: |
           set -e -x
-          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
+          ctest --test-dir build/cpu/Release/src/java --build-config Release --verbose --timeout 10800
 
       # This will also download all the test models to the test/models directory
       # These models are used by the python tests as well as C#, C++ and others.
@@ -142,7 +153,7 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/Release/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
 
       - name: Build the C# Examples
         run: |
@@ -163,5 +174,5 @@ jobs:
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
-          ./build/cpu/unit_tests
-          ./build/cpu/engine_unit_tests
+          ./build/cpu/Release/unit_tests
+          ./build/cpu/Release/engine_unit_tests

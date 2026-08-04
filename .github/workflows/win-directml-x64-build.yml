@@ -23,7 +23,8 @@ env:
   d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.1"
   d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.1.zip"
   d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1"
-  binaryDir: 'build/directml/win-x64'
+  buildRoot: 'build/directml/win-x64'
+  binaryDir: 'build/directml/win-x64/Release'
 
 
 jobs:
@@ -98,14 +99,25 @@ jobs:
           & $exePath -y --default-toolchain=1.86.0
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
-          cmake --preset windows_x64_directml_release -DTEST_PHI2=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DTEST_QWEN_2_5=True
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_x64_directml_release --parallel
-          cmake --build --preset windows_x64_directml_release --target PyPackageBuild
+          python build.py `
+            --config Release `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_dml `
+            --use_guidance `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              TEST_PHI2=True `
+              TEST_QWEN_2_5=True `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG'
 
       - name: Build the C Examples
         run: |

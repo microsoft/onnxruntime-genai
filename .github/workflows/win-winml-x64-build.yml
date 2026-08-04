@@ -17,7 +17,8 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
-  binaryDir: 'build/winml/win-x64'
+  buildRoot: 'build/winml/win-x64'
+  binaryDir: 'build/winml/win-x64/RelWithDebInfo'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
@@ -61,17 +62,32 @@ jobs:
           & $exePath -y --default-toolchain=1.86.0
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
-          # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
-          # time and memory usage manageable. The preset's default arch list is for
-          # release packaging, not CI validation.
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='2.1.1' -DNUGET_PACKAGE_SOURCE='${{ env.ORT_NIGHTLY_SOURCE }}' -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_x64_winml_relwithdebinfo --parallel
-          cmake --build --preset windows_x64_winml_relwithdebinfo --target PyPackageBuild
+          # WinML uses CUDA and DML together. Limit CUDA archs to SM 86 (matches
+          # the A10 runner GPU) to keep CI build time and memory manageable.
+          python build.py `
+            --config RelWithDebInfo `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_cuda `
+            --cuda_home "${{ env.cuda_dir }}\v${{ env.cuda_version }}" `
+            --use_dml `
+            --use_winml `
+            --winml_sdk_version 2.1.1 `
+            --use_guidance `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              "NUGET_PACKAGE_SOURCE=${{ env.ORT_NIGHTLY_SOURCE }}" `
+              CMAKE_CUDA_ARCHITECTURES=86-real `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG' `
+              'CMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf /Qspectre " -allow-unsupported-compiler'
 
       - name: Build the C Examples
         run: |
