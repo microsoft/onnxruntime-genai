@@ -66,6 +66,7 @@ jobs:
         run: |
           # WinML uses CUDA and DML together. Limit CUDA archs to SM 86 (matches
           # the A10 runner GPU) to keep CI build time and memory manageable.
+          python -m pip install -r requirements-dev.txt
           python build.py `
             --config RelWithDebInfo `
             --build_dir $env:buildRoot `

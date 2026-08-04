@@ -90,6 +90,7 @@ jobs:
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            python3 -m pip install -r requirements-dev.txt && \
             CC=gcc CXX=g++ python3 build.py \
               --config Release \
               --build_dir build/cpu \

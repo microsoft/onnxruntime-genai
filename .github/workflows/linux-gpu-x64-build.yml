@@ -124,6 +124,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r requirements-dev.txt && \
               CC=gcc CXX=g++ ${{ env.PYTHON_EXECUTABLE }} build.py \
                 --config Release \
                 --build_dir build/cuda \

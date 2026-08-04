@@ -145,6 +145,7 @@ jobs:
       export CCACHE_DIR=$(Build.SourcesDirectory)/.ccache
       export CC=clang
       export CXX=clang++
+      python3 -m pip install -r requirements-dev.txt
       python3 build.py \
         --config Release \
         --build_dir build/cpu/osx-arm64 \

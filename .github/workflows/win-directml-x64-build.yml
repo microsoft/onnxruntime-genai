@@ -101,6 +101,7 @@ jobs:
 
       - name: Build with build.py
         run: |
+          python -m pip install -r requirements-dev.txt
           python build.py `
             --config Release `
             --build_dir $env:buildRoot `

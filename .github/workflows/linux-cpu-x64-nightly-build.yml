@@ -101,6 +101,7 @@ jobs:
         run: |
           set -e -x
           rm -rf build
+          python3 -m pip install -r requirements-dev.txt
           CC=gcc CXX=g++ python3 build.py \
             --config Release \
             --build_dir build/cpu \

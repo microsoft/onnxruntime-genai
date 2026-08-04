@@ -108,6 +108,7 @@ jobs:
           $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
           # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
           # time and memory usage manageable.
+          python -m pip install -r requirements-dev.txt
           python build.py `
             --config Release `
             --build_dir $env:buildRoot `
