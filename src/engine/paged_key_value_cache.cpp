@@ -195,6 +195,27 @@ void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   }
 }
 
+PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
+  PagedCacheSnapshot snapshot;
+  snapshot.block_size = block_pool_->BlockSize();
+  snapshot.total_blocks = block_pool_->Capacity();
+  snapshot.free_blocks = block_pool_->AvailableBlocks();
+  snapshot.block_table_columns = block_table_columns_;
+  snapshot.requests.reserve(block_tables_.size());
+  for (const auto& block_table : block_tables_) {
+    RequestBlockSnapshot request_snapshot;
+    request_snapshot.request_id = block_table.request.get();
+    request_snapshot.block_ids.reserve(block_table.blocks.size());
+    for (const auto& block : block_table.blocks) {
+      request_snapshot.block_ids.push_back(block->Id());
+      request_snapshot.used_slots += block->Size();
+      request_snapshot.empty_slots += block->EmptySlots();
+    }
+    snapshot.requests.push_back(std::move(request_snapshot));
+  }
+  return snapshot;
+}
+
 std::vector<std::pair<OrtValue*, OrtValue*>> PagedKeyValueCache::Cache() {
   std::vector<std::pair<OrtValue*, OrtValue*>> cache;
   for (auto& layer_cache : cache_) {

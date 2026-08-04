@@ -6,10 +6,31 @@
 namespace Generators {
 
 Engine::Engine(std::shared_ptr<Model> model)
-    : model_{model},
-      cache_manager_{CacheManager::Create(model)},
-      scheduler_{Scheduler::Create(model, cache_manager_)},
-      model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {}
+    : Engine(model, CreateDependencies(model)) {}
+
+Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
+    : model_{std::move(model)},
+      cache_manager_{std::move(dependencies.cache_manager)},
+      scheduler_{std::move(dependencies.scheduler)},
+      model_executor_{std::move(dependencies.model_executor)} {
+  // Fail fast on a missing collaborator rather than crashing later on first use.
+  if (!cache_manager_) {
+    throw std::runtime_error("Engine requires a non-null cache manager.");
+  }
+  if (!scheduler_) {
+    throw std::runtime_error("Engine requires a non-null scheduler.");
+  }
+  if (!model_executor_) {
+    throw std::runtime_error("Engine requires a non-null model executor.");
+  }
+}
+
+EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
+  auto scheduler = Scheduler::Create(model, cache_manager);
+  auto model_executor = std::make_unique<ModelExecutor>(model, cache_manager);
+  return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
+}
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
   request->Assign(shared_from_this());

@@ -156,6 +156,9 @@ jobs:
         run: |
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\$env:binaryDir\Release\engine_unit_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

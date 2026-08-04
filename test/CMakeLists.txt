@@ -127,3 +127,40 @@ if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STR
   endif()
   add_test(NAME TelemetryDeviceInfoTests COMMAND telemetry_device_info_tests)
 endif()
+
+# Dedicated white-box unit tests for the continuous-batching Engine. Like reinit_tests, this binary
+# links the genai OBJECT library (not the public shared DLL) so it can exercise internal Engine
+# types (Block/BlockPool today; scheduler, cache manager, and Request invariants as the framework
+# grows) directly. It is kept separate from unit_tests so that internal test-only fakes/helpers do
+# not leak into the public-API suite and Engine failures are attributable to Engine correctness.
+# These are Tier 0 pure unit tests: no model, no ONNX session, no GPU.
+file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.cpp"
+)
+add_executable(engine_unit_tests ${engine_unit_test_srcs})
+target_include_directories(engine_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+# onnxruntime-genai-obj propagates its PUBLIC usage requirements (ORT + extensions include dirs and
+# link libs), so those are inherited here.
+target_link_libraries(engine_unit_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+# The shared library stages the ORT runtime (and CUDA add-on) next to itself; depend on it so those
+# are present in engine_unit_tests' output directory at run time.
+add_dependencies(engine_unit_tests onnxruntime-genai)
+set_target_properties(engine_unit_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(engine_unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+
+add_test(NAME EngineUnitTests COMMAND engine_unit_tests)
+set_tests_properties(EngineUnitTests PROPERTIES LABELS "engine;unit")
