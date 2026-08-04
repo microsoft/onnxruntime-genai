@@ -7,6 +7,7 @@
 #include "standard_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "speculative_sampling.h"
+#include "models/decoder_only.h"
 #include "models/model.h"
 
 #include <algorithm>
@@ -76,16 +77,24 @@ std::vector<int32_t> CommitGuidanceToken(ConstrainedLogitsProcessor& guidance_pr
   guidance_processor.CommitTokens({&token, 1});
   return guidance_processor.GetFFTokens(0);
 }
+
+DecoderOnly_State& RequireDecoderOnlyState(State& state) {
+  auto* decoder_state = dynamic_cast<DecoderOnly_State*>(&state);
+  if (!decoder_state)
+    throw std::runtime_error(
+        "Speculative decoding requires a plain decoder-only target state.");
+  return *decoder_state;
+}
 }  // namespace
 
 SpeculativeDecodingStrategy::SpeculativeDecodingStrategy(State& target_state,
                                                          const Model& target_model)
-    : target_state_{target_state},
+    : target_state_{RequireDecoderOnlyState(target_state)},
       target_model_{target_model},
-      adaptive_k_{target_state.params_->speculative.max_draft_tokens,
-                  target_state.params_->speculative.adaptive_k_min,
-                  target_state.params_->speculative.adaptive_k_bool != 0},
-      cooldown_{target_state.params_->speculative.cooldown_bool != 0} {}
+      adaptive_k_{target_state_.params_->speculative.max_draft_tokens,
+                  target_state_.params_->speculative.adaptive_k_min,
+                  target_state_.params_->speculative.adaptive_k_bool != 0},
+      cooldown_{target_state_.params_->speculative.cooldown_bool != 0} {}
 
 std::deque<int32_t> SpeculativeDecodingStrategy::CreateGuidanceFFQueue() const {
   return {ff_carry_.begin(), ff_carry_.end()};
@@ -546,7 +555,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.Run(seed_length + K, target_input, {});
+  target_state_.RunUnchunked(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
@@ -947,7 +956,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.Run(seed_length + K, target_input, {});
+  target_state_.RunUnchunked(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
