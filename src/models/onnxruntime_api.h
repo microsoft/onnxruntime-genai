@@ -201,7 +201,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   return ort_lib_handle;
 }
 
-#if defined(__linux__)
+#if (defined(__linux__) || defined(MACOS_USE_DLOPEN)) && defined(RTLD_NOLOAD)
 inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
   LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
@@ -289,6 +289,7 @@ inline void InitApi() {
   }
 
 #if defined(__linux__)
+#if defined(RTLD_NOLOAD)
   if (ort_lib_handle == nullptr) {
     // Reuse any ORT image already loaded by the host before resolving a new path. In particular,
     // a host may depend on the versioned SONAME while the unversioned sibling is also present.
@@ -300,6 +301,7 @@ inline void InitApi() {
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so.1");
   }
+#endif
 
   if (ort_lib_handle == nullptr) {
     // For Android and NuGet Linux package, the file name is libonnxruntime.so
@@ -314,6 +316,16 @@ inline void InitApi() {
 #endif
 
 #if defined(MACOS_USE_DLOPEN)
+#if defined(RTLD_NOLOAD)
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.dylib");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.1.dylib");
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
