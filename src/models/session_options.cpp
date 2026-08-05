@@ -7,6 +7,7 @@
 #include <functional>
 #include <unordered_map>
 
+#include "../amdgpu/session_options.h"
 #include "../cuda/session_options.h"
 #include "../dml/session_options.h"
 #include "../nvtensorrtrtx/session_options.h"
@@ -164,6 +165,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"AMDGPU", AMDGPUExecutionProvider::AppendExecutionProvider},
       {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},

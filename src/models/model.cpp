@@ -459,7 +459,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -586,10 +586,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
-  // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
+  // Only CUDA, TRT-RTX, RyzenAI, AMDGPU and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-      p_device_->GetType() == DeviceType::RyzenAI ||
+      p_device_->GetType() == DeviceType::RyzenAI || p_device_->GetType() == DeviceType::AMDGPU ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
