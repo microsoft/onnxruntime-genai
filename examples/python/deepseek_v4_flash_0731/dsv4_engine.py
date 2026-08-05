@@ -175,7 +175,20 @@ class _Worker:
         # second rendezvous to collide with.
         self.mtp = None
         if self.has_mtp:
-            self.mtp = ort.InferenceSession(mtp_path, so, providers=["CUDAExecutionProvider"])
+            mso = so
+            if os.environ.get("DSV4_MTP_PROFILE") and rank == 0:
+                mso = ort.SessionOptions()
+                mso.log_severity_level = 3
+                mso.enable_profiling = True
+                mso.profile_file_prefix = "/tmp/mtp_prof"
+            self.mtp = ort.InferenceSession(mtp_path, mso, providers=["CUDAExecutionProvider"])
+            if os.environ.get("DSV4_MTP_PLACEMENT") and rank == 0:
+                # A single CPU-placed node in the drafter serialises the whole graph,
+                # so confirm the placement before blaming the kernels.
+                pso = ort.SessionOptions()
+                pso.log_severity_level = 0
+                pso.optimized_model_filepath = "/tmp/mtp_opt.onnx"
+                ort.InferenceSession(mtp_path, pso, providers=["CUDAExecutionProvider"])
             mm = self.mtp.get_modelmeta().custom_metadata_map
             self.mtp_block = int(mm["dsv4_mtp_block_size"])
             self.mtp_window = int(mm["dsv4_window"])
@@ -846,6 +859,7 @@ class _Worker:
         produced, stop = [[]], ["max_new_tokens" if limit == max_new_tokens else "length"]
         t_decode, steps, drafted, accepted = 0.0, 0, 0, 0
         t_draft = t_verify = 0.0
+        pos_hit, pos_n = torch.zeros(K, device="cuda"), 0
         debug = int(os.environ.get("DSV4_SPEC_DEBUG", "0"))
 
         past = lens[0]
@@ -906,6 +920,10 @@ class _Worker:
             match = (cand[0, 1:] == preds[:K])
             j = int((~match).float().argmax()) if not bool(match.all()) else K
             new = torch.cat([cand[0, 1:j + 1], preds[j:j + 1]])
+            # Per-slot hit rate, independent of the prefix rule: it separates "the
+            # drafter is weak everywhere" from "it is fine but dies with depth".
+            pos_hit += match.float()
+            pos_n += 1
 
             # One collective per step, so the ranks cannot pick different lengths.
             vote.zero_()
@@ -938,6 +956,12 @@ class _Worker:
 
         out = self._reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps)
         out["accept_rate"] = accepted / drafted if drafted else 0.0
+        out["pos_hit"] = [round(v, 3) for v in (pos_hit / max(pos_n, 1)).tolist()]
+        if self.rank == 0:
+            print(f"[spec] pos_hit={out['pos_hit']} steps={pos_n} "
+                  f"draft_ms={1000 * t_draft / max(steps, 1):.2f} "
+                  f"verify_ms={1000 * t_verify / max(steps, 1):.2f}",
+                  file=sys.stderr, flush=True)
         out["draft_ms"] = 1000 * t_draft / steps if steps else 0.0
         out["verify_ms"] = 1000 * t_verify / steps if steps else 0.0
         out["tokens_per_step"] = (len(produced[0]) - 1) / steps if steps else 0.0
