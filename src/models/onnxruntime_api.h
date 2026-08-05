@@ -201,6 +201,8 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   return ort_lib_handle;
 }
 
+// RTLD_NOLOAD is a dlfcn extension available on Linux and macOS, but not on every POSIX platform.
+// Platforms without it continue through the existing dlopen fallback below.
 #if (defined(__linux__) || defined(MACOS_USE_DLOPEN)) && defined(RTLD_NOLOAD)
 inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
   LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
