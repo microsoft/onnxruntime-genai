@@ -513,6 +513,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
                                 : kMaxNumBeams;
   if (params.search.num_beams < 1 || params.search.num_beams > max_num_beams)
     throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
+  if (params.search.num_return_sequences < 1 || params.search.num_return_sequences > params.search.num_beams)
+    throw std::runtime_error("num_return_sequences (" + std::to_string(params.search.num_return_sequences) + ") must be in [1, " + std::to_string(params.search.num_beams) + "]");
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
   // Beam search selects the top 2*num_beams (beam, token) candidates out of
