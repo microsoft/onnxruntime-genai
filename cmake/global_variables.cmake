@@ -77,6 +77,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/openvino/*.cpp"
   "${GENERATORS_ROOT}/ryzenai/*.h"
   "${GENERATORS_ROOT}/ryzenai/*.cpp"
+  "${GENERATORS_ROOT}/amdgpu/*.h"
+  "${GENERATORS_ROOT}/amdgpu/*.cpp"
   "${GENERATORS_ROOT}/cuda/session_options.h"
   "${GENERATORS_ROOT}/cuda/session_options.cpp"
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.h"
