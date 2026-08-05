@@ -7,7 +7,7 @@ r"""Benchmark EAGLE-3 tree speculative decoding against its target-only model.
 The benchmark is intentionally strict:
 
 * target-only and EAGLE use the same target graph, external data, tokenizer,
-  prompt token IDs, CUDA provider configuration, and greedy search settings;
+  prompt token IDs, execution-provider configuration, and greedy search settings;
 * the target-only model is unloaded before the EAGLE model is loaded;
 * every measured EAGLE output must exactly match target-only token IDs;
 * per-token statistics polling is confined to a separate untimed telemetry run;
@@ -20,6 +20,11 @@ Examples:
     python benchmark_eagle.py --eagle-model C:\models\phase5-runtime-bf16 \
         --builtin --output-lengths 32 --warmups 2 --repetitions 3 \
         -o results\eagle_smoke
+
+    # FP32 CPU correctness and performance run.
+    python benchmark_eagle.py --eagle-model C:\models\phase5-runtime-fp32 \
+        --execution-provider cpu --builtin --output-lengths 32 \
+        --warmups 1 --repetitions 2 -o results\eagle_fp32_cpu
 
     # Two prompts from each Spec-Bench category.
     python benchmark_eagle.py --eagle-model C:\models\phase5-runtime-bf16 \
@@ -82,6 +87,7 @@ TREE_DEPTH = 7
 TREE_TOP_K = 10
 TREE_SCORED_CANDIDATES = 710
 EAGLE_CALLS_PER_FULL_ROUND = 8
+PRECISION_BY_PROVIDER = {"cpu": "fp32", "cuda": "bf16"}
 MT_BENCH_SUBCATEGORIES = {
     "writing",
     "roleplay",
@@ -193,6 +199,8 @@ TREE_METRIC_FIELDS = (
 CSV_COLUMNS = (
     "run_id",
     "decoder",
+    "execution_provider",
+    "precision",
     "task",
     "subcategory",
     "category",
@@ -410,8 +418,10 @@ def _provider_names(component: dict[str, Any], label: str) -> list[str]:
     if not isinstance(session_options, dict):
         raise ValueError(f"{label}.session_options must be an object")
     provider_options = session_options.get("provider_options")
-    if not isinstance(provider_options, list) or not provider_options:
-        raise ValueError(f"{label} must explicitly configure the CUDA provider")
+    if not isinstance(provider_options, list):
+        raise ValueError(f"{label}.provider_options must be a list")
+    if not provider_options:
+        return ["cpu"]
     names: list[str] = []
     for entry in provider_options:
         if not isinstance(entry, dict) or len(entry) != 1:
@@ -420,7 +430,14 @@ def _provider_names(component: dict[str, Any], label: str) -> list[str]:
     return names
 
 
-def validate_eagle_config(config: dict[str, Any]) -> dict[str, Any]:
+def validate_eagle_config(
+    config: dict[str, Any],
+    execution_provider: str = "cuda",
+) -> dict[str, Any]:
+    if execution_provider not in PRECISION_BY_PROVIDER:
+        raise ValueError(
+            f"Unsupported execution provider {execution_provider!r}; expected cpu or cuda"
+        )
     model = config.get("model")
     search = config.get("search")
     speculative = config.get("speculative")
@@ -441,9 +458,14 @@ def validate_eagle_config(config: dict[str, Any]) -> dict[str, Any]:
 
     decoder_providers = _provider_names(decoder, "model.decoder")
     eagle_providers = _provider_names(eagle, "model.eagle")
-    if decoder_providers != ["cuda"] or eagle_providers != ["cuda"]:
+    expected_providers = [execution_provider]
+    if (
+        decoder_providers != expected_providers
+        or eagle_providers != expected_providers
+    ):
         raise ValueError(
-            "This harness requires target and EAGLE sessions to use only CUDA; "
+            "Target and EAGLE sessions must use only the requested execution "
+            f"provider ({execution_provider}); "
             f"got decoder={decoder_providers}, eagle={eagle_providers}"
         )
 
@@ -480,6 +502,7 @@ def validate_eagle_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("EAGLE v0 requires min_length=0")
 
     return {
+        "execution_provider": execution_provider,
         "max_draft_tokens": MAX_DRAFT_TOKENS,
         "tree_total_tokens": TREE_TOTAL_TOKENS,
         "tree_draft_nodes": TREE_DRAFT_NODES,
@@ -1133,6 +1156,7 @@ def _installed_version(name: str) -> str | None:
 def import_runtime(
     expected_ort_version: str | None,
     expected_genai_version: str | None,
+    execution_provider: str = "cuda",
 ) -> tuple[Any, dict[str, Any]]:
     genai_distributions = {
         name: _installed_version(name)
@@ -1148,12 +1172,18 @@ def import_runtime(
         for name, version in genai_distributions.items()
         if version is not None
     }
-    if set(installed_genai) != {"onnxruntime-genai-cuda"}:
+    allowed_genai = (
+        {"onnxruntime-genai-cuda"}
+        if execution_provider == "cuda"
+        else {"onnxruntime-genai", "onnxruntime-genai-cuda"}
+    )
+    if len(installed_genai) != 1 or not set(installed_genai) <= allowed_genai:
         raise RuntimeError(
-            "CUDA EAGLE benchmarking requires exactly the "
-            "onnxruntime-genai-cuda distribution; found "
+            f"{execution_provider.upper()} EAGLE benchmarking requires exactly "
+            f"one compatible GenAI distribution from {sorted(allowed_genai)}; found "
             f"{installed_genai or 'none'}"
         )
+    genai_distribution_name = next(iter(installed_genai))
 
     runtime_distributions = {
         name: _installed_version(name)
@@ -1168,31 +1198,35 @@ def import_runtime(
         for name, version in runtime_distributions.items()
         if version is not None
     }
-    if "onnxruntime-gpu" not in installed_runtime:
-        raise RuntimeError("onnxruntime-gpu is not installed")
-    conflicting = set(installed_runtime) - {"onnxruntime-gpu"}
-    if conflicting:
+    allowed_runtime = (
+        {"onnxruntime-gpu"}
+        if execution_provider == "cuda"
+        else {"onnxruntime", "onnxruntime-gpu"}
+    )
+    if len(installed_runtime) != 1 or not set(installed_runtime) <= allowed_runtime:
         raise RuntimeError(
-            "Conflicting ONNX Runtime distributions are installed alongside "
-            "onnxruntime-gpu: " + ", ".join(sorted(conflicting))
+            f"{execution_provider.upper()} EAGLE benchmarking requires exactly "
+            f"one compatible ONNX Runtime distribution from {sorted(allowed_runtime)}; "
+            f"found {installed_runtime or 'none'}"
         )
+    runtime_distribution_name = next(iter(installed_runtime))
 
     if (
         expected_ort_version
-        and installed_runtime["onnxruntime-gpu"] != expected_ort_version
+        and installed_runtime[runtime_distribution_name] != expected_ort_version
     ):
         raise RuntimeError(
-            "onnxruntime-gpu version "
-            f"{installed_runtime['onnxruntime-gpu']} does not match "
+            f"{runtime_distribution_name} version "
+            f"{installed_runtime[runtime_distribution_name]} does not match "
             f"--expected-ort-version {expected_ort_version}"
         )
     if (
         expected_genai_version
-        and installed_genai["onnxruntime-genai-cuda"] != expected_genai_version
+        and installed_genai[genai_distribution_name] != expected_genai_version
     ):
         raise RuntimeError(
-            "onnxruntime-genai-cuda version "
-            f"{installed_genai['onnxruntime-genai-cuda']} does not match "
+            f"{genai_distribution_name} version "
+            f"{installed_genai[genai_distribution_name]} does not match "
             f"--expected-genai-version {expected_genai_version}"
         )
 
@@ -1200,13 +1234,18 @@ def import_runtime(
     ort = importlib.import_module("onnxruntime")
     validate_python_api(og)
     available_providers = list(ort.get_available_providers())
-    if "CUDAExecutionProvider" not in available_providers:
+    required_provider = (
+        "CUDAExecutionProvider"
+        if execution_provider == "cuda"
+        else "CPUExecutionProvider"
+    )
+    if required_provider not in available_providers:
         raise RuntimeError(
-            "onnxruntime-gpu does not expose CUDAExecutionProvider; available "
+            f"ONNX Runtime does not expose {required_provider}; available "
             f"providers: {available_providers}"
         )
     module_id = getattr(og, "__id__", None)
-    if module_id not in (None, "onnxruntime-genai-cuda"):
+    if module_id not in (None, genai_distribution_name):
         raise RuntimeError(
             f"Loaded onnxruntime_genai reports unexpected package ID {module_id!r}"
         )
@@ -1217,28 +1256,31 @@ def import_runtime(
     genai_root = Path(
         str(
             importlib.metadata.distribution(
-                "onnxruntime-genai-cuda"
+                genai_distribution_name
             ).locate_file("")
         )
     ).resolve()
     ort_root = Path(
-        str(importlib.metadata.distribution("onnxruntime-gpu").locate_file(""))
+        str(importlib.metadata.distribution(runtime_distribution_name).locate_file(""))
     ).resolve()
     try:
         Path(og_file).resolve().relative_to(genai_root)
     except ValueError as error:
         raise RuntimeError(
-            "onnxruntime_genai was not imported from the installed CUDA wheel: "
+            f"onnxruntime_genai was not imported from {genai_distribution_name}: "
             f"{Path(og_file).resolve()}"
         ) from error
     try:
         Path(ort_file).resolve().relative_to(ort_root)
     except ValueError as error:
         raise RuntimeError(
-            "onnxruntime was not imported from the installed GPU distribution: "
+            f"onnxruntime was not imported from {runtime_distribution_name}: "
             f"{Path(ort_file).resolve()}"
         ) from error
     return og, {
+        "execution_provider": execution_provider,
+        "onnxruntime_genai_distribution_name": genai_distribution_name,
+        "onnxruntime_distribution_name": runtime_distribution_name,
         "onnxruntime_genai_distribution": installed_genai,
         "onnxruntime_distribution": installed_runtime,
         "onnxruntime_genai_module": str(Path(og_file).resolve()),
@@ -1403,7 +1445,7 @@ def process_rss_mib() -> float:
 
 
 class ResourceMonitor:
-    def __init__(self, nvidia: NvidiaSmi, interval: float):
+    def __init__(self, nvidia: NvidiaSmi | None, interval: float):
         self._nvidia = nvidia
         self._interval = interval
         self._stop_event = threading.Event()
@@ -1415,12 +1457,22 @@ class ResourceMonitor:
         self._baseline: dict[str, Any] | None = None
         self._markers: dict[str, dict[str, Any]] = {}
         self._peak_process_rss_mib = 0.0
-        self._peak_total_gpu_used_mib = 0.0
+        self._peak_total_gpu_used_mib: float | None = None
         self._peak_process_gpu_used_mib: float | None = None
-        self._process_gpu_memory_supported = True
+        self._process_gpu_memory_supported = nvidia is not None
 
     def _capture(self) -> dict[str, Any]:
-        gpu = self._nvidia.usage(os.getpid())
+        gpu = (
+            self._nvidia.usage(os.getpid())
+            if self._nvidia is not None
+            else {
+                "total_used_mib": None,
+                "process_used_mib": None,
+                "process_memory_supported": False,
+                "total_used_by_gpu_mib": None,
+                "process_used_by_gpu_mib": None,
+            }
+        )
         return {
             "timestamp_utc": utc_now(),
             "process_rss_mib": process_rss_mib(),
@@ -1434,10 +1486,12 @@ class ResourceMonitor:
                 self._peak_process_rss_mib,
                 sample["process_rss_mib"],
             )
-            self._peak_total_gpu_used_mib = max(
-                self._peak_total_gpu_used_mib,
-                sample["total_used_mib"],
-            )
+            total_gpu = sample["total_used_mib"]
+            if total_gpu is not None:
+                self._peak_total_gpu_used_mib = max(
+                    self._peak_total_gpu_used_mib or 0.0,
+                    total_gpu,
+                )
             process_gpu = sample["process_used_mib"]
             self._process_gpu_memory_supported = (
                 self._process_gpu_memory_supported
@@ -1657,6 +1711,8 @@ def _base_row(
     prompt_tokens: int,
     result: dict[str, Any],
     expected: Sequence[int],
+    execution_provider: str | None = None,
+    precision: str | None = None,
 ) -> dict[str, Any]:
     actual = result["tail"]
     comparison = compare_tokens(expected, actual)
@@ -1665,6 +1721,8 @@ def _base_row(
     row = {
         "run_id": run_id,
         "decoder": decoder,
+        "execution_provider": execution_provider,
+        "precision": precision,
         "task": prompt["task"],
         "subcategory": prompt["subcategory"],
         "category": prompt["category"],
@@ -2096,12 +2154,38 @@ def write_checkpoint(
             staged_csv.unlink()
 
 
-def _phase_memory_evidence(phase: dict[str, Any]) -> dict[str, Any]:
+def _phase_memory_evidence(
+    phase: dict[str, Any],
+    execution_provider: str,
+) -> dict[str, Any]:
     baseline = phase["baseline"]
     model_loaded = phase["markers"].get("model_loaded")
+    rss_evidence = {
+        "execution_provider": execution_provider,
+        "model_load_process_rss_increase_mib": (
+            model_loaded["process_rss_mib"] - baseline["process_rss_mib"]
+            if model_loaded is not None
+            else None
+        ),
+        "process_rss_peak_increase_mib": (
+            phase["peak_process_rss_mib"] - baseline["process_rss_mib"]
+        ),
+    }
+    if execution_provider == "cpu":
+        return {
+            **rss_evidence,
+            "interpretation": (
+                "Process RSS captures host-memory growth for CPU execution."
+            ),
+        }
+
     process_increase = phase["process_gpu_peak_increase_mib"]
+    peak_total_gpu = phase["peak_total_gpu_used_mib"]
+    baseline_total_gpu = baseline["total_used_mib"]
+    if peak_total_gpu is None or baseline_total_gpu is None:
+        raise RuntimeError("CUDA resource monitoring did not capture GPU memory")
     total_increase = (
-        phase["peak_total_gpu_used_mib"] - baseline["total_used_mib"]
+        peak_total_gpu - baseline_total_gpu
     )
     model_load_process_increase = (
         model_loaded["process_used_mib"] - baseline["process_used_mib"]
@@ -2116,6 +2200,7 @@ def _phase_memory_evidence(phase: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     return {
+        **rss_evidence,
         "process_gpu_memory_available": phase["process_gpu_memory_supported"],
         "model_load_process_gpu_increase_mib": model_load_process_increase,
         "model_load_total_gpu_increase_mib": model_load_total_increase,
@@ -2154,13 +2239,14 @@ def _benchmark(
     json_path: Path,
     csv_path: Path,
     og: Any,
-    nvidia: NvidiaSmi,
+    nvidia: NvidiaSmi | None,
     target_bundle: Path,
     eagle_bundle: Path,
     eagle_config: dict[str, Any],
     prompt_items: list[dict[str, Any]],
     output_lengths: list[int],
 ) -> None:
+    precision = PRECISION_BY_PROVIDER[args.execution_provider]
     references: dict[tuple[int, int], dict[str, Any]] = {}
     baseline_rates: dict[tuple[int, int], dict[str, float]] = {}
     output_records: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2308,6 +2394,8 @@ def _benchmark(
                     len(prompt_ids),
                     result,
                     reference,
+                    args.execution_provider,
+                    precision,
                 )
                 row.update(quality)
                 row["baseline_quality_score"] = baseline_quality[
@@ -2377,7 +2465,12 @@ def _benchmark(
         target_phase["model_load_s"] = time.perf_counter() - target_load_start
         if target_load_s is not None:
             target_phase["model_load_s"] = target_load_s
-        target_phase["cuda_memory_evidence"] = _phase_memory_evidence(target_phase)
+        target_evidence = _phase_memory_evidence(
+            target_phase,
+            args.execution_provider,
+        )
+        target_phase["memory_evidence"] = target_evidence
+        target_phase[f"{args.execution_provider}_memory_evidence"] = target_evidence
         document["resources"]["target"] = target_phase
         _fill_phase_memory(rows, "target", target_phase)
         write_checkpoint(document, rows, json_path, csv_path)
@@ -2474,6 +2567,8 @@ def _benchmark(
                     len(prompt_ids),
                     result,
                     expected_tail,
+                    args.execution_provider,
+                    precision,
                 )
                 row["baseline_decode_tokens_per_s"] = baseline["decode"]
                 row["baseline_end_to_end_tokens_per_s"] = baseline["end_to_end"]
@@ -2589,7 +2684,12 @@ def _benchmark(
         eagle_phase["model_load_s"] = time.perf_counter() - eagle_load_start
         if eagle_load_s is not None:
             eagle_phase["model_load_s"] = eagle_load_s
-        eagle_phase["cuda_memory_evidence"] = _phase_memory_evidence(eagle_phase)
+        eagle_evidence = _phase_memory_evidence(
+            eagle_phase,
+            args.execution_provider,
+        )
+        eagle_phase["memory_evidence"] = eagle_evidence
+        eagle_phase[f"{args.execution_provider}_memory_evidence"] = eagle_evidence
         document["resources"]["eagle"] = eagle_phase
         _fill_phase_memory(rows, "eagle", eagle_phase)
         write_checkpoint(document, rows, json_path, csv_path)
@@ -2602,6 +2702,7 @@ def _manifest_verification(
     bundle: Path,
     config: dict[str, Any],
     artifact_records: dict[str, dict[str, Any]],
+    execution_provider: str,
 ) -> dict[str, Any]:
     bundle_root = bundle.resolve()
     manifest = _load_json(manifest_path)
@@ -2652,20 +2753,23 @@ def _manifest_verification(
         raise ValueError("Manifest is missing artifacts")
     decoder_files = decoder_artifacts(bundle_root, config)
     eagle_file = eagle_graph_path(bundle_root, config)
+    precision = PRECISION_BY_PROVIDER[execution_provider]
     mapping = {
-        "bf16_target_onnx_sha256": artifact_records[
+        f"{precision}_target_onnx_sha256": artifact_records[
             str(decoder_files[0].relative_to(bundle_root))
         ]["sha256"],
-        "bf16_eagle_sha256": artifact_records[
+        f"{precision}_eagle_sha256": artifact_records[
             str(eagle_file.relative_to(bundle_root))
         ]["sha256"],
-        "bf16_runtime_config_sha256": artifact_records[CONFIG_FILENAME]["sha256"],
+        f"{precision}_runtime_config_sha256": artifact_records[CONFIG_FILENAME][
+            "sha256"
+        ],
     }
     external_data = [
         path for path in decoder_files[1:] if path.name.endswith(".data")
     ]
     if external_data:
-        mapping["bf16_target_data_sha256"] = artifact_records[
+        mapping[f"{precision}_target_data_sha256"] = artifact_records[
             str(external_data[0].relative_to(bundle_root))
         ]["sha256"]
     hash_results = {}
@@ -2684,6 +2788,8 @@ def _manifest_verification(
     return {
         "path": str(manifest_path),
         "sha256": sha256_file(manifest_path),
+        "precision": precision,
+        "execution_provider": execution_provider,
         "tree_contract_match": True,
         "runtime_contract_match": True,
         "artifact_hashes": hash_results,
@@ -2812,7 +2918,10 @@ def _run_benchmark_cli(args: argparse.Namespace, script_path: Path) -> None:
     if not config_path.is_file():
         raise FileNotFoundError(f"EAGLE configuration does not exist: {config_path}")
     eagle_config = _load_json(config_path)
-    runtime_contract = validate_eagle_config(eagle_config)
+    runtime_contract = validate_eagle_config(
+        eagle_config,
+        args.execution_provider,
+    )
 
     dataset = args.dataset.resolve()
     prompt_items = load_selected_prompts(
@@ -2855,6 +2964,8 @@ def _run_benchmark_cli(args: argparse.Namespace, script_path: Path) -> None:
         },
         "configuration": {
             "eagle_model": str(eagle_bundle),
+            "execution_provider": args.execution_provider,
+            "precision": PRECISION_BY_PROVIDER[args.execution_provider],
             "target_model_argument": (
                 str(args.target_model.resolve()) if args.target_model else None
             ),
@@ -2974,10 +3085,13 @@ def _run_benchmark_cli(args: argparse.Namespace, script_path: Path) -> None:
         og, packages = import_runtime(
             args.expected_ort_version,
             args.expected_genai_version,
+            args.execution_provider,
         )
         document["provenance"]["packages"] = packages
-        nvidia = NvidiaSmi()
-        document["provenance"]["nvidia_smi"] = nvidia.metadata()
+        nvidia = NvidiaSmi() if args.execution_provider == "cuda" else None
+        document["provenance"]["nvidia_smi"] = (
+            nvidia.metadata() if nvidia is not None else None
+        )
 
         if args.target_model is not None:
             supplied_target: Path = args.target_model
@@ -3016,9 +3130,11 @@ def _run_benchmark_cli(args: argparse.Namespace, script_path: Path) -> None:
                 eagle_bundle,
                 eagle_config,
                 document["artifacts"],
+                args.execution_provider,
             )
 
         print(f"onnxruntime_genai: {packages['onnxruntime_genai_module']}")
+        print(f"Execution provider: {args.execution_provider.upper()}")
         print(f"EAGLE model:       {eagle_bundle}")
         print(f"Target-only model: {target_bundle}")
         print(
@@ -3109,6 +3225,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--execution-provider",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help=(
+            "execution provider and model precision contract: cuda requires the "
+            "BF16 CUDA bundle; cpu requires the FP32 CPU bundle (default: cuda)"
+        ),
+    )
+    parser.add_argument(
         "--staging-root",
         type=Path,
         help="directory for the temporary target bundle (default: EAGLE bundle parent)",
@@ -3121,7 +3246,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         type=Path,
-        help="optional Phase 5 manifest whose BF16 hashes and tree contract must match",
+        help=(
+            "optional Phase 5 manifest whose provider-specific FP32/BF16 hashes "
+            "and tree contract must match"
+        ),
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
@@ -3338,11 +3466,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--expected-ort-version",
-        help="required installed onnxruntime-gpu version",
+        help="required installed ONNX Runtime distribution version",
     )
     parser.add_argument(
         "--expected-genai-version",
-        help="required installed onnxruntime-genai-cuda version",
+        help="required installed ONNX Runtime GenAI distribution version",
     )
     parser.add_argument(
         "-o",
@@ -3381,6 +3509,14 @@ def run_self_tests() -> None:
         True,
     ) == {"humaneval"}
     assert process_rss_mib() > 0
+    cpu_monitor = ResourceMonitor(None, 0.01).start()
+    cpu_monitor.mark("model_loaded")
+    cpu_phase = cpu_monitor.stop()
+    assert cpu_phase["baseline"]["total_used_mib"] is None
+    assert cpu_phase["peak_total_gpu_used_mib"] is None
+    cpu_evidence = _phase_memory_evidence(cpu_phase, "cpu")
+    assert cpu_evidence["execution_provider"] == "cpu"
+    assert "process_rss_peak_increase_mib" in cpu_evidence
 
     eagle_config = {
         "model": {
@@ -3498,7 +3634,20 @@ def run_self_tests() -> None:
             },
             "speculative": {"max_draft_tokens": MAX_DRAFT_TOKENS},
         }
-        validate_eagle_config(complete_config)
+        assert validate_eagle_config(complete_config)["execution_provider"] == "cuda"
+        cpu_config = copy.deepcopy(complete_config)
+        cpu_config["model"]["decoder"]["session_options"]["provider_options"] = []
+        cpu_config["model"]["eagle"]["session_options"]["provider_options"] = []
+        assert (
+            validate_eagle_config(cpu_config, "cpu")["execution_provider"]
+            == "cpu"
+        )
+        try:
+            validate_eagle_config(cpu_config, "cuda")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("CPU model configuration was accepted as CUDA")
         (bundle / CONFIG_FILENAME).write_text(
             json.dumps(complete_config),
             encoding="utf-8",
@@ -3507,6 +3656,72 @@ def run_self_tests() -> None:
         (bundle / "model.onnx.data").write_bytes(b"target weights")
         (bundle / "eagle.onnx").write_bytes(b"eagle graph")
         (bundle / "tokenizer.json").write_text("{}", encoding="utf-8")
+        artifact_records = {
+            name: artifact_record(bundle / name, bundle)
+            for name in (
+                CONFIG_FILENAME,
+                "model.onnx",
+                "model.onnx.data",
+                "eagle.onnx",
+            )
+        }
+        manifest_artifacts = {}
+        for precision in ("fp32", "bf16"):
+            manifest_artifacts.update(
+                {
+                    f"{precision}_target_onnx_sha256": artifact_records[
+                        "model.onnx"
+                    ]["sha256"],
+                    f"{precision}_target_data_sha256": artifact_records[
+                        "model.onnx.data"
+                    ]["sha256"],
+                    f"{precision}_eagle_sha256": artifact_records["eagle.onnx"][
+                        "sha256"
+                    ],
+                    f"{precision}_runtime_config_sha256": artifact_records[
+                        CONFIG_FILENAME
+                    ]["sha256"],
+                }
+            )
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "tree": {
+                        "total_tokens": TREE_TOTAL_TOKENS,
+                        "selected_draft_nodes": TREE_DRAFT_NODES,
+                        "depth": TREE_DEPTH,
+                        "top_k": TREE_TOP_K,
+                        "scored_candidates": TREE_SCORED_CANDIDATES,
+                        "target_verifications_per_round": 1,
+                        "eagle_calls_per_round": EAGLE_CALLS_PER_FULL_ROUND,
+                    },
+                    "runtime_contract": {
+                        "batch_size": 1,
+                        "num_beams": 1,
+                        "greedy_only": True,
+                        "max_draft_tokens": MAX_DRAFT_TOKENS,
+                        "past_present_share_buffer": False,
+                        "graph_capture": False,
+                    },
+                    "artifacts": manifest_artifacts,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for execution_provider, precision in PRECISION_BY_PROVIDER.items():
+            verification = _manifest_verification(
+                manifest_path,
+                bundle,
+                complete_config,
+                artifact_records,
+                execution_provider,
+            )
+            assert verification["precision"] == precision
+            assert all(
+                key.startswith(precision)
+                for key in verification["artifact_hashes"]
+            )
         staged, staging_info = stage_target_bundle(
             bundle,
             complete_config,
@@ -3798,7 +4013,12 @@ def run_self_tests() -> None:
         ["--eagle-model", "bundle", "--output-lengths", "32,128"]
     )
     assert parsed.eagle_model == Path("bundle")
+    assert parsed.execution_provider == "cuda"
     assert parse_output_lengths(parsed.output_lengths) == [32, 128]
+    cpu_args = parser.parse_args(
+        ["--eagle-model", "bundle", "--execution-provider", "cpu"]
+    )
+    assert cpu_args.execution_provider == "cpu"
     all_suites = ",".join(sorted(suite_utils.SUPPORTED_SUITES))
     suite_args = parser.parse_args(
         [
