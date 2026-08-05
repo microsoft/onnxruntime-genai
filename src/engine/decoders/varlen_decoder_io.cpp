@@ -69,7 +69,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     throw std::runtime_error("Step plan size does not match the scheduled batch.");
   }
   const size_t num_tokens =
-      plan ? plan->prompt_token_count + plan->decode_token_count
+      plan ? plan->token_count
            : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
                              [](size_t sum, const std::shared_ptr<Request>& request) {
                                return sum + request->UnprocessedTokens().size();
@@ -213,7 +213,7 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
 void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
   const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
   const size_t num_tokens =
-      plan ? plan->prompt_token_count + plan->decode_token_count
+      plan ? plan->token_count
            : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
                              [](size_t sum, const std::shared_ptr<Request>& request) {
                                return sum + request->UnprocessedTokens().size();

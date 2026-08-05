@@ -5,6 +5,22 @@
 
 namespace Generators {
 
+namespace {
+
+std::string AddExceptionCause(std::string message, std::exception_ptr error) {
+  try {
+    std::rethrow_exception(error);
+  } catch (const std::exception& cause) {
+    message += " Cause: ";
+    message += cause.what();
+  } catch (...) {
+    message += " Cause: non-standard exception.";
+  }
+  return message;
+}
+
+}  // namespace
+
 Engine::Engine(std::shared_ptr<Model> model)
     : Engine(model, CreateDependencies(model)) {}
 
@@ -86,7 +102,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       ++transaction_metrics_.capacity_deferrals;
     }
     if (!planning_result.executable) {
-      const auto outcome = planning_result.terminal_outcome;
+      const auto outcome = planning_result.outcome;
       if (outcome.kind == StepOutcomeKind::NoWork &&
           !scheduler_->HasPendingRequests()) {
         return nullptr;
@@ -112,14 +128,11 @@ std::shared_ptr<Request> Engine::StepDynamic() {
               "Invalid dynamic scheduler planning outcome."}));
     }
 
-    StepTransaction transaction{step_plan_};
     std::unique_ptr<CacheStepReservation> reservation;
     try {
       reservation = cache_manager_->ReserveStep(step_plan_);
-      transaction.MarkReserved();
     } catch (...) {
       ++transaction_metrics_.reservation_failures;
-      transaction.RollBack();
       MarkUnhealthyAndThrow(
           StepOutcomeKind::ExecutionContractFailure,
           step_plan_.transaction_id,
@@ -130,10 +143,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
 
     auto scheduled_requests =
         scheduler_->CreateScheduledRequests(step_plan_);
-    ExecutionContext context{step_plan_.transaction_id, &step_plan_};
+    ExecutionContext context{&step_plan_};
     context.cache_reservation = reservation->PagedReservation();
-    context.block_table_columns = step_plan_.proposed_block_table_columns;
-    context.graph_capture_eligible = step_plan_.graph_capture_eligible;
 
     bool request_transaction_active = false;
     const auto rollback_transaction = [&]() {
@@ -148,12 +159,6 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       }
       try {
         reservation->Release();
-      } catch (...) {
-        if (!rollback_error)
-          rollback_error = std::current_exception();
-      }
-      try {
-        transaction.RollBack();
       } catch (...) {
         if (!rollback_error)
           rollback_error = std::current_exception();
@@ -178,30 +183,20 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       rollback_transaction();
       ++transaction_metrics_.post_processing_aborts;
       ++transaction_metrics_.retryable_aborts;
-      std::string message =
-          "Request validation failed; the batch was rolled back.";
-      try {
-        std::rethrow_exception(validation_error);
-      } catch (const std::exception& error) {
-        message += " Cause: ";
-        message += error.what();
-      } catch (...) {
-        message += " Cause: non-standard exception.";
-      }
       throw EngineStepError{
           {StepOutcomeKind::RetryableBatchAbort,
            step_plan_.transaction_id,
            nullptr},
-          std::move(message),
+          AddExceptionCause(
+              "Request validation failed; the batch was rolled back.",
+              validation_error),
       };
     }
 
     try {
       scheduled_requests.BeginTransaction();
       request_transaction_active = true;
-      transaction.MarkExecuting();
       model_executor_->Decode(scheduled_requests, context);
-      transaction.MarkExecuted();
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
       rollback_transaction();
@@ -246,21 +241,13 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       rollback_transaction();
       ++transaction_metrics_.post_processing_aborts;
       ++transaction_metrics_.retryable_aborts;
-      std::string message =
-          "Request post-processing failed; the batch was rolled back.";
-      try {
-        std::rethrow_exception(post_processing_error);
-      } catch (const std::exception& error) {
-        message += " Cause: ";
-        message += error.what();
-      } catch (...) {
-        message += " Cause: non-standard exception.";
-      }
       throw EngineStepError{
           {StepOutcomeKind::RetryableBatchAbort,
            step_plan_.transaction_id,
            nullptr},
-          std::move(message),
+          AddExceptionCause(
+              "Request post-processing failed; the batch was rolled back.",
+              post_processing_error),
       };
     }
 
@@ -268,13 +255,11 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
-      scheduler_->CommitStepPlan(step_plan_);
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
     } catch (...) {
-      transaction.RollBack();
       MarkUnhealthyAndThrow(
           StepOutcomeKind::ExecutionContractFailure,
           step_plan_.transaction_id,
@@ -285,7 +270,6 @@ std::shared_ptr<Request> Engine::StepDynamic() {
 
     ready_requests_.swap(staged_ready_requests_);
     ready_request_index_ = 0;
-    transaction.Commit();
     ++transaction_metrics_.committed_steps;
     if (auto request = DrainReadyRequest()) {
       return request;
@@ -314,10 +298,9 @@ std::shared_ptr<Request> Engine::DrainReadyRequest() {
       outcome == StepOutcomeKind::ExecutionContractFailure) {
     ++transaction_metrics_.fatal_execution_failures;
   }
-  fatal_cause_ = std::move(error);
   fatal_error_ = std::make_exception_ptr(EngineStepError{
       {outcome, transaction_id, request_id},
-      std::move(message),
+      AddExceptionCause(std::move(message), error),
   });
   std::rethrow_exception(fatal_error_);
 }

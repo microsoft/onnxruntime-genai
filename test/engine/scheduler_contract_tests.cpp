@@ -174,7 +174,7 @@ TEST_F(SchedulerContractTest, DynamicPlanningDoesNotMutateAdmissionState) {
   EXPECT_EQ(plan.requests[1].request, second);
   EXPECT_EQ(plan.requests[1].packed_token_offset, 3u);
   EXPECT_EQ(plan.requests[1].logits_row_index, 5u);
-  EXPECT_EQ(plan.prompt_token_count, 6u);
+  EXPECT_EQ(plan.token_count, 6u);
   EXPECT_FALSE(plan.graph_capture_eligible);
   EXPECT_EQ(first->status_, RequestStatus::Assigned);
   EXPECT_EQ(second->status_, RequestStatus::Assigned);
@@ -215,8 +215,8 @@ TEST_F(SchedulerContractTest, DynamicPlanningReportsNoWorkWithoutMutation) {
   const auto result = scheduler.PlanStep(plan);
 
   EXPECT_FALSE(result.executable);
-  EXPECT_EQ(result.terminal_outcome.kind, StepOutcomeKind::NoWork);
-  EXPECT_EQ(result.terminal_outcome.transaction_id, 9u);
+  EXPECT_EQ(result.outcome.kind, StepOutcomeKind::NoWork);
+  EXPECT_EQ(result.outcome.transaction_id, 9u);
   EXPECT_TRUE(plan.Empty());
 }
 
@@ -252,9 +252,9 @@ TEST_F(SchedulerContractTest, UnserviceableActiveGrowthIsNotDeferred) {
 
   EXPECT_FALSE(result.executable);
   EXPECT_FALSE(result.capacity_deferred);
-  EXPECT_EQ(result.terminal_outcome.kind,
+  EXPECT_EQ(result.outcome.kind,
             StepOutcomeKind::UnserviceableRequest);
-  EXPECT_EQ(result.terminal_outcome.request_id, active.get());
+  EXPECT_EQ(result.outcome.request_id, active.get());
 }
 
 }  // namespace

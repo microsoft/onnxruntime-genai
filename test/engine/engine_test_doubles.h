@@ -113,8 +113,6 @@ struct RecordingCacheManager : CacheManager {
       plan.requests[selected_requests++] = std::move(plan.requests[i]);
     }
     plan.requests.resize(selected_requests);
-    plan.capacity_deferred = capacity_deferred;
-    plan.unserviceable_request_id = unserviceable_request_id;
 
     if (!plan.requests.empty()) {
       return StepPlanningResult{
@@ -274,7 +272,6 @@ struct RecordingModelExecutor : ModelExecutor {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable execution failure."};
     }
-    context.execution_started = true;
     if (failure == ScriptedExecutionFailure::RetryableDuringExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable in-execution failure."};
@@ -286,7 +283,7 @@ struct RecordingModelExecutor : ModelExecutor {
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing));
-    context.execution_completed = true;
+    static_cast<void>(context);
   }
 
   void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }

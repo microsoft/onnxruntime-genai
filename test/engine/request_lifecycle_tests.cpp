@@ -156,7 +156,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   RequestStepPlan plan;
   plan.request = request;
   plan.request_id = request.get();
-  plan.processed_sequence_length_after = before.current_sequence_length;
+  plan.sequence_length_before = before.current_sequence_length;
   const int32_t next_token = 5;
   auto logits = LogitsForToken(*model_, next_token);
 
@@ -207,7 +207,7 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted)
   RequestStepPlan plan;
   plan.request = request;
   plan.request_id = request.get();
-  plan.processed_sequence_length_after = before.current_sequence_length;
+  plan.sequence_length_before = before.current_sequence_length;
   auto logits = LogitsForToken(*model_, EosToken(*model_));
 
   request->SaveStateForTransaction();
@@ -222,7 +222,12 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted)
 TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
   auto params = MakeGreedyParams(*model_);
   params->search.batch_size = 2;
-  EXPECT_THROW(std::make_shared<Request>(params), std::runtime_error);
+  EXPECT_THROW(
+      {
+        auto request = std::make_shared<Request>(params);
+        static_cast<void>(request);
+      },
+      std::runtime_error);
 }
 
 }  // namespace

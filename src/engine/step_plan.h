@@ -6,9 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
-
-#include "request_status.h"
 
 namespace Generators {
 
@@ -22,7 +23,6 @@ enum class StepOutcomeKind {
   UnserviceableRequest,
   Committed,
   RetryableBatchAbort,
-  InvalidRequest,
   ExecutionContractFailure,
   FatalExecutionFailure,
 };
@@ -42,26 +42,17 @@ struct StepPlanningResult {
   bool executable{};
   bool capacity_deferred{};
   const void* unserviceable_request_id{};
-  StepOutcome terminal_outcome;
+  StepOutcome outcome;
 };
 
 struct RequestStepPlan {
   std::shared_ptr<Request> request;
   const void* request_id{};
-  RequestStatus status_before{RequestStatus::Unassigned};
   int64_t sequence_length_before{};
-  int64_t processed_sequence_length_before{};
-  int64_t seen_sequence_length_before{};
-  int64_t processed_sequence_length_after{};
-  size_t unprocessed_token_offset{};
   size_t unprocessed_token_count{};
   size_t packed_token_offset{};
   size_t logits_row_index{};
-  size_t committed_cache_slots{};
-  size_t committed_block_count{};
   size_t target_cache_slots{};
-  size_t tail_slots_to_consume{};
-  size_t new_blocks_required{};
   bool is_prefill{};
   bool newly_admitted{};
 };
@@ -69,14 +60,23 @@ struct RequestStepPlan {
 struct StepPlan {
   StepTransactionId transaction_id{};
   std::vector<RequestStepPlan> requests;
-  size_t prompt_token_count{};
-  size_t decode_token_count{};
+  size_t token_count{};
   size_t proposed_block_table_columns{};
   bool graph_capture_eligible{};
-  bool capacity_deferred{};
-  const void* unserviceable_request_id{};
 
   bool Empty() const { return requests.empty(); }
+};
+
+class EngineStepError : public std::runtime_error {
+ public:
+  EngineStepError(StepOutcome outcome, std::string message)
+      : std::runtime_error{std::move(message)},
+        outcome_{outcome} {}
+
+  const StepOutcome& Outcome() const { return outcome_; }
+
+ private:
+  StepOutcome outcome_;
 };
 
 }  // namespace Generators

@@ -38,10 +38,6 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
     : requests_{requests}, model_{model}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
 }
 
-std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
-  return OrtRunOptions::Create();
-}
-
 ExecutionContext& ScheduledRequests::CreateExecutionContext() {
   execution_context_ = std::make_unique<ExecutionContext>();
   return *execution_context_;
@@ -175,7 +171,10 @@ void ScheduledRequests::BeginTransaction() {
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   try {
     for (const auto& request : requests_) {
-      request->SaveStateForTransaction(!transaction_uses_batched_sampler_);
+      if (transaction_uses_batched_sampler_)
+        request->SaveStateForExternalSamplingTransaction();
+      else
+        request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
     }
     if (transaction_uses_batched_sampler_) {
@@ -255,7 +254,7 @@ void ScheduledRequests::RestoreStateForTransaction() {
   while (transaction_checkpoint_count_ > 0) {
     auto* request = requests_[--transaction_checkpoint_count_].get();
     try {
-      request->RestoreStateForTransaction(true);
+      request->QueueStateRestoreForTransaction();
       pending_restore_completion.push_back(request);
     } catch (...) {
       if (!error)

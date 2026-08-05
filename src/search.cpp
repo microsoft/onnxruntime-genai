@@ -67,7 +67,7 @@ void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
-void Search_Cpu::SaveStateForTransactionImpl(bool /*include_sampling_state*/) {
+void Search_Cpu::SaveStateForTransactionImpl(bool /*checkpoint_local_state*/) {
   auto sequence_lengths = sequence_lengths_.CpuSpan();
   transaction_sequence_lengths_.assign(sequence_lengths.begin(), sequence_lengths.end());
   transaction_done_ = done_;
@@ -79,8 +79,8 @@ void Search_Cpu::RestoreStateForTransactionImpl() {
   done_ = transaction_done_;
 }
 
-void GreedySearch_Cpu::SaveStateForTransactionImpl(bool include_sampling_state) {
-  Search_Cpu::SaveStateForTransactionImpl(include_sampling_state);
+void GreedySearch_Cpu::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cpu::SaveStateForTransactionImpl(checkpoint_local_state);
   transaction_next_tokens_.assign(next_tokens_.begin(), next_tokens_.end());
   if (!transaction_eos_seen_)
     transaction_eos_seen_ = std::make_unique<bool[]>(eos_seen_.size());

@@ -88,17 +88,17 @@ void Search_Cuda::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
 }
 
-void Search_Cuda::SaveStateForTransactionImpl(bool include_sampling_state) {
+void Search_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
   if (!transaction_eos_seen_)
     transaction_eos_seen_ = CudaMallocArray<bool>(eos_seen_.size());
 
-  if (include_sampling_state) {
+  if (checkpoint_local_state) {
     if (!transaction_sequence_lengths_)
       transaction_sequence_lengths_ = CudaMallocArray<int32_t>(sequence_lengths_.size());
     CUDA_CHECK(cudaMemcpyAsync(transaction_sequence_lengths_.get(), sequence_lengths_.Span().data(),
                                sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
   }
-  transaction_saved_sequence_lengths_ = include_sampling_state;
+  transaction_saved_sequence_lengths_ = checkpoint_local_state;
   CUDA_CHECK(cudaMemcpyAsync(transaction_eos_seen_.get(), eos_seen_.data(),
                              eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
   transaction_done_ = *done_cpu_;
@@ -123,9 +123,9 @@ void Search_Cuda::CompleteStateRestoreForTransactionImpl() {
   done_pending_ = false;
 }
 
-void GreedySearch_Cuda::SaveStateForTransactionImpl(bool include_sampling_state) {
-  Search_Cuda::SaveStateForTransactionImpl(include_sampling_state);
-  if (include_sampling_state) {
+void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cuda::SaveStateForTransactionImpl(checkpoint_local_state);
+  if (checkpoint_local_state) {
     EnsureSamplingData();
     if (!transaction_next_tokens_)
       transaction_next_tokens_ = CudaMallocArray<int32_t>(next_tokens_.size());
@@ -137,7 +137,7 @@ void GreedySearch_Cuda::SaveStateForTransactionImpl(bool include_sampling_state)
     CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), samplingdata_->curand_states,
                                params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
   }
-  transaction_saved_sampling_state_ = include_sampling_state;
+  transaction_saved_sampling_state_ = checkpoint_local_state;
 }
 
 void GreedySearch_Cuda::RestoreStateForTransactionImpl() {

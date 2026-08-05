@@ -37,8 +37,6 @@ struct ScheduledRequests {
                     BatchedSampler* batched_sampler,
                     BatchedSamplingPlan* sampling_plan);
 
-  std::unique_ptr<OrtRunOptions> RunOptions();
-
   ExecutionContext& CreateExecutionContext();
 
   std::shared_ptr<GeneratorParams> Params();

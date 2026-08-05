@@ -39,7 +39,7 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                            ExecutionContext& context) {
   const bool capture = graph_buffers_ != nullptr &&
                        graph_buffers_->Fits(scheduled_requests.size()) &&
-                       (context.plan ? context.graph_capture_eligible
+                       (context.plan ? context.plan->graph_capture_eligible
                                      : IsPureDecodeStep(scheduled_requests));
 
   std::unique_ptr<DecoderIO> decoder_state =
@@ -57,14 +57,10 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
         capture ? std::to_string(VarlenGraphBuffers::GraphId(scheduled_requests.size(),
                                                              context.block_table_columns))
                 : std::string("-1");
-    context.graph_id = capture ? VarlenGraphBuffers::GraphId(scheduled_requests.size(),
-                                                             context.block_table_columns)
-                               : -1;
     context.run_options->AddConfigEntry("gpu_graph_id", graph_id.c_str());
   }
 
   decoder_state->DumpInputs();
-  context.execution_started = true;
   model_->session_decoder_->Run(context.run_options.get(),
                                 decoder_state->input_names_.data(),
                                 decoder_state->inputs_.data(),
@@ -72,7 +68,6 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                                 decoder_state->output_names_.data(),
                                 decoder_state->outputs_.data(),
                                 decoder_state->output_names_.size());
-  context.execution_completed = true;
   decoder_state->DumpOutputs();
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));

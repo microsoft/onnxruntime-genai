@@ -121,7 +121,7 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
   StepPlan plan;
   const auto result = PlanStep(plan);
   if (!result.executable) {
-    if (result.terminal_outcome.kind == StepOutcomeKind::UnserviceableRequest) {
+    if (result.outcome.kind == StepOutcomeKind::UnserviceableRequest) {
       throw std::runtime_error("A request cannot be serviced by the configured paged cache.");
     }
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
@@ -172,12 +172,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   ReapCompletedRequests();
 
   plan.requests.clear();
-  plan.prompt_token_count = 0;
-  plan.decode_token_count = 0;
+  plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
   plan.graph_capture_eligible = false;
-  plan.capacity_deferred = false;
-  plan.unserviceable_request_id = nullptr;
 
   const auto add_request = [&plan](const std::shared_ptr<Request>& request,
                                    bool newly_admitted) {
@@ -196,13 +193,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     RequestStepPlan entry;
     entry.request = request;
     entry.request_id = request.get();
-    entry.status_before = snapshot.status;
     entry.sequence_length_before = snapshot.current_sequence_length;
-    entry.processed_sequence_length_before = snapshot.processed_sequence_length;
-    entry.seen_sequence_length_before = snapshot.seen_sequence_length;
-    entry.processed_sequence_length_after = snapshot.current_sequence_length;
-    entry.unprocessed_token_offset =
-        static_cast<size_t>(snapshot.processed_sequence_length);
     entry.unprocessed_token_count =
         static_cast<size_t>(unprocessed_token_count);
     entry.target_cache_slots = RequiredSlots(
@@ -238,20 +229,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.logits_row_index =
         packed_token_offset + entry.unprocessed_token_count - 1;
     packed_token_offset += entry.unprocessed_token_count;
-
-    if (entry.is_prefill) {
-      plan.prompt_token_count += entry.unprocessed_token_count;
-    } else {
-      plan.decode_token_count += entry.unprocessed_token_count;
-    }
+    plan.token_count += entry.unprocessed_token_count;
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == 1;
   }
   return result;
-}
-
-void DynamicBatchScheduler::CommitStepPlan(const StepPlan& plan) {
-  static_cast<void>(plan);
 }
 
 bool DynamicBatchScheduler::HasPendingRequests() const {

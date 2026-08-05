@@ -20,7 +20,6 @@ struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
   bool done{};
-  RequestStatus status_after{RequestStatus::InProgress};
 };
 
 /**
@@ -113,12 +112,14 @@ struct Request : std::enable_shared_from_this<Request>,
   void GenerateNextTokens(DeviceSpan<float> logits);
 
   void ValidateEngineCompatibility() const;
-  void SaveStateForTransaction(bool include_sampling_state = true);
+  void SaveStateForTransaction();
+  void SaveStateForExternalSamplingTransaction();
   RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
   void PrepareGenerationForTransaction(DeviceSpan<float> logits);
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
-  void RestoreStateForTransaction(bool defer_completion = false);
+  void RestoreStateForTransaction();
+  void QueueStateRestoreForTransaction();
   void CompleteStateRestoreForTransaction();
   void CommitStateForTransaction();
   void CommitStep(const RequestStepPlan& plan,
@@ -236,7 +237,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
 
-  RequestStepResult ApplyLogits(DeviceSpan<float> logits);
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();
   RequestStepResult StageGeneration(int64_t sequence_length_before);

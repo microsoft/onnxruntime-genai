@@ -51,7 +51,7 @@ struct Search_Cuda : Search {
   mutable bool done_pending_{false};
 
  protected:
-  void SaveStateForTransactionImpl(bool include_sampling_state) override;
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
   void RestoreStateForTransactionImpl() override;
   void SynchronizeStateForTransactionImpl() override;
   void CompleteStateRestoreForTransactionImpl() override;
@@ -98,7 +98,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void LaunchNextTokensTail();
 
  protected:
-  void SaveStateForTransactionImpl(bool include_sampling_state) override;
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
   void RestoreStateForTransactionImpl() override;
   void CompleteStateRestoreForTransactionImpl() override;
 

@@ -207,11 +207,14 @@ void PagedCacheManager::PrepareStep(
     Step();
     return;
   }
+  if (!context.plan) {
+    throw std::logic_error("Transactional cache preparation requires a step plan.");
+  }
 
   key_value_cache_->UpdateState(*key_value_cache_state_,
                                 requests,
                                 *context.cache_reservation,
-                                context.block_table_columns);
+                                context.plan->proposed_block_table_columns);
 }
 
 void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {

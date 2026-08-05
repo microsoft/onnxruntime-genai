@@ -66,16 +66,17 @@ struct Search : LeakChecked<Search> {
   virtual bool SupportsBatchedSampling() const { return false; }
   virtual void OnNextTokensSampled() {}
 
-  virtual void SaveStateForTransaction(bool include_sampling_state = true) {
-    if (transaction_checkpoint_active_)
-      throw std::logic_error("Search transaction checkpoint is already active.");
-
-    transaction_sequence_length_ = sequences_.GetSequenceLength();
-    SaveStateForTransactionImpl(include_sampling_state);
-    transaction_checkpoint_active_ = true;
+  void SaveStateForTransaction() {
+    StartTransactionCheckpoint(true);
   }
 
-  virtual void RestoreStateForTransaction(bool defer_completion = false) {
+  // The Engine's batched sampler owns RNG and next-token scratch. Its varlen decoder does not use
+  // or mutate Search sequence lengths, so the Search checkpoint only needs tail and logical state.
+  void SaveStateForExternalSamplingTransaction() {
+    StartTransactionCheckpoint(false);
+  }
+
+  void QueueStateRestoreForTransaction() {
     if (!transaction_checkpoint_active_)
       throw std::logic_error("Search transaction checkpoint is not active.");
     if (transaction_restore_pending_)
@@ -83,17 +84,16 @@ struct Search : LeakChecked<Search> {
 
     sequences_.RewindTo(transaction_sequence_length_);
     RestoreStateForTransactionImpl();
-    if (defer_completion) {
-      transaction_restore_pending_ = true;
-      return;
-    }
-
-    SynchronizeStateForTransactionImpl();
-    CompleteStateRestoreForTransactionImpl();
-    transaction_checkpoint_active_ = false;
+    transaction_restore_pending_ = true;
   }
 
-  virtual void CompleteStateRestoreForTransaction() {
+  void RestoreStateForTransaction() {
+    QueueStateRestoreForTransaction();
+    SynchronizeStateForTransactionImpl();
+    CompleteStateRestoreForTransaction();
+  }
+
+  void CompleteStateRestoreForTransaction() {
     if (!transaction_checkpoint_active_ || !transaction_restore_pending_)
       throw std::logic_error("Search transaction restore is not pending.");
 
@@ -102,11 +102,10 @@ struct Search : LeakChecked<Search> {
     transaction_checkpoint_active_ = false;
   }
 
-  virtual void CommitStateForTransaction() {
+  void CommitStateForTransaction() {
     if (!transaction_checkpoint_active_ || transaction_restore_pending_)
       throw std::logic_error("Search transaction checkpoint is not active.");
 
-    CommitStateForTransactionImpl();
     transaction_checkpoint_active_ = false;
   }
 
@@ -135,13 +134,21 @@ struct Search : LeakChecked<Search> {
   Sequences sequences_;
 
  protected:
-  virtual void SaveStateForTransactionImpl(bool /*include_sampling_state*/) {}
+  virtual void SaveStateForTransactionImpl(bool /*checkpoint_local_state*/) {}
   virtual void RestoreStateForTransactionImpl() {}
   virtual void SynchronizeStateForTransactionImpl() {}
   virtual void CompleteStateRestoreForTransactionImpl() {}
-  virtual void CommitStateForTransactionImpl() {}
 
  private:
+  void StartTransactionCheckpoint(bool checkpoint_local_state) {
+    if (transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is already active.");
+
+    transaction_sequence_length_ = sequences_.GetSequenceLength();
+    SaveStateForTransactionImpl(checkpoint_local_state);
+    transaction_checkpoint_active_ = true;
+  }
+
   bool transaction_checkpoint_active_{};
   bool transaction_restore_pending_{};
   int transaction_sequence_length_{};
@@ -178,7 +185,7 @@ struct Search_Cpu : Search {
   bool done_{};
 
  protected:
-  void SaveStateForTransactionImpl(bool include_sampling_state) override;
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
   void RestoreStateForTransactionImpl() override;
 
  private:
@@ -218,7 +225,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   std::mt19937 gen_;
 
  protected:
-  void SaveStateForTransactionImpl(bool include_sampling_state) override;
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
   void RestoreStateForTransactionImpl() override;
 
  private:

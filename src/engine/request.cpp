@@ -191,9 +191,12 @@ void Request::ValidateEngineCompatibility() const {
   }
 }
 
-void Request::SaveStateForTransaction(bool include_sampling_state) {
-  ValidateEngineCompatibility();
-  search_->SaveStateForTransaction(include_sampling_state);
+void Request::SaveStateForTransaction() {
+  search_->SaveStateForTransaction();
+}
+
+void Request::SaveStateForExternalSamplingTransaction() {
+  search_->SaveStateForExternalSamplingTransaction();
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
@@ -212,8 +215,12 @@ RequestStepResult Request::StageGenerationForTransaction(
   return StageGeneration(plan.sequence_length_before);
 }
 
-void Request::RestoreStateForTransaction(bool defer_completion) {
-  search_->RestoreStateForTransaction(defer_completion);
+void Request::RestoreStateForTransaction() {
+  search_->RestoreStateForTransaction();
+}
+
+void Request::QueueStateRestoreForTransaction() {
+  search_->QueueStateRestoreForTransaction();
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -229,16 +236,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
   }
-  processed_sequence_length_ = plan.processed_sequence_length_after;
+  processed_sequence_length_ = plan.sequence_length_before;
   is_prefill_ = false;
-  status_ = result.status_after;
-}
-
-RequestStepResult Request::ApplyLogits(DeviceSpan<float> logits) {
-  const int64_t sequence_length_before = CurrentSequenceLength();
-  ApplyLogitsProcessors(logits);
-  SelectNextToken();
-  return StageGeneration(sequence_length_before);
+  status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
@@ -276,7 +276,6 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       token,
       token_appended,
       done,
-      done ? RequestStatus::Completed : RequestStatus::InProgress,
   };
 }
 

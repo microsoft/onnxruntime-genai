@@ -247,6 +247,53 @@ TEST_F(CudaSearchCheckpointTest, BatchedSamplerRollbackRestoresRequestRandomStat
             std::vector<int32_t>(first.begin(), first.end()));
 }
 
+TEST_F(CudaSearchCheckpointTest, ExternalSamplingRollbackRestoresSearchTailState) {
+  auto external_params = CreateGeneratorParams(*model);
+  external_params->search.batch_size = 1;
+  external_params->search.max_length = 8;
+  auto external_search = CreateSearch(*external_params);
+
+  auto input = external_params->p_device->Allocate<int32_t>(1);
+  input.CpuSpan()[0] = 1;
+  input.CopyCpuToDevice();
+  external_search->AppendTokens(input);
+
+  auto sequence_lengths = external_search->GetSequenceLengths();
+  sequence_lengths.CpuSpan()[0] = 5;
+  sequence_lengths.CopyCpuToDevice();
+
+  auto sampler = model->p_device_scoring_->CreateBatchedSampler(
+      1, external_params->config.model.vocab_size);
+  auto state = sampler->CreateState(1234);
+  std::array<BatchedSamplerState*, 1> states{state.get()};
+  std::array<BatchedSamplingParams, 1> sampling_params{
+      BatchedSamplingParams{1, 0.0f, 1.0f}};
+
+  auto scores = external_params->p_device->Allocate<float>(4);
+  const std::array<float, 4> score_values{0.0f, 0.0f, 0.0f, 10.0f};
+  std::copy(score_values.begin(), score_values.end(),
+            scores.CpuSpan().begin());
+  scores.CopyCpuToDevice();
+  std::array<DeviceSpan<float>, 1> rows{scores};
+
+  external_search->SaveStateForExternalSamplingTransaction();
+  sampler->SaveStateForTransaction(states);
+  auto next_tokens = sampler->Sample(
+      rows, sampling_params, states, external_params->config.model.vocab_size);
+  ASSERT_TRUE(external_search->BindNextTokensSlot(next_tokens));
+  external_search->OnNextTokensSampled();
+  next_tokens.CopyDeviceToCpu();
+  external_search->CompleteGeneration();
+  EXPECT_TRUE(external_search->IsDone());
+
+  sampler->RestoreStateForTransaction();
+  external_search->RestoreStateForTransaction();
+
+  EXPECT_FALSE(external_search->IsDone());
+  EXPECT_EQ(external_search->GetSequenceLength(), 1);
+  EXPECT_EQ(external_search->GetSequenceLengths().CopyDeviceToCpu()[0], 5);
+}
+
 TEST_F(CudaSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {
   auto input = Tokens({1, 2});
   search->AppendTokens(input);

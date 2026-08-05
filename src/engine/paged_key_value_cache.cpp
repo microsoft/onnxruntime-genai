@@ -197,8 +197,12 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
   bool capacity_deferred = false;
   const void* unserviceable_request_id = nullptr;
 
-  const auto populate_entry = [&](RequestStepPlan& entry,
-                                  const PagedCacheBlockTable* table) {
+  struct CacheGrowth {
+    size_t proposed_blocks{};
+    size_t new_blocks{};
+  };
+  const auto calculate_growth = [&](const RequestStepPlan& entry,
+                                    const PagedCacheBlockTable* table) {
     const size_t committed_slots = table ? table->committed_slots : 0;
     const size_t committed_blocks = table ? table->blocks.size() : 0;
     if (entry.target_cache_slots < committed_slots) {
@@ -211,14 +215,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
             ? entry.target_cache_slots - committed_capacity
             : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
-    const size_t growth = entry.target_cache_slots - committed_slots;
-
-    entry.committed_cache_slots = committed_slots;
-    entry.committed_block_count = committed_blocks;
-    entry.tail_slots_to_consume =
-        std::min(growth, committed_capacity - committed_slots);
-    entry.new_blocks_required = new_blocks;
-    return committed_blocks + new_blocks;
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
   };
   const auto find_table = [this](const void* request_id) {
     const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
@@ -235,11 +232,12 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
       throw std::runtime_error("Step plan order does not match the committed block table order.");
     }
 
-    const size_t proposed_blocks = populate_entry(entry, &table);
-    planned_blocks += entry.new_blocks_required;
-    max_blocks_per_request = std::max(max_blocks_per_request, proposed_blocks);
+    const auto growth = calculate_growth(entry, &table);
+    planned_blocks += growth.new_blocks;
+    max_blocks_per_request =
+        std::max(max_blocks_per_request, growth.proposed_blocks);
     if (planned_blocks > available_blocks ||
-        (graph_capture_ && proposed_blocks > max_block_table_columns_)) {
+        (graph_capture_ && growth.proposed_blocks > max_block_table_columns_)) {
       return StepPlanningResult{
           false,
           false,
@@ -255,10 +253,10 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
       throw std::runtime_error("New step plan request already belongs to the paged cache.");
     }
 
-    const size_t proposed_blocks = populate_entry(candidate, nullptr);
+    const auto growth = calculate_growth(candidate, nullptr);
     const bool permanently_unserviceable =
-        candidate.new_blocks_required > block_pool_->Capacity() ||
-        (graph_capture_ && proposed_blocks > max_block_table_columns_);
+        growth.new_blocks > block_pool_->Capacity() ||
+        (graph_capture_ && growth.proposed_blocks > max_block_table_columns_);
     if (permanently_unserviceable) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;
@@ -267,13 +265,14 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     }
 
     if (selected_requests == max_batch_size_ ||
-        planned_blocks + candidate.new_blocks_required > available_blocks) {
+        planned_blocks + growth.new_blocks > available_blocks) {
       capacity_deferred = true;
       continue;
     }
 
-    planned_blocks += candidate.new_blocks_required;
-    max_blocks_per_request = std::max(max_blocks_per_request, proposed_blocks);
+    planned_blocks += growth.new_blocks;
+    max_blocks_per_request =
+        std::max(max_blocks_per_request, growth.proposed_blocks);
     plan.requests[selected_requests++] = std::move(candidate);
   }
   plan.requests.resize(selected_requests);
@@ -288,8 +287,6 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
   }
 
   plan.proposed_block_table_columns = block_table_columns;
-  plan.capacity_deferred = capacity_deferred;
-  plan.unserviceable_request_id = unserviceable_request_id;
 
   if (!plan.requests.empty()) {
     return StepPlanningResult{

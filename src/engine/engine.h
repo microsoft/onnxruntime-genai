@@ -6,7 +6,6 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
-#include "step_transaction.h"
 
 /**
  * @file engine.h
@@ -16,6 +15,11 @@
  */
 
 namespace Generators {
+
+enum class EngineHealth {
+  Healthy,
+  Unhealthy,
+};
 
 /**
  * @struct EngineDependencies
@@ -130,7 +134,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
-  std::exception_ptr fatal_cause_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;
