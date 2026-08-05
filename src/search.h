@@ -43,6 +43,29 @@ struct Search : LeakChecked<Search> {
   virtual void SetLogits(DeviceSpan<float> logits) = 0;
   virtual bool IsDone() const = 0;
 
+  // Deferred completion lets a caller that drives many independent searches launch the token
+  // selection work for all of them before paying for a single device synchronization. When
+  // enabled, the part of token selection that depends on a device result is postponed until
+  // CompleteGeneration() is called. With it disabled (the default) token selection completes
+  // inline, exactly as before.
+  //
+  // Once CompleteGeneration() has returned, GetNextTokens().CpuSpan() holds the selected tokens.
+  virtual void DeferCompletion(bool /*defer*/) {}
+  virtual void CompleteGeneration() {}
+
+  // Lets a caller that drives many single-sequence searches sample them all in one call. The
+  // caller binds each search to a one-element slot of a shared next-token buffer, samples the
+  // whole buffer itself, calls OnNextTokensSampled() on each search to launch the per-sequence
+  // tail (EOS handling and appending to the sequence), then copies the shared buffer back once
+  // before calling CompleteGeneration(). The copy has to come after the tail so that it observes
+  // the EOS padding.
+  //
+  // Returns false if the search cannot use a shared buffer, in which case the caller must fall
+  // back to driving each search through SelectTop()/SampleTopKTopP() individually.
+  virtual bool BindNextTokensSlot(DeviceSpan<int32_t> /*slot*/) { return false; }
+  virtual bool SupportsBatchedSampling() const { return false; }
+  virtual void OnNextTokensSampled() {}
+
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }

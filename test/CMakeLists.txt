@@ -56,6 +56,30 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(unit_tests onnxruntime-genai-cuda)
+
+  # These tests exercise the internal BatchedSampler interface, so keep them out of unit_tests,
+  # which deliberately links only the public shared-library API.
+  add_executable(cuda_batched_sampler_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cuda_batched_sampler_tests/cuda_batched_sampler_tests.cpp")
+  target_include_directories(cuda_batched_sampler_tests PRIVATE
+    ${ORT_HEADER_DIR}
+    ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  target_link_libraries(cuda_batched_sampler_tests PRIVATE
+    onnxruntime-genai-obj
+    GTest::gtest
+  )
+  add_dependencies(cuda_batched_sampler_tests onnxruntime-genai)
+  set_target_properties(cuda_batched_sampler_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+    FOLDER "Tests"
+  )
+  if(NOT MSVC)
+    target_compile_options(cuda_batched_sampler_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  add_test(NAME CudaBatchedSamplerTests COMMAND cuda_batched_sampler_tests)
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/")

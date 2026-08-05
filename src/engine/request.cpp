@@ -22,7 +22,23 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 }  // namespace
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {}
+    : params_{params}, search_{CreateSearch(*params.get())} {
+  // A request is one sequence: the engine batches requests, not rows within a request. Several
+  // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
+  // next-token span, so a wider search would silently mirror the wrong row's tokens.
+  if (params->search.batch_size != 1) {
+    throw std::runtime_error("A request must have search.batch_size == 1; batch across requests instead.");
+  }
+  // Beam search does not implement the deferred completion contract below, so its next tokens would
+  // never be copied back from the device.
+  if (params->search.num_beams != 1) {
+    throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
+  }
+
+  // The engine drives one independent search per request, so completion is batched: see
+  // ScheduledRequests::GenerateNextTokens().
+  search_->DeferCompletion(true);
+}
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
@@ -35,6 +51,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   processed_sequence_length_ = CurrentSequenceLength();
   search_->AppendTokens(device_tokens);
   seen_sequence_length_ = CurrentSequenceLength();
+  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
 }
 
@@ -75,6 +92,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
+    tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
 
@@ -95,11 +113,10 @@ RequestStateSnapshot Request::Snapshot() const {
 }
 
 int32_t Request::UnseenToken() {
-  auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
-  if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())
+  if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
 
-  return sequence[seen_sequence_length_++];
+  return tokens_host_[seen_sequence_length_++];
 }
 
 bool Request::HasUnseenTokens() const {
@@ -112,6 +129,15 @@ DeviceSpan<int32_t> Request::UnprocessedTokens() {
   return unprocessed_tokens;
 }
 
+std::span<const int32_t> Request::UnprocessedTokensCpu() const {
+  const size_t begin = static_cast<size_t>(processed_sequence_length_);
+  const size_t end = static_cast<size_t>(CurrentSequenceLength());
+  if (end > tokens_host_.size())
+    throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
+
+  return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
+}
+
 bool Request::IsDone() const {
   return status_ == RequestStatus::Completed;
 }
@@ -121,15 +147,9 @@ bool Request::IsPrefill() const {
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
-  is_prefill_ = false;
+  PrepareGeneration(logits);
 
-  search_->SetLogits(logits);
   auto& search_params = search_->params_->search;
-  search_->ApplyMinLength(search_params.min_length);
-  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
-  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
-
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
     search_->SelectTop();
   } else {
@@ -151,6 +171,53 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       assert(search_params.top_k == 0);
       search_->SampleTopP(search_params.top_p, search_params.temperature);
     }
+  }
+}
+
+void Request::PrepareGeneration(DeviceSpan<float> logits) {
+  processed_sequence_length_ = search_->GetSequence(0).size();
+  is_prefill_ = false;
+
+  search_->SetLogits(logits);
+  auto& search_params = search_->params_->search;
+  search_->ApplyMinLength(search_params.min_length);
+  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
+
+const Config::Search& Request::SearchOptions() const {
+  return search_->params_->search;
+}
+
+bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
+  return search_->BindNextTokensSlot(slot);
+}
+
+bool Request::SupportsBatchedSampling() const {
+  return search_->SupportsBatchedSampling();
+}
+
+void Request::OnNextTokensSampled() {
+  search_->OnNextTokensSampled();
+}
+
+BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
+  if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
+    batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
+  return *batched_sampler_state_;
+}
+
+void Request::CompleteGeneration() {
+  search_->CompleteGeneration();
+
+  const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  if (sequence_length > tokens_host_.size()) {
+    const size_t new_token_count = sequence_length - tokens_host_.size();
+    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    if (new_token_count > next_tokens.size())
+      throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
+
+    tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
   }
 
   if (search_->IsDone()) {
