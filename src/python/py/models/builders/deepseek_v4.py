@@ -197,7 +197,7 @@ class DeepSeekV4FlashModel(Model):
         # kept selectable because the win reappears for any consumer that can read the
         # fused tensor directly and skip the split.  See
         # dev/docs/memory/dsv4_perf_it13_sibling_gemm_fusion.md.
-        self.proj_fusion = extra_options.get("dsv4_proj_fused", "1") not in ("0", 0, False)
+        self.proj_fusion = extra_options.get("dsv4_proj_fused", "0") not in ("0", 0, False)
 
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
