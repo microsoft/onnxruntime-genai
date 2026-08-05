@@ -215,6 +215,16 @@ class DeepSeekV4FlashModel(Model):
         self.norm_bf16 = extra_options.get("dsv4_norm_bf16", "1") not in ("0", 0, False)
         self.moe_combine_bf16 = extra_options.get("dsv4_moe_combine_bf16", "1") not in ("0", 0, False)
 
+        # DSpark drafts from the target model's own hidden states rather than from a
+        # separate small model: `mtp.0.main_proj` consumes the hc-mean of a few late
+        # layers, concatenated in layer order (inference/model.py:920).  The target
+        # graph is the only place those states exist, so it has to hand them out.  Off
+        # by default -- an unused [B, S, 12288] output is pure cost when no drafter is
+        # attached, and every published decode number was measured without it.
+        self.mtp = extra_options.get("dsv4_mtp", "0") not in ("0", 0, False)
+        self.mtp_target_layers = [i for i in getattr(c, "dspark_target_layer_ids", ())
+                                  if i < self.num_layers]
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -328,6 +338,13 @@ class DeepSeekV4FlashModel(Model):
         self.output_names = {"logits": "logits"}
         self.output_types = {"logits": ir.DataType.FLOAT}
         self.output_shapes = {"logits": [B, S, self.vocab_size]}
+
+        if self.mtp and self.mtp_target_layers:
+            self.model.metadata_props["dsv4_mtp_target_layers"] = ",".join(
+                str(i) for i in self.mtp_target_layers)
+            self.output_names["main_hidden"] = "main_hidden"
+            self.output_types["main_hidden"] = self.io_dtype
+            self.output_shapes["main_hidden"] = [B, S, self.dim * len(self.mtp_target_layers)]
 
         if self.paged:
             # One block table per ratio group: layers do not share a logical position space, and
@@ -1933,11 +1950,21 @@ class DeepSeekV4FlashModel(Model):
         y, post, comb = self.make_hc_pre("/layers.0/hc_attn", h, "layers.0.hc_attn", [B, S])
         y = self.make_hc_norm("/layers.0/attn_norm", y, "layers.0.attn_norm.weight", [B, S])
 
+        main_hiddens = []
         for layer_id in range(self.num_layers):
             h, y, post, comb, presents = self.make_block(layer_id, h, y, post, comb, ctx)
             for key, val in presents.items():
                 out = f"present_{key}_{layer_id}"
                 self.make_node("Identity", inputs=[val], outputs=[out], name=f"/out/{out}")
+            if self.mtp and layer_id in self.mtp_target_layers:
+                # The carried `h` is the post-mix residual, which is what the reference
+                # appends before the next block runs.
+                main_hiddens.append(
+                    self.op("ReduceMean", [h, self.const("INT64", [2])],
+                            f"/mtp/hcmean.{layer_id}", io, [B, S, dim], keepdims=0))
+        if main_hiddens:
+            self.make_node("Concat", inputs=main_hiddens, outputs=["main_hidden"],
+                           name="/mtp/main_hidden", axis=-1)
 
         h = self.make_hc_head("/hc_head", h, "hc_head", [B, S])
         nd = io if self.norm_bf16 else ir.DataType.FLOAT
