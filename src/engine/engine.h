@@ -23,9 +23,8 @@ namespace Generators {
  * The Engine constructor assembles these from the model via CreateDependencies and forwards them
  * to the dependency-injecting constructor, so there is a single construction flow. The injecting
  * constructor accepts a pre-assembled bundle, which also lets a caller supply alternative
- * collaborators. The scheduler and cache manager are abstract interfaces and are substitutable
- * today; the model executor is a concrete type until its interface is introduced, so only the real
- * executor can be supplied for now.
+ * collaborators. The cache manager, scheduler, and model executor are all abstract interfaces, so
+ * an alternative implementation of any of them can be supplied in place of the production one.
  * This is a composition seam, not a setter: the dependencies are supplied once at construction and
  * never replaced mid-run.
  */
