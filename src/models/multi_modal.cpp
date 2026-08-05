@@ -81,7 +81,16 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       if (!shape.empty()) {
-        return shape[0];  // num_images
+        int64_t num_images = shape[0];
+        // Validate that the tensor contains at least num_images * 3 elements
+        // (t, h, w for each image)
+        int64_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+        if (elem_count < num_images * 3) {
+          throw std::runtime_error("image_grid_thw element count (" + std::to_string(elem_count) +
+                                   ") is less than required for " + std::to_string(num_images) +
+                                   " images (need at least " + std::to_string(num_images * 3) + ")");
+        }
+        return num_images;
       }
     }
   }
@@ -195,6 +204,15 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   OrtValue* grid_full = inputs_[grid_idx];
   const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+  
+  // Defensive bounds check: verify grid_data has enough elements for all images
+  // Each image requires 3 elements (t, h, w)
+  int64_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
+  if (grid_elem_count < num_images_ * 3) {
+    throw std::runtime_error("image_grid_thw has " + std::to_string(grid_elem_count) +
+                             " elements but need at least " + std::to_string(num_images_ * 3) +
+                             " for " + std::to_string(num_images_) + " images");
+  }
 
   // Check if the ONNX model accepts dynamic num_images.
   // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
