@@ -204,14 +204,18 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
 #if (defined(__linux__) || defined(MACOS_USE_DLOPEN)) && defined(RTLD_NOLOAD)
 inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
   LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
+  dlerror();
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-  if (ort_lib_handle) {
-#if defined(RTLD_DI_ORIGIN)
-    char pathname[PATH_MAX];
-    dlinfo(ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
-    LOG_INFO("Reusing loaded native library at %s", pathname);
-#endif
+  if (!ort_lib_handle) {
+    dlerror();
+    return nullptr;
   }
+
+#if defined(RTLD_DI_ORIGIN)
+  char pathname[PATH_MAX];
+  dlinfo(ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Reusing loaded native library at %s", pathname);
+#endif
   return ort_lib_handle;
 }
 #endif
