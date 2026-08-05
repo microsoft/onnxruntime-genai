@@ -1640,9 +1640,12 @@ class Model:
         self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value(output, dtype, shape=shape)
 
-    def make_scatter_elements(self, name, inputs, dtype, shape, axis):
+    def make_scatter_elements(self, name, inputs, dtype, shape, axis, reduction=None):
         output = f"{name}/output_0"
-        self.make_node("ScatterElements", inputs=inputs, outputs=[output], name=name, axis=axis)
+        attributes = {"axis": axis}
+        if reduction is not None:
+            attributes["reduction"] = reduction
+        self.make_node("ScatterElements", inputs=inputs, outputs=[output], name=name, **attributes)
         self.make_value(output, dtype, shape=shape)
 
     def make_cos(self, name, root_input, dtype, shape):

@@ -443,9 +443,6 @@ def create_model(
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
     elif config.architectures[0] == "DeepseekV4ForCausalLM":
-        print("WARNING: DeepSeek V4 uses a novel 4-D multi-stream residual architecture (mHC). "
-              "Compressed-sparse and heavily-compressed attention layers are built as plain "
-              "sliding-window attention (compressor components are not supported in standard ONNX).")
         onnx_model = DeepSeekV4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Ernie4_5ForCausalLM":
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)

@@ -43,6 +43,7 @@ import numpy as np
 import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import to_torch_dtype
+from transformers import AutoModelForCausalLM, FineGrainedFP8Config
 
 from .base import Model
 
@@ -78,6 +79,13 @@ class DeepSeekV4Model(Model):
 
         # Base class reads config.activation; if absent, fall back to hidden_act.
         # (DeepseekV4Config uses hidden_act; no hidden_activation attribute.)
+
+        self.dequantize_fp8 = (
+            hasattr(config, "quantization_config")
+            and config.quantization_config.get("quant_method") == "fp8"
+        )
+        if self.dequantize_fp8:
+            delattr(config, "quantization_config")
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -137,6 +145,30 @@ class DeepSeekV4Model(Model):
         # com.microsoft::RotaryEmbedding node.  Only the parity test flips this; it is
         # deliberately not exposed as an extra_option.
         self.use_manual_deepseek_rope = False
+
+    def load_weights(self, input_path):
+        if not self.dequantize_fp8:
+            return super().load_weights(input_path)
+
+        extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            trust_remote_code=self.hf_remote,
+            dtype="auto",
+            quantization_config=FineGrainedFP8Config(dequantize=True),
+            **extra_kwargs,
+        )
+
+        if "adapter_path" in self.extra_options:
+            from peft import PeftModel
+
+            model = PeftModel.from_pretrained(
+                model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
+            )
+
+        return model
 
     def add_compression_state(self, layer_id: int, name: str, shape: list) -> tuple[str, str]:
         past_name = f"past_compression.{layer_id}.{name}"
@@ -303,7 +335,7 @@ class DeepSeekV4Model(Model):
         self.make_initializer(indexer.kv_norm.weight.data, index_norm_weight, to=self.io_dtype)
         index_outputs = [f"{index_base}/output_0"] + [state[1] for state in index_states]
         self.make_node(
-            "DeepSeekV4Indexer",
+            "LightningIndexer",
             [
                 collapsed,
                 q_residual,
@@ -1799,6 +1831,7 @@ class DeepSeekV4Model(Model):
             self.io_dtype,
             [None, num_e],
             axis=-1,
+            reduction="add",
         )
         return self.make_deepseek_moe_op(
             layer_id,

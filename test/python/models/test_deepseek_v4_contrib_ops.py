@@ -45,6 +45,35 @@ def _compressor(hidden_size: int, head_size: int, rate: int, *, with_indexer: bo
     return compressor
 
 
+def test_fp8_checkpoint_is_dequantized_by_transformers(monkeypatch):
+    calls = {}
+    loaded_model = object()
+
+    class FakeAutoModel:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls["model_name"] = model_name
+            calls["kwargs"] = kwargs
+            return loaded_model
+
+    monkeypatch.setattr("models.builders.deepseek.AutoModelForCausalLM", FakeAutoModel)
+
+    model = object.__new__(DeepSeekV4Model)
+    model.dequantize_fp8 = True
+    model.model_name_or_path = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    model.cache_dir = "/tmp/cache"
+    model.hf_token = None
+    model.hf_remote = False
+    model.num_layers = 2
+    model.extra_options = {"num_hidden_layers": 2}
+
+    assert model.load_weights("unused") is loaded_model
+    assert calls["model_name"] == model.model_name_or_path
+    assert calls["kwargs"]["dtype"] == "auto"
+    assert calls["kwargs"]["num_hidden_layers"] == 2
+    assert calls["kwargs"]["quantization_config"].dequantize is True
+
+
 def _make_builder(layer_types: list[str]) -> DeepSeekV4Model:
     model = object.__new__(DeepSeekV4Model)
     model.graph = ir.Graph(
@@ -99,7 +128,7 @@ def test_emits_compression_contrib_contracts_and_state_config():
     }
     assert contracts["HeavilyCompressedAttention"] == (11, 5)
     assert contracts["CompressedSparseAttention"] == (13, 6)
-    assert contracts["DeepSeekV4Indexer"] == (16, 6)
+    assert contracts["LightningIndexer"] == (16, 6)
     assert len(model.compression_state_names) == 13
 
     config = {"model": {"decoder": {"inputs": {}, "outputs": {}}}}

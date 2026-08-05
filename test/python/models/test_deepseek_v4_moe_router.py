@@ -116,16 +116,19 @@ def _build_router_session(
         model.make_initializer(eye.unsqueeze(0).repeat(NUM_EXPERTS, 1, 1), w1_name, to=model.io_dtype)
         model.make_initializer(eye.unsqueeze(0).repeat(NUM_EXPERTS, 1, 1), w2_name, to=model.io_dtype)
         moe_name = f"{base}/MoE"
-        model.make_moe_op(
-            moe_name,
-            root_input=root_input,
-            router_probs=router_probs,
-            router_weights=router_weights,
-            weight1=w1_name,
-            weight2=w2_name,
-        )
-        if router_weights:
-            return f"{moe_name}/output_0"
+        saved_normalize = model.moe_attrs["normalize_routing_weights"]
+        model.moe_attrs["normalize_routing_weights"] = not router_weights
+        try:
+            model.make_moe_op(
+                moe_name,
+                root_input=root_input,
+                router_probs=router_probs,
+                router_weights=router_weights,
+                weight1=w1_name,
+                weight2=w2_name,
+            )
+        finally:
+            model.moe_attrs["normalize_routing_weights"] = saved_normalize
         return f"{moe_name}/output_0"
 
     model.make_deepseek_moe_op = identity_moe_op
