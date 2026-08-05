@@ -69,18 +69,13 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
   auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
+  auto engine = OgaEngine::Create(*model);
   const std::string prompt = BuildPromptText(config.prompt_length_k);
 
   auto prompt_sequences = OgaSequences::Create();
-  for (int i = 0; i < config.concurrency; ++i) {
-    tokenizer->Encode(prompt.c_str(), *prompt_sequences);
-  }
+  tokenizer->Encode(prompt.c_str(), *prompt_sequences);
 
   const size_t prompt_token_count = prompt_sequences->SequenceCount(0);
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("batch_size", static_cast<double>(config.concurrency));
-  params->SetSearchOption(
-      "max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
 
   ScenarioExecutionOutput output;
   std::vector<double> ttft_values;
@@ -90,36 +85,56 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
 
   for (int run = 0; run < config.measured_runs; ++run) {
-    auto generator = OgaGenerator::Create(*model, *params);
-    generator->AppendTokenSequences(*prompt_sequences);
-
+    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<std::unique_ptr<OgaRequest>> requests;
+    std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
+    std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
+
+    params.reserve(static_cast<size_t>(config.concurrency));
+    requests.reserve(static_cast<size_t>(config.concurrency));
+
+    for (int i = 0; i < config.concurrency; ++i) {
+      params.emplace_back(OgaGeneratorParams::Create(*model));
+      params.back()->SetSearchOption(
+          "max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
+
+      request_tokens[static_cast<size_t>(i)].assign(
+          prompt_sequences->SequenceData(0), prompt_sequences->SequenceData(0) + prompt_token_count);
+
+      requests.emplace_back(OgaRequest::Create(*params.back()));
+      requests.back()->AddTokens(*prompt_sequences);
+      requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
+      engine->Add(*requests.back());
+    }
+
     const auto run_start = std::chrono::steady_clock::now();
-    int emitted_steps = 0;
+    size_t generated_tokens = 0;
 
-    while (!generator->IsDone() && emitted_steps < config.generation_tokens) {
-      const auto step_start = std::chrono::steady_clock::now();
-      generator->GenerateNextToken();
-      const auto step_end = std::chrono::steady_clock::now();
+    while (auto ready_request = engine->Step()) {
+      const auto now = std::chrono::steady_clock::now();
+      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
+      const auto request_index = static_cast<size_t>(tokens - request_tokens.data());
 
-      const double elapsed_ms = std::chrono::duration<double, std::milli>(step_end - run_start).count();
-      const double step_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
-      if (emitted_steps > 0) {
-        inter_token_latency_values.push_back(step_ms);
-      }
+      while (ready_request->HasUnseenTokens()) {
+        tokens->push_back(ready_request->GetUnseenToken());
+        ++generated_tokens;
 
-      for (int i = 0; i < config.concurrency; ++i) {
-        if (first_token_ms[static_cast<size_t>(i)] < 0.0) {
-          first_token_ms[static_cast<size_t>(i)] = elapsed_ms;
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
+        if (first_token_ms[request_index] < 0.0) {
+          first_token_ms[request_index] = elapsed_ms;
+        } else {
+          inter_token_latency_values.push_back(
+              std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
         }
-      }
 
-      ++emitted_steps;
+        last_token_time[request_index] = now;
+      }
     }
 
     const auto run_end = std::chrono::steady_clock::now();
     const double run_elapsed_ms = std::chrono::duration<double, std::milli>(run_end - run_start).count();
-    const double tokens_per_s = static_cast<double>(config.generation_tokens) / std::max(0.001, run_elapsed_ms / 1000.0);
+    const double tokens_per_s = static_cast<double>(generated_tokens) / std::max(0.001, run_elapsed_ms / 1000.0);
 
     e2e_ms_values.push_back(run_elapsed_ms);
     tokens_per_s_values.push_back(tokens_per_s);
@@ -129,12 +144,11 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       ttft_values.push_back(ttft_ms);
       output.requests.push_back({run * config.concurrency + i, ttft_ms, Percentile(inter_token_latency_values, 50.0)});
 
-      const size_t total_tokens = generator->GetSequenceCount(static_cast<size_t>(i));
-      const int32_t* seq_data = generator->GetSequenceData(static_cast<size_t>(i));
-      const size_t output_tokens = total_tokens > prompt_token_count ? total_tokens - prompt_token_count : 0;
+      const auto& tokens = request_tokens[static_cast<size_t>(i)];
+      const size_t output_tokens = tokens.size() > prompt_token_count ? tokens.size() - prompt_token_count : 0;
       std::string output_text;
       if (output_tokens > 0) {
-        const auto decoded = tokenizer->Decode(seq_data + prompt_token_count, output_tokens);
+        const auto decoded = tokenizer->Decode(tokens.data() + prompt_token_count, output_tokens);
         output_text = static_cast<const char*>(decoded);
       }
 
