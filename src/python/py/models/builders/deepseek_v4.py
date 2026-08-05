@@ -163,6 +163,11 @@ class DeepSeekV4FlashModel(Model):
         # raw projections.
         self.comp_fused = extra_options.get("dsv4_comp_fused", "1") not in ("0", 0, False)
 
+        # `wkv`/`wgate` have no `.scale` in the checkpoint, so they arrive as plain bf16 and the
+        # fp32 projections were an upcast of the activations, a widened GEMM and a Cast per site
+        # for no precision anyone chose. The operator widens what it reads anyway.
+        self.comp_bf16 = extra_options.get("dsv4_comp_bf16", "1") not in ("0", 0, False)
+
         # Likewise for what is left of the indexer once its compressor is fused: a rotation, a
         # cache refresh, a scoring einsum over every cached row and a top-k, ~60 nodes on each
         # of the 21 ratio-4 layers. One operator covers everything after its two projections.
@@ -782,12 +787,26 @@ class DeepSeekV4FlashModel(Model):
         F = ir.DataType.FLOAT
         I = ir.DataType.INT64
 
-        xf = self.cast(f"{name}/castx", x, F, [B, S, self.dim])
-        kv = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wkv.weight"].T, f"{p}.wkv/T", to=F)],
-                     f"{name}/kv", F, [B, S, co * d])
-        sc = self.op("MatMul", [xf, self.init(self.sd[f"{p}.wgate.weight"].T, f"{p}.wgate/T",
-                                              to=F)],
-                     f"{name}/sc", F, [B, S, co * d])
+        # The operator reads the projections once and widens them, so it can take them in the
+        # activation type.  The unrolled subgraph below cannot: it is the fp32 reference.
+        pdt = self.io_dtype if (self.comp_bf16 and self.comp_fused) else F
+        xp = x if pdt == self.io_dtype else self.cast(f"{name}/castx", x, F, [B, S, self.dim])
+
+        if self.comp_fused:
+            # Both projections read the same `x` and neither is used anywhere else, so they are
+            # one GEMM over a weight stacked along N.  The operator splits the result by stride
+            # rather than by a Split node, which would give the saving straight back.
+            w = torch.cat([self.sd[f"{p}.wkv.weight"], self.sd[f"{p}.wgate.weight"]], 0)
+            kv = self.op("MatMul", [xp, self.init(w.T, f"{p}.wkvgate/T", to=pdt)],
+                         f"{name}/kv", pdt, [B, S, 2 * co * d])
+            sc = ""
+        else:
+            kv = self.op("MatMul",
+                         [xp, self.init(self.sd[f"{p}.wkv.weight"].T, f"{p}.wkv/T", to=pdt)],
+                         f"{name}/kv", pdt, [B, S, co * d])
+            sc = self.op("MatMul",
+                         [xp, self.init(self.sd[f"{p}.wgate.weight"].T, f"{p}.wgate/T", to=pdt)],
+                         f"{name}/sc", pdt, [B, S, co * d])
 
         if self.comp_fused:
             # `J` stays on the host: it feeds a Range, and `row_count` is the same count on the
