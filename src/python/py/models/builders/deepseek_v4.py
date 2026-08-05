@@ -958,10 +958,18 @@ class DeepSeekV4FlashModel(Model):
         io = self.io_dtype
         tbl = 1 if ratio else 0
 
-        cos = self.op("Gather", [f"rope/cos_{tbl}", ctx["pos"]], f"{name}/cos", F, [B, S, rd], axis=0)
-        sin = self.op("Gather", [f"rope/sin_{tbl}", ctx["pos"]], f"{name}/sin", F, [B, S, rd], axis=0)
-        cos_q = self.unsq(f"{name}/cosq", cos, [2], F, [B, S, 1, rd])
-        sin_q = self.unsq(f"{name}/sinq", sin, [2], F, [B, S, 1, rd])
+        # The rope tables are gathered at the same positions in every layer of a group.
+        rope = ctx.setdefault("rope", {})
+        if tbl not in rope:
+            r = f"/rope/t{tbl}"
+            c = self.op("Gather", [f"rope/cos_{tbl}", ctx["pos"]], f"{r}/cos", F, [B, S, rd],
+                        axis=0)
+            s = self.op("Gather", [f"rope/sin_{tbl}", ctx["pos"]], f"{r}/sin", F, [B, S, rd],
+                        axis=0)
+            rope[tbl] = (c, s,
+                         self.unsq(f"{r}/cosq", c, [2], F, [B, S, 1, rd]),
+                         self.unsq(f"{r}/sinq", s, [2], F, [B, S, 1, rd]))
+        cos, sin, cos_q, sin_q = rope[tbl]
         cos_k, sin_k = cos, sin
 
         def rope_last(tag, t, shape, c, s, inverse=False):
@@ -1256,6 +1264,116 @@ class DeepSeekV4FlashModel(Model):
                        f"{name}/csel", I, [B, S, k])
         return csel, {"icache": present, "icstate_kv": pkv, "icstate_score": psc}
 
+    def _paged_group(self, ratio, ctx):
+        """The slot mapping and row selection every layer of one cache group shares.
+
+        All of it is a function of ``past_lens``, ``S`` and ``ratio`` alone, so the 43 layers
+        collapse onto one of these per distinct ratio.  ``first_slot``/``last_slot`` are
+        recomputed here with the compressor kernel's own formulas rather than read off each
+        layer's ``DSV4Compressor`` outputs: those are distinct nodes per layer, so everything
+        downstream of them is beyond the reach of common subexpression elimination.
+        """
+        memo = ctx.setdefault("paged_groups", {})
+        if ratio in memo:
+            return memo[ratio]
+
+        I, I32, BOOL = ir.DataType.INT64, ir.DataType.INT32, ir.DataType.BOOL
+        L, W, bsize = self.max_seq_len, self.window, self.block_size
+        g = f"/paged/r{ratio}"
+        table64 = self.cast(f"{g}/bt64", f"block_table_{ratio}", I,
+                            [B, self.group_blocks(ratio)])
+
+        def to_slot(tag, logical, shape, rows):
+            """Logical position -> flat cache slot, through this group's block table."""
+            blk = self.batched_gather(
+                f"{g}/{tag}/blk", table64,
+                self.op("Div", [logical, self.const("INT64", bsize)], f"{g}/{tag}/bi", I, shape),
+                rows, I, shape)
+            return self.op("Add",
+                           [self.op("Mul", [blk, self.const("INT64", bsize)],
+                                    f"{g}/{tag}/base", I, shape),
+                            self.op("Mod", [logical, self.const("INT64", bsize)],
+                                    f"{g}/{tag}/off", I, shape)],
+                           f"{g}/{tag}/slot", I, shape)
+
+        # ---- one stored KV row per token, at its own absolute position ----
+        slots = [self.reshape(f"{g}/tokslot", to_slot("tok", ctx["pos"], [B, S], S),
+                              [-1], I, [None])]
+
+        # ---- selection: the sliding window, as absolute positions ----
+        # The window does not depend on the group either, so it is shared across all of them.
+        if "winsel" not in ctx:
+            jw = self.init(torch.arange(W, dtype=torch.int64), f"paged/arange_{W}")
+            win = self.op("Add", [self.op("Sub", [ctx["qpos"], self.const("INT64", W - 1)],
+                                          "/paged/wbase", I, [B, S, 1]), jw],
+                          "/paged/win", I, [B, S, W])
+            # Positions above qpos cannot occur (the offsets stop at W-1); negative ones are the
+            # not-yet-full window and drop out as -1.
+            ctx["winsel"] = self.op(
+                "Where", [self.op("GreaterOrEqual", [win, self.const("INT64", 0)],
+                                  "/paged/wge", BOOL, [B, S, W]),
+                          win, self.const("INT64", -1)],
+                "/paged/winsel", I, [B, S, W])
+        sel = [ctx["winsel"]]
+
+        if ratio:
+            C = self.comp_capacity(ratio)
+            # `DSV4CompressorStateKernel`: first = past / ratio, last = (past + S - 1) / ratio,
+            # row_count = (S - 1) / ratio + 2.  `J` feeds a Range, so it takes the host-side `S`.
+            first_slot = self.op("Div", [ctx["past2"], self.const("INT64", ratio)],
+                                 f"{g}/first", I, [B, 1])
+            last_slot = self.op("Div", [self.op("Sub", [ctx["total2"], self.const("INT64", 1)],
+                                                f"{g}/end", I, [B, 1]),
+                                        self.const("INT64", ratio)], f"{g}/last", I, [B, 1])
+            jm1 = self.op("Sub", [ctx["S"], self.const("INT64", 1)], f"{g}/jm1", I, [])
+            jdiv = self.op("Div", [jm1, self.const("INT64", ratio)], f"{g}/jdiv", I, [])
+            J = self.op("Add", [jdiv, self.const("INT64", 2)], f"{g}/J", I, [])
+
+            # ---- surplus KV rows: the compressor's J candidate rows for this step ----
+            jr = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
+                         f"{g}/jr", I, [None])
+            c = self.op("Add", [jr, first_slot], f"{g}/c", I, [B, None])
+            live = self.op("LessOrEqual", [c, last_slot], f"{g}/clive", BOOL, [B, None])
+            # Clamped so a dead row still indexes the table in range; the -1 slot suppresses it.
+            clog = self.op("Clip", [self.op("Add", [c, self.const("INT64", L)],
+                                            f"{g}/clog", I, [B, None]),
+                                    self.const("INT64", L), self.const("INT64", L + C - 1)],
+                           f"{g}/clogc", I, [B, None])
+            cslot = self.op("Where", [live, to_slot("crow", clog, [B, None], None),
+                                      self.const("INT64", -1)],
+                            f"{g}/cslot", I, [B, None])
+            slots.append(self.reshape(f"{g}/cslotf", cslot, [-1], I, [None]))
+
+            if not self.has_indexer(ratio):
+                # Ratio-128 layers have no indexer: the model attends to all their valid rows.
+                cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
+                qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
+                                              f"{g}/qp1", I, [B, S, 1]),
+                                      self.const("INT64", ratio)], f"{g}/qpr", I, [B, S, 1])
+                sel.append(self.op(
+                    "Where",
+                    [self.op("Less", [self.unsq(f"{g}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
+                             f"{g}/cmask", BOOL, [B, S, C]),
+                     self.op("Add", [cidx, self.const("INT64", L)], f"{g}/cabs", I, [C]),
+                     self.const("INT64", -1)],
+                    f"{g}/csel", I, [B, S, C]))
+
+        slot = (slots[0] if len(slots) == 1 else
+                self.op("Concat", slots, f"{g}/slot", I, [None], axis=0))
+        group = {"slot32": self.cast(f"{g}/slot32", slot, I32, [None]), "sel": sel}
+
+        # Only the indexed groups still owe a per-layer `csel`; everything else finishes here.
+        if not self.has_indexer(ratio):
+            width = W + (self.index_width(ratio) if ratio else 0)
+            kvi = (sel[0] if len(sel) == 1 else
+                   self.op("Concat", sel, f"{g}/sel", I, [B, S, width], axis=-1))
+            group["kvi32"] = self.cast(
+                f"{g}/kvi32", self.reshape(f"{g}/kvi", kvi, [-1, width], I, [None, width]),
+                I32, [None, width])
+
+        memo[ratio] = group
+        return group
+
     def make_paged_attention(self, name, layer_id, ratio, q, kv, x, ctx,
                              qr=None, cos_q=None, sin_q=None):
         """The same attention as one ``com.microsoft.PagedAttention`` node (LATENT layout).
@@ -1278,93 +1396,38 @@ class DeepSeekV4FlashModel(Model):
         could not give, since ``key_cache`` may be touched by exactly one node.
         """
         p = f"layers.{layer_id}.attn"
-        H, D, W, L = self.n_heads_local, self.head_dim, self.window, self.max_seq_len
-        I, I32, BOOL = ir.DataType.INT64, ir.DataType.INT32, ir.DataType.BOOL
+        H, D, W = self.n_heads_local, self.head_dim, self.window
+        I, I32 = ir.DataType.INT64, ir.DataType.INT32
         io = self.io_dtype
-        bsize = self.block_size
         table = f"block_table_{ratio}"
-        table64 = self.cast(f"{name}/bt64", table, I, [B, self.group_blocks(ratio)])
-
-        def to_slot(tag, logical, shape, rows):
-            """Logical position -> flat cache slot, through this group's block table."""
-            blk = self.batched_gather(
-                f"{name}/{tag}/blk", table64,
-                self.op("Div", [logical, self.const("INT64", bsize)], f"{name}/{tag}/bi", I, shape),
-                rows, I, shape)
-            return self.op("Add",
-                           [self.op("Mul", [blk, self.const("INT64", bsize)],
-                                    f"{name}/{tag}/base", I, shape),
-                            self.op("Mod", [logical, self.const("INT64", bsize)],
-                                    f"{name}/{tag}/off", I, shape)],
-                           f"{name}/{tag}/slot", I, shape)
+        grp = self._paged_group(ratio, ctx)
 
         # ---- one stored KV row per token, at its own absolute position ----
         keys = [self.reshape(f"{name}/kpack", kv, [-1, D], io, [None, D])]
-        slots = [self.reshape(f"{name}/tokslot", to_slot("tok", ctx["pos"], [B, S], S),
-                              [-1], I, [None])]
-
-        # ---- selection: the sliding window, as absolute positions ----
-        jw = self.init(torch.arange(W, dtype=torch.int64), f"paged/arange_{W}")
-        win = self.op("Add", [self.op("Sub", [ctx["qpos"], self.const("INT64", W - 1)],
-                                      f"{name}/wbase", I, [B, S, 1]), jw],
-                      f"{name}/win", I, [B, S, W])
-        # Positions above qpos cannot occur (the offsets stop at W-1); negative ones are the
-        # not-yet-full window and drop out as -1.
-        sel = [self.op("Where", [self.op("GreaterOrEqual", [win, self.const("INT64", 0)],
-                                         f"{name}/wge", BOOL, [B, S, W]),
-                                 win, self.const("INT64", -1)],
-                       f"{name}/winsel", I, [B, S, W])]
         presents = {}
+        kvi32 = grp.get("kvi32")
 
         if ratio:
-            rows, first_slot, last_slot, J, _J_g, pkv, psc = self.make_compressor(
+            rows, _first, _last, _J, _J_g, pkv, psc = self.make_compressor(
                 f"{name}/comp", layer_id, ratio, x, ctx)
-            C = self.comp_capacity(ratio)
             presents.update(cstate_kv=pkv, cstate_score=psc)
-
-            # ---- surplus KV rows: the compressor's J candidate rows for this step ----
-            jr = self.op("Range", [self.const("INT64", 0), J, self.const("INT64", 1)],
-                         f"{name}/jr", I, [None])
-            c = self.op("Add", [jr, first_slot], f"{name}/c", I, [B, None])
-            live = self.op("LessOrEqual", [c, last_slot], f"{name}/clive", BOOL, [B, None])
-            # Clamped so a dead row still indexes the table in range; the -1 slot suppresses it.
-            clog = self.op("Clip", [self.op("Add", [c, self.const("INT64", L)],
-                                            f"{name}/clog", I, [B, None]),
-                                    self.const("INT64", L), self.const("INT64", L + C - 1)],
-                           f"{name}/clogc", I, [B, None])
-            cslot = self.op("Where", [live, to_slot("crow", clog, [B, None], None),
-                                      self.const("INT64", -1)],
-                            f"{name}/cslot", I, [B, None])
+            # The rows themselves are per layer; the slots they land in came from the group.
             keys.append(self.reshape(f"{name}/rpack", rows, [-1, D], io, [None, D]))
-            slots.append(self.reshape(f"{name}/cslotf", cslot, [-1], I, [None]))
 
             # ---- selection: which compressed rows this token may look at ----
             if self.has_indexer(ratio):
                 csel, ipres = self.make_indexer(f"{name}/idx", layer_id, ratio, x, qr,
                                                 cos_q, sin_q, ctx)
                 presents.update(ipres)
-            else:
-                # Ratio-128 layers have no indexer: the model attends to all their valid rows.
-                cidx = self.init(torch.arange(C, dtype=torch.int64), f"comp/arange_{C}")
-                qpr = self.op("Div", [self.op("Add", [ctx["qpos"], self.const("INT64", 1)],
-                                              f"{name}/qp1", I, [B, S, 1]),
-                                      self.const("INT64", ratio)], f"{name}/qpr", I, [B, S, 1])
-                csel = self.op(
-                    "Where",
-                    [self.op("Less", [self.unsq(f"{name}/cidx2", cidx, [0, 1], I, [1, 1, C]), qpr],
-                             f"{name}/cmask", BOOL, [B, S, C]),
-                     self.op("Add", [cidx, self.const("INT64", L)], f"{name}/cabs", I, [C]),
-                     self.const("INT64", -1)],
-                    f"{name}/csel", I, [B, S, C])
-            sel.append(csel)
+                width = W + self.index_width(ratio)
+                kvi = self.op("Concat", grp["sel"] + [csel], f"{name}/sel", I,
+                              [B, S, width], axis=-1)
+                kvi32 = self.cast(
+                    f"{name}/kvi32", self.reshape(f"{name}/kvi", kvi, [-1, width], I,
+                                                  [None, width]), I32, [None, width])
 
-        width = W + (self.index_width(ratio) if ratio else 0)
         key = (keys[0] if len(keys) == 1 else
                self.op("Concat", keys, f"{name}/key", io, [None, D], axis=0))
-        slot = (slots[0] if len(slots) == 1 else
-                self.op("Concat", slots, f"{name}/slot", I, [None], axis=0))
-        kvi = (sel[0] if len(sel) == 1 else
-               self.op("Concat", sel, f"{name}/sel", I, [B, S, width], axis=-1))
 
         node = f"{name}/paged"
         out, cache_out = f"{node}/output_0", f"{node}/cache_0"
@@ -1380,13 +1443,11 @@ class DeepSeekV4FlashModel(Model):
                 ctx["past32"],
                 table,
                 "", "",                              # cos/sin: RoPE is applied in the graph
-                self.cast(f"{name}/slot32", slot, I32, [None]),
+                grp["slot32"],
                 self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(H),
                           f"{p}.attn_sink", to=io),
                 "", "", "", "", "",                  # q/k norm, k/v scale, attention_metadata
-                self.cast(f"{name}/kvi32",
-                          self.reshape(f"{name}/kvi", kvi, [-1, width], I, [None, width]),
-                          I32, [None, width]),
+                kvi32,
             ],
             outputs=[out, cache_out],
             name=node,
