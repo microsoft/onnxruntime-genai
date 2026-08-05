@@ -38,6 +38,7 @@ _FFN_RENAMES = {
     "tid2eid": "gate.tid2eid",
 }
 _FFN_KEY = re.compile(r"(layers\.\d+\.ffn)\.(.+)")
+_LAYER_KEY = re.compile(r"layers\.(\d+)\.(.+)")
 _SHARED_KEY = re.compile(r"sw(\d)\.weight")
 _EXPERT_KEY = re.compile(r"layers\.(\d+)\.ffn\.(fc1_q|fc1_s|fc2_q|fc2_s)")
 
@@ -51,10 +52,11 @@ class DSV4Weights(Mapping):
     # Experts are narrowed here, so the builder must not shard them again.
     pre_sharded = True
 
-    def __init__(self, model_dir, expert_range, device="cpu"):
+    def __init__(self, model_dir, expert_range, device="cpu", mtp_base=None):
         self.store = SafeTensorStore(model_dir)
         self.expert_range = expert_range
         self.device = device
+        self.mtp_base = mtp_base
         self._layer = None
         self._experts: dict[str, torch.Tensor] = {}
 
@@ -82,10 +84,24 @@ class DSV4Weights(Mapping):
 
     # -- name mapping ----------------------------------------------------- #
 
+    def _map_layer(self, key):
+        """``layers.{mtp_base + s}.*`` -> ``mtp.{s}.*``.
+
+        The reference numbers a DSpark stage ``n_layers + stage_id`` (model.py:828), so
+        the builder can emit one as an ordinary block and have its names land here.
+        """
+        if self.mtp_base is None:
+            return key
+        m = _LAYER_KEY.fullmatch(key)
+        if m is None or int(m.group(1)) < self.mtp_base:
+            return key
+        return f"mtp.{int(m.group(1)) - self.mtp_base}.{m.group(2)}"
+
     def _resolve(self, key):
         """Builder key -> checkpoint key, or ``None`` if there is no such weight."""
-        if key in self.store:
-            return key
+        mapped = self._map_layer(key)
+        if mapped in self.store:
+            return mapped
         m = _FFN_KEY.fullmatch(key)
         if m is None:
             return None
@@ -97,6 +113,7 @@ class DSV4Weights(Mapping):
             if shared is None:
                 return None
             renamed = f"{base}.shared_experts.w{shared.group(1)}.weight"
+        renamed = self._map_layer(renamed)
         return renamed if renamed in self.store else None
 
     def _scale_key(self, ckpt_key):
@@ -134,7 +151,7 @@ class DSV4Weights(Mapping):
         return self._experts
 
     def _pack_experts(self, layer):
-        prefix = f"layers.{layer}.ffn.experts"
+        prefix = self._map_layer(f"layers.{layer}.ffn.experts")
         lo, hi = self.expert_range
 
         def load(which):

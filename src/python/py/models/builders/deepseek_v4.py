@@ -84,6 +84,9 @@ INT64_MAX = 9223372036854775807
 
 B = "batch_size"
 S = "sequence_length"
+# The drafter's second sequence axis: how many positions the target accepted since
+# the last draft.  Its block axis is `S`, which is `dspark_block_size` there.
+MAIN = "main_len"
 
 
 class DeepSeekV4FlashModel(Model):
@@ -225,6 +228,20 @@ class DeepSeekV4FlashModel(Model):
         self.mtp_target_layers = [i for i in getattr(c, "dspark_target_layer_ids", ())
                                   if i < self.num_layers]
 
+        # `dsv4_graph=mtp` emits the drafter instead of the target.  It is a separate
+        # model because the two run on different schedules -- verify then draft, one
+        # `Run` each -- so there is nothing to gain from sharing a graph, and keeping
+        # them apart leaves the target's measured decode path untouched.
+        self.graph_kind = extra_options.get("dsv4_graph", "target")
+        if self.graph_kind not in ("target", "mtp"):
+            raise ValueError(f"dsv4_graph must be 'target' or 'mtp', got {self.graph_kind!r}")
+        self.dspark_block = int(getattr(c, "dspark_block_size", 0) or 0)
+        self.noise_token = int(getattr(c, "dspark_noise_token_id", 0) or 0)
+        self.markov_rank = int(getattr(c, "dspark_markov_rank", 0) or 0)
+        # `num_nextn_predict_layers` says 1, but the checkpoint carries three full
+        # DSpark stages; trust the tensors, not the config.
+        self.n_mtp = int(extra_options.get("dsv4_mtp_stages", 3))
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -252,6 +269,8 @@ class DeepSeekV4FlashModel(Model):
         # to the model by `save_model`; `location` is a bare basename so the
         # references survive the move.
         self.stream = extra_options.get("dsv4_stream_weights", "1") not in ("0", 0, False)
+        if self.graph_kind == "mtp":
+            self.filename = "mtp.onnx"
         self.writer = (ExternalDataWriter(os.path.join(cache_dir, self.filename + ".data"))
                        if self.stream else None)
 
@@ -265,6 +284,7 @@ class DeepSeekV4FlashModel(Model):
                 ckpt,
                 expert_range=(self.expert_lo, self.expert_lo + self.n_experts_local),
                 device=extra_options.get("dsv4_repack_device", "cpu"),
+                mtp_base=self.num_layers,
             )
 
         self._make_dsv4_io()
@@ -331,6 +351,9 @@ class DeepSeekV4FlashModel(Model):
             "dsv4_indexer": "1" if self.indexer else "0",
             "dsv4_index_topk": str(self.index_topk),
         })
+
+        if self.graph_kind == "mtp":
+            return self._make_mtp_io()
 
         self.input_names = {"input_ids": "input_ids", "past_lens": "past_lens"}
         self.input_types = {"input_ids": ir.DataType.INT64, "past_lens": ir.DataType.INT64}
@@ -1958,10 +1981,16 @@ class DeepSeekV4FlashModel(Model):
                 self.make_node("Identity", inputs=[val], outputs=[out], name=f"/out/{out}")
             if self.mtp and layer_id in self.mtp_target_layers:
                 # The carried `h` is the post-mix residual, which is what the reference
-                # appends before the next block runs.
+                # appends before the next block runs.  The reduction runs in float
+                # because there is no bfloat16 ReduceMean on CUDA and an unplaced node
+                # fails session init outright.
+                hf = self.cast(f"/mtp/hcf.{layer_id}", h, ir.DataType.FLOAT,
+                               [B, S, self.hc, dim])
+                mean = self.op("ReduceMean", [hf, self.const("INT64", [2])],
+                               f"/mtp/hcmean.{layer_id}", ir.DataType.FLOAT,
+                               [B, S, dim], keepdims=0)
                 main_hiddens.append(
-                    self.op("ReduceMean", [h, self.const("INT64", [2])],
-                            f"/mtp/hcmean.{layer_id}", io, [B, S, dim], keepdims=0))
+                    self.cast(f"/mtp/hcb.{layer_id}", mean, io, [B, S, dim]))
         if main_hiddens:
             self.make_node("Concat", inputs=main_hiddens, outputs=["main_hidden"],
                            name="/mtp/main_hidden", axis=-1)
@@ -2004,6 +2033,321 @@ class DeepSeekV4FlashModel(Model):
             self.make_node("Cast", inputs=[lg], outputs=["logits"], name="/logits",
                            to=int(ir.DataType.FLOAT))
 
+    # ------------------------------------------------------------------ #
+    # DSpark drafter
+    # ------------------------------------------------------------------ #
+
+    def _make_mtp_io(self):
+        """One draft pass: eat the target's new main states, emit a block of ids.
+
+        ``main_hidden`` carries every position the target accepted since the last draft,
+        not just the newest one.  The ring holds one row per accepted position, so
+        feeding them one at a time would need a ``Run`` per token and defeat the point;
+        taking the whole run at once keeps the cache exact for any accept length.
+        """
+        W, D, K = self.window, self.head_dim, self.dspark_block
+        self.model.metadata_props.update({
+            "dsv4_mtp_stages": str(self.n_mtp),
+            "dsv4_mtp_block_size": str(K),
+            "dsv4_mtp_noise_token": str(self.noise_token),
+            "dsv4_window": str(W),
+        })
+        self.input_names = {n: n for n in ("main_hidden", "input_ids", "past_lens")}
+        self.input_types = {"main_hidden": self.io_dtype, "input_ids": ir.DataType.INT64,
+                            "past_lens": ir.DataType.INT64}
+        self.input_shapes = {
+            "main_hidden": [B, MAIN, self.dim * len(self.mtp_target_layers)],
+            "input_ids": [B, 1], "past_lens": [B]}
+        self.output_names = {"output_ids": "output_ids", "confidence": "confidence"}
+        self.output_types = {"output_ids": ir.DataType.INT64, "confidence": ir.DataType.FLOAT}
+        self.output_shapes = {"output_ids": [B, K + 1], "confidence": [B, K]}
+        self.cache_spec = []
+        for s in range(self.n_mtp):
+            lid = self.num_layers + s
+            self.cache_spec.append((lid, "kv"))
+            for side, pre in (("input", "past"), ("output", "present")):
+                getattr(self, f"{side}_names")[f"{pre}_kv_{lid}"] = f"{pre}_kv_{lid}"
+                getattr(self, f"{side}_types")[f"{pre}_kv_{lid}"] = self.io_dtype
+                getattr(self, f"{side}_shapes")[f"{pre}_kv_{lid}"] = [B, W, D]
+
+    def make_dspark_attention(self, name, lid, x, main_x, ctx):
+        """Dense MQA over the window ring of main states plus the draft block itself.
+
+        ``get_dspark_topk_idxs`` (model.py:744) hands every query the same row set --
+        every live ring row and every row of the draft block -- so the reference's
+        ``sparse_attn`` is dense here, and the block attends to itself in both
+        directions rather than causally.
+        """
+        p = f"layers.{lid}.attn"
+        H, D, rd, npd = self.n_heads_local, self.head_dim, self.rope_head_dim, self.nope_dim
+        G, R, W = self.o_groups_local, self.o_lora_rank, self.window
+        dh = self.n_heads * self.head_dim // self.o_groups
+        F = ir.DataType.FLOAT
+        io = self.io_dtype
+        kv_w = self.init_w(f"{p}.kv_norm.weight", to=F)
+
+        def rope_last(tag, t, shape, c, s, inverse=False):
+            n_ = self.slice1(f"{tag}/nope", t, 0, npd, io, shape[:-1] + [npd])
+            r_ = self.slice1(f"{tag}/rope", t, npd, INT64_MAX, io, shape[:-1] + [rd])
+            r_ = self.cast(f"{tag}/ropef", r_, F, shape[:-1] + [rd])
+            r_ = self.make_rope(f"{tag}/rot", r_, c, s, shape[:-1] + [rd], inverse=inverse)
+            r_ = self.cast(f"{tag}/ropeb", r_, io, shape[:-1] + [rd])
+            return self.op("Concat", [n_, r_], tag, io, shape, axis=-1)
+
+        def kv_tail(tag, t, shape, c, s):
+            t = rope_last(f"{tag}/rope", t, shape, c, s)
+            n_ = self.slice1(f"{tag}/n", t, 0, npd, io, shape[:-1] + [npd])
+            r_ = self.slice1(f"{tag}/r", t, npd, INT64_MAX, io, shape[:-1] + [rd])
+            n_ = self.make_act_quant(f"{tag}/aq",
+                                     self.cast(f"{tag}/nf", n_, F, shape[:-1] + [npd]),
+                                     shape[:-1] + [npd])
+            n_ = self.cast(f"{tag}/nb", n_, io, shape[:-1] + [npd])
+            return self.op("Concat", [n_, r_], tag, io, shape, axis=-1)
+
+        # ---- the accepted run's main states land in the ring ----
+        mkv = self.proj(f"{name}/mkv", main_x, f"{p}.wkv.weight", [B, MAIN, D])
+        mkv = self.make_rmsnorm(f"{name}/mkvn", mkv, kv_w, [B, MAIN, D])
+        mkv = self.cast(f"{name}/mkvb", mkv, io, [B, MAIN, D])
+        mkv = kv_tail(f"{name}/mkv2", mkv, [B, MAIN, D], ctx["mcos"], ctx["msin"])
+        ring = f"present_kv_{lid}"
+        self.make_node("ScatterND", inputs=[f"past_kv_{lid}", ctx["ring_idx"], mkv],
+                       outputs=[ring], name=f"{name}/ring")
+
+        # ---- the draft block's own q and kv ----
+        qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
+        nd_ = io if self.norm_bf16 else F
+        qn = self.make_rmsnorm(f"{name}/qnorm", qa, self.init_w(f"{p}.q_norm.weight", to=nd_),
+                               [B, S, self.q_lora_rank], dtype=nd_)
+        if nd_ != io:
+            qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
+        q = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
+        q = self.reshape(f"{name}/q4", q, [0, 0, H, D], io, [B, S, H, D])
+        q = self.make_weightless_rmsnorm(f"{name}/qrms", q, [B, S, H, D], io)
+        q = rope_last(f"{name}/qrope", q, [B, S, H, D], ctx["cos_q"], ctx["sin_q"])
+
+        kv = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
+        kv = self.make_rmsnorm(f"{name}/kvn", kv, kv_w, [B, S, D])
+        kv = self.cast(f"{name}/kvb", kv, io, [B, S, D])
+        kv = kv_tail(f"{name}/kv2", kv, [B, S, D], ctx["cos"], ctx["sin"])
+
+        k = self.op("Concat", [ring, kv], f"{name}/keys", io, [B, W + self.dspark_block, D],
+                    axis=1)
+        qf = self.cast(f"{name}/qf", q, F, [B, S, H, D])
+        kf = self.cast(f"{name}/kf", k, F, [B, W + self.dspark_block, D])
+        n_keys = W + self.dspark_block
+        scores = self.op("Einsum", [qf, kf], f"{name}/scores", F, [B, S, H, n_keys],
+                         equation="bshd,bnd->bshn")
+        scores = self.op("Mul", [scores, self.const("FLOAT", self.softmax_scale)],
+                         f"{name}/scaled", F, [B, S, H, n_keys])
+        scores = self.op("Where", [ctx["kmask"], scores, self.const("FLOAT", NEG_INF)],
+                         f"{name}/masked", F, [B, S, H, n_keys])
+        smx = self.op("ReduceMax", [scores, self.const("INT64", [-1])], f"{name}/smax",
+                      F, [B, S, H, 1], keepdims=1)
+        pex = self.op("Exp", [self.op("Sub", [scores, smx], f"{name}/shift", F,
+                                      [B, S, H, n_keys])],
+                      f"{name}/exp", F, [B, S, H, n_keys])
+        denom = self.op("ReduceSum", [pex, self.const("INT64", [-1])], f"{name}/den",
+                        F, [B, S, H, 1], keepdims=1)
+        sink = self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(1, 1, H, 1),
+                         f"{p}.attn_sink")
+        sink_e = self.op("Exp", [self.op("Sub", [sink, smx], f"{name}/sinkshift", F,
+                                        [B, S, H, 1])],
+                         f"{name}/sinkexp", F, [B, S, H, 1])
+        denom = self.op("Add", [denom, sink_e], f"{name}/den2", F, [B, S, H, 1])
+        o = self.op("Einsum", [pex, kf], f"{name}/ctx", F, [B, S, H, D],
+                    equation="bshn,bnd->bshd")
+        o = self.op("Div", [o, denom], f"{name}/norm", F, [B, S, H, D])
+        o = self.cast(f"{name}/ob", o, io, [B, S, H, D])
+
+        o = rope_last(f"{name}/orope", o, [B, S, H, D], ctx["cos_q"], ctx["sin_q"], inverse=True)
+        o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
+        o = self.op("Transpose", [o], f"{name}/ot", io, [G, B, S, dh], perm=[2, 0, 1, 3])
+        o = self.reshape(f"{name}/of", o, [G, -1, dh], io, [G, None, dh])
+        wa = self.shard(self.sd[f"{p}.wo_a.weight"].reshape(self.o_groups, R, dh), 0)
+        o = self.op("MatMul", [o, self.init(wa.transpose(1, 2), f"{p}.wo_a/G", to=io)],
+                    f"{name}/oa", io, [G, None, R])
+        o = self.op("Transpose", [o], f"{name}/oat", io, [None, G, R], perm=[1, 0, 2])
+        o = self.reshape(f"{name}/oaf", o, [-1, G * R], io, [None, G * R])
+        o = self.proj(f"{name}/ob2", o, f"{p}.wo_b.weight", [None, self.dim], shard_axis=1)
+        o = self.all_reduce(f"{name}/ar", o, io, [None, self.dim])
+        return self.dyn_reshape(f"{name}/out", o, ctx["bs"], [self.dim], io, [B, S, self.dim])
+
+    def make_dspark_block(self, stage, h, y, post, comb, main_x, ctx):
+        lid = self.num_layers + stage
+        n, p = f"/mtp.{stage}", f"layers.{lid}"
+        bs = [B, S]
+        a = self.make_dspark_attention(f"{n}/attn", lid, y, main_x, ctx)
+        h, post, comb, y = self.make_hc_mix(
+            f"{n}/hc_attn_post", a, h, post, comb,
+            (f"{n}/hc_ffn", f"{n}/ffn_norm", f"{p}.hc_ffn", f"{p}.ffn_norm.weight"), bs)
+        f_ = self.make_moe(f"{n}/ffn", lid, y, ctx)
+        if stage + 1 < self.n_mtp:
+            nl = lid + 1
+            h, post, comb, y = self.make_hc_mix(
+                f"{n}/hc_ffn_post", f_, h, post, comb,
+                (f"/mtp.{stage + 1}/hc_attn", f"/mtp.{stage + 1}/attn_norm",
+                 f"layers.{nl}.hc_attn", f"layers.{nl}.attn_norm.weight"), bs)
+        else:
+            h = self.make_hc_post(f"{n}/hc_ffn_post", f_, h, post, comb, bs)
+            y = post = comb = None
+        return h, y, post, comb
+
+    def make_mtp_graph(self):
+        F, I, BOOL = ir.DataType.FLOAT, ir.DataType.INT64, ir.DataType.BOOL
+        io, hc, dim = self.io_dtype, self.hc, self.dim
+        W, D, K, rd = self.window, self.head_dim, self.dspark_block, self.rope_head_dim
+        first, last = self.num_layers, self.num_layers + self.n_mtp - 1
+
+        self.make_inputs_and_outputs()
+        self.make_rope_tables()
+
+        shp = self.op("Shape", ["input_ids"], "/shape", I, [2])
+        bv = self.op("Gather", [shp, self.const("INT64", 0)], "/batch", I, [], axis=0)
+        bv1 = self.unsq("/bv1", bv, [0], I, [1])
+        # Every block tensor is [B, K]; `S` is the draft block length in this graph.
+        bs = self.op("Concat", [bv1, self.const("INT64", [K])], "/bs", I, [2], axis=0)
+
+        mshape = self.op("Shape", ["main_hidden"], "/mshape", I, [3])
+        Mv = self.op("Gather", [mshape, self.const("INT64", 1)], "/mlen", I, [], axis=0)
+        Mv1 = self.unsq("/mlen1", Mv, [0], I, [1])
+        mrng = self.op("Range", [self.const("INT64", 0), Mv, self.const("INT64", 1)],
+                       "/mrange", I, [MAIN])
+        past2 = self.unsq("/past2", "past_lens", [1], I, [B, 1])
+        mpos = self.op("Add", [mrng, past2], "/mpos", I, [B, MAIN])
+        # The draft block sits immediately after the accepted run (model.py:772).
+        dpos = self.op("Add", [self.init(torch.arange(K, dtype=torch.int64), "/draft_arange"),
+                               self.op("Add", [past2, Mv], "/dstart", I, [B, 1])],
+                       "/dpos", I, [B, S])
+
+        def gather_rope(tag, pos, shape):
+            c = self.op("Gather", ["rope/cos_0", pos], f"{tag}/cos", F, shape, axis=0)
+            s = self.op("Gather", ["rope/sin_0", pos], f"{tag}/sin", F, shape, axis=0)
+            return c, s
+
+        mcos, msin = gather_rope("/rope/main", mpos, [B, MAIN, rd])
+        cos, sin = gather_rope("/rope/draft", dpos, [B, S, rd])
+
+        # ScatterND writes one ring row per accepted position; the ring index is the
+        # absolute position mod the window, exactly as model.py:783 does for one row.
+        bidx = self.op("Expand", [self.unsq("/bidx1", self.op("Range", [self.const("INT64", 0),
+                                                                       bv, self.const("INT64", 1)],
+                                                              "/brange", I, [B]), [1], I, [B, 1]),
+                                  self.op("Concat", [bv1, Mv1], "/bmshape", I, [2], axis=0)],
+                       "/bidx", I, [B, MAIN])
+        slot = self.op("Mod", [mpos, self.const("INT64", W)], "/slot", I, [B, MAIN])
+        ring_idx = self.op("Concat", [self.unsq("/bidx2", bidx, [2], I, [B, MAIN, 1]),
+                                      self.unsq("/slot2", slot, [2], I, [B, MAIN, 1])],
+                           "/ring_idx", I, [B, MAIN, 2], axis=-1)
+
+        # A ring row is live once the sequence has reached it.  The draft rows are always
+        # live, so they ride along as position -1, which is below any total.
+        jext = torch.cat([torch.arange(W, dtype=torch.int64), torch.full((K,), -1, dtype=torch.int64)])
+        kmask = self.op("Less", [self.init(jext, "/jext"),
+                                 self.op("Add", [past2, Mv], "/total", I, [B, 1])],
+                        "/kmask", BOOL, [B, W + K])
+        kmask = self.unsq("/kmask4", kmask, [1, 2], BOOL, [B, 1, 1, W + K])
+
+        nd_ = io if self.norm_bf16 else F
+        main_x = self.proj("/mtp/main_proj", "main_hidden", f"layers.{first}.main_proj.weight",
+                           [B, MAIN, dim])
+        main_x = self.make_rmsnorm("/mtp/main_norm", main_x,
+                                   self.init_w(f"layers.{first}.main_norm.weight", to=nd_),
+                                   [B, MAIN, dim], dtype=nd_)
+        if nd_ != io:
+            main_x = self.cast("/mtp/main_norm_b", main_x, io, [B, MAIN, dim])
+
+        ctx = {"bs": bs, "mcos": mcos, "msin": msin, "cos": cos, "sin": sin,
+               "cos_q": self.unsq("/rope/cosq", cos, [2], F, [B, S, 1, rd]),
+               "sin_q": self.unsq("/rope/sinq", sin, [2], F, [B, S, 1, rd]),
+               "ring_idx": ring_idx, "kmask": kmask}
+
+        # The block is the accepted token followed by noise; the drafter fills it in one
+        # pass rather than autoregressively (model.py:855).
+        noise = self.op("Expand", [self.const("INT64", self.noise_token),
+                                   self.op("Concat", [bv1, self.const("INT64", [K - 1])],
+                                           "/noiseshape", I, [2], axis=0)],
+                        "/noise", I, [B, K - 1])
+        draft_ids = self.op("Concat", ["input_ids", noise], "/draft_ids", I, [B, S], axis=1)
+        emb = self.op("Gather", [self.init_w("embed.weight", to=io), draft_ids],
+                      "/mtp/embed", io, [B, S, dim], axis=0)
+        h = self.op("Expand", [self.unsq("/mtp/embed_u", emb, [2], io, [B, S, 1, dim]),
+                               self.op("Concat", [bs, self.const("INT64", [hc, dim])],
+                                       "/hc_expand_shape", I, [4], axis=0)],
+                    "/mtp/hc_expand", io, [B, S, hc, dim])
+
+        y, post, comb = self.make_hc_pre(f"/mtp.0/hc_attn", h, f"layers.{first}.hc_attn", [B, S])
+        y = self.make_hc_norm(f"/mtp.0/attn_norm", y, f"layers.{first}.attn_norm.weight", [B, S])
+        for stage in range(self.n_mtp):
+            h, y, post, comb = self.make_dspark_block(stage, h, y, post, comb, main_x, ctx)
+
+        x = self.make_hc_head("/mtp/hc_head", h, f"layers.{last}.hc_head", [B, S])
+        n_ = self.make_rmsnorm("/mtp/norm", x, self.init_w(f"layers.{last}.norm.weight", to=nd_),
+                               [B, S, dim], dtype=nd_)
+        if nd_ != io:
+            n_ = self.cast("/mtp/norm_b", n_, io, [B, S, dim])
+        logits = self.make_mtp_logits(n_)
+        self.make_mtp_head(x, logits)
+
+    def make_mtp_logits(self, n_):
+        """The drafter shares the target's lm head (model.py:903)."""
+        F, io, V = ir.DataType.FLOAT, self.io_dtype, self.vocab_size
+        if self.lm_head_shard and self.world > 1 and V % self.world == 0:
+            vloc = V // self.world
+            lg = self.op("MatMul", [n_, self.init(self.shard(self.sd["head.weight"], 0).T,
+                                                  "head/T", to=io)], "/mtp/lm_head", io,
+                         [B, S, vloc])
+            lgf = self.cast("/mtp/lm_head_f", lg, F, [B, S, vloc])
+            pads = [0, 0, self.rank * vloc, 0, 0, (self.world - 1 - self.rank) * vloc]
+            wide = self.op("Pad", [lgf, self.const("INT64", pads)], "/mtp/lm_head_pad",
+                           F, [B, S, V])
+            return self.all_reduce("/mtp/logits", wide, F, [B, S, V])
+        lg = self.op("MatMul", [n_, self.init(self.sd["head.weight"].T, "head/T", to=io)],
+                     "/mtp/lm_head", io, [B, S, V])
+        return self.cast("/mtp/logits", lg, F, [B, S, V])
+
+    def make_mtp_head(self, x, logits):
+        """Sample the block through the rank-256 Markov head (model.py:864).
+
+        Only this head runs autoregressively -- the transformer above produced all ``K``
+        positions in one pass -- so the loop is ``K`` narrow GEMVs, not ``K`` blocks.
+        Both Markov tensors are replicated rather than sharded: they are 66 MiB each,
+        and sharding them would put a full-vocabulary collective inside the loop.
+        """
+        F, I, io = ir.DataType.FLOAT, ir.DataType.INT64, self.io_dtype
+        K, V, R, last = self.dspark_block, self.vocab_size, self.markov_rank, \
+            self.num_layers + self.n_mtp - 1
+        mp = f"layers.{last}.markov_head"
+        w1 = self.init_w(f"{mp}.markov_w1.weight", to=io)
+        w2 = self.init(self.sd[f"{mp}.markov_w2.weight"].T, f"{mp}.markov_w2/T", to=io)
+
+        cur = self.op("Squeeze", ["input_ids", self.const("INT64", [1])], "/mtp/tok0", I, [B])
+        ids, embeds = [cur], []
+        for i in range(K):
+            e = self.op("Gather", [w1, cur], f"/mtp/mk{i}/embed", io, [B, R], axis=0)
+            embeds.append(e)
+            bias = self.op("MatMul", [e, w2], f"/mtp/mk{i}/bias", io, [B, V])
+            li = self.op("Add", [self.op("Gather", [logits, self.const("INT64", i)],
+                                         f"/mtp/mk{i}/slice", F, [B, V], axis=1),
+                                 self.cast(f"/mtp/mk{i}/biasf", bias, F, [B, V])],
+                         f"/mtp/mk{i}/logits", F, [B, V])
+            cur = self.op("ArgMax", [li], f"/mtp/mk{i}/argmax", I, [B], axis=-1, keepdims=0)
+            ids.append(cur)
+
+        self.make_node("Concat", inputs=[self.unsq(f"/mtp/id{i}", t, [1], I, [B, 1])
+                                         for i, t in enumerate(ids)],
+                       outputs=["output_ids"], name="/mtp/output_ids", axis=1)
+
+        me = self.op("Concat", [self.unsq(f"/mtp/me{i}", e, [1], io, [B, 1, R])
+                                for i, e in enumerate(embeds)],
+                     "/mtp/markov_embed", io, [B, S, R], axis=1)
+        cin = self.op("Concat", [x, me], "/mtp/conf_in", io, [B, S, self.dim + R], axis=-1)
+        cw = self.init(self.sd[f"layers.{last}.confidence_head.proj.weight"].T,
+                       "confidence/T", to=F)
+        conf = self.op("MatMul", [self.cast("/mtp/conf_f", cin, F, [B, S, self.dim + R]), cw],
+                       "/mtp/conf", F, [B, S, 1])
+        self.make_node("Squeeze", inputs=[conf, self.const("INT64", [2])],
+                       outputs=["confidence"], name="/mtp/confidence")
+
     def save_model(self, out_dir):
         if self.writer is None:
             return super().save_model(out_dir)
@@ -2024,4 +2368,7 @@ class DeepSeekV4FlashModel(Model):
     def make_model(self, input_path):
         if not self.sd:
             raise ValueError("state dict must be populated (see load_dsv4_weights) before building")
+        if self.graph_kind == "mtp":
+            self.make_mtp_graph()
+            return
         self.make_dsv4_graph()

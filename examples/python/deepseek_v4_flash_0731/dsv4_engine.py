@@ -134,6 +134,16 @@ class _Worker:
             so.enable_profiling = True
             so.profile_file_prefix = f"/tmp/dsv4_prof_rank{rank}"
         path = os.path.join(model_dir, f"rank_{rank}", "model.onnx")
+        # Speculation runs the target over a block of candidates, so the decode shape
+        # changes from step to step and the session must not be in CUDA graph mode at
+        # all -- with `enable_cuda_graph` on, a run that is not given an explicit
+        # graph id is captured and then replayed against whatever it recorded.
+        # Capture is worth nothing here anyway: the step is GPU-bound, not
+        # launch-bound (12.163 ms captured vs 12.156 ms not).
+        mtp_path = os.path.join(model_dir, f"rank_{rank}", "mtp.onnx")
+        self.has_mtp = (os.path.exists(mtp_path)
+                        and os.environ.get("DSV4_NO_MTP") != "1")
+        cuda_graph = cuda_graph and not self.has_mtp
         # A decode step launches ~23k kernels but keeps the GPU busy only ~28% of the
         # step, so the wall clock is set by launch dispatch rather than by any kernel.
         # Capturing the step collapses those launches into one graph replay.
@@ -159,10 +169,31 @@ class _Worker:
         self.load_s = time.time() - t0
         self.rank = rank
 
+        # The DSpark drafter, if this export carries one.  It is a second session over
+        # the same devices; ORT's NCCL communicator is a function-local static
+        # (nccl_kernels.cc:255), so both graphs share one communicator and there is no
+        # second rendezvous to collide with.
+        self.mtp = None
+        if self.has_mtp:
+            self.mtp = ort.InferenceSession(mtp_path, so, providers=["CUDAExecutionProvider"])
+            mm = self.mtp.get_modelmeta().custom_metadata_map
+            self.mtp_block = int(mm["dsv4_mtp_block_size"])
+            self.mtp_window = int(mm["dsv4_window"])
+            self.mtp_cache_in = [i.name for i in self.mtp.get_inputs()
+                                 if i.name.startswith("past_kv_")]
+            self.mtp_cache_out = ["present" + n[4:] for n in self.mtp_cache_in]
+
         ins, outs = self.sess.get_inputs(), self.sess.get_outputs()
         if [i.name for i in ins[:2]] != ["input_ids", "past_lens"]:
             raise ProtocolError("unexpected graph inputs: %s" % [i.name for i in ins[:3]])
         self.vocab = int(outs[0].shape[-1])
+
+        # `main_hidden` is the DSpark drafting contract, not a cache: it is produced
+        # fresh every step and never fed back in.
+        out_names = [o.name for o in outs]
+        self.mtp_dim = (int(outs[out_names.index("main_hidden")].shape[-1])
+                        if "main_hidden" in out_names else 0)
+        self._mh = {}
 
         meta = self.sess.get_modelmeta().custom_metadata_map
         self.paged = meta.get("dsv4_paged") == "1"
@@ -179,13 +210,19 @@ class _Worker:
         cache_ins = [i for i in ins[2:] if i.name not in self.const_in]
 
         self.cache_in = [i.name for i in cache_ins]
-        self.cache_out = [o.name for o in outs[1:] if o.name != PROBE_OUTPUT]
+    self.cache_out = [o.name for o in outs[1:]
+              if o.name not in ("main_hidden", PROBE_OUTPUT)]
         if len(self.cache_in) != len(self.cache_out):
             raise ProtocolError("past/present count mismatch")
         self._init_probe(outs)
         # Pooled entries are addressed by the block table, so their first dimension is
         # blocks rather than rows and they must never be sliced per batch row.
         self._pooled = [n in getattr(self, "pool_blocks", {}) for n in self.cache_in]
+        # The compressor and indexer window states are the one kind of cache that is
+        # NOT addressed by absolute position: each run re-cuts them to the last L raw
+        # projections, so a run advances them by however many positions it consumed.
+        # Speculation accepts fewer than it runs, so they have to be re-cut by hand.
+        self._slide = ["cstate" in n for n in self.cache_in]
 
         # Two full copies of the cache, allocated once and ping-ponged.  The paged
         # kv cache is the exception: PagedAttention updates it in place and ORT
@@ -286,6 +323,8 @@ class _Worker:
         self.g_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
         self.g_past = torch.zeros((self.batch,), dtype=torch.int64, device="cuda")
         self.g_logits = self._logits_buf(1, self.batch)
+        if self.mtp_dim:
+            self.g_mh = self._mh_buf(1, self.batch)
 
         # Prefill is not capturable -- every chunk is a different shape -- so it runs
         # under the reserved id that tells the EP to skip capture entirely.
@@ -302,7 +341,10 @@ class _Worker:
             for name, t in ([("input_ids", self.g_ids), ("past_lens", self.g_past)]
                             + list(self.const_in.items()) + list(zip(self.cache_in, src))):
                 io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
-            for name, t in [("logits", self.g_logits)] + list(zip(self.cache_out, dst)):
+            outs = [("logits", self.g_logits)] + list(zip(self.cache_out, dst))
+            if self.mtp_dim:
+                outs.append(("main_hidden", self.g_mh))
+            for name, t in outs:
                 io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
             self._graph_io.append(io)
 
@@ -402,16 +444,27 @@ class _Worker:
             self._logits[(rows, seq_len)] = buf
         return buf
 
-    def _step(self, ids, past_t, row=None):
+    def _mh_buf(self, seq_len, rows):
+        """The main-hidden output, sized like the logits buffer and kept per shape."""
+        buf = self._mh.get((rows, seq_len))
+        if buf is None:
+            buf = self.torch.empty((rows, seq_len, self.mtp_dim),
+                                   dtype=self.torch.bfloat16, device="cuda")
+            self._mh = {k: v for k, v in self._mh.items() if k[1] <= 8}
+            self._mh[(rows, seq_len)] = buf
+        return buf
+
+    def _step(self, ids, past_t, row=None, full=False):
         """One session run.  Returns the final position's logits, one row per sequence.
 
         ``row`` restricts the run to a single batch row, which is how prefill works:
         prompts have different lengths, so each sequence is filled independently.
         Pooled kv entries are shared and reached through the block table, so only the
-        row-shaped caches and block tables get sliced.
+        row-shaped caches and block tables get sliced.  ``full`` returns every
+        position's logits, which is what verifying a speculated block needs.
         """
         torch = self.torch
-        if row is None and self._graph_io is not None and ids.shape[1] == 1:
+        if row is None and self._graph_io is not None and ids.shape[1] == 1 and not full:
             return self._step_captured(ids, past_t)
         src, dst = self.cache[self.cur], self.cache[1 - self.cur]
         sl = slice(None) if row is None else slice(row, row + 1)
@@ -428,6 +481,9 @@ class _Worker:
         outputs = ([("logits", logits)]
                    + [(n, t if p else t[sl])
                       for n, t, p in zip(self.cache_out, dst, self._pooled)])
+        if self.mtp_dim:
+            self.mh_last = self._mh_buf(ids.shape[1], rows)
+            outputs.append(("main_hidden", self.mh_last))
         for name, t in outputs:
             io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
         if self._probe is not None:
@@ -439,7 +495,7 @@ class _Worker:
             torch.maximum(self._probe_max, self._probe, out=self._probe_max)
 
         self.cur = 1 - self.cur
-        return logits[:, -1]
+        return logits if full else logits[:, -1]
 
     def _init_probe(self, outs):
         """Wire up the range probes that probe_ranges.py adds to a model, if present.
@@ -474,6 +530,8 @@ class _Worker:
             take = min(chunk, ids.shape[1])
             past_t = torch.full((1,), past, dtype=torch.int64, device="cuda")
             logits = self._step(ids[:, :take], past_t, row=b)
+            if self.mtp is not None:
+                self._push_main(self.mh_last)
             past += take
             ids = ids[:, take:]
         for j, pooled in enumerate(self._pooled):
@@ -504,6 +562,8 @@ class _Worker:
                 t.zero_()
         self.cur = 0
         self._abort = False
+        if self.mtp is not None:
+            self._init_mtp_state()
 
         lens = [len(p) for p in prompts]
         limits = [max(0, min(max_new_tokens, self.max_seq_len - n if self.max_seq_len
@@ -542,6 +602,8 @@ class _Worker:
         and holding the batch shape fixed is what lets the step stay a replayable
         graph.
         """
+        if self.mtp is not None and self.dist_ready and self.batch == 1:
+            return self._generate_spec(prompts, max_new_tokens, eos_token_ids, chan)
         if self.dist_ready and os.environ.get("DSV4_HOST_TOKEN_SYNC") != "1":
             return self._generate_device(prompts, max_new_tokens, eos_token_ids, chan)
         return self._generate_host(prompts, max_new_tokens, eos_token_ids, chan)
@@ -688,6 +750,199 @@ class _Worker:
         if self.rank == 0:
             out["disagreements"] = (self._disagreements(hist, last + 1)
                                     if max_steps and last >= 0 else [])
+        return out
+
+    # -- decode: DSpark speculation ---------------------------------------- #
+
+    def _init_mtp_state(self):
+        """Ring caches for the drafter, plus the rolling window of main states.
+
+        The drafter's attention reads a `window`-row ring of main states, one row per
+        position the target has committed.  Priming it needs the last `window` rows of
+        the prompt's `main_hidden`, so prefill keeps them in `mh_hist` as it goes.
+        """
+        torch = self.torch
+        W, B = self.mtp_window, self.batch
+        self.mtp_cache = [torch.zeros((B, W, int(i.shape[-1])), dtype=torch.bfloat16,
+                                      device="cuda")
+                          for i in self.mtp.get_inputs() if i.name.startswith("past_kv_")]
+        self.mh_hist = torch.zeros((B, W, self.mtp_dim), dtype=torch.bfloat16, device="cuda")
+        self.mh_valid = 0
+
+    def _push_main(self, mh):
+        """Append this run's main states to the rolling window, newest last."""
+        W = self.mtp_window
+        k = min(mh.shape[1], W)
+        if k < W:
+            self.mh_hist[:, :W - k] = self.mh_hist[:, k:].clone()
+        self.mh_hist[:, W - k:] = mh[:, -k:]
+        self.mh_valid = min(self.mh_valid + mh.shape[1], W)
+
+    def _draft(self, tok, past):
+        """One drafter run: `block` candidate ids continuing `tok` at position `past`.
+
+        `main_hidden` carries every position committed since the last draft, so the
+        ring stays exact however many tokens the last verify accepted.
+        """
+        torch = self.torch
+        M = self.mh_valid
+        mh = self.mh_hist[:, self.mtp_window - M:].contiguous()
+        past_t = torch.full((self.batch,), past - M, dtype=torch.int64, device="cuda")
+        out_ids = torch.empty((self.batch, self.mtp_block + 1), dtype=torch.int64, device="cuda")
+        conf = torch.empty((self.batch, self.mtp_block), dtype=torch.float32, device="cuda")
+        nxt = [torch.empty_like(t) for t in self.mtp_cache]
+
+        io = self.mtp.io_binding()
+        for name, t in ([("main_hidden", mh), ("input_ids", tok), ("past_lens", past_t)]
+                        + list(zip(self.mtp_cache_in, self.mtp_cache))):
+            io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
+        for name, t in ([("output_ids", out_ids), ("confidence", conf)]
+                        + list(zip(self.mtp_cache_out, nxt))):
+            io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
+        torch.cuda.current_stream().synchronize()
+        self.mtp.run_with_iobinding(io)
+        self.mtp_cache = nxt
+        self.mh_valid = 0
+        return out_ids, conf
+
+    def _reslide(self, keep, ran):
+        """Re-cut the compressor windows from `ran` positions consumed to `keep` kept.
+
+        Both ends are already on hand: the run's input window is the other ping-pong
+        copy, and its own new rows are the tail of its output, so the window that
+        would have followed a `keep`-token run is just a different cut of the two.
+        """
+        if keep == ran:
+            return
+        torch = self.torch
+        post, pre = self.cache[self.cur], self.cache[1 - self.cur]
+        for i, slide in enumerate(self._slide):
+            if not slide:
+                continue
+            L = post[i].shape[1]
+            if ran > L:
+                raise ProtocolError(f"verify of {ran} exceeds the {L}-row window state")
+            post[i].copy_(torch.cat([pre[i][:, keep:],
+                                     post[i][:, L - ran:L - ran + keep]], dim=1))
+
+    def _generate_spec(self, prompts, max_new_tokens, eos_token_ids, chan):
+        """Draft a block with DSpark, verify it with the target, keep the prefix.
+
+        The target's own prediction at the first rejected position is always kept, so
+        a step commits at least one token and the emitted text is exactly what plain
+        decoding would have produced -- the drafter can only change the speed.
+
+        Nothing rolls the caches back on a partial accept.  The paged kv is addressed
+        by absolute position, and the compressor and indexer states are rolling buffers
+        of raw projections addressed the same way (deepseek_v4.py:960), so re-running
+        from the accepted position overwrites exactly the rejected entries.
+        """
+        torch, dist = self.torch, self.dist
+        if self.batch != 1:
+            raise ProtocolError("speculative decode is batch 1 only")
+        logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
+        n, K = len(prompts), self.mtp_block
+        eos, limit = set(eos_token_ids), limits[0]
+        produced, stop = [[]], ["max_new_tokens" if limit == max_new_tokens else "length"]
+        t_decode, steps, drafted, accepted = 0.0, 0, 0, 0
+        t_draft = t_verify = 0.0
+        debug = int(os.environ.get("DSV4_SPEC_DEBUG", "0"))
+
+        past = lens[0]
+        tok = torch.argmax(logits[0]).view(1, 1)
+        produced[0].append(int(tok))
+        if produced[0][0] in eos:
+            stop[0] = "eos"
+        vote = torch.zeros(K + 3, dtype=torch.float32, device="cuda")
+        gathered = torch.zeros((self.world, K + 3), dtype=torch.float32, device="cuda")
+
+        while len(produced[0]) < limit and stop[0] not in ("eos", "abort"):
+            t1 = time.time()
+            cand, conf = self._draft(tok, past)
+            t_draft += time.time() - t1
+            past_t = torch.full((1,), past, dtype=torch.int64, device="cuda")
+            if debug and steps < debug:
+                # `_reslide(0, ...)` is a full rewind, so the block can be re-run from
+                # the same state twice: that isolates whether everything outside the
+                # window states really is position-addressed.  Then rewind to one
+                # accepted token and run the rest from one position later -- same
+                # positions, same prefix, so the predictions have to line up.
+                a = self._step(cand, past_t, full=True).clone()
+                self._reslide(0, K + 1)
+                a2 = self._step(cand, past_t, full=True).clone()
+                self._reslide(0, K + 1)
+                # Same block, but every position after the first carries a different
+                # token.  Position 0 precedes all of them, so a causal path can only
+                # be reading ahead if its logits move.
+                alt = cand.clone()
+                alt[:, 1:] = 12345
+                c = self._step(alt, past_t, full=True).clone()
+                self._reslide(0, K + 1)
+                # The same probe at S=1: whatever this shows is the model's own
+                # run-to-run noise and has nothing to do with the block path.
+                o1 = self._step(tok, past_t).clone()
+                self._reslide(0, 1)
+                o2 = self._step(tok, past_t).clone()
+                self._reslide(0, 1)
+                self._reslide(1, K + 1)
+                b = self._step(cand[:, 1:], past_t + 1, full=True).clone()
+                rep = [round(v, 3) for v in (a - a2).abs().amax(-1)[0].tolist()]
+                d = [round(v, 3) for v in (a[0, 1:] - b[0]).abs().amax(-1).tolist()]
+                if self.rank == 0:
+                    print(f"[spec {steps}] past={past} s1_repeat={float((o1 - o2).abs().max()):.4g} "
+                          f"s1_vs_block={float((o1[0] - a[0, 0]).abs().max()):.4g} "
+                          f"future_leak={float((a[0, 0] - c[0, 0]).abs().max()):.4g} "
+                          f"repeat={rep} shift={d} a={a[0].argmax(-1).tolist()} "
+                          f"b={b[0].argmax(-1).tolist()}", file=sys.stderr, flush=True)
+            t2 = time.time()
+            # The target sees the accepted token followed by the block, so one run
+            # checks every draft and predicts one more beyond the last of them.
+            full = self._step(cand, past_t, full=True)
+            preds = torch.argmax(full[0], dim=-1)
+            t_verify += time.time() - t2
+            if debug and self.rank == 0 and steps < debug:
+                print(f"[spec {steps}] draft={cand[0].tolist()} target={preds.tolist()}",
+                      file=sys.stderr, flush=True)
+            match = (cand[0, 1:] == preds[:K])
+            j = int((~match).float().argmax()) if not bool(match.all()) else K
+            new = torch.cat([cand[0, 1:j + 1], preds[j:j + 1]])
+
+            # One collective per step, so the ranks cannot pick different lengths.
+            vote.zero_()
+            vote[0] = j
+            vote[1] = 1.0 if (self.rank == 0 and self._abort_pending(chan)) else 0.0
+            vote[2:2 + j + 1] = new.float()
+            dist.all_gather_into_tensor(gathered, vote)
+            g = gathered[0]
+            if bool(g[1]):
+                stop[0] = "abort"
+                break
+            j = int(g[0])
+            new = g[2:2 + j + 1].to(torch.int64)
+
+            self._reslide(j + 1, K + 1)
+            self._push_main(self.mh_last[:, :j + 1])
+            past += j + 1
+            for t in new.tolist():
+                produced[0].append(int(t))
+                if int(t) in eos:
+                    stop[0] = "eos"
+                    break
+                if len(produced[0]) >= limit:
+                    break
+            tok = new[-1].view(1, 1)
+            drafted += K
+            accepted += j
+            steps += 1
+            t_decode += time.time() - t1
+
+        out = self._reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps)
+        out["accept_rate"] = accepted / drafted if drafted else 0.0
+        out["draft_ms"] = 1000 * t_draft / steps if steps else 0.0
+        out["verify_ms"] = 1000 * t_verify / steps if steps else 0.0
+        out["tokens_per_step"] = (len(produced[0]) - 1) / steps if steps else 0.0
+        # A step emits a variable number of tokens, so the generic rate is wrong.
+        out["decode_tok_s"] = (len(produced[0]) - 1) / t_decode if t_decode else 0.0
         return out
 
     # -- decode: agreement through the engine process ----------------------- #
