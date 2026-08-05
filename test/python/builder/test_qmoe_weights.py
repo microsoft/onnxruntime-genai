@@ -74,20 +74,24 @@ def _stub_missing_builder_dependencies():
         tqdm_module.tqdm = lambda iterable=None, *args, **kwargs: iterable
         sys.modules["tqdm"] = tqdm_module
 
-    if not _module_available("transformers"):
+    if _module_available("transformers"):
+        import transformers  # noqa: PLC0415
+    else:
         transformers = types.ModuleType("transformers")
-        for class_name in (
-            "AutoConfig",
-            "AutoModelForCausalLM",
-            "AutoModelForSpeechSeq2Seq",
-            "AutoTokenizer",
-            "GenerationConfig",
-            "Qwen2ForCausalLM",
-            "Qwen2_5_VLForConditionalGeneration",
-            "Qwen3VLForConditionalGeneration",
-        ):
+
+    for class_name in (
+        "AutoConfig",
+        "AutoModelForCausalLM",
+        "AutoModelForSpeechSeq2Seq",
+        "AutoTokenizer",
+        "GenerationConfig",
+        "Qwen2ForCausalLM",
+        "Qwen2_5_VLForConditionalGeneration",
+        "Qwen3VLForConditionalGeneration",
+    ):
+        if not hasattr(transformers, class_name):
             setattr(transformers, class_name, type(class_name, (), {}))
-        sys.modules["transformers"] = transformers
+    sys.modules["transformers"] = transformers
 
 
 _stub_missing_builder_dependencies()
