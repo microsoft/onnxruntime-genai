@@ -358,6 +358,13 @@ void ParakeetTdtState::EncodeNextChunk() {
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
   auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
+  if (enc_shape.size() < 3) {
+    throw std::runtime_error("Encoder output must have rank 3 [batch, channels, time], got rank " + std::to_string(enc_shape.size()));
+  }
+  if (enc_shape[1] != cfg_.hidden_dim) {
+    throw std::runtime_error("Encoder output channel dimension (" + std::to_string(enc_shape[1]) +
+                             ") does not match config hidden_dim (" + std::to_string(cfg_.hidden_dim) + ")");
+  }
   current_enc_time_ = enc_shape[2];
   size_t enc_elems = 1;
   for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
@@ -430,6 +437,12 @@ int32_t ParakeetTdtState::EmitNextToken() {
 
     // Decoder output is [1, dec_dim, 1]; reshape to [1, 1, dec_dim] for
     // the joiner via a plain memcpy (layout is identical for contiguous data).
+    auto dec_output_shape = decoder_output_->GetTensorTypeAndShapeInfo()->GetShape();
+    if (dec_output_shape.size() < 2 || dec_output_shape[1] != dec_dim) {
+      throw std::runtime_error("Decoder output dimension (" +
+                               (dec_output_shape.size() >= 2 ? std::to_string(dec_output_shape[1]) : "unknown") +
+                               ") does not match config decoder_lstm_dim (" + std::to_string(dec_dim) + ")");
+    }
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
     if (!decoder_frame_) {
       decoder_frame_ = OrtValue::CreateTensor(cpu_allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
