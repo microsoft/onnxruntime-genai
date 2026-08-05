@@ -261,6 +261,8 @@ TEST_F(EngineStepTest, LaterRequestFailureRestoresEarlierSample) {
             second_before.current_sequence_length);
   EXPECT_EQ(first->status_, RequestStatus::Assigned);
   EXPECT_EQ(second->status_, RequestStatus::Assigned);
+  EXPECT_FALSE(first->HasUnseenTokens());
+  EXPECT_FALSE(second->HasUnseenTokens());
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
 
   second_params->search.top_p = 1.0f;

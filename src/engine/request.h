@@ -17,6 +17,7 @@
 namespace Generators {
 
 struct RequestStepResult {
+  int32_t token{};
   bool token_appended{};
   bool done{};
   RequestStatus status_after{RequestStatus::InProgress};
@@ -112,9 +113,13 @@ struct Request : std::enable_shared_from_this<Request>,
   void GenerateNextTokens(DeviceSpan<float> logits);
 
   void ValidateEngineCompatibility() const;
-  void SaveStateForTransaction();
+  void SaveStateForTransaction(bool include_sampling_state = true);
   RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
-  void RestoreStateForTransaction();
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult StageGenerationForTransaction(
+      const RequestStepPlan& plan);
+  void RestoreStateForTransaction(bool defer_completion = false);
+  void CompleteStateRestoreForTransaction();
   void CommitStateForTransaction();
   void CommitStep(const RequestStepPlan& plan,
                   const RequestStepResult& result) noexcept;
@@ -232,6 +237,9 @@ struct Request : std::enable_shared_from_this<Request>,
   bool is_prefill_{true};
 
   RequestStepResult ApplyLogits(DeviceSpan<float> logits);
+  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void SelectNextToken();
+  RequestStepResult StageGeneration(int64_t sequence_length_before);
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };

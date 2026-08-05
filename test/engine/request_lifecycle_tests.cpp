@@ -178,6 +178,8 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   EXPECT_EQ(committed.status, RequestStatus::InProgress);
   EXPECT_EQ(committed.processed_sequence_length, before.current_sequence_length);
   EXPECT_FALSE(committed.is_prefill);
+  ASSERT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), next_token);
 }
 
 TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
@@ -195,6 +197,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   EXPECT_EQ(restored.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(restored.processed_sequence_length, before.processed_sequence_length);
   EXPECT_EQ(restored.is_prefill, before.is_prefill);
+  EXPECT_FALSE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted) {
@@ -216,15 +219,10 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted)
   EXPECT_EQ(request->status_, RequestStatus::Completed);
 }
 
-TEST_F(RequestLifecycleTest, DynamicEngineRejectsMultiSequenceRequestBeforeAssignment) {
+TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
   auto params = MakeGreedyParams(*model_);
   params->search.batch_size = 2;
-  auto request = std::make_shared<Request>(params);
-  auto prompt = Prompt();
-  request->AddTokens(prompt);
-
-  EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
-  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+  EXPECT_THROW(std::make_shared<Request>(params), std::runtime_error);
 }
 
 }  // namespace

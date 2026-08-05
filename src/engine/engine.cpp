@@ -128,39 +128,83 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
-    std::vector<std::shared_ptr<Request>> requests;
-    requests.reserve(step_plan_.requests.size());
-    for (const auto& entry : step_plan_.requests) {
-      requests.push_back(entry.request);
-    }
-    ScheduledRequests scheduled_requests{std::move(requests), model_};
+    auto scheduled_requests =
+        scheduler_->CreateScheduledRequests(step_plan_);
     ExecutionContext context{step_plan_.transaction_id, &step_plan_};
     context.cache_reservation = reservation->PagedReservation();
     context.block_table_columns = step_plan_.proposed_block_table_columns;
     context.graph_capture_eligible = step_plan_.graph_capture_eligible;
 
-    const auto rollback_reservation = [&]() {
+    bool request_transaction_active = false;
+    const auto rollback_transaction = [&]() {
+      std::exception_ptr rollback_error;
+      if (request_transaction_active) {
+        try {
+          scheduled_requests.RestoreStateForTransaction();
+        } catch (...) {
+          rollback_error = std::current_exception();
+        }
+        request_transaction_active = false;
+      }
       try {
         reservation->Release();
-        transaction.RollBack();
-        ++transaction_metrics_.rollbacks;
       } catch (...) {
+        if (!rollback_error)
+          rollback_error = std::current_exception();
+      }
+      try {
+        transaction.RollBack();
+      } catch (...) {
+        if (!rollback_error)
+          rollback_error = std::current_exception();
+      }
+      ++transaction_metrics_.rollbacks;
+      if (rollback_error) {
         MarkUnhealthyAndThrow(
             StepOutcomeKind::FatalExecutionFailure,
             step_plan_.transaction_id,
             nullptr,
-            "Paged cache rollback failed and the Engine is no longer healthy.",
-            std::current_exception());
+            "Transaction rollback failed and the Engine is no longer healthy.",
+            rollback_error);
       }
     };
 
     try {
+      for (const auto& entry : step_plan_.requests) {
+        entry.request->ValidateEngineCompatibility();
+      }
+    } catch (...) {
+      const auto validation_error = std::current_exception();
+      rollback_transaction();
+      ++transaction_metrics_.post_processing_aborts;
+      ++transaction_metrics_.retryable_aborts;
+      std::string message =
+          "Request validation failed; the batch was rolled back.";
+      try {
+        std::rethrow_exception(validation_error);
+      } catch (const std::exception& error) {
+        message += " Cause: ";
+        message += error.what();
+      } catch (...) {
+        message += " Cause: non-standard exception.";
+      }
+      throw EngineStepError{
+          {StepOutcomeKind::RetryableBatchAbort,
+           step_plan_.transaction_id,
+           nullptr},
+          std::move(message),
+      };
+    }
+
+    try {
+      scheduled_requests.BeginTransaction();
+      request_transaction_active = true;
       transaction.MarkExecuting();
       model_executor_->Decode(scheduled_requests, context);
       transaction.MarkExecuted();
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
-      rollback_reservation();
+      rollback_transaction();
       if (error.FailureKind() == ExecutionFailureKind::RetryableAbort) {
         ++transaction_metrics_.retryable_aborts;
         throw EngineStepError{
@@ -178,7 +222,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           execution_error);
     } catch (...) {
       const auto execution_error = std::current_exception();
-      rollback_reservation();
+      rollback_transaction();
       MarkUnhealthyAndThrow(
           StepOutcomeKind::FatalExecutionFailure,
           step_plan_.transaction_id,
@@ -187,61 +231,19 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           execution_error);
     }
 
-    size_t checkpoint_count = 0;
     try {
-      for (const auto& entry : step_plan_.requests) {
-        entry.request->SaveStateForTransaction();
-        ++checkpoint_count;
-      }
-    } catch (...) {
-      try {
-        while (checkpoint_count > 0) {
-          step_plan_.requests[--checkpoint_count].request->RestoreStateForTransaction();
-        }
-        rollback_reservation();
-      } catch (...) {
-        MarkUnhealthyAndThrow(
-            StepOutcomeKind::FatalExecutionFailure,
-            step_plan_.transaction_id,
-            nullptr,
-            "Search checkpoint cleanup failed and the Engine is no longer healthy.",
-            std::current_exception());
-      }
-      MarkUnhealthyAndThrow(
-          StepOutcomeKind::FatalExecutionFailure,
-          step_plan_.transaction_id,
-          nullptr,
-          "Search checkpoint creation failed and the Engine is no longer healthy.",
-          std::current_exception());
-    }
-
-    try {
-      const auto logits = scheduled_requests.ProcessLogits();
-      step_results_.clear();
+      scheduled_requests.GenerateNextTokensForTransaction(
+          step_plan_, step_results_);
       staged_ready_requests_.clear();
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         auto& request = step_plan_.requests[i].request;
-        step_results_.push_back(
-            request->ApplyLogitsForTransaction(logits[i]));
-        if (request->HasUnseenTokens() || step_results_.back().done) {
+        if (step_results_[i].token_appended || step_results_[i].done) {
           staged_ready_requests_.push_back(request);
         }
       }
     } catch (...) {
       const auto post_processing_error = std::current_exception();
-      try {
-        for (const auto& entry : step_plan_.requests) {
-          entry.request->RestoreStateForTransaction();
-        }
-        rollback_reservation();
-      } catch (...) {
-        MarkUnhealthyAndThrow(
-            StepOutcomeKind::FatalExecutionFailure,
-            step_plan_.transaction_id,
-            nullptr,
-            "Transaction rollback failed and the Engine is no longer healthy.",
-            std::current_exception());
-      }
+      rollback_transaction();
       ++transaction_metrics_.post_processing_aborts;
       ++transaction_metrics_.retryable_aborts;
       std::string message =
@@ -263,9 +265,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
-      for (const auto& entry : step_plan_.requests) {
-        entry.request->CommitStateForTransaction();
-      }
+      scheduled_requests.CommitStateForTransaction();
+      request_transaction_active = false;
       reservation->Commit();
       scheduler_->CommitStepPlan(step_plan_);
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {

@@ -6,7 +6,8 @@
 
 namespace Generators {
 
-Scheduler::Scheduler(std::shared_ptr<Model> model) {
+Scheduler::Scheduler(std::shared_ptr<Model> model)
+    : model_{model} {
   constexpr size_t default_static_batch_size = 4;
   size_t max_batch_size = default_static_batch_size;
   const auto& engine_config = model->config_->engine;
@@ -18,6 +19,16 @@ Scheduler::Scheduler(std::shared_ptr<Model> model) {
   batched_sampling_plan_.Reserve(max_batch_size);
   batched_sampler_ = model->p_device_scoring_->CreateBatchedSampler(
       max_batch_size, model->config_->model.vocab_size);
+}
+
+ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
+  std::vector<std::shared_ptr<Request>> requests;
+  requests.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    requests.push_back(entry.request);
+  }
+  return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
+                           GetBatchedSamplingPlan()};
 }
 
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)

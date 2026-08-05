@@ -54,6 +54,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   processed_sequence_length_ = CurrentSequenceLength();
   search_->AppendTokens(device_tokens);
   seen_sequence_length_ = CurrentSequenceLength();
+  tokens_host_.reserve(params_->search.max_length);
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
 }
@@ -190,16 +191,33 @@ void Request::ValidateEngineCompatibility() const {
   }
 }
 
-void Request::SaveStateForTransaction() {
-  search_->SaveStateForTransaction();
+void Request::SaveStateForTransaction(bool include_sampling_state) {
+  ValidateEngineCompatibility();
+  search_->SaveStateForTransaction(include_sampling_state);
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
-  return ApplyLogits(logits);
+  const auto sequence_length_before = CurrentSequenceLength();
+  PrepareGenerationForTransaction(logits);
+  SelectNextToken();
+  return StageGeneration(sequence_length_before);
 }
 
-void Request::RestoreStateForTransaction() {
-  search_->RestoreStateForTransaction();
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
+  ApplyLogitsProcessors(logits);
+}
+
+RequestStepResult Request::StageGenerationForTransaction(
+    const RequestStepPlan& plan) {
+  return StageGeneration(plan.sequence_length_before);
+}
+
+void Request::RestoreStateForTransaction(bool defer_completion) {
+  search_->RestoreStateForTransaction(defer_completion);
+}
+
+void Request::CompleteStateRestoreForTransaction() {
+  search_->CompleteStateRestoreForTransaction();
 }
 
 void Request::CommitStateForTransaction() {
@@ -208,6 +226,9 @@ void Request::CommitStateForTransaction() {
 
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
+  if (result.token_appended) {
+    tokens_host_.push_back(result.token);
+  }
   processed_sequence_length_ = plan.processed_sequence_length_after;
   is_prefill_ = false;
   status_ = result.status_after;
@@ -215,12 +236,21 @@ void Request::CommitStep(const RequestStepPlan& plan,
 
 RequestStepResult Request::ApplyLogits(DeviceSpan<float> logits) {
   const int64_t sequence_length_before = CurrentSequenceLength();
+  ApplyLogitsProcessors(logits);
+  SelectNextToken();
+  return StageGeneration(sequence_length_before);
+}
+
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->SetLogits(logits);
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
 
+void Request::SelectNextToken() {
+  auto& search_params = search_->params_->search;
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
     search_->SelectTop();
   } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
@@ -232,11 +262,19 @@ RequestStepResult Request::ApplyLogits(DeviceSpan<float> logits) {
   } else {
     search_->SampleTopP(search_params.top_p, search_params.temperature);
   }
+}
 
+RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   search_->CompleteGeneration();
   const bool done = search_->IsDone();
+  const bool token_appended = CurrentSequenceLength() > sequence_length_before;
+  int32_t token = 0;
+  if (token_appended) {
+    token = search_->GetNextTokens().CpuSpan().back();
+  }
   return RequestStepResult{
-      CurrentSequenceLength() > sequence_length_before,
+      token,
+      token_appended,
       done,
       done ? RequestStatus::Completed : RequestStatus::InProgress,
   };
@@ -245,12 +283,7 @@ RequestStepResult Request::ApplyLogits(DeviceSpan<float> logits) {
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
   processed_sequence_length_ = search_->GetSequence(0).size();
   is_prefill_ = false;
-
-  search_->SetLogits(logits);
-  auto& search_params = search_->params_->search;
-  search_->ApplyMinLength(search_params.min_length);
-  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
-  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+  ApplyLogitsProcessors(logits);
 }
 
 const Config::Search& Request::SearchOptions() const {

@@ -69,8 +69,15 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens();
+  void BeginTransaction();
+  void GenerateNextTokensForTransaction(
+      const StepPlan& plan,
+      std::vector<RequestStepResult>& results);
+  void RestoreStateForTransaction();
+  void CommitStateForTransaction();
 
  private:
+  bool PrepareBatchedSamplingPlan(bool require_transaction_support);
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
 
   std::vector<std::shared_ptr<Request>> requests_;
@@ -80,6 +87,9 @@ struct ScheduledRequests {
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};
+  size_t transaction_checkpoint_count_{};
+  bool transaction_uses_batched_sampler_{};
+  bool sampler_checkpoint_active_{};
 };
 
 }  // namespace Generators

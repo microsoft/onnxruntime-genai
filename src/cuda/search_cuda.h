@@ -51,13 +51,16 @@ struct Search_Cuda : Search {
   mutable bool done_pending_{false};
 
  protected:
-  void SaveStateForTransactionImpl() override;
+  void SaveStateForTransactionImpl(bool include_sampling_state) override;
   void RestoreStateForTransactionImpl() override;
+  void SynchronizeStateForTransactionImpl() override;
+  void CompleteStateRestoreForTransactionImpl() override;
 
  private:
   cuda_unique_ptr<int32_t> transaction_sequence_lengths_;
   cuda_unique_ptr<bool> transaction_eos_seen_;
   bool transaction_done_{};
+  bool transaction_saved_sequence_lengths_{};
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
@@ -95,12 +98,14 @@ struct GreedySearch_Cuda : Search_Cuda {
   void LaunchNextTokensTail();
 
  protected:
-  void SaveStateForTransactionImpl() override;
+  void SaveStateForTransactionImpl(bool include_sampling_state) override;
   void RestoreStateForTransactionImpl() override;
+  void CompleteStateRestoreForTransactionImpl() override;
 
  private:
   cuda_unique_ptr<int32_t> transaction_next_tokens_;
   cuda_unique_ptr<curandState> transaction_curand_states_;
+  bool transaction_saved_sampling_state_{};
 };
 
 struct BeamSearch_Cuda : Search_Cuda {

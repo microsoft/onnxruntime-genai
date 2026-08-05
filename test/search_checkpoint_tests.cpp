@@ -1,9 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
+#include <array>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "generators.h"
+#include "models/model.h"
 #include "search.h"
 
 namespace Generators {
@@ -199,6 +204,47 @@ TEST_F(CudaSearchCheckpointTest, SamplingRollbackRestoresCurandStateAfterSelectT
     retried_tokens.insert(retried_tokens.end(), next_tokens.begin(), next_tokens.end());
   }
   EXPECT_EQ(retried_tokens, first_tokens);
+}
+
+TEST_F(CudaSearchCheckpointTest, BatchedSamplerRollbackRestoresRequestRandomStates) {
+  auto sampler = model->p_device_scoring_->CreateBatchedSampler(
+      2, params->config.model.vocab_size);
+  ASSERT_NE(sampler, nullptr);
+  ASSERT_TRUE(sampler->SupportsTransactions());
+
+  auto first_state = sampler->CreateState(1234);
+  auto second_state = sampler->CreateState(5678);
+  std::array<BatchedSamplerState*, 2> states{
+      first_state.get(), second_state.get()};
+  std::array<BatchedSamplingParams, 2> sampling_params{
+      BatchedSamplingParams{3, 1.0f, 1.0f},
+      BatchedSamplingParams{3, 1.0f, 1.0f}};
+
+  auto scores = params->p_device->Allocate<float>(8);
+  const std::array<float, 8> score_values{
+      1.0f, 1.0f, 1.0f, -100.0f,
+      1.0f, 1.0f, 1.0f, -100.0f};
+  std::copy(score_values.begin(), score_values.end(),
+            scores.CpuSpan().begin());
+  scores.CopyCpuToDevice();
+  std::array<DeviceSpan<float>, 2> rows{
+      scores.subspan(0, 4), scores.subspan(4, 4)};
+
+  sampler->SaveStateForTransaction(states);
+  auto first_tokens = sampler->Sample(
+      rows, sampling_params, states, params->config.model.vocab_size);
+  const auto first = first_tokens.CopyDeviceToCpu();
+  sampler->RestoreStateForTransaction();
+
+  std::copy(score_values.begin(), score_values.end(),
+            scores.CpuSpan().begin());
+  scores.CopyCpuToDevice();
+  auto retried_tokens = sampler->Sample(
+      rows, sampling_params, states, params->config.model.vocab_size);
+  const auto retried = retried_tokens.CopyDeviceToCpu();
+
+  EXPECT_EQ(std::vector<int32_t>(retried.begin(), retried.end()),
+            std::vector<int32_t>(first.begin(), first.end()));
 }
 
 TEST_F(CudaSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {

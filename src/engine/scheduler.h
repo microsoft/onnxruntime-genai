@@ -60,6 +60,8 @@ struct Scheduler {
     throw std::logic_error("Scheduler does not support transactional step commit.");
   }
 
+  ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
+
   /**
    * @brief Checks if the Scheduler has any pending requests.
    * @return True if there are pending requests, false otherwise.
@@ -76,6 +78,7 @@ struct Scheduler {
   BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
 
  private:
+  std::shared_ptr<Model> model_;
   std::unique_ptr<BatchedSampler> batched_sampler_;
   BatchedSamplingPlan batched_sampling_plan_;
 };
