@@ -158,6 +158,47 @@ static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::
   return params;
 }
 
+std::vector<const char*> ToCStrings(const std::vector<std::string>& strings) {
+  std::vector<const char*> c_strings;
+  c_strings.reserve(strings.size());
+  for (const auto& s : strings) {
+    c_strings.push_back(s.c_str());
+  }
+  return c_strings;
+}
+
+// Builds a prompt with the model-specific media tags, mirroring benchmark_multimodal.py.
+std::string MakeDefaultMultiModalPrompt(const std::string& model_type,
+                                        bool has_images, bool has_audios,
+                                        size_t num_images, size_t num_audios) {
+  if (model_type == "whisper") {
+    return "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
+  }
+
+  const bool is_phi4mm = model_type == "phi4mm";
+
+  std::string media_tags;
+  for (size_t i = 0; i < num_images; ++i) {
+    media_tags += is_phi4mm ? "<|endoftext10|>\n" : "<|image_" + std::to_string(i + 1) + "|>\n";
+  }
+  for (size_t i = 0; i < num_audios; ++i) {
+    media_tags += is_phi4mm ? "<|endoftext11|>\n" : "<|audio_" + std::to_string(i + 1) + "|>\n";
+  }
+
+  const char* main_prompt;
+  if (has_images && has_audios) {
+    main_prompt = "What are some of the similarities and differences between the provided inputs?";
+  } else if (has_images) {
+    main_prompt = "What is shown in this image?";
+  } else if (has_audios) {
+    main_prompt = "What is described in this audio?";
+  } else {
+    main_prompt = "What is the meaning of life?";
+  }
+
+  return "<|user|>\n" + media_tags + main_prompt + "<|end|>\n<|assistant|>\n";
+}
+
 void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
 
@@ -416,6 +457,139 @@ void RunBenchmark(const benchmark::Options& opts) {
   }
 }
 
+void RunMultiModalBenchmark(const benchmark::Options& opts) {
+  auto model = OgaModel::Create(opts.model_path.c_str());
+  auto processor = OgaMultiModalProcessor::Create(*model);
+
+  const std::string model_type = std::string{model->GetType()};
+
+  std::unique_ptr<OgaImages> images;
+  if (!opts.image_paths.empty()) {
+    images = OgaImages::Load(ToCStrings(opts.image_paths));
+  }
+  std::unique_ptr<OgaAudios> audios;
+  if (!opts.audio_paths.empty()) {
+    audios = OgaAudios::Load(ToCStrings(opts.audio_paths));
+  }
+
+  std::string prompt;
+  if (const std::string* p = std::get_if<std::string>(&opts.prompt_num_tokens_or_content)) {
+    prompt = *p;
+  } else {
+    prompt = MakeDefaultMultiModalPrompt(model_type, images != nullptr, audios != nullptr,
+                                         opts.image_paths.size(), opts.audio_paths.size());
+  }
+
+  if (opts.verbose) {
+    std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+  }
+
+  auto process_inputs = [&]() {
+    return processor->ProcessImagesAndAudios(prompt.c_str(), images.get(), audios.get());
+  };
+
+  // Determine the prompt length so that the generator gets the full capacity up front.
+  size_t num_prompt_tokens = 0;
+  {
+    auto inputs = process_inputs();
+    auto input_ids = inputs->Get("input_ids");
+    const auto shape = input_ids->Shape();
+    num_prompt_tokens = shape.empty() ? 0 : static_cast<size_t>(shape.back());
+  }
+
+  const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
+  const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
+
+  // warmup
+  if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
+  for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
+    auto inputs = process_inputs();
+    auto generator = OgaGenerator::Create(*model, *generator_params);
+    generator->SetInputs(*inputs);
+    const size_t target_token_count = generator->TokenCount() + opts.num_tokens_to_generate;
+    while (!generator->IsDone() && generator->TokenCount() < target_token_count) {
+      generator->GenerateNextToken();
+    }
+
+    if (opts.verbose && i == 0) {
+      const auto output_sequence_length = generator->TokenCount();
+      const auto* output_sequence_data = generator->GetSequenceData(0);
+      const auto output = processor->Decode(output_sequence_data, output_sequence_length);
+      std::cout << "[OUTPUT BEGIN]" << output << "[OUTPUT END]\n";
+    }
+  }
+
+  std::vector<Duration> e2e_gen_times, input_processing_times, prompt_processing_times,
+      token_gen_times, sampling_times;
+  e2e_gen_times.reserve(opts.num_iterations);
+  input_processing_times.reserve(opts.num_iterations);
+  prompt_processing_times.reserve(opts.num_iterations);
+  token_gen_times.reserve(opts.num_iterations * opts.num_tokens_to_generate);
+  sampling_times.reserve(opts.num_iterations);
+
+  if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
+
+  const size_t profile_iter_index = opts.num_iterations / 2;
+  constexpr const char* prefill_profile_prefix = "prefill_profile";
+  constexpr const char* generation_profile_prefix = "generation_profile";
+
+  for (size_t i = 0; i < opts.num_iterations; ++i) {
+    const bool profile_this_iter = (i == profile_iter_index);
+    const bool profile_prefill_now = profile_this_iter && opts.profile_prefill;
+    const bool profile_generation_now = profile_this_iter && opts.profile_generation;
+
+    Timing e2e_gen_timing{e2e_gen_times};
+
+    std::unique_ptr<OgaNamedTensors> inputs;
+    {
+      // Measure the multimodal (image/audio/text) preprocessing.
+      Timing input_processing_timing{input_processing_times};
+      inputs = process_inputs();
+    }
+
+    auto generator = OgaGenerator::Create(*model, *generator_params);
+
+    {
+      Timing prompt_processing_timing{prompt_processing_times};
+      ScopedProfilingRuntimeOption prefill_profile_guard{generator.get(), profile_prefill_now, prefill_profile_prefix};
+      generator->SetInputs(*inputs);
+    }
+
+    const size_t target_token_count = generator->TokenCount() + opts.num_tokens_to_generate;
+    bool generator_done = false;
+
+    ScopedProfilingRuntimeOption generation_profile_guard{generator.get(), profile_generation_now, generation_profile_prefix};
+
+    {
+      Timing sampling_timing{sampling_times};
+      generator->GenerateNextToken();
+      generator_done = generator->IsDone();
+    }
+
+    while (!generator_done && generator->TokenCount() < target_token_count) {
+      Timing token_gen_timing{token_gen_times};
+      generator->GenerateNextToken();
+      generator_done = generator->IsDone();
+    }
+  }
+
+  std::cout << "Model type: " << model_type
+            << ", images: " << opts.image_paths.size()
+            << ", audios: " << opts.audio_paths.size()
+            << ", prompt tokens: " << num_prompt_tokens
+            << ", tokens to generate: " << opts.num_tokens_to_generate
+            << "\n";
+
+  WriteE2EStats("Input processing (image/audio/text preprocessing)", ComputeStats(input_processing_times));
+  WritePerTokenStats("Prompt processing (time to first token)",
+                     ComputeStats(prompt_processing_times), num_prompt_tokens);
+  WritePerTokenStats("Token generation", ComputeStats(token_gen_times), 1);
+  WritePerTokenStats("Token sampling", ComputeStats(sampling_times), 1);
+  WriteE2EStats("E2E generation (entire generation loop)", ComputeStats(e2e_gen_times));
+
+  std::cout << "Peak working set size: " << benchmark::utils::GetPeakWorkingSetSizeInBytes() << " bytes\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -423,7 +597,11 @@ int main(int argc, char** argv) {
   OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);
-    RunBenchmark(opts);
+    if (opts.IsMultiModal()) {
+      RunMultiModalBenchmark(opts);
+    } else {
+      RunBenchmark(opts);
+    }
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "Exception: " << e.what() << "\n";
