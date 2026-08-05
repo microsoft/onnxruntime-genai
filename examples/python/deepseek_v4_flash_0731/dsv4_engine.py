@@ -56,6 +56,10 @@ _ELEM = {"torch.float32": 1, "torch.int32": 6, "torch.int64": 7, "torch.bool": 9
 _DTYPE = {"tensor(float)": "float32", "tensor(bfloat16)": "bfloat16",
           "tensor(float16)": "float16", "tensor(int32)": "int32",
           "tensor(int64)": "int64", "tensor(bool)": "bool"}
+# Rows of `main_hidden` replayed into the drafter every step.  Held constant so
+# the drafter keeps one execution plan; must be >= the largest number of tokens a
+# single verify can commit (block + 1).
+_MH_PAD = 8
 
 DEFAULT_PORT = 19555
 
@@ -794,8 +798,11 @@ class _Worker:
     def _draft(self, tok, past):
         """One drafter run: `block` candidate ids continuing `tok` at position `past`.
 
-        `main_hidden` carries every position committed since the last draft, so the
-        ring stays exact however many tokens the last verify accepted.
+        `main_hidden` replays a *fixed* `_MH_PAD` rows rather than only the ones
+        committed since the last draft.  The ring is addressed by absolute position,
+        so rewriting rows that are already in it is idempotent, and a constant
+        `main_len` is what lets ORT keep one execution plan instead of re-planning
+        all 624 nodes on every step.
         """
         torch = self.torch
         M = self.mh_valid
