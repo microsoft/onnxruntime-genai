@@ -208,6 +208,13 @@ class DeepSeekV4FlashModel(Model):
         # dev/docs/memory/dsv4_perf_it15_lm_head_shard.md.
         self.lm_head_shard = extra_options.get("dsv4_lm_head_shard", "1") not in ("0", 0, False)
 
+        # Two knobs that drain the float32 island the reference implementation leaves
+        # in the decode path.  Each cast there is a full kernel launch on a [1, dim]
+        # row, so they cost far more in dispatch than in arithmetic; see
+        # dev/docs/memory/dsv4_perf_it16_fp32_island.md.
+        self.norm_bf16 = extra_options.get("dsv4_norm_bf16", "1") not in ("0", 0, False)
+        self.moe_combine_bf16 = extra_options.get("dsv4_moe_combine_bf16", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -569,13 +576,22 @@ class DeepSeekV4FlashModel(Model):
     # norms
     # ------------------------------------------------------------------ #
 
-    def make_rmsnorm(self, name, x, weight, shape):
-        """Reference computes in fp32 with an fp32 weight; returns FLOAT."""
-        xf = self.cast(f"{name}/castf", x, ir.DataType.FLOAT, shape)
+    def make_rmsnorm(self, name, x, weight, shape, dtype=None):
+        """Reference computes in fp32 with an fp32 weight; returns ``dtype``.
+
+        ``dtype`` is the tensor type the node runs in, defaulting to the reference's
+        float32.  ``stash_type=1`` keeps the accumulator in float32 whatever the
+        tensor type, so asking for the io dtype changes only the rounding of the
+        input read, the scale and the output write -- and it drops the pair of casts
+        that would otherwise bracket every call.  ``weight`` must already be in
+        ``dtype``.
+        """
+        dtype = ir.DataType.FLOAT if dtype is None else dtype
+        xf = x if dtype != ir.DataType.FLOAT else self.cast(f"{name}/castf", x, dtype, shape)
         out = f"{name}/output_0"
         self.make_node("SimplifiedLayerNormalization", inputs=[xf, weight], outputs=[out],
                        name=name, axis=-1, epsilon=self.eps, stash_type=1)
-        self.make_value(out, ir.DataType.FLOAT, shape=shape)
+        self.make_value(out, dtype, shape=shape)
         return out
 
     def _rsqrt_mean_sq(self, name, xf, shape):
@@ -1075,11 +1091,12 @@ class DeepSeekV4FlashModel(Model):
         else:
             qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
             kv_raw = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
+        nd = io if self.norm_bf16 else ir.DataType.FLOAT
         qn = self.make_rmsnorm(f"{name}/qnorm", qa,
-                               self.init_w(f"{p}.q_norm.weight",
-                                           to=ir.DataType.FLOAT),
-                               [B, S, self.q_lora_rank])
-        qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
+                               self.init_w(f"{p}.q_norm.weight", to=nd),
+                               [B, S, self.q_lora_rank], dtype=nd)
+        if nd != io:
+            qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
         q_raw = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
 
         # ---- KV (single latent row shared by all heads) ----
@@ -1670,9 +1687,18 @@ class DeepSeekV4FlashModel(Model):
                            activation_alpha=1.0, activation_beta=0.0,
                            use_sparse_mixer=0, quant_type="fp4", block_size=32)
             self.make_value(out, io, shape=[None, dim])
+            # The routed output, the shared expert's output and the all-reduce that
+            # follows are all in the io dtype; widening to float32 just to scale by a
+            # per-token constant and add one tensor costs three casts of a [1, dim]
+            # row per layer, each its own kernel launch.  Scale the [None, 1] weight
+            # instead, which is 4096x smaller.
+            if self.moe_combine_bf16:
+                wl = self.cast(f"{name}/wlocb", wloc, io, [None, 1])
+                y = self.op("Mul", [out, wl], f"{name}/scaled", io, [None, dim])
+                return self.make_moe_shared(name, layer_id, xflat, y, ctx, io)
             y = self.cast(f"{name}/qmoef", out, F, [None, dim])
             y = self.op("Mul", [y, wloc], f"{name}/scaled", F, [None, dim])
-            return self.make_moe_shared(name, layer_id, xflat, y, ctx)
+            return self.make_moe_shared(name, layer_id, xflat, y, ctx, F)
 
         idx, wn = self.make_topk_weights(f"{name}/route", layer_id, scores, expert_ids)
 
@@ -1734,10 +1760,12 @@ class DeepSeekV4FlashModel(Model):
             act = self.op("Mul", [act, gu], f"{name}/gated", F, [None, E_loc, mi])
             y = self.op("Einsum", [act, w2], f"{name}/y", F, [None, dim], equation="nei,edi->nd")
 
-        return self.make_moe_shared(name, layer_id, xflat, y, ctx)
+        return self.make_moe_shared(name, layer_id, xflat, y, ctx, F)
 
-    def make_moe_shared(self, name, layer_id, xflat, y, ctx):
-        """The shared expert, added to the routed output and all-reduced.
+    def make_moe_shared(self, name, layer_id, xflat, y, ctx, ydtype):
+        """The shared expert, added to the routed output ``y`` and all-reduced.
+
+        ``ydtype`` is the type ``y`` arrives in, and the type the sum is formed in.
 
         Tensor-parallel over the intermediate dim, so one collective at the end
         covers both this split and the expert-parallel one above it.
@@ -1765,9 +1793,12 @@ class DeepSeekV4FlashModel(Model):
                                 self.cast(f"{name}/suf", su, F, [None, mil]), [None, mil])
             sactb = self.cast(f"{name}/sactb", sact, io, [None, mil])
         sy = self.proj(f"{name}/sy", sactb, f"{p}.sw2.weight", [None, dim], shard_axis=1)
-        y = self.op("Add", [y, self.cast(f"{name}/syf", sy, F, [None, dim])],
-                    f"{name}/total", F, [None, dim])
-        y = self.cast(f"{name}/tob", y, io, [None, dim])
+        if ydtype == io:
+            y = self.op("Add", [y, sy], f"{name}/total", io, [None, dim])
+        else:
+            y = self.op("Add", [y, self.cast(f"{name}/syf", sy, F, [None, dim])],
+                        f"{name}/total", F, [None, dim])
+            y = self.cast(f"{name}/tob", y, io, [None, dim])
         # One collective covers both the expert-parallel and the shared-expert split.
         y = self.all_reduce(f"{name}/ar", y, io, [None, dim])
         return self.dyn_reshape(f"{name}/out", y, ctx["bs"], [dim], io, [B, S, dim])
@@ -1909,10 +1940,11 @@ class DeepSeekV4FlashModel(Model):
                 self.make_node("Identity", inputs=[val], outputs=[out], name=f"/out/{out}")
 
         h = self.make_hc_head("/hc_head", h, "hc_head", [B, S])
-        n = self.make_rmsnorm("/norm", h, self.init_w("norm.weight",
-                                                      to=ir.DataType.FLOAT),
-                              [B, S, dim])
-        n = self.cast("/norm_b", n, io, [B, S, dim])
+        nd = io if self.norm_bf16 else ir.DataType.FLOAT
+        n = self.make_rmsnorm("/norm", h, self.init_w("norm.weight", to=nd),
+                              [B, S, dim], dtype=nd)
+        if nd != io:
+            n = self.cast("/norm_b", n, io, [B, S, dim])
         # Keep the vocabulary projection in the activation type; a float copy of
         # it would be the single largest initializer in the model.
         shard_head = (self.lm_head_shard and self.world > 1
