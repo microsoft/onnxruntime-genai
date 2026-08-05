@@ -745,6 +745,52 @@ class _Worker:
         return self._reply(produced, stop, finite, lens, len(prompts),
                            t_prefill, t_decode, steps)
 
+    # -- speculative-decoding feasibility ----------------------------------- #
+
+    def spec_probe(self, prompts, ks, reps):
+        """Time one decode step over K token positions.
+
+        Verifying K speculative candidates costs exactly one session run over K
+        positions, so this measures the cost side of speculative decoding without
+        any of the machinery that would produce the candidates.  Speculation pays
+        off when the mean number of accepted tokens exceeds the ratio reported
+        here of a K-position step to the captured one-position step.
+
+        `past_lens` is deliberately not advanced between runs: every repetition
+        rewrites the same cache slots, so the kv length -- and therefore the
+        attention cost -- is identical across all K, and the only variable is how
+        many positions the step carries.
+        """
+        torch = self.torch
+        _, lens, _, _, _ = self._prefill(prompts, max_new_tokens=1)
+        past_t = torch.tensor(lens, dtype=torch.int64, device="cuda")
+        out = {}
+
+        def timed(fn):
+            for _ in range(3):  # warm up: buffers, and the first run of a shape
+                fn()
+            torch.cuda.synchronize()
+            best = []
+            for _ in range(reps):
+                torch.cuda.synchronize()
+                t0 = time.time()
+                fn()
+                torch.cuda.synchronize()
+                best.append((time.time() - t0) * 1000.0)
+            best.sort()
+            return best[len(best) // 2]
+
+        if self._graph_io is not None:
+            ids1 = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
+            out["captured_1"] = timed(lambda: self._step_captured(ids1, past_t))
+
+        for k in ks:
+            ids = torch.zeros((self.batch, k), dtype=torch.int64, device="cuda")
+            # row=0 would restrict the run to one row; passing row=None with S>1
+            # takes the uncaptured path, which is what a verify step would use.
+            out[f"uncaptured_{k}"] = timed(lambda ids=ids: self._step(ids, past_t))
+        return {"ms": out, "batch": self.batch, "past": int(lens[0])}
+
 
 def _worker_main(a):
     chan = _Chan(socket.socket(fileno=int(os.environ["DSV4_FD"])))
@@ -781,6 +827,16 @@ def _worker_main(a):
         if req.get("cmd") == "host_sync":
             # Some rank could not join the group; nobody may use it.
             w.dist_ready = False
+            continue
+        if req.get("cmd") == "spec_probe":
+            try:
+                reply = w.spec_probe(req["prompts"], req["ks"], req["reps"])
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                reply = {"error": f"{type(e).__name__}: {e}"}
+            reply["event"] = "probed"
+            chan.send(reply)
             continue
         if req.get("cmd") != "generate":
             chan.send({"event": "generated", "error": "unknown command %r" % req.get("cmd")})
@@ -988,6 +1044,28 @@ class DSV4Engine:
         out["stop_reason"] = out["stop_reason"][0]
         out["prompt_len"] = out["prompt_lens"][0]
         return out
+
+    def spec_probe(self, prompts, ks=(1, 2, 4, 6, 8), reps=20, timeout=1800):
+        """Time a decode step over K positions, for each K in `ks`.
+
+        This answers the one question that decides whether speculative decoding is
+        worth building here: a verify step carries K candidate positions instead of
+        one, and speculation only pays if the mean accepted length beats the cost
+        ratio of a K-position step to today's captured one-position step.
+
+        Returns rank 0's timings in milliseconds.
+        """
+        if not self.procs:
+            raise ProtocolError("engine is closed")
+        prompts = [[int(t) for t in p] for p in prompts]
+        for chan in self.chans:
+            chan.send({"cmd": "spec_probe", "prompts": prompts,
+                       "ks": list(ks), "reps": reps})
+        msgs = [self._recv(rank, chan, timeout) for rank, chan in enumerate(self.chans)]
+        for m in msgs:
+            if m.get("error"):
+                raise ProtocolError(m["error"])
+        return msgs[0]
 
     def generate_batch(self, prompts, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
         """Greedily continue a batch of prompts.  Returns rank 0's reply dict.
