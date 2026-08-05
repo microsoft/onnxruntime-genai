@@ -41,6 +41,7 @@ Usage::
 """
 
 import argparse
+import atexit
 import json
 import os
 import select
@@ -57,6 +58,9 @@ _DTYPE = {"tensor(float)": "float32", "tensor(bfloat16)": "bfloat16",
           "tensor(int64)": "int64", "tensor(bool)": "bool"}
 
 DEFAULT_PORT = 19555
+
+# Single output carrying max |x| for every intermediate, added by probe_ranges.py.
+PROBE_OUTPUT = "probe__all"
 # A worker blocks indefinitely between requests; only the engine bounds its waits.
 _FOREVER = 10 ** 9
 # Compressed-cache capacity is `max_seq_len // ratio + 2`; the ratio-128 layers
@@ -175,9 +179,10 @@ class _Worker:
         cache_ins = [i for i in ins[2:] if i.name not in self.const_in]
 
         self.cache_in = [i.name for i in cache_ins]
-        self.cache_out = [o.name for o in outs[1:]]
+        self.cache_out = [o.name for o in outs[1:] if o.name != PROBE_OUTPUT]
         if len(self.cache_in) != len(self.cache_out):
             raise ProtocolError("past/present count mismatch")
+        self._init_probe(outs)
         # Pooled entries are addressed by the block table, so their first dimension is
         # blocks rather than rows and they must never be sliced per batch row.
         self._pooled = [n in getattr(self, "pool_blocks", {}) for n in self.cache_in]
@@ -425,10 +430,34 @@ class _Worker:
                       for n, t, p in zip(self.cache_out, dst, self._pooled)])
         for name, t in outputs:
             io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
+        if self._probe is not None:
+            b = self._probe
+            io.bind_output(PROBE_OUTPUT, "cuda", 0, _ELEM[str(b.dtype)], tuple(b.shape),
+                           b.data_ptr())
         self.sess.run_with_iobinding(io, self._ro_skip)
+        if self._probe is not None:
+            torch.maximum(self._probe_max, self._probe, out=self._probe_max)
 
         self.cur = 1 - self.cur
         return logits[:, -1]
+
+    def _init_probe(self, outs):
+        """Wire up the range probes that probe_ranges.py adds to a model, if present.
+
+        A probed export carries one extra output holding max |x| for every intermediate
+        tensor; this keeps a running maximum over every step and writes it out at exit.
+        Absent that output the whole facility costs one None check per step.
+        """
+        self._probe = self._probe_max = None
+        path = os.environ.get("DSV4_PROBE_OUT")
+        probe = next((o for o in outs if o.name == PROBE_OUTPUT), None)
+        if path is None or probe is None:
+            return
+        n = int(probe.shape[0])
+        self._probe = self.torch.zeros(n, dtype=self.torch.float32, device="cuda")
+        self._probe_max = self.torch.zeros(n, dtype=self.torch.float32, device="cuda")
+        atexit.register(lambda: json.dump(self._probe_max.cpu().tolist(),
+                                          open(f"{path}.rank{self.rank}.json", "w")))
 
     def _prefill_row(self, b, prompt):
         """Chunked prefill for one batch row.  Returns that row's final logits.
