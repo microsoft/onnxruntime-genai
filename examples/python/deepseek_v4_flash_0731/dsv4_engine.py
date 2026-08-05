@@ -56,9 +56,10 @@ _ELEM = {"torch.float32": 1, "torch.int32": 6, "torch.int64": 7, "torch.bool": 9
 _DTYPE = {"tensor(float)": "float32", "tensor(bfloat16)": "bfloat16",
           "tensor(float16)": "float16", "tensor(int32)": "int32",
           "tensor(int64)": "int64", "tensor(bool)": "bool"}
-# Rows of `main_hidden` replayed into the drafter every step.  Held constant so
-# the drafter keeps one execution plan; must be >= the largest number of tokens a
-# single verify can commit (block + 1).
+# Rows of `main_hidden` handed to the drafter per run.  Pinned rather than sized to
+# the accepted run: ORT only captures a graph when every node is on CUDA, and the
+# drafter's shape arithmetic is CPU-placed for as long as `main_len` is symbolic.
+# Must be >= the most tokens one verify can commit, and divide the ring window.
 _MH_PAD = 8
 
 DEFAULT_PORT = 19555
@@ -185,7 +186,23 @@ class _Worker:
                 mso.log_severity_level = 3
                 mso.enable_profiling = True
                 mso.profile_file_prefix = "/tmp/mtp_prof"
-            self.mtp = ort.InferenceSession(mtp_path, mso, providers=["CUDAExecutionProvider"])
+            # The drafter is the mirror image of the target: 559 nodes that between them
+            # do ~1 ms of work, so it is launch-bound and a replay is worth ~18 ms a
+            # step.  Its shapes are fixed per accepted-run length, so unlike the target
+            # it can be captured.
+            self.mtp_graph = os.environ.get("DSV4_NO_MTP_GRAPH") != "1"
+            if self.mtp_graph:
+                # Folds the shape arithmetic to constants, which is what moves the last
+                # nine nodes off the CPU and lets the EP capture at all.
+                mso = ort.SessionOptions() if mso is so else mso
+                mso.log_severity_level = int(os.environ.get("DSV4_MTP_LOG", "3"))
+                mso.add_free_dimension_override_by_name("batch_size", batch)
+                mso.add_free_dimension_override_by_name("main_len", _MH_PAD)
+            mprov = (("CUDAExecutionProvider",
+                      {"enable_cuda_graph": "1",
+                       "arena_extend_strategy": "kSameAsRequested"})
+                     if self.mtp_graph else "CUDAExecutionProvider")
+            self.mtp = ort.InferenceSession(mtp_path, mso, providers=[mprov])
             if os.environ.get("DSV4_MTP_PLACEMENT") and rank == 0:
                 # A single CPU-placed node in the drafter serialises the whole graph,
                 # so confirm the placement before blaming the kernels.
@@ -199,6 +216,7 @@ class _Worker:
             self.mtp_cache_in = [i.name for i in self.mtp.get_inputs()
                                  if i.name.startswith("past_kv_")]
             self.mtp_cache_out = ["present" + n[4:] for n in self.mtp_cache_in]
+            self.mtp_cache = None
 
         ins, outs = self.sess.get_inputs(), self.sess.get_outputs()
         if [i.name for i in ins[:2]] != ["input_ids", "past_lens"]:
@@ -780,11 +798,102 @@ class _Worker:
         """
         torch = self.torch
         W, B = self.mtp_window, self.batch
-        self.mtp_cache = [torch.zeros((B, W, int(i.shape[-1])), dtype=torch.bfloat16,
-                                      device="cuda")
-                          for i in self.mtp.get_inputs() if i.name.startswith("past_kv_")]
-        self.mh_hist = torch.zeros((B, W, self.mtp_dim), dtype=torch.bfloat16, device="cuda")
+        if self.mtp_cache is None:
+            shapes = [(B, W, int(i.shape[-1])) for i in self.mtp.get_inputs()
+                      if i.name.startswith("past_kv_")]
+            # Ping-ponged, because the ring is produced by ScatterND and so cannot be
+            # written in place.  Allocated once: a captured graph replays the addresses
+            # it recorded, and a fresh allocation per prefill would invalidate them.
+            self.mtp_cache = [[torch.zeros(s, dtype=torch.bfloat16, device="cuda")
+                               for s in shapes] for _ in range(2)]
+            self.mh_hist = torch.zeros((B, W, self.mtp_dim), dtype=torch.bfloat16,
+                                       device="cuda")
+            self._init_mtp_graphs()
+        else:
+            for copy in self.mtp_cache:
+                for t in copy:
+                    t.zero_()
+            self.mh_hist.zero_()
+        self.mtp_cur = 0
         self.mh_valid = 0
+
+    def _init_mtp_graphs(self):
+        """Capture one drafter graph per cache parity.
+
+        `main_len` is pinned to `_MH_PAD`, so the only thing that alternates between
+        runs is which ring copy is read and which is written.
+        """
+        torch, ort = self.torch, self.ort
+        B, K = self.batch, self.mtp_block
+        self.d_tok = torch.zeros((B, 1), dtype=torch.int64, device="cuda")
+        self.d_past = torch.zeros((B,), dtype=torch.int64, device="cuda")
+        self.d_out = torch.zeros((B, K + 1), dtype=torch.int64, device="cuda")
+        self.d_conf = torch.zeros((B, K), dtype=torch.float32, device="cuda")
+        self.d_mh = torch.zeros((B, _MH_PAD, self.mtp_dim), dtype=torch.bfloat16,
+                                device="cuda")
+        self._mtp_skip = ort.RunOptions()
+        self._mtp_skip.add_run_config_entry("gpu_graph_id", "-1")
+        self._mtp_ro, self._mtp_io = [], []
+        for parity in range(2):
+            ro = ort.RunOptions()
+            ro.add_run_config_entry("gpu_graph_id", str(parity + 1))
+            io = self.mtp.io_binding()
+            src, dst = self.mtp_cache[parity], self.mtp_cache[1 - parity]
+            for name, t in ([("main_hidden", self.d_mh), ("input_ids", self.d_tok),
+                             ("past_lens", self.d_past)]
+                            + list(zip(self.mtp_cache_in, src))):
+                io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape),
+                              t.data_ptr())
+            for name, t in ([("output_ids", self.d_out), ("confidence", self.d_conf)]
+                            + list(zip(self.mtp_cache_out, dst))):
+                io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape),
+                               t.data_ptr())
+            self._mtp_ro.append(ro)
+            self._mtp_io.append(io)
+        if not self.mtp_graph:
+            self._mtp_ro = [self._mtp_skip, self._mtp_skip]
+            torch.cuda.synchronize()
+            self._bench_mtp()
+            return
+
+        # Same two phases as the target: run every id normally so nothing is left to
+        # allocate lazily, then drive each id until the EP stops executing and starts
+        # replaying.  Both phases write garbage into the ring, which the priming pass
+        # after prefill overwrites in full.
+        for capture in (False, True):
+            for parity in range(2):
+                for _ in range(_GRAPH_WARMUP):
+                    self.mtp.run_with_iobinding(
+                        self._mtp_io[parity],
+                        self._mtp_ro[parity] if capture else self._mtp_skip)
+        torch.cuda.synchronize()
+        self._bench_mtp()
+
+    def _bench_mtp(self):
+        if not os.environ.get("DSV4_MTP_BENCH"):
+            return
+        torch = self.torch
+        # Runs back to back, so what it reports is the drafter on its own, without
+        # the target's collectives or any rank skew mixed in.
+        n = int(os.environ["DSV4_MTP_BENCH"])
+        t0 = time.time()
+        for i in range(n):
+            self.mtp.run_with_iobinding(self._mtp_io[i & 1], self._mtp_ro[i & 1])
+        torch.cuda.synchronize()
+        if self.rank == 0:
+            print(f"[mtp] isolated {1000 * (time.time() - t0) / n:.2f} ms/run",
+                  file=sys.stderr, flush=True)
+
+    def _prime_ring(self, past):
+        """Fill every ring row before the first draft.
+
+        The drafter writes one ring row per row of `main_hidden`, and `main_len` is
+        pinned so the graph can be captured, so priming the window takes
+        `window / _MH_PAD` runs rather than one wide one.
+        """
+        W = self.mtp_window
+        for off in range(min(self.mh_valid, W) // _MH_PAD * _MH_PAD, 0, -_MH_PAD):
+            self._run_draft(self.mh_hist[:, W - off:W - off + _MH_PAD], past - off)
 
     def _push_main(self, mh):
         """Append this run's main states to the rolling window, newest last."""
@@ -795,35 +904,28 @@ class _Worker:
         self.mh_hist[:, W - k:] = mh[:, -k:]
         self.mh_valid = min(self.mh_valid + mh.shape[1], W)
 
+    def _run_draft(self, mh, past_lens):
+        """Copy the drafter's inputs into the pinned buffers and replay one parity."""
+        torch = self.torch
+        parity = self.mtp_cur
+        self.d_mh.copy_(mh)
+        self.d_past.fill_(max(past_lens, 0))
+        # The writes above are queued on torch's stream, the replay runs on ORT's.
+        torch.cuda.current_stream().synchronize()
+        self.mtp.run_with_iobinding(self._mtp_io[parity], self._mtp_ro[parity])
+        self.mtp_cur = 1 - parity
+
     def _draft(self, tok, past):
         """One drafter run: `block` candidate ids continuing `tok` at position `past`.
 
-        `main_hidden` replays a *fixed* `_MH_PAD` rows rather than only the ones
-        committed since the last draft.  The ring is addressed by absolute position,
-        so rewriting rows that are already in it is idempotent, and a constant
-        `main_len` is what lets ORT keep one execution plan instead of re-planning
-        all 624 nodes on every step.
+        The ring is addressed by absolute position, so replaying a pinned `_MH_PAD`
+        rows rather than just the ones the last verify committed only rewrites rows
+        that are already there with the values they already hold.
         """
-        torch = self.torch
-        M = self.mh_valid
-        mh = self.mh_hist[:, self.mtp_window - M:].contiguous()
-        past_t = torch.full((self.batch,), past - M, dtype=torch.int64, device="cuda")
-        out_ids = torch.empty((self.batch, self.mtp_block + 1), dtype=torch.int64, device="cuda")
-        conf = torch.empty((self.batch, self.mtp_block), dtype=torch.float32, device="cuda")
-        nxt = [torch.empty_like(t) for t in self.mtp_cache]
-
-        io = self.mtp.io_binding()
-        for name, t in ([("main_hidden", mh), ("input_ids", tok), ("past_lens", past_t)]
-                        + list(zip(self.mtp_cache_in, self.mtp_cache))):
-            io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
-        for name, t in ([("output_ids", out_ids), ("confidence", conf)]
-                        + list(zip(self.mtp_cache_out, nxt))):
-            io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape), t.data_ptr())
-        torch.cuda.current_stream().synchronize()
-        self.mtp.run_with_iobinding(io)
-        self.mtp_cache = nxt
+        self.d_tok.copy_(tok)
+        self._run_draft(self.mh_hist[:, self.mtp_window - _MH_PAD:], past - _MH_PAD)
         self.mh_valid = 0
-        return out_ids, conf
+        return self.d_out, self.d_conf
 
     def _reslide(self, keep, ran):
         """Re-cut the compressor windows from `ran` positions consumed to `keep` kept.
@@ -876,6 +978,7 @@ class _Worker:
             stop[0] = "eos"
         vote = torch.zeros(K + 3, dtype=torch.float32, device="cuda")
         gathered = torch.zeros((self.world, K + 3), dtype=torch.float32, device="cuda")
+        self._prime_ring(past)
 
         while len(produced[0]) < limit and stop[0] not in ("eos", "abort"):
             t1 = time.time()
