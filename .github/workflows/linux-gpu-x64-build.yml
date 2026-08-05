@@ -15,7 +15,6 @@ env:
   ORT_BUILD_VERSION: "1.26.0"
   ORT_RUNTIME_VERSION: "1.28.0"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
-  ORT_NIGHTLY_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -74,24 +73,30 @@ jobs:
 
       - name: Download build-time and runtime CUDA 12 OnnxRuntime
         run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_BUILD_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_RUNTIME_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          curl -fsSL \
+            "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_BUILD_VERSION }}/content?api-version=6.0-preview.1" \
+            -o ort-build.zip
+          curl -fsSL \
+            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/onnxruntime-cuda-12/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_RUNTIME_VERSION }}/content?api-version=6.0-preview.1" \
+            -o ort-runtime.zip
+          unzip -q ort-build.zip -d ort-build-package
+          unzip -q ort-runtime.zip -d ort-runtime-package
 
       - name: list files
         shell: bash
         run: |
           ls -l
-          ls -R ${{ env.ORT_PACKAGE_NAME }}
+          ls -R ort-build-package
+          ls -R ort-runtime-package
         continue-on-error: true
 
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
           mkdir -p ort-build/lib ort/lib
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_BUILD_VERSION }}/buildTransitive/native/include ort-build/
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_BUILD_VERSION }}/runtimes/linux-x64/native/* ort-build/lib/
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_RUNTIME_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mv ort-build-package/buildTransitive/native/include ort-build/
+          mv ort-build-package/runtimes/linux-x64/native/* ort-build/lib/
+          mv ort-runtime-package/runtimes/linux-x64/native/* ort/lib/
           cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
