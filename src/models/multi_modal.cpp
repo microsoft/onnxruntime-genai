@@ -204,7 +204,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   OrtValue* grid_full = inputs_[grid_idx];
   const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
-  
+
   // Defensive bounds check: verify grid_data has enough elements for all images
   // Each image requires 3 elements (t, h, w)
   int64_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
