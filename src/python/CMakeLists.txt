@@ -177,11 +177,35 @@ if(BUILD_WHEEL)
     set(_genai_host_platform "${_genai_host_processor}")
   endif()
 
+  # ORT runtime copied into the isolated stub-generation dir so the freshly built
+  # extension can be imported. For CPU/CUDA this is the ORT the core was built
+  # against (ORT_LIB_DIR), which matches the required API. For WinML the bundled
+  # SDK ORT can be older than the API the GenAI core requires, so importing the
+  # extension fails with an ORT API-version mismatch. Use the pip-installed
+  # onnxruntime runtime instead (the WinML pipeline installs a matching onnxruntime
+  # before the build — see sdk-python-winml-win-step.yml); copying it over the
+  # isolated dir replaces the stale bundled ORT there. The shipped wheel is
+  # unaffected (it still bundles the SDK ORT for end users).
+  set(STUBGEN_ORT_LIB_DIR "${ORT_LIB_DIR}")
+  if(USE_WINML)
+    execute_process(
+      COMMAND ${PYTHON_EXECUTABLE} -c "import onnxruntime, os, sys; sys.stdout.write(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))"
+      OUTPUT_VARIABLE _ort_python_capi_dir
+      RESULT_VARIABLE _ort_python_capi_result
+      ERROR_QUIET)
+    if(_ort_python_capi_result EQUAL 0 AND EXISTS "${_ort_python_capi_dir}")
+      set(STUBGEN_ORT_LIB_DIR "${_ort_python_capi_dir}")
+      message(STATUS "WinML stub generation will use the pip-installed onnxruntime runtime at: ${_ort_python_capi_dir}")
+    else()
+      message(WARNING "WinML stub generation: pip-installed onnxruntime not found; falling back to the bundled SDK ORT (${ORT_LIB_DIR}). The stubgen import may fail with an ORT API-version mismatch. Install a matching onnxruntime before building.")
+    endif()
+  endif()
+
   if(genai_target_platform STREQUAL _genai_host_platform)
     add_custom_command(TARGET python POST_BUILD
       # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${GENERATE_TYPE_DIR}"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${STUBGEN_ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
       # pybind11-stubgen and numpy must already be installed in the Python environment used for the
       # build (see test/python/requirements.txt).
       # --numpy-array-use-type-var makes stubgen emit valid `numpy.ndarray[Any, numpy.dtype[...]]`
