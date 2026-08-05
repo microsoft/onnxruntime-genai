@@ -189,6 +189,16 @@ class DeepSeekV4FlashModel(Model):
         # buffer, one of which exists only to widen to float and one only to narrow back.
         self.swiglu_fused = extra_options.get("dsv4_swiglu_fused", "1") not in ("0", 0, False)
 
+        # Sibling projections that read the same activation can share one GEMV, the way
+        # vLLM folds them through ``stacked_params_mapping``.  It halves their kernel time
+        # (a 1024+512 pair over K=4096 goes 16.0 -> 8.4 us, a 256+256 pair 15.3 -> 7.9 us),
+        # but the ``Split`` that hands the halves back costs more than that in exposed
+        # CUDA-graph node dispatch: measured 82.5 -> 78.6 tok/s at batch 1.  Off by default,
+        # kept selectable because the win reappears for any consumer that can read the
+        # fused tensor directly and skip the split.  See
+        # dev/docs/memory/dsv4_perf_it13_sibling_gemm_fusion.md.
+        self.proj_fusion = extra_options.get("dsv4_proj_fused", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -404,6 +414,50 @@ class DeepSeekV4FlashModel(Model):
         return self.op("MatMulBlockQuantizedFp8Weight",
                        [x, self.init(w, f"{key}/q"), self.init(scale, f"{key}/s")],
                        name, io, shape, domain="com.microsoft", block_size=FP8_BLOCK)
+
+    def proj_fused(self, name, x, keys, sizes, shapes, shard_axis=None):
+        """One ``x @ concat(W).T`` in place of several, split back afterwards.
+
+        At M == 1 a projection is 1-4 MB, far less than the bytes H200 needs in
+        flight to saturate HBM, so each of these launches sits at its latency
+        floor rather than at a bandwidth limit -- and the grid is only
+        ``ceil(N / 16)`` blocks, well under a wave for the narrow ones.  Siblings
+        that read the same activation therefore pay twice for one round trip.
+        Concatenating them along N buys back a launch and doubles the blocks;
+        vLLM folds the same pairs through ``stacked_params_mapping``.
+
+        The checkpoint's fp8 scales are already expanded to one row per output
+        channel, so both the weights and the scales concatenate on axis 0 with
+        no alignment constraint on N.
+        """
+        io = self.io_dtype
+        qs = [self.sd.qweight(k) if hasattr(self.sd, "qweight") else None for k in keys]
+        if any(q is None for q in qs):
+            # Unquantized parity checkpoint: no fp8 layout to concatenate.
+            return [self.proj(f"{name}/{i}", x, k, s, shard_axis=shard_axis)
+                    for i, (k, s) in enumerate(zip(keys, shapes))]
+
+        ws, ss = [], []
+        for w, scale in qs:
+            if shard_axis is not None:
+                w = self.shard(w, shard_axis)
+                scale = self.shard(scale, shard_axis)
+            ws.append(w)
+            ss.append(scale)
+
+        fused = self.op("MatMulBlockQuantizedFp8Weight",
+                        [x,
+                         self.init(torch.cat(ws, 0), f"{name}/q"),
+                         self.init(torch.cat(ss, 0), f"{name}/s")],
+                        f"{name}/fused", io, list(shapes[0][:-1]) + [sum(sizes)],
+                        domain="com.microsoft", block_size=FP8_BLOCK)
+
+        outs = [f"{name}/split_{i}" for i in range(len(keys))]
+        self.make_node("Split", inputs=[fused, self.const("INT64", list(sizes))],
+                       outputs=outs, name=f"{name}/split", axis=-1)
+        for out, shape in zip(outs, shapes):
+            self.make_value(out, io, shape=shape)
+        return outs
 
     def cast(self, name, x, dtype, shape=None):
         return self.op("Cast", [x], name, dtype, shape, to=dtype)
@@ -1000,7 +1054,15 @@ class DeepSeekV4FlashModel(Model):
             return self.op("Concat", [n, r_], tag, io, shape, axis=-1)
 
         # ---- Q ----
-        qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
+        if self.proj_fusion:
+            # wq_a and wkv both read the attention norm, so they can ride one GEMV.
+            qa, kv_raw = self.proj_fused(f"{name}/qakv", x,
+                                         [f"{p}.wq_a.weight", f"{p}.wkv.weight"],
+                                         [self.q_lora_rank, D],
+                                         [[B, S, self.q_lora_rank], [B, S, D]])
+        else:
+            qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
+            kv_raw = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
         qn = self.make_rmsnorm(f"{name}/qnorm", qa,
                                self.init_w(f"{p}.q_norm.weight",
                                            to=ir.DataType.FLOAT),
@@ -1009,7 +1071,6 @@ class DeepSeekV4FlashModel(Model):
         q_raw = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
 
         # ---- KV (single latent row shared by all heads) ----
-        kv_raw = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
         kv_w = self.init_w(f"{p}.kv_norm.weight", to=ir.DataType.FLOAT)
 
         if self.qkv_fused:
@@ -1673,8 +1734,13 @@ class DeepSeekV4FlashModel(Model):
         F = ir.DataType.FLOAT
         io, dim, mil = self.io_dtype, self.dim, self.moe_inter_local
 
-        sg = self.proj(f"{name}/sg", xflat, f"{p}.sw1.weight", [None, mil], shard_axis=0)
-        su = self.proj(f"{name}/su", xflat, f"{p}.sw3.weight", [None, mil], shard_axis=0)
+        if self.proj_fusion:
+            sg, su = self.proj_fused(f"{name}/sgu", xflat,
+                                     [f"{p}.sw1.weight", f"{p}.sw3.weight"],
+                                     [mil, mil], [[None, mil], [None, mil]], shard_axis=0)
+        else:
+            sg = self.proj(f"{name}/sg", xflat, f"{p}.sw1.weight", [None, mil], shard_axis=0)
+            su = self.proj(f"{name}/su", xflat, f"{p}.sw3.weight", [None, mil], shard_axis=0)
         if self.swiglu_fused:
             # The activation stays in the io dtype end to end: the operator widens to
             # float internally, so the two casts around it -- and the six elementwise
