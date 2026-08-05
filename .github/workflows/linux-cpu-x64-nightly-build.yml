@@ -12,9 +12,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_BUILD_VERSION: "1.26.0"
+  ORT_RUNTIME_VERSION: "1.28.0"
+  ORT_BUILD_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_RUNTIME_SOURCE: "https://api.nuget.org/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   job:
@@ -63,18 +65,11 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
-      - name: Get the Latest OnnxRuntime Nightly Version
-        shell: pwsh
-        run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "$ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Download OnnxRuntime Nightly
+      - name: Download build-time and runtime OnnxRuntime
         run: |
           dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_BUILD_VERSION }} --source ${{ env.ORT_BUILD_SOURCE }} --package-directory .
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_RUNTIME_VERSION }} --source ${{ env.ORT_RUNTIME_SOURCE }} --package-directory .
 
       - name: list files
         shell: bash
@@ -87,9 +82,11 @@ jobs:
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
-          mkdir -p ort/lib
-          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
-          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mkdir -p ort-build/lib ort/lib
+          mv microsoft.ml.onnxruntime/${{ env.ORT_BUILD_VERSION }}/build/native/include ort-build/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_BUILD_VERSION }}/runtimes/linux-x64/native/* ort-build/lib/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_RUNTIME_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
       - name: Git Submodule Update
@@ -106,7 +103,7 @@ jobs:
             --build_dir build/cpu \
             --cmake_generator Ninja \
             --build_java \
-            --ort_home "$GITHUB_WORKSPACE/ort" \
+            --ort_home "$GITHUB_WORKSPACE/ort-build" \
             --use_guidance \
             --update --build \
             --skip_examples \
@@ -122,8 +119,8 @@ jobs:
           set -e -x
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/ort/include \
-            -DORT_LIB_DIR=$GITHUB_WORKSPACE/ort/lib \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/ort-build/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/ort-build/lib \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
             -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release
           cmake --build examples/c/build --config Release
@@ -143,7 +140,8 @@ jobs:
       - name: Run the Java tests
         run: |
           set -e -x
-          ctest --test-dir build/cpu/Release/src/java --build-config Release --verbose --timeout 10800
+          LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib \
+            ctest --test-dir build/cpu/Release/src/java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python tests
         run: |

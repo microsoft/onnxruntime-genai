@@ -11,9 +11,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_BUILD_VERSION: "1.26.0"
+  ORT_RUNTIME_VERSION: "1.28.0"
+  ORT_BUILD_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_RUNTIME_SOURCE: "https://api.nuget.org/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -44,18 +46,11 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
-      - name: Get the Latest OnnxRuntime Nightly Version
-        shell: pwsh
-        run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "$ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Download OnnxRuntime Nightly
+      - name: Download build-time and runtime OnnxRuntime
         run: |
           dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_BUILD_VERSION }} --source ${{ env.ORT_BUILD_SOURCE }} --package-directory .
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_RUNTIME_VERSION }} --source ${{ env.ORT_RUNTIME_SOURCE }} --package-directory .
 
       - name: list files
         shell: bash
@@ -67,9 +62,11 @@ jobs:
       # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
-          mkdir -p ort/lib
-          mv microsoft.ml.onnxruntime/**/build/native/include ort/
-          mv microsoft.ml.onnxruntime/**/runtimes/linux-arm64/native/* ort/lib/
+          mkdir -p ort-build/lib ort/lib
+          mv microsoft.ml.onnxruntime/${{ env.ORT_BUILD_VERSION }}/build/native/include ort-build/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_BUILD_VERSION }}/runtimes/linux-arm64/native/* ort-build/lib/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_RUNTIME_VERSION }}/runtimes/linux-arm64/native/* ort/lib/
+          cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
       - name: Download Docker Image
@@ -94,7 +91,7 @@ jobs:
               --config Release \
               --build_dir build/cpu \
               --cmake_generator Ninja \
-              --ort_home /onnxruntime_src/ort \
+              --ort_home /onnxruntime_src/ort-build \
               --use_guidance \
               --update --build \
               --skip_examples \
@@ -114,8 +111,8 @@ jobs:
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             /usr/bin/cmake -S examples/c -B examples/c/build \
               -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-              -DORT_INCLUDE_DIR=/onnxruntime_src/ort/include \
-              -DORT_LIB_DIR=/onnxruntime_src/ort/lib \
+              -DORT_INCLUDE_DIR=/onnxruntime_src/ort-build/include \
+              -DORT_LIB_DIR=/onnxruntime_src/ort-build/lib \
               -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
               -DOGA_LIB_DIR=/onnxruntime_src/build/cpu/Release && \
             /usr/bin/cmake --build examples/c/build --config Release"
