@@ -648,6 +648,43 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                                            const std::shared_ptr<Tensor>& video_grid_thw,
                                            const std::shared_ptr<Tensor>& second_per_grid_ts) {
+  // Validate grid tensor dimensions to prevent overflow during position computation
+  constexpr int64_t kMaxGridDim = 16384;  // Conservative upper bound to prevent overflow
+  
+  if (image_grid_thw) {
+    auto grid_data = image_grid_thw->GetData<int64_t>();
+    auto elem_count = image_grid_thw->GetElementCount();
+    // Each image contributes t, h, w (3 values per image)
+    if (elem_count % 3 != 0) {
+      throw std::runtime_error("image_grid_thw element count must be divisible by 3");
+    }
+    for (size_t i = 0; i < elem_count; ++i) {
+      if (grid_data[i] < 0) {
+        throw std::runtime_error("image_grid_thw values must be non-negative");
+      }
+      if (grid_data[i] > kMaxGridDim) {
+        throw std::runtime_error("image_grid_thw values must be <= " + std::to_string(kMaxGridDim));
+      }
+    }
+  }
+  
+  if (video_grid_thw) {
+    auto grid_data = video_grid_thw->GetData<int64_t>();
+    auto elem_count = video_grid_thw->GetElementCount();
+    // Each video contributes t, h, w (3 values per video)
+    if (elem_count % 3 != 0) {
+      throw std::runtime_error("video_grid_thw element count must be divisible by 3");
+    }
+    for (size_t i = 0; i < elem_count; ++i) {
+      if (grid_data[i] < 0) {
+        throw std::runtime_error("video_grid_thw values must be non-negative");
+      }
+      if (grid_data[i] > kMaxGridDim) {
+        throw std::runtime_error("video_grid_thw values must be <= " + std::to_string(kMaxGridDim));
+      }
+    }
+  }
+  
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
   second_per_grid_ts_ = second_per_grid_ts;
@@ -815,6 +852,17 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
       // 2. Fill Vision Part
       st_idx = max_pos_for_batch + 1;
       int64_t vision_len = llm_grid_t * llm_grid_h * llm_grid_w;
+      
+      // Validate that the vision tokens fit within the sequence
+      if (ed + vision_len > seq_len) {
+        throw std::runtime_error("Image/video grid dimensions (t=" + std::to_string(llm_grid_t) + 
+                                 " h=" + std::to_string(llm_grid_h) + 
+                                 " w=" + std::to_string(llm_grid_w) + 
+                                 ") result in " + std::to_string(vision_len) + 
+                                 " tokens but only " + std::to_string(seq_len - ed) + 
+                                 " positions available in sequence");
+      }
+      
       for (int64_t s = 0; s < vision_len; ++s) {
         int64_t gt = s / (llm_grid_h * llm_grid_w);
         int64_t gh = (s / llm_grid_w) % llm_grid_h;
