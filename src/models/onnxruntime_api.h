@@ -201,6 +201,21 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   return ort_lib_handle;
 }
 
+#if defined(__linux__)
+inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  if (ort_lib_handle) {
+#if defined(RTLD_DI_ORIGIN)
+    char pathname[PATH_MAX];
+    dlinfo(ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+    LOG_INFO("Reusing loaded native library at %s", pathname);
+#endif
+  }
+  return ort_lib_handle;
+}
+#endif
+
 inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   if (ort_api_base_fn == nullptr) {
     throw std::runtime_error("OrtGetApiBase not found");
@@ -274,6 +289,18 @@ inline void InitApi() {
   }
 
 #if defined(__linux__)
+  if (ort_lib_handle == nullptr) {
+    // Reuse any ORT image already loaded by the host before resolving a new path. In particular,
+    // a host may depend on the versioned SONAME while the unversioned sibling is also present.
+    // Loading the sibling first would create a second ORT environment that cannot see EPs the host
+    // registered with the original image.
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so.1");
+  }
+
   if (ort_lib_handle == nullptr) {
     // For Android and NuGet Linux package, the file name is libonnxruntime.so
     // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
