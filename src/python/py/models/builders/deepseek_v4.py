@@ -199,6 +199,15 @@ class DeepSeekV4FlashModel(Model):
         # dev/docs/memory/dsv4_perf_it13_sibling_gemm_fusion.md.
         self.proj_fusion = extra_options.get("dsv4_proj_fused", "0") not in ("0", 0, False)
 
+        # The vocabulary projection is the one weight that was left replicated: every rank
+        # holds all 4096 x 129280 of it and computes the same logits from the same
+        # activation.  At decode that is a pure weight-streaming GEMV -- 1.06 GB at 4.8 TB/s,
+        # measured 238.6 us of a 9.6 ms step, the single most expensive kernel launch in the
+        # graph -- and seven eighths of the work is redundant.  Sharding the vocabulary and
+        # gathering the pieces back costs one collective on 129280 floats.  See
+        # dev/docs/memory/dsv4_perf_it15_lm_head_shard.md.
+        self.lm_head_shard = extra_options.get("dsv4_lm_head_shard", "1") not in ("0", 0, False)
+
         # Hybrid parallelism, matching what vLLM runs for this checkpoint:
         # tensor-parallel for attention and the shared expert, expert-parallel
         # for the routed experts.  One graph is emitted per rank; the ranks are
@@ -255,11 +264,14 @@ class DeepSeekV4FlashModel(Model):
         experts to this rank (the real checkpoint reads only its own slice)."""
         return t if getattr(self.sd, "pre_sharded", False) else self.shard(t, axis)
 
-    def all_reduce(self, name, x, dtype, shape):
+    def all_reduce(self, name, x, dtype, shape, declared=False):
+        """``declared`` marks an output the base builder already registered (``logits``),
+        where re-declaring the value would duplicate the graph output."""
         if self.world == 1:
             return x
         self.make_node("AllReduce", inputs=[x], outputs=[name], name=name, domain="com.microsoft")
-        self.make_value(name, dtype, shape=shape)
+        if not declared:
+            self.make_value(name, dtype, shape=shape)
         return name
 
     # ------------------------------------------------------------------ #
@@ -1903,10 +1915,35 @@ class DeepSeekV4FlashModel(Model):
         n = self.cast("/norm_b", n, io, [B, S, dim])
         # Keep the vocabulary projection in the activation type; a float copy of
         # it would be the single largest initializer in the model.
-        lg = self.op("MatMul", [n, self.init(self.sd["head.weight"].T, "head/T", to=io)],
-                     "/lm_head", io, [B, S, self.vocab_size])
-        self.make_node("Cast", inputs=[lg], outputs=["logits"], name="/logits",
-                       to=int(ir.DataType.FLOAT))
+        shard_head = (self.lm_head_shard and self.world > 1
+                      and self.vocab_size % self.world == 0)
+        if shard_head:
+            # head.weight is [vocab, dim], so a contiguous slice along axis 0 is this
+            # rank's vocabulary range.  The pieces are reunified with a zero pad and an
+            # AllReduce rather than an AllGather: every output element comes from exactly
+            # one rank and the others contribute zero, so the sum is exact, and unlike
+            # com.microsoft.AllGather -- which concatenates on axis 0 and reaches any other
+            # axis through a pair of transposes and two temporaries -- this needs no
+            # reshaping at all.  Measured on this box, a 517 KB fp32 AllReduce is 22.9 us
+            # against 41.4 us for the equivalent 64 KB AllGather.
+            vloc = self.vocab_size // self.world
+            lg = self.op("MatMul", [n, self.init(self.shard(self.sd["head.weight"], 0).T,
+                                                 "head/T", to=io)],
+                         "/lm_head", io, [B, S, vloc])
+            # The cast has to precede the pad: CUDA Pad has no bfloat16 kernel, and an
+            # unassigned node fails session initialization outright.  It is also the
+            # cheaper order, since the cast then runs on an eighth of the vocabulary.
+            lgf = self.cast("/lm_head_f", lg, ir.DataType.FLOAT, [B, S, vloc])
+            pads = [0, 0, self.rank * vloc, 0, 0, (self.world - 1 - self.rank) * vloc]
+            wide = self.op("Pad", [lgf, self.const("INT64", pads)], "/lm_head_pad",
+                           ir.DataType.FLOAT, [B, S, self.vocab_size])
+            self.all_reduce("logits", wide, ir.DataType.FLOAT,
+                            [B, S, self.vocab_size], declared=True)
+        else:
+            lg = self.op("MatMul", [n, self.init(self.sd["head.weight"].T, "head/T", to=io)],
+                         "/lm_head", io, [B, S, self.vocab_size])
+            self.make_node("Cast", inputs=[lg], outputs=["logits"], name="/logits",
+                           to=int(ir.DataType.FLOAT))
 
     def save_model(self, out_dir):
         if self.writer is None:
