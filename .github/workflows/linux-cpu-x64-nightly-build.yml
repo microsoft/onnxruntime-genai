@@ -75,7 +75,6 @@ jobs:
         run: |
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-        continue-on-error: true
 
       - name: list files
         shell: bash
@@ -107,6 +106,7 @@ jobs:
             --build_dir build/cpu \
             --cmake_generator Ninja \
             --build_java \
+            --ort_home "$GITHUB_WORKSPACE/ort" \
             --use_guidance \
             --update --build \
             --skip_examples \
@@ -120,16 +120,10 @@ jobs:
       - name: Build the C Examples
         run: |
           set -e -x
-          ORT_EXAMPLE_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/runtimes/linux-x64/native
-          if [ -f "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" ] && [ ! -e "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" ]; then
-            ln -s libonnxruntime.so "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1" || \
-            cp "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so" "$ORT_EXAMPLE_LIB_DIR/libonnxruntime.so.1"
-          fi
-
           cmake -S examples/c -B examples/c/build \
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/Release/_deps/ortlib-src/build/native/include \
-            -DORT_LIB_DIR=$ORT_EXAMPLE_LIB_DIR \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/ort/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/ort/lib \
             -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
             -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/Release
           cmake --build examples/c/build --config Release

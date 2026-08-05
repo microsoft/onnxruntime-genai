@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ hashFiles('build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
+          key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
           restore-keys: |
             sccache-win-cuda-
 
@@ -142,7 +142,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ hashFiles('build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
+          key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
 
       - name: Add CUDA to PATH
         run: |

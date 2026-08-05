@@ -56,7 +56,6 @@ jobs:
         run: |
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-        continue-on-error: true
 
       - name: list files
         shell: bash
@@ -95,6 +94,7 @@ jobs:
               --config Release \
               --build_dir build/cpu \
               --cmake_generator Ninja \
+              --ort_home /onnxruntime_src/ort \
               --use_guidance \
               --update --build \
               --skip_examples \
@@ -114,8 +114,8 @@ jobs:
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
             /usr/bin/cmake -S examples/c -B examples/c/build \
               -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-              -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/Release/_deps/ortlib-src/build/native/include \
-              -DORT_LIB_DIR=/onnxruntime_src/build/cpu/Release/_deps/ortlib-src/runtimes/linux-arm64/native \
+              -DORT_INCLUDE_DIR=/onnxruntime_src/ort/include \
+              -DORT_LIB_DIR=/onnxruntime_src/ort/lib \
               -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
               -DOGA_LIB_DIR=/onnxruntime_src/build/cpu/Release && \
             /usr/bin/cmake --build examples/c/build --config Release"

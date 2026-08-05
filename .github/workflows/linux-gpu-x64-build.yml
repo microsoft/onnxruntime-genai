@@ -12,9 +12,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/onnxruntime-cuda-12/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
-  ORT_VERSION: "1.26.0"
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_NIGHTLY_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -71,11 +71,18 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
-      - name: Download OnnxRuntime
+      - name: Get the Latest CUDA 12 OnnxRuntime Nightly Version
+        shell: pwsh
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download CUDA 12 OnnxRuntime Nightly
         run: |
           dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-        continue-on-error: true
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
 
       - name: list files
         shell: bash
@@ -88,8 +95,8 @@ jobs:
         run: |
           set -e -x
           mkdir -p ort/lib
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_VERSION }}/buildTransitive/native/include ort/
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
 

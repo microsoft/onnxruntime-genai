@@ -125,7 +125,7 @@ jobs:
   - task: Cache@2
     displayName: 'Restore ccache'
     inputs:
-      key: 'ccache | macos-arm64 | "$(Agent.OS)" | build.py, **/CMakeLists.txt, cmake/**/*.cmake'
+      key: 'ccache | macos-arm64 | "$(Agent.OS)" | .pipelines/mac-cpu-arm64-build.yml, build.py, **/CMakeLists.txt, cmake/**/*.cmake'
       restoreKeys: |
         ccache | macos-arm64 | "$(Agent.OS)"
         ccache | macos-arm64
