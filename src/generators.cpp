@@ -369,7 +369,7 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       slot = owned_interfaces_.back().get();
       break;
     case DeviceType::AMDGPU:
-      slot = GetAMDGPUInterface();  // static singleton owned by amdgpu/interface.cpp
+      slot = GetAMDGPUInterface();
       break;
     case DeviceType::CPU:
     default:

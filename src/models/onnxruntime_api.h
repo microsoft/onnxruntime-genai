@@ -878,7 +878,7 @@ struct OrtMemoryInfo {
   static std::unique_ptr<OrtMemoryInfo> Create(const char* name, OrtAllocatorType type, int id, OrtMemType mem_type);
   // Wraps CreateMemoryInfo_V2 — lets us request a specific OrtDeviceMemoryType (e.g.
   // HOST_ACCESSIBLE) so an EP that registers both DEFAULT and HOST_ACCESSIBLE allocators
-  // (MIGraphX HipPinned, DML CUSTOM/L0) hands back the host-accessible one.
+  // hands back the host-accessible one.
   static std::unique_ptr<OrtMemoryInfo> CreateV2(const char* name, OrtMemoryInfoDeviceType device_type,
                                                  uint32_t vendor_id, int32_t device_id,
                                                  OrtDeviceMemoryType mem_type, OrtAllocatorType allocator_type);
