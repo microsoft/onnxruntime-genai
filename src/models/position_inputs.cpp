@@ -650,40 +650,33 @@ void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_
                                            const std::shared_ptr<Tensor>& second_per_grid_ts) {
   // Validate grid tensor dimensions to prevent overflow during position computation
   constexpr int64_t kMaxGridDim = 16384;  // Conservative upper bound to prevent overflow
-
-  if (image_grid_thw) {
-    auto grid_data = image_grid_thw->GetData<int64_t>();
-    auto elem_count = image_grid_thw->GetElementCount();
-    // Each image contributes t, h, w (3 values per image)
-    if (elem_count % 3 != 0) {
-      throw std::runtime_error("image_grid_thw element count must be divisible by 3");
+  const auto validate_grid_tensor = [&](const std::shared_ptr<Tensor>& grid_tensor, const char* tensor_name) {
+    if (!grid_tensor) {
+      return;
     }
+
+    if (grid_tensor->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      throw std::runtime_error(std::string(tensor_name) + " must be int64.");
+    }
+
+    const auto* grid_data = grid_tensor->GetData<int64_t>();
+    const size_t elem_count = grid_tensor->GetElementCount();
+    if (elem_count % 3 != 0) {
+      throw std::runtime_error(std::string(tensor_name) + " element count must be divisible by 3");
+    }
+
     for (size_t i = 0; i < elem_count; ++i) {
       if (grid_data[i] < 0) {
-        throw std::runtime_error("image_grid_thw values must be non-negative");
+        throw std::runtime_error(std::string(tensor_name) + " values must be non-negative");
       }
       if (grid_data[i] > kMaxGridDim) {
-        throw std::runtime_error("image_grid_thw values must be <= " + std::to_string(kMaxGridDim));
+        throw std::runtime_error(std::string(tensor_name) + " values must be <= " + std::to_string(kMaxGridDim));
       }
     }
-  }
+  };
 
-  if (video_grid_thw) {
-    auto grid_data = video_grid_thw->GetData<int64_t>();
-    auto elem_count = video_grid_thw->GetElementCount();
-    // Each video contributes t, h, w (3 values per video)
-    if (elem_count % 3 != 0) {
-      throw std::runtime_error("video_grid_thw element count must be divisible by 3");
-    }
-    for (size_t i = 0; i < elem_count; ++i) {
-      if (grid_data[i] < 0) {
-        throw std::runtime_error("video_grid_thw values must be non-negative");
-      }
-      if (grid_data[i] > kMaxGridDim) {
-        throw std::runtime_error("video_grid_thw values must be <= " + std::to_string(kMaxGridDim));
-      }
-    }
-  }
+  validate_grid_tensor(image_grid_thw, "image_grid_thw");
+  validate_grid_tensor(video_grid_thw, "video_grid_thw");
 
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
