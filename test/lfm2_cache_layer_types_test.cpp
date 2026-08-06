@@ -127,5 +127,8 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
       "valid",
       "[\"full_attention\", \"conv\", \"full_attention\", \"conv\"]");
 
-  EXPECT_TRUE(CaptureThrowMessage(model_dir).empty());
+  const std::string message = CaptureThrowMessage(model_dir);
+  EXPECT_EQ(message.find("LFM2Cache"), std::string::npos) << message;
+  EXPECT_EQ(message.find("layer_types"), std::string::npos) << message;
+  EXPECT_EQ(message.find("num_hidden_layers"), std::string::npos) << message;
 }
