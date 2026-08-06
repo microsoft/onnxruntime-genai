@@ -124,7 +124,7 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Checks if the request is in prefill mode.
-   * @return True if the request is in prefill mode, false otherwise.
+   * @return True if no tokens have been processed yet, false otherwise.
    */
   bool IsPrefill() const;
 
@@ -142,6 +142,14 @@ struct Request : std::enable_shared_from_this<Request>,
    * reference into the request and does not mutate any state.
    */
   RequestStateSnapshot Snapshot() const;
+
+  /**
+   * @brief Number of leading tokens of the sequence whose keys and values are already in the cache.
+   *
+   * This is the absolute position the next scheduled token will be written at, which is what the
+   * decoder has to report to the model as the past sequence length.
+   */
+  int64_t ProcessedSequenceLength() const;
 
   RequestStatus status_{RequestStatus::Unassigned};
 
@@ -204,6 +212,9 @@ struct Request : std::enable_shared_from_this<Request>,
   void* GetOpaqueData();
 
  private:
+  // The search sequence is partitioned at processed_sequence_length_: tokens before it already
+  // have KV entries, and UnprocessedTokens() returns [processed, current). seen_sequence_length_
+  // independently tracks tokens consumed by the application; both cursors are at most current.
   std::vector<int32_t> prefill_input_ids_;
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
@@ -214,7 +225,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
-  bool is_prefill_{true};
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };
