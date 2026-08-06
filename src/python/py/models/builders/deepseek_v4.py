@@ -2046,11 +2046,14 @@ class DeepSeekV4FlashModel(Model):
         taking the whole run at once keeps the cache exact for any accept length.
         """
         W, D, K = self.window, self.head_dim, self.dspark_block
+        cache_block = self.block_size
+        cache_blocks = (W + K + cache_block - 1) // cache_block
         self.model.metadata_props.update({
             "dsv4_mtp_stages": str(self.n_mtp),
             "dsv4_mtp_block_size": str(K),
             "dsv4_mtp_noise_token": str(self.noise_token),
             "dsv4_window": str(W),
+            "dsv4_mtp_cache_block_size": str(cache_block),
         })
         self.input_names = {n: n for n in ("main_hidden", "input_ids", "past_lens")}
         self.input_types = {"main_hidden": self.io_dtype, "input_ids": ir.DataType.INT64,
@@ -2068,7 +2071,8 @@ class DeepSeekV4FlashModel(Model):
             for side, pre in (("input", "past"), ("output", "present")):
                 getattr(self, f"{side}_names")[f"{pre}_kv_{lid}"] = f"{pre}_kv_{lid}"
                 getattr(self, f"{side}_types")[f"{pre}_kv_{lid}"] = self.io_dtype
-                getattr(self, f"{side}_shapes")[f"{pre}_kv_{lid}"] = [B, W, D]
+                getattr(self, f"{side}_shapes")[f"{pre}_kv_{lid}"] = [
+                    cache_blocks, cache_block, 1, D]
 
     def make_dspark_attention(self, name, lid, x, main_x, ctx):
         """Dense MQA over the window ring of main states plus the draft block itself.
@@ -2109,10 +2113,6 @@ class DeepSeekV4FlashModel(Model):
         mkv = self.make_rmsnorm(f"{name}/mkvn", mkv, kv_w, [B, MAIN, D])
         mkv = self.cast(f"{name}/mkvb", mkv, io, [B, MAIN, D])
         mkv = kv_tail(f"{name}/mkv2", mkv, [B, MAIN, D], ctx["mcos"], ctx["msin"])
-        ring = f"present_kv_{lid}"
-        self.make_node("ScatterND", inputs=[f"past_kv_{lid}", ctx["ring_idx"], mkv],
-                       outputs=[ring], name=f"{name}/ring")
-
         # ---- the draft block's own q and kv ----
         qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
         nd_ = io if self.norm_bf16 else F
@@ -2130,34 +2130,24 @@ class DeepSeekV4FlashModel(Model):
         kv = self.cast(f"{name}/kvb", kv, io, [B, S, D])
         kv = kv_tail(f"{name}/kv2", kv, [B, S, D], ctx["cos"], ctx["sin"])
 
-        k = self.op("Concat", [ring, kv], f"{name}/keys", io, [B, W + self.dspark_block, D],
-                    axis=1)
-        qf = self.cast(f"{name}/qf", q, F, [B, S, H, D])
-        kf = self.cast(f"{name}/kf", k, F, [B, W + self.dspark_block, D])
-        n_keys = W + self.dspark_block
-        scores = self.op("Einsum", [qf, kf], f"{name}/scores", F, [B, S, H, n_keys],
-                         equation="bshd,bnd->bshn")
-        scores = self.op("Mul", [scores, self.const("FLOAT", self.softmax_scale)],
-                         f"{name}/scaled", F, [B, S, H, n_keys])
-        scores = self.op("Where", [ctx["kmask"], scores, self.const("FLOAT", NEG_INF)],
-                         f"{name}/masked", F, [B, S, H, n_keys])
-        smx = self.op("ReduceMax", [scores, self.const("INT64", [-1])], f"{name}/smax",
-                      F, [B, S, H, 1], keepdims=1)
-        pex = self.op("Exp", [self.op("Sub", [scores, smx], f"{name}/shift", F,
-                                      [B, S, H, n_keys])],
-                      f"{name}/exp", F, [B, S, H, n_keys])
-        denom = self.op("ReduceSum", [pex, self.const("INT64", [-1])], f"{name}/den",
-                        F, [B, S, H, 1], keepdims=1)
-        sink = self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(1, 1, H, 1),
-                         f"{p}.attn_sink")
-        sink_e = self.op("Exp", [self.op("Sub", [sink, smx], f"{name}/sinkshift", F,
-                                        [B, S, H, 1])],
-                         f"{name}/sinkexp", F, [B, S, H, 1])
-        denom = self.op("Add", [denom, sink_e], f"{name}/den2", F, [B, S, H, 1])
-        o = self.op("Einsum", [pex, kf], f"{name}/ctx", F, [B, S, H, D],
-                    equation="bshn,bnd->bshd")
-        o = self.op("Div", [o, denom], f"{name}/norm", F, [B, S, H, D])
-        o = self.cast(f"{name}/ob", o, io, [B, S, H, D])
+        key = self.op("Concat", [mkv, kv], f"{name}/keys", io, [B, None, D], axis=1)
+        out, cache_out = f"{name}/paged/output_0", f"present_kv_{lid}"
+        self.make_node(
+            "PagedAttention",
+            inputs=[
+                self.reshape(f"{name}/qpack", q, [-1, H * D], io, [None, H * D]),
+                self.reshape(f"{name}/kpack", key, [-1, D], io, [None, D]),
+                "", f"past_kv_{lid}", "", ctx["cum32"], ctx["zero_past32"],
+                ctx["block_table32"], "", "", ctx["slot32"],
+                self.init(self.shard(self.sd[f"{p}.attn_sink"], 0).reshape(H),
+                          f"{p}.attn_sink", to=io),
+                "", "", "", "", "", ctx["kvi32"],
+            ],
+            outputs=[out, cache_out], name=f"{name}/paged", domain="com.microsoft",
+            num_heads=H, kv_num_heads=1, kv_cache_layout="LATENT", v_head_size=D)
+        self.make_value(out, io, shape=[None, H * D])
+        self.make_value(cache_out, io, shape=self.input_shapes[f"past_kv_{lid}"])
+        o = self.dyn_reshape(f"{name}/o4", out, ctx["bs"], [H, D], io, [B, S, H, D])
 
         o = rope_last(f"{name}/orope", o, [B, S, H, D], ctx["cos_q"], ctx["sin_q"], inverse=True)
         o = self.reshape(f"{name}/og", o, [0, 0, G, -1], io, [B, S, G, dh])
@@ -2227,25 +2217,41 @@ class DeepSeekV4FlashModel(Model):
         mcos, msin = gather_rope("/rope/main", mpos, [B, MAIN, rd])
         cos, sin = gather_rope("/rope/draft", dpos, [B, S, rd])
 
-        # ScatterND writes one ring row per accepted position; the ring index is the
-        # absolute position mod the window, exactly as model.py:783 does for one row.
-        bidx = self.op("Expand", [self.unsq("/bidx1", self.op("Range", [self.const("INT64", 0),
-                                                                       bv, self.const("INT64", 1)],
-                                                              "/brange", I, [B]), [1], I, [B, 1]),
-                                  self.op("Concat", [bv1, Mv1], "/bmshape", I, [2], axis=0)],
-                       "/bidx", I, [B, MAIN])
+        # Accepted rows retain the reference ring's logical slots. Draft rows occupy the
+        # five slots after it; sparse indices make all of them visible to every query.
         slot = self.op("Mod", [mpos, self.const("INT64", W)], "/slot", I, [B, MAIN])
-        ring_idx = self.op("Concat", [self.unsq("/bidx2", bidx, [2], I, [B, MAIN, 1]),
-                                      self.unsq("/slot2", slot, [2], I, [B, MAIN, 1])],
-                           "/ring_idx", I, [B, MAIN, 2], axis=-1)
+        draft_slot = self.init(torch.arange(W, W + K, dtype=torch.int64), "/draft_slot")
+        draft_slot = self.op("Expand", [self.unsq("/draft_slot_u", draft_slot, [0], I, [1, K]),
+                        bs], "/draft_slot_b", I, [B, K])
+        slot = self.op("Concat", [slot, draft_slot], "/cache_slot", I, [B, None], axis=1)
+        slot32 = self.cast("/cache_slot32", self.reshape("/cache_slot_flat", slot, [-1], I,
+                                 [None]), ir.DataType.INT32, [None])
 
         # A ring row is live once the sequence has reached it.  The draft rows are always
         # live, so they ride along as position -1, which is below any total.
         jext = torch.cat([torch.arange(W, dtype=torch.int64), torch.full((K,), -1, dtype=torch.int64)])
-        kmask = self.op("Less", [self.init(jext, "/jext"),
-                                 self.op("Add", [past2, Mv], "/total", I, [B, 1])],
-                        "/kmask", BOOL, [B, W + K])
-        kmask = self.unsq("/kmask4", kmask, [1, 2], BOOL, [B, 1, 1, W + K])
+        live = self.op("Less", [self.init(jext, "/jext"),
+                    self.op("Add", [past2, Mv], "/total", I, [B, 1])],
+                   "/live", BOOL, [B, W + K])
+        selected = self.op("Where", [live, self.init(torch.arange(W + K, dtype=torch.int64),
+                                  "/selected_rows"),
+                         self.const("INT64", -1)],
+                   "/selected", I, [B, W + K])
+        selected = self.op("Expand", [self.unsq("/selected_u", selected, [1], I,
+                             [B, 1, W + K]),
+                          self.op("Concat", [bs, self.const("INT64", [W + K])],
+                              "/selected_shape", I, [3], axis=0)],
+                   "/selected_b", I, [B, S, W + K])
+        kvi32 = self.cast("/selected32", self.reshape("/selected_flat", selected,
+                                   [-1, W + K], I, [None, W + K]),
+                  ir.DataType.INT32, [None, W + K])
+        block_table32 = self.init(torch.arange((W + K + self.block_size - 1) // self.block_size,
+                            dtype=torch.int32).reshape(1, -1),
+                      "/mtp_block_table")
+        cum32 = self.init(torch.tensor([0, K], dtype=torch.int32), "/mtp_cum")
+        zero_past32 = self.cast("/zero_past32", self.op("Sub", ["past_lens", "past_lens"],
+                                "/zero_past", I, [B]),
+                    ir.DataType.INT32, [B])
 
         nd_ = io if self.norm_bf16 else F
         main_x = self.proj("/mtp/main_proj", "main_hidden", f"layers.{first}.main_proj.weight",
@@ -2259,7 +2265,8 @@ class DeepSeekV4FlashModel(Model):
         ctx = {"bs": bs, "mcos": mcos, "msin": msin, "cos": cos, "sin": sin,
                "cos_q": self.unsq("/rope/cosq", cos, [2], F, [B, S, 1, rd]),
                "sin_q": self.unsq("/rope/sinq", sin, [2], F, [B, S, 1, rd]),
-               "ring_idx": ring_idx, "kmask": kmask}
+             "slot32": slot32, "kvi32": kvi32, "block_table32": block_table32,
+             "cum32": cum32, "zero_past32": zero_past32}
 
         # The block is the accepted token followed by noise; the drafter fills it in one
         # pass rather than autoregressively (model.py:855).

@@ -186,10 +186,9 @@ class _Worker:
                 mso.log_severity_level = 3
                 mso.enable_profiling = True
                 mso.profile_file_prefix = "/tmp/mtp_prof"
-            # The drafter is the mirror image of the target: 559 nodes that between them
-            # do ~1 ms of work, so it is launch-bound and a replay is worth ~18 ms a
-            # step.  Its shapes are fixed per accepted-run length, so unlike the target
-            # it can be captured.
+            # The drafter's shapes are fixed per accepted-run length, so unlike the
+            # target it can be captured. Graph replay removes host dispatch overhead;
+            # the remaining time is dominated by the small-token QMoE kernels.
             self.mtp_graph = os.environ.get("DSV4_NO_MTP_GRAPH") != "1"
             if self.mtp_graph:
                 # Folds the shape arithmetic to constants, which is what moves the last
@@ -245,8 +244,8 @@ class _Worker:
         cache_ins = [i for i in ins[2:] if i.name not in self.const_in]
 
         self.cache_in = [i.name for i in cache_ins]
-    self.cache_out = [o.name for o in outs[1:]
-              if o.name not in ("main_hidden", PROBE_OUTPUT)]
+        self.cache_out = [o.name for o in outs[1:]
+                          if o.name not in ("main_hidden", PROBE_OUTPUT)]
         if len(self.cache_in) != len(self.cache_out):
             raise ProtocolError("past/present count mismatch")
         self._init_probe(outs)
@@ -790,7 +789,7 @@ class _Worker:
     # -- decode: DSpark speculation ---------------------------------------- #
 
     def _init_mtp_state(self):
-        """Ring caches for the drafter, plus the rolling window of main states.
+        """Paged ring caches for the drafter, plus the rolling window of main states.
 
         The drafter's attention reads a `window`-row ring of main states, one row per
         position the target has committed.  Priming it needs the last `window` rows of
@@ -799,13 +798,12 @@ class _Worker:
         torch = self.torch
         W, B = self.mtp_window, self.batch
         if self.mtp_cache is None:
-            shapes = [(B, W, int(i.shape[-1])) for i in self.mtp.get_inputs()
+            shapes = [tuple(int(d) for d in i.shape) for i in self.mtp.get_inputs()
                       if i.name.startswith("past_kv_")]
-            # Ping-ponged, because the ring is produced by ScatterND and so cannot be
-            # written in place.  Allocated once: a captured graph replays the addresses
-            # it recorded, and a fresh allocation per prefill would invalidate them.
-            self.mtp_cache = [[torch.zeros(s, dtype=torch.bfloat16, device="cuda")
-                               for s in shapes] for _ in range(2)]
+            # PagedAttention updates its cache in place. Both captured graph ids bind the
+            # same stable buffers so every draft sees all preceding ring updates.
+            cache = [torch.zeros(s, dtype=torch.bfloat16, device="cuda") for s in shapes]
+            self.mtp_cache = [cache, cache]
             self.mh_hist = torch.zeros((B, W, self.mtp_dim), dtype=torch.bfloat16,
                                        device="cuda")
             self._init_mtp_graphs()
@@ -818,10 +816,10 @@ class _Worker:
         self.mh_valid = 0
 
     def _init_mtp_graphs(self):
-        """Capture one drafter graph per cache parity.
+        """Capture two drafter graph ids over the stable in-place paged caches.
 
         `main_len` is pinned to `_MH_PAD`, so the only thing that alternates between
-        runs is which ring copy is read and which is written.
+        runs is the graph id used by ORT.
         """
         torch, ort = self.torch, self.ort
         B, K = self.batch, self.mtp_block
@@ -838,7 +836,7 @@ class _Worker:
             ro = ort.RunOptions()
             ro.add_run_config_entry("gpu_graph_id", str(parity + 1))
             io = self.mtp.io_binding()
-            src, dst = self.mtp_cache[parity], self.mtp_cache[1 - parity]
+            src = dst = self.mtp_cache[parity]
             for name, t in ([("main_hidden", self.d_mh), ("input_ids", self.d_tok),
                              ("past_lens", self.d_past)]
                             + list(zip(self.mtp_cache_in, src))):
