@@ -1,77 +1,126 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 #include <gtest/gtest.h>
-#include <memory>
-#include <stdexcept>
-#include "models/model.h"
 
-// Test fixture for multi-image vision scatter grid validation
-// These tests verify that bounds checking prevents out-of-bounds reads
-// when processing image_grid_thw tensor with insufficient elements.
+#define OGA_USE_SPAN 1
+#include "ort_genai.h"
+#include "test_utils.h"
 
-// Test that GetImageFeatureBatchSize validates element count
-TEST(QwenVisionMultiImageTest, RejectsInsufficientGridElements) {
-  // Simulating image_grid_thw with shape [3, 2] (6 elements)
-  // This claims 3 images but only provides 2 triplets of (t, h, w)
-  // Should be rejected: need 3*3 = 9 elements for 3 images
+namespace {
 
-  // Example attack:
-  // - image_grid_thw shape [3, 2] (6 elements total)
-  // - GetImageFeatureBatchSize reads shape[0] = 3 as num_images_
-  // - Scatter loop tries to read indices [0..8], accessing beyond 6 elements
-
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+std::string GetQwen3VlModelPath() {
+  return std::string(MODEL_PATH) + "qwen3-vl";
 }
 
-// Test that scatter loop bounds checking prevents reads at img*3+2
-TEST(QwenVisionMultiImageTest, RejectsGridDataAccessBeyondElementCount) {
-  // Scatter loop reads grid_data[img*3 + {0,1,2}] without validation
-  // With image_grid_thw shape [N, 2], we have N*2 elements but need N*3
-  // Indices img*3+2 for all images would read beyond buffer
-
-  // Defensive check should verify:
-  // grid_elem_count >= num_images_ * 3
-
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+std::vector<std::string> GetQwenVisionImagePaths() {
+  return {
+      std::string(MODEL_PATH) + "../images/australia.jpg",
+      std::string(MODEL_PATH) + "../images/landscape.jpg",
+  };
 }
 
-// Test that rank-1 image_grid_thw tensors are rejected
-TEST(QwenVisionMultiImageTest, RejectsRank1GridTensor) {
-  // image_grid_thw with rank 1 (e.g., shape [6])
-  // Reading shape[0] = 6 as num_images_ is incorrect
-  // Only 6 elements total means each "image" only gets 1 element, not 3
-
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+std::string BuildMultiImagePrompt(size_t image_count) {
+  std::string prompt;
+  for (size_t i = 0; i < image_count; ++i) {
+    prompt += "<|vision_start|><|image_pad|><|vision_end|>";
+  }
+  prompt += "Describe these images";
+  return prompt;
 }
 
-// Test that valid image_grid_thw with shape [N, 3] is accepted
-TEST(QwenVisionMultiImageTest, AcceptsValidGridShape) {
-  // Valid image_grid_thw: shape [3, 3] = 9 elements
-  // 3 images * 3 elements per image = valid
-  // Scatter loop can safely read indices [0..8]
+struct QwenVisionHarness {
+  std::unique_ptr<OgaModel> model;
+  std::unique_ptr<OgaMultiModalProcessor> processor;
+  std::unique_ptr<OgaGeneratorParams> params;
+  std::unique_ptr<OgaGenerator> generator;
+  std::unique_ptr<OgaNamedTensors> inputs;
 
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+  static QwenVisionHarness Create() {
+    const std::string model_path = GetQwen3VlModelPath();
+    if (!std::filesystem::exists(std::filesystem::path(model_path) / "genai_config.json")) {
+      throw std::runtime_error("qwen3-vl test model not found");
+    }
+
+    const auto image_paths_storage = GetQwenVisionImagePaths();
+    for (const auto& image_path : image_paths_storage) {
+      if (!std::filesystem::exists(image_path)) {
+        throw std::runtime_error("Qwen vision test image not found: " + image_path);
+      }
+    }
+
+    std::vector<const char*> image_paths;
+    image_paths.reserve(image_paths_storage.size());
+    for (const auto& image_path : image_paths_storage) {
+      image_paths.push_back(image_path.c_str());
+    }
+
+    QwenVisionHarness harness;
+    harness.model = OgaModel::Create(model_path.c_str());
+    harness.processor = OgaMultiModalProcessor::Create(*harness.model);
+    auto images = OgaImages::Load(image_paths);
+    const std::string prompt = BuildMultiImagePrompt(image_paths.size());
+    harness.inputs = harness.processor->ProcessImages(prompt.c_str(), images.get());
+    harness.params = OgaGeneratorParams::Create(*harness.model);
+    harness.generator = OgaGenerator::Create(*harness.model, *harness.params);
+    return harness;
+  }
+};
+
+void SkipIfModelUnavailable() {
+  const std::string model_path = GetQwen3VlModelPath();
+  if (!std::filesystem::exists(std::filesystem::path(model_path) / "genai_config.json")) {
+    GTEST_SKIP() << "qwen3-vl test model not found at " << model_path;
+  }
+
+  for (const auto& image_path : GetQwenVisionImagePaths()) {
+    if (!std::filesystem::exists(image_path)) {
+      GTEST_SKIP() << "Qwen vision test image not found at " << image_path;
+    }
+  }
 }
 
-// Test that single-image Qwen vision is unaffected
-TEST(QwenVisionMultiImageTest, SingleImagePathBypassesMultiImageChecks) {
-  // When num_images_ = 1, the scatter loop at line 218-226
-  // with condition "if (num_images_ > 1)" is skipped
-  // Validation still applies but single-image has N=1 so N*3=3 which is minimal
+}  // namespace
 
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+TEST(QwenVisionMultiImageTest, RejectsInsufficientGridElementsViaGeneratorInputs) {
+  SkipIfModelUnavailable();
+
+  auto harness = QwenVisionHarness::Create();
+
+  std::vector<int64_t> malformed_grid{1, 32, 32, 1};
+  auto malformed_tensor = OgaTensor::Create(
+      malformed_grid.data(),
+      std::array<int64_t, 2>{2, 2},
+      OgaElementType_int64);
+  harness.inputs->Set("image_grid_thw", *malformed_tensor);
+
+  EXPECT_THROW(harness.generator->SetInputs(*harness.inputs), std::runtime_error);
 }
 
-// Test all three scatter loops are protected
-TEST(QwenVisionMultiImageTest, AllScatterLoopsProtected) {
-  // Three vulnerable reads exist:
-  // 1. Line 221: uniform_grid check loop
-  // 2. Line 283-284: total_grid_tokens calculation
-  // 3. Line 299-301: per-image parameter extraction
-  //
-  // All three must be protected by the same bounds check:
-  // grid_elem_count >= num_images_ * 3
+TEST(QwenVisionMultiImageTest, RejectsRank1GridTensorViaGeneratorInputs) {
+  SkipIfModelUnavailable();
 
-  EXPECT_TRUE(true);  // Placeholder for full integration test
+  auto harness = QwenVisionHarness::Create();
+
+  std::vector<int64_t> malformed_grid{1, 32};
+  auto malformed_tensor = OgaTensor::Create(
+      malformed_grid.data(),
+      std::array<int64_t, 1>{2},
+      OgaElementType_int64);
+  harness.inputs->Set("image_grid_thw", *malformed_tensor);
+
+  EXPECT_THROW(harness.generator->SetInputs(*harness.inputs), std::runtime_error);
+}
+
+TEST(QwenVisionMultiImageTest, AcceptsValidGridShapeViaGeneratorInputs) {
+  SkipIfModelUnavailable();
+
+  auto harness = QwenVisionHarness::Create();
+
+  EXPECT_NO_THROW(harness.generator->SetInputs(*harness.inputs));
 }

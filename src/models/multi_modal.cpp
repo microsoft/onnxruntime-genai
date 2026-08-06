@@ -81,14 +81,19 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       if (!shape.empty()) {
-        int64_t num_images = shape[0];
-        // Validate that the tensor contains at least num_images * 3 elements
-        // (t, h, w for each image)
-        int64_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
-        if (elem_count < num_images * 3) {
+        const int64_t num_images = shape[0];
+        if (num_images < 0) {
+          throw std::runtime_error("image_grid_thw num_images must be non-negative");
+        }
+
+        // Validate that the tensor contains at least one (t, h, w) triplet per image
+        // without multiplying num_images by 3, which could overflow int64_t.
+        const size_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+        const size_t expected_image_count = static_cast<size_t>(num_images);
+        if (elem_count / 3 < expected_image_count) {
           throw std::runtime_error("image_grid_thw element count (" + std::to_string(elem_count) +
                                    ") is less than required for " + std::to_string(num_images) +
-                                   " images (need at least " + std::to_string(num_images * 3) + ")");
+                                   " images (need at least 3 values per image)");
         }
         return num_images;
       }
@@ -207,11 +212,16 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   // Defensive bounds check: verify grid_data has enough elements for all images
   // Each image requires 3 elements (t, h, w)
-  int64_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
-  if (grid_elem_count < num_images_ * 3) {
+  if (num_images_ < 0) {
+    throw std::runtime_error("image_grid_thw num_images must be non-negative");
+  }
+
+  const size_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
+  const size_t expected_image_count = static_cast<size_t>(num_images_);
+  if (grid_elem_count / 3 < expected_image_count) {
     throw std::runtime_error("image_grid_thw has " + std::to_string(grid_elem_count) +
-                             " elements but need at least " + std::to_string(num_images_ * 3) +
-                             " for " + std::to_string(num_images_) + " images");
+                             " elements but needs at least 3 values per image for " +
+                             std::to_string(num_images_) + " images");
   }
 
   // Check if the ONNX model accepts dynamic num_images.
