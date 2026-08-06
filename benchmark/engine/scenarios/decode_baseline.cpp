@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -62,20 +64,38 @@ void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const 
 }
 
 ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
+  std::cout << "[decode_baseline] Execute start: model_path='" << config.model_path
+            << "', provider='" << config.execution_provider
+            << "', concurrency=" << config.concurrency
+            << ", measured_runs=" << config.measured_runs
+            << ", prompt_length_k=" << config.prompt_length_k
+            << ", generation_tokens=" << config.generation_tokens
+            << std::endl;
+
+  std::cout << "[decode_baseline] Resolving model path..." << std::endl;
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
+  std::cout << "[decode_baseline] Resolved model path: " << resolved_model_path << std::endl;
+
+  std::cout << "[decode_baseline] Creating OGA config..." << std::endl;
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
   oga_config->ClearProviders();
   oga_config->AppendProvider(config.execution_provider.c_str());
 
+  std::cout << "[decode_baseline] Creating model/tokenizer/engine..." << std::endl;
   auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto engine = OgaEngine::Create(*model);
-  const std::string prompt = BuildPromptText(config.prompt_length_k);
 
+  std::cout << "[decode_baseline] Building synthetic prompt..." << std::endl;
+  const std::string prompt = BuildPromptText(config.prompt_length_k);
+  std::cout << "[decode_baseline] Prompt size (chars): " << prompt.size() << std::endl;
+
+  std::cout << "[decode_baseline] Encoding prompt..." << std::endl;
   auto prompt_sequences = OgaSequences::Create();
   tokenizer->Encode(prompt.c_str(), *prompt_sequences);
 
   const size_t prompt_token_count = prompt_sequences->SequenceCount(0);
+  std::cout << "[decode_baseline] Prompt token count: " << prompt_token_count << std::endl;
 
   ScenarioExecutionOutput output;
   std::vector<double> ttft_values;
@@ -85,6 +105,9 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
 
   for (int run = 0; run < config.measured_runs; ++run) {
+    std::cout << "[decode_baseline] Run " << run + 1 << "/" << config.measured_runs
+              << ": creating requests..." << std::endl;
+
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
@@ -96,8 +119,9 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
     for (int i = 0; i < config.concurrency; ++i) {
       params.emplace_back(OgaGeneratorParams::Create(*model));
+      const size_t max_length = prompt_token_count + static_cast<size_t>(config.generation_tokens);
       params.back()->SetSearchOption(
-          "max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
+        "max_length", static_cast<double>(max_length));
 
       request_tokens[static_cast<size_t>(i)].assign(
           prompt_sequences->SequenceData(0), prompt_sequences->SequenceData(0) + prompt_token_count);
@@ -106,15 +130,46 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       requests.back()->AddTokens(*prompt_sequences);
       requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
       engine->Add(*requests.back());
+
+      std::cout << "[decode_baseline] Run " << run + 1
+                << ": added request " << i
+                << " (max_length=" << max_length
+                << ", prompt_tokens=" << prompt_token_count << ")"
+                << std::endl;
     }
 
+    std::cout << "[decode_baseline] Run " << run + 1 << ": entering step loop..." << std::endl;
     const auto run_start = std::chrono::steady_clock::now();
     size_t generated_tokens = 0;
+    size_t step_events = 0;
 
     while (auto ready_request = engine->Step()) {
+      ++step_events;
       const auto now = std::chrono::steady_clock::now();
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-      const auto request_index = static_cast<size_t>(tokens - request_tokens.data());
+      if (tokens == nullptr) {
+        std::cout << "[decode_baseline] ERROR: ready_request has null opaque data at run " << run + 1
+                  << ", step_event=" << step_events << std::endl;
+        throw std::runtime_error("decode_baseline: null opaque data from request");
+      }
+
+      const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
+      const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
+      const auto end_addr =
+          reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
+
+      if (ptr_addr < base_addr || ptr_addr >= end_addr) {
+        std::cout << "[decode_baseline] ERROR: opaque token pointer out of range at run " << run + 1
+                  << ", step_event=" << step_events
+                  << ", ptr=" << ptr_addr
+                  << ", base=" << base_addr
+                  << ", end=" << end_addr
+                  << std::endl;
+        throw std::runtime_error("decode_baseline: opaque data pointer not in request_tokens");
+      }
+
+      const auto request_index =
+          static_cast<size_t>((ptr_addr - base_addr) / sizeof(std::vector<int32_t>));
 
       while (ready_request->HasUnseenTokens()) {
         tokens->push_back(ready_request->GetUnseenToken());
@@ -130,11 +185,26 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
         last_token_time[request_index] = now;
       }
+
+      if (step_events <= 8 || step_events % 50 == 0) {
+        std::cout << "[decode_baseline] Run " << run + 1
+                  << ": processed step_event=" << step_events
+                  << ", request_index=" << request_index
+                  << ", generated_tokens_so_far=" << generated_tokens
+                  << std::endl;
+      }
     }
 
     const auto run_end = std::chrono::steady_clock::now();
     const double run_elapsed_ms = std::chrono::duration<double, std::milli>(run_end - run_start).count();
     const double tokens_per_s = static_cast<double>(generated_tokens) / std::max(0.001, run_elapsed_ms / 1000.0);
+
+    std::cout << "[decode_baseline] Run " << run + 1
+              << " complete: step_events=" << step_events
+              << ", generated_tokens=" << generated_tokens
+              << ", elapsed_ms=" << run_elapsed_ms
+              << ", tokens_per_s=" << tokens_per_s
+              << std::endl;
 
     e2e_ms_values.push_back(run_elapsed_ms);
     tokens_per_s_values.push_back(tokens_per_s);
@@ -148,6 +218,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       const size_t output_tokens = tokens.size() > prompt_token_count ? tokens.size() - prompt_token_count : 0;
       std::string output_text;
       if (output_tokens > 0) {
+        std::cout << "[decode_baseline] Run " << run + 1
+                  << ": decoding output for request " << i
+                  << " with output_tokens=" << output_tokens
+                  << std::endl;
         const auto decoded = tokenizer->Decode(tokens.data() + prompt_token_count, output_tokens);
         output_text = static_cast<const char*>(decoded);
       }
@@ -158,6 +232,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           {"text", output_text},
       });
     }
+
+    std::cout << "[decode_baseline] Run " << run + 1 << ": request post-processing complete." << std::endl;
   }
 
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
@@ -169,6 +245,12 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
   };
+
+  std::cout << "[decode_baseline] Execute complete: ttft_p50_ms=" << output.ttft_p50_ms
+            << ", ttft_p95_ms=" << output.ttft_p95_ms
+            << ", inter_token_latency_p50_ms=" << output.inter_token_latency_p50_ms
+            << ", inter_token_latency_p95_ms=" << output.inter_token_latency_p95_ms
+            << std::endl;
 
   return output;
 }
