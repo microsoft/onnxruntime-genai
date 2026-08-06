@@ -220,13 +220,18 @@ class QuantizedDecoderLayer:
 
 
 class QuantizedModel:
-    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+    def __init__(
+        self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=True
+    ):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = TensorModule()
         self.layers = {}
         self.num_layers = num_layers
+        if not load_weights:
+            return
+
         self._quant_attrs = quant_attrs
         self._load_quant_config(quant_attrs)
 
@@ -1654,53 +1659,6 @@ class OliveModel(GPTQModel):
 # builder's normal (int4 RTN) path since ONNX Runtime has no native FP8 attention
 # GEMM; dequantizing the FP8 weights to BF16 reconstructs them exactly.
 
-_MODELOPT_FP4_E2M1_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
-
-
-def _modelopt_dequant_nvfp4(weight_u8, block_scale_e4m3, global_scale, name=""):
-    """Reconstruct a BF16 weight from Model Optimizer NVFP4 tensors.
-
-    ``weight_u8``        uint8 ``[N, K/2]`` (E2M1, low nibble = even K, high = odd K)
-    ``block_scale_e4m3`` float8_e4m3fn ``[N, K/16]`` (one block scale per 16 K-elements)
-    ``global_scale``     f32 scalar (per-tensor)
-    Value: ``w = e2m1(code) * e4m3(block_scale[n, k//16]) * global_scale``.
-    """
-    if block_scale_e4m3 is None:
-        raise ValueError(
-            f"NVFP4 tensor '{name}' has 'weight_scale_2' but no 'weight_scale' (FP8-E4M3 block scales). "
-            "The Model Optimizer checkpoint is incomplete."
-        )
-    if block_scale_e4m3.dtype == torch.uint8:
-        # Some exporters store the E4M3 block scales as raw bytes; reinterpret, do not convert.
-        block_scale_e4m3 = block_scale_e4m3.view(torch.float8_e4m3fn)
-    elif block_scale_e4m3.dtype != torch.float8_e4m3fn:
-        raise ValueError(
-            f"NVFP4 tensor '{name}' block scales must be float8_e4m3fn (or raw uint8 bytes), "
-            f"got {block_scale_e4m3.dtype}."
-        )
-    if weight_u8.dtype != torch.uint8:
-        weight_u8 = weight_u8.to(torch.uint8)
-    n = weight_u8.shape[0]
-    low = weight_u8 & 0x0F
-    high = weight_u8 >> 4
-    codes = torch.stack([low, high], dim=-1).reshape(n, -1).long()  # [N, K]
-    mag = _MODELOPT_FP4_E2M1_LUT[codes & 0x7]
-    val = torch.where((codes & 0x8) > 0, -mag, mag)  # [N, K]
-    bs = block_scale_e4m3.to(torch.float32)  # [N, K/16]
-    k = codes.shape[1]
-    if bs.shape[0] != n or bs.shape[1] == 0 or k % bs.shape[1] != 0:
-        raise ValueError(
-            f"NVFP4 tensor '{name}' block scales {tuple(bs.shape)} are not a block-wise split of the "
-            f"[{n}, {k}] weight."
-        )
-    bs = bs.repeat_interleave(k // bs.shape[1], dim=1)  # [N, K]
-    return (val * bs * float(global_scale)).to(torch.bfloat16)
-
-
-def _modelopt_dequant_fp8(weight_f8, weight_scale):
-    """Reconstruct a BF16 weight from an FP8 (E4M3) weight + per-tensor scale."""
-    return (weight_f8.to(torch.float32) * float(weight_scale)).to(torch.bfloat16)
-
 
 class ModeloptDecoderLayer:
     """Lightweight decoder-layer container (name ends in 'DecoderLayer' so the
@@ -1719,25 +1677,24 @@ class ModeloptDecoderLayer:
         return self.input_layernorm.weight is None
 
 
-class ModeloptModel:
+class ModeloptModel(QuantizedModel):
     """Loader for NVIDIA Model Optimizer NVFP4 + FP8 mixed-precision checkpoints.
 
-    Deliberately not a ``QuantizedModel`` subclass: that base eagerly loads every
-    safetensors file into memory and unpacks/repacks integer quantized tensors,
-    while this loader streams tensors on demand and dequantizes to BF16. It shares
-    no implementation with the base, only the duck-typed surface the model builder
-    walks (``modules()`` plus the module tree).
+    The base initializes the module surface the builder walks without running its
+    eager integer-checkpoint loading path. This loader instead streams tensors on
+    demand and dequantizes only the non-routed weights to BF16.
     """
+
+    _FP4_E2M1_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         import json
         from types import SimpleNamespace
         from safetensors import safe_open
 
-        self.quant_type = quant_type
-        self.embedding = TensorModule()
-        self.final_norm = TensorModule()
-        self.lm_head = TensorModule()
+        super().__init__(
+            quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=False
+        )
         self._input_path = input_path
         self._safe_open = safe_open
         self._simple_namespace = SimpleNamespace
@@ -1788,9 +1745,57 @@ class ModeloptModel:
         if getattr(self, "_open_handles", None):
             self.close()
 
-    def modules(self):
-        """Modules in order of appearance in the model (the builder's walk order)."""
-        return [self.embedding] + self.layers + [self.final_norm, self.lm_head]
+    def repack_nvfp4_weight_codes(self, packed_nk2):
+        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes."""
+        if packed_nk2.dtype != torch.uint8:
+            packed_nk2 = packed_nk2.to(torch.uint8)
+        low = packed_nk2 & 0x0F
+        high = packed_nk2 >> 4
+        n = packed_nk2.shape[0]
+        return torch.stack((low, high), dim=-1).reshape(n, -1).contiguous()
+
+    def pack_nvfp4_codes_for_qmoe(self, codes_nk):
+        """Pack e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout."""
+        if codes_nk.dtype != torch.uint8:
+            codes_nk = codes_nk.to(torch.uint8)
+        n = codes_nk.shape[0]
+        if n % 2 != 0:
+            raise ValueError(f"NVFP4 QMoE packing requires an even N={n} for nibble packing.")
+        codes_kn = codes_nk.T.contiguous()
+        low = codes_kn[:, 0::2] & 0x0F
+        high = codes_kn[:, 1::2] & 0x0F
+        return ((high << 4) | low).contiguous()
+
+    def _dequant_nvfp4(self, weight_u8, block_scale_e4m3, global_scale, name=""):
+        """Reconstruct a BF16 weight from Model Optimizer NVFP4 tensors."""
+        if block_scale_e4m3 is None:
+            raise ValueError(
+                f"NVFP4 tensor '{name}' has 'weight_scale_2' but no 'weight_scale' (FP8-E4M3 block scales). "
+                "The Model Optimizer checkpoint is incomplete."
+            )
+        if block_scale_e4m3.dtype == torch.uint8:
+            block_scale_e4m3 = block_scale_e4m3.view(torch.float8_e4m3fn)
+        elif block_scale_e4m3.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"NVFP4 tensor '{name}' block scales must be float8_e4m3fn (or raw uint8 bytes), "
+                f"got {block_scale_e4m3.dtype}."
+            )
+        codes = self.repack_nvfp4_weight_codes(weight_u8).long()
+        mag = self._FP4_E2M1_LUT[codes & 0x7]
+        values = torch.where((codes & 0x8) > 0, -mag, mag)
+        block_scales = block_scale_e4m3.to(torch.float32)
+        n, k = codes.shape
+        if block_scales.shape[0] != n or block_scales.shape[1] == 0 or k % block_scales.shape[1] != 0:
+            raise ValueError(
+                f"NVFP4 tensor '{name}' block scales {tuple(block_scales.shape)} are not a block-wise split of the "
+                f"[{n}, {k}] weight."
+            )
+        block_scales = block_scales.repeat_interleave(k // block_scales.shape[1], dim=1)
+        return (values * block_scales * float(global_scale)).to(torch.bfloat16)
+
+    def _dequant_fp8(self, weight_f8, weight_scale):
+        """Reconstruct a BF16 weight from an FP8 (E4M3) weight and per-tensor scale."""
+        return (weight_f8.to(torch.float32) * float(weight_scale)).to(torch.bfloat16)
 
     # -- raw tensor access ------------------------------------------------------
     def _get(self, name):
@@ -1817,9 +1822,9 @@ class ModeloptModel:
         weight_scale_2 = self._get(f"{base}.weight_scale_2")
         weight_scale = self._get(f"{base}.weight_scale")
         if weight_scale_2 is not None:  # NVFP4 (block-16 E2M1 + E4M3 block scale + global)
-            return _modelopt_dequant_nvfp4(weight, weight_scale, weight_scale_2, name=base)
+            return self._dequant_nvfp4(weight, weight_scale, weight_scale_2, name=base)
         if weight_scale is not None and weight.dtype == torch.float8_e4m3fn:  # FP8 (per-tensor scale)
-            return _modelopt_dequant_fp8(weight, weight_scale)
+            return self._dequant_fp8(weight, weight_scale)
         return weight.to(torch.bfloat16)
 
     def _linear_module(self, base):

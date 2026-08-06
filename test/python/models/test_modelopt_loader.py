@@ -135,6 +135,7 @@ def test_modelopt_loader_tree_and_dequant():
             "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
         )
 
+        assert isinstance(model, QM.QuantizedModel)
         mods = model.modules()
         assert mods[0] is model.embedding and mods[-1] is model.lm_head
         assert len(model.layers) == 2

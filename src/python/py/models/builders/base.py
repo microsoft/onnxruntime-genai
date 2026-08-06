@@ -3909,39 +3909,6 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
-    @staticmethod
-    def repack_modelopt_nvfp4_weight_codes(packed_nk2):
-        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes.
-
-        ``packed_nk2`` is uint8 ``[N, K/2]`` where each byte holds two adjacent K-axis
-        e2m1 codes for the same output row N (low nibble = even K, high nibble = odd K)
-        -- the layout Model Optimizer writes. Returns uint8 codes ``[N, K]`` (0-15).
-        """
-        if packed_nk2.dtype != torch.uint8:
-            packed_nk2 = packed_nk2.to(torch.uint8)
-        low = packed_nk2 & 0x0F
-        high = packed_nk2 >> 4
-        n = packed_nk2.shape[0]
-        codes = torch.stack((low, high), dim=-1).reshape(n, -1)  # [N, K]
-        return codes.contiguous()
-
-    @staticmethod
-    def pack_nvfp4_codes_for_qmoe(codes_nk):
-        """Pack per-element e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout.
-
-        The QMoE FP4 kernel reads weights as ``[E, K, N/2]`` with each byte holding two
-        adjacent N-axis codes for the same K (even N = low nibble, odd N = high nibble).
-        """
-        if codes_nk.dtype != torch.uint8:
-            codes_nk = codes_nk.to(torch.uint8)
-        n = codes_nk.shape[0]
-        if n % 2 != 0:
-            raise ValueError(f"NVFP4 QMoE packing requires an even N={n} for nibble packing.")
-        codes_kn = codes_nk.T.contiguous()  # [K, N]
-        low = codes_kn[:, 0::2] & 0x0F
-        high = codes_kn[:, 1::2] & 0x0F
-        return ((high << 4) | low).contiguous()  # [K, N/2]
-
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).
 

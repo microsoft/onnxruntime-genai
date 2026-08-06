@@ -3,7 +3,7 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""Numerical guard for the NVFP4 model-builder repack helpers.
+"""Numerical guard for the Model Optimizer NVFP4 repack helpers.
 
 Model Optimizer stores each NVFP4 expert projection as:
   weight        uint8   [N, K/2]  (E2M1, 2 codes/byte, packed along K; low nibble = even K)
@@ -24,65 +24,22 @@ bit-for-bit (no re-quantization).
 
 import importlib.util
 import os
-import sys
-import types
-from unittest import mock
 
 import numpy as np
 import torch
 
 
-def _load_builder_model_class():
-    """Load ``Model`` from the source base.py, stubbing heavy optional imports.
-
-    The two repack helpers under test are pure-torch static methods, so we do not
-    need transformers/onnxruntime installed just to exercise them. Every entry this
-    function adds to ``sys.modules`` is removed again before returning, so a later
-    test in the same session still imports the real packages.
-    """
-    base_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "builders", "base.py"
+def _load_modelopt_class():
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "quantized_model.py"
     )
-    base_path = os.path.abspath(base_path)
-    builders_dir = os.path.dirname(base_path)
-    models_dir = os.path.dirname(builders_dir)
-    injected = []
-
-    def inject(name, module):
-        if name not in sys.modules:
-            sys.modules[name] = module
-            injected.append(name)
-
-    for name in (
-        "transformers",
-        "tqdm",
-        "peft",
-        "onnxruntime",
-        "onnxruntime.quantization",
-        "onnxruntime.quantization.matmul_nbits_quantizer",
-    ):
-        inject(name, mock.MagicMock())
-    # Synthetic parent packages so base.py's `from .cuda_quantizer import ...` resolves
-    # without executing the real builders __init__ (which imports every builder).
-    pkg_models = types.ModuleType("_genai_models_pkg")
-    pkg_models.__path__ = [models_dir]
-    pkg_builders = types.ModuleType("_genai_models_pkg.builders")
-    pkg_builders.__path__ = [builders_dir]
-    inject("_genai_models_pkg", pkg_models)
-    inject("_genai_models_pkg.builders", pkg_builders)
-    inject("_genai_models_pkg.builders.cuda_quantizer", mock.MagicMock())
-    spec = importlib.util.spec_from_file_location("_genai_models_pkg.builders.base", base_path)
+    spec = importlib.util.spec_from_file_location("_genai_quantized_model_under_test", os.path.abspath(path))
     module = importlib.util.module_from_spec(spec)
-    inject("_genai_models_pkg.builders.base", module)
-    try:
-        spec.loader.exec_module(module)
-        return module.Model
-    finally:
-        for name in injected:
-            sys.modules.pop(name, None)
+    spec.loader.exec_module(module)
+    return module.ModeloptModel
 
 
-Model = _load_builder_model_class()
+ModeloptModel = _load_modelopt_class()
 
 _FP4_E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
@@ -130,13 +87,14 @@ def _kernel_dequant_from_qmoe_layout(packed_kn2, scale_nk16, global_scale, n, k)
 
 
 def test_nvfp4_repack_roundtrip_matches_modelopt():
+    model = ModeloptModel.__new__(ModeloptModel)
     for seed, (n, k) in enumerate([(8, 64), (16, 128), (32, 512), (2048, 512)]):
         packed_nk2, scale_bytes, global_scale, ref = _make_modelopt_nvfp4_projection(n, k, seed)
 
-        # Builder repack: K-unpack -> per-element codes [N, K] -> N-pack [K, N/2].
-        codes_nk = Model.repack_modelopt_nvfp4_weight_codes(torch.from_numpy(packed_nk2))
+        # Model Optimizer repack: K-unpack -> per-element codes [N, K] -> N-pack [K, N/2].
+        codes_nk = model.repack_nvfp4_weight_codes(torch.from_numpy(packed_nk2))
         assert tuple(codes_nk.shape) == (n, k)
-        qweight_kn2 = Model.pack_nvfp4_codes_for_qmoe(codes_nk)
+        qweight_kn2 = model.pack_nvfp4_codes_for_qmoe(codes_nk)
         assert tuple(qweight_kn2.shape) == (k, n // 2)
 
         # Block scales are unchanged ([N, K/16]); global scale passed through.
