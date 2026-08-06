@@ -29,6 +29,22 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.write_indices) &&
+      model_.session_info_.HasInput(model_.config_->model.decoder.inputs.nonpad_kv_seqlen)) {
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch beam size (batch_size * num_beams) must be 1 for write_indices and nonpad_kv_seqlen inputs");
+    }
+    if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.write_indices) != Ort::TypeToTensorType<int64_t> ||
+        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.nonpad_kv_seqlen) != Ort::TypeToTensorType<int64_t>)
+      throw std::runtime_error("write_indices and nonpad_kv_seqlen must be int64");
+
+    const std::array<int64_t, 1> static_scatter_shape{1};
+    write_indices_ = OrtValue::CreateTensor(model_.allocator_cpu_, static_scatter_shape, Ort::TypeToTensorType<int64_t>);
+    nonpad_kv_seqlen_ = OrtValue::CreateTensor(model_.allocator_cpu_, static_scatter_shape, Ort::TypeToTensorType<int64_t>);
+    *write_indices_->GetTensorMutableData<int64_t>() = 0;
+    *nonpad_kv_seqlen_->GetTensorMutableData<int64_t>() = 0;
+  }
+
   value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
   cast_value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
 }
@@ -44,6 +60,13 @@ void DefaultInputIDs::Add() {
     state_.inputs_.push_back(current_sequence_length_.get());
     state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
     state_.inputs_.push_back(past_sequence_length_.get());
+  }
+
+  if (write_indices_ && nonpad_kv_seqlen_) {
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.write_indices.c_str());
+    state_.inputs_.push_back(write_indices_.get());
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.nonpad_kv_seqlen.c_str());
+    state_.inputs_.push_back(nonpad_kv_seqlen_.get());
   }
 }
 
@@ -65,6 +88,16 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+  }
+
+  if (write_indices_ && nonpad_kv_seqlen_) {
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch beam size (batch_size * num_beams) must be 1 for write_indices and nonpad_kv_seqlen inputs");
+    }
+    auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
+    const StaticScatterIndices indices = static_scatter_indices_.Advance(new_sequence_length);
+    *write_indices_->GetTensorMutableData<int64_t>() = indices.write_index;
+    *nonpad_kv_seqlen_->GetTensorMutableData<int64_t>() = indices.nonpad_kv_seqlen;
   }
 
   // For beam search, resize input_ids shape based on new_tokens
