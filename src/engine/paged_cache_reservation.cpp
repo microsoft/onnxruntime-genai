@@ -32,7 +32,6 @@ PagedCacheReservation::PagedCacheReservation(
   committed_tables.reserve(committed_tables.size() + requests.size());
 
   size_t reserved_block_count = 0;
-  size_t newly_admitted_count = 0;
   for (const auto& request : requests) {
     const bool duplicate_request =
         std::any_of(deltas_.begin(), deltas_.end(),
@@ -75,16 +74,11 @@ PagedCacheReservation::PagedCacheReservation(
     if (committed_table) {
       committed_table->blocks.reserve(committed_blocks + new_blocks);
     } else {
-      ++newly_admitted_count;
       PagedCacheBlockTable table;
       table.request_id = request.request_id;
       table.blocks.reserve(new_blocks);
       new_tables_.push_back(std::move(table));
     }
-  }
-
-  if (requests.size() != committed_tables.size() + newly_admitted_count) {
-    throw std::runtime_error("Paged cache reservation must include every committed request.");
   }
 
   if (reserved_block_count > block_pool.AvailableBlocks()) {

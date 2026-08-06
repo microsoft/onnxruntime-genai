@@ -85,32 +85,36 @@ struct RecordingCacheManager : CacheManager {
         committed_request_count > plan.requests.size()) {
       throw std::runtime_error("Recording cache received an invalid committed request count.");
     }
-    for (size_t i = 0; i < committed_request_count; ++i) {
-      if (plan.requests[i].request_id == unserviceable_request_id_) {
-        return StepPlanningResult{
-            false,
-            false,
-            unserviceable_request_id_,
-            {StepOutcomeKind::UnserviceableRequest,
-             plan.transaction_id,
-             unserviceable_request_id_},
-        };
-      }
-    }
-
-    size_t selected_requests = committed_request_count;
+    size_t selected_requests = 0;
+    size_t selected_new_requests = 0;
     bool capacity_deferred = false;
     const void* unserviceable_request_id = nullptr;
+    for (size_t i = 0; i < committed_request_count; ++i) {
+      if (plan.requests[i].request_id == unserviceable_request_id_) {
+        unserviceable_request_id = unserviceable_request_id_;
+        continue;
+      }
+      if (selected_requests != i) {
+        plan.requests[selected_requests] = std::move(plan.requests[i]);
+      }
+      ++selected_requests;
+    }
+
     for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
       if (plan.requests[i].request_id == unserviceable_request_id_) {
         unserviceable_request_id = unserviceable_request_id_;
         continue;
       }
-      if (!can_allocate_verdict_ || selected_requests == capacity_) {
+      if (!can_allocate_verdict_ ||
+          committed_request_count + selected_new_requests >= capacity_) {
         capacity_deferred = true;
         continue;
       }
-      plan.requests[selected_requests++] = std::move(plan.requests[i]);
+      if (selected_requests != i) {
+        plan.requests[selected_requests] = std::move(plan.requests[i]);
+      }
+      ++selected_requests;
+      ++selected_new_requests;
     }
     plan.requests.resize(selected_requests);
 

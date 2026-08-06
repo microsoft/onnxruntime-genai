@@ -192,7 +192,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
 
   const size_t available_blocks = block_pool_->AvailableBlocks();
   size_t planned_blocks = 0;
-  size_t selected_requests = committed_request_count;
+  size_t selected_requests = 0;
+  size_t selected_new_requests = 0;
   size_t max_blocks_per_request = 0;
   bool capacity_deferred = false;
   const void* unserviceable_request_id = nullptr;
@@ -217,6 +218,22 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
     return CacheGrowth{committed_blocks + new_blocks, new_blocks};
   };
+  const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
+    return growth.proposed_blocks > block_pool_->Capacity() ||
+           (graph_capture_ &&
+            growth.proposed_blocks > max_block_table_columns_);
+  };
+  const auto select = [&](size_t request_index,
+                          const CacheGrowth& growth) {
+    planned_blocks += growth.new_blocks;
+    max_blocks_per_request =
+        std::max(max_blocks_per_request, growth.proposed_blocks);
+    if (selected_requests != request_index) {
+      plan.requests[selected_requests] =
+          std::move(plan.requests[request_index]);
+    }
+    ++selected_requests;
+  };
   const auto find_table = [this](const void* request_id) {
     const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                  [request_id](const PagedCacheBlockTable& table) {
@@ -224,56 +241,49 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
                                  });
     return it == block_tables_.end() ? nullptr : &*it;
   };
-
   for (size_t i = 0; i < committed_request_count; ++i) {
-    auto& entry = plan.requests[i];
+    const auto& entry = plan.requests[i];
     const auto& table = block_tables_[i];
     if (entry.newly_admitted || entry.request_id != table.request_id) {
       throw std::runtime_error("Step plan order does not match the committed block table order.");
     }
 
     const auto growth = calculate_growth(entry, &table);
-    planned_blocks += growth.new_blocks;
-    max_blocks_per_request =
-        std::max(max_blocks_per_request, growth.proposed_blocks);
-    if (planned_blocks > available_blocks ||
-        (graph_capture_ && growth.proposed_blocks > max_block_table_columns_)) {
-      return StepPlanningResult{
-          false,
-          false,
-          entry.request_id,
-          {StepOutcomeKind::UnserviceableRequest, plan.transaction_id, entry.request_id},
-      };
+    if (permanently_unserviceable(growth)) {
+      if (!unserviceable_request_id) {
+        unserviceable_request_id = entry.request_id;
+      }
+      continue;
     }
+    if (planned_blocks + growth.new_blocks > available_blocks) {
+      capacity_deferred = true;
+      continue;
+    }
+    select(i, growth);
   }
 
   for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
-    RequestStepPlan candidate = std::move(plan.requests[i]);
+    const auto& candidate = plan.requests[i];
     if (!candidate.newly_admitted || find_table(candidate.request_id)) {
       throw std::runtime_error("New step plan request already belongs to the paged cache.");
     }
 
     const auto growth = calculate_growth(candidate, nullptr);
-    const bool permanently_unserviceable =
-        growth.new_blocks > block_pool_->Capacity() ||
-        (graph_capture_ && growth.proposed_blocks > max_block_table_columns_);
-    if (permanently_unserviceable) {
+    if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;
       }
       continue;
     }
 
-    if (selected_requests == max_batch_size_ ||
+    if (committed_request_count + selected_new_requests >= max_batch_size_ ||
         planned_blocks + growth.new_blocks > available_blocks) {
       capacity_deferred = true;
       continue;
     }
 
-    planned_blocks += growth.new_blocks;
-    max_blocks_per_request =
-        std::max(max_blocks_per_request, growth.proposed_blocks);
-    plan.requests[selected_requests++] = std::move(candidate);
+    select(i, growth);
+    ++selected_new_requests;
   }
   plan.requests.resize(selected_requests);
 

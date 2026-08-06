@@ -43,6 +43,7 @@ enum class PagedCacheReservationState {
 
 class PagedCacheReservation {
  public:
+  // Requests omitted from the reservation keep their committed tables unchanged.
   PagedCacheReservation(BlockPool& block_pool,
                         std::vector<PagedCacheBlockTable>& committed_tables,
                         std::span<const PagedCacheReservationRequest> requests);
