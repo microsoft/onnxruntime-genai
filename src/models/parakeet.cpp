@@ -358,7 +358,7 @@ void ParakeetTdtState::EncodeNextChunk() {
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
   auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
-  if (enc_shape.size() < 3) {
+  if (enc_shape.size() != 3) {
     throw std::runtime_error("Encoder output must have rank 3 [batch, channels, time], got rank " + std::to_string(enc_shape.size()));
   }
   if (enc_shape[1] != cfg_.hidden_dim) {

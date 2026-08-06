@@ -579,7 +579,7 @@ void NemotronSpeechState::StepToken() {
 
   auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
-  if (enc_shape.size() < 3) {
+  if (enc_shape.size() != 3) {
     throw std::runtime_error("Encoder output must have rank 3 [batch, time, channels], got rank " + std::to_string(enc_shape.size()));
   }
   auto enc_type = enc_info->GetElementType();

@@ -30,10 +30,10 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  // Validate audio_features shape has at least 3 dimensions before indexing [2]
+  // Validate audio_features shape before indexing [2].
   const auto& shape = audio_features_->GetShape();
-  if (shape.size() < 3) {
-    throw std::runtime_error("audio_features must have rank >= 3, got rank " + std::to_string(shape.size()));
+  if (shape.size() != 3) {
+    throw std::runtime_error("audio_features must have rank 3 [batch, mels, frames], got rank " + std::to_string(shape.size()));
   }
 
   // Verify that the frame size is expected
