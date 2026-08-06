@@ -62,6 +62,15 @@ _DTYPE = {"tensor(float)": "float32", "tensor(bfloat16)": "bfloat16",
 # Must be >= the most tokens one verify can commit, and divide the ring window.
 _MH_PAD = 8
 
+# Measured cost of one verify run carrying S positions, batch 1, past 1024, in ms
+# (dsv4_perf_it13, section 5).  Index is S.  The drafter proposes a fixed 5-token
+# block but nothing forces the target to verify all of it: submitting L drafts costs
+# _VERIFY_MS[L + 1] and returns at most L + 1 tokens, so the block length is a real
+# tuning knob rather than a property of the checkpoint.  Override with
+# DSV4_SPEC_COST="12.163,18.6,..." after re-running spec_verify_cost.py on a change
+# that moves the curve -- the MoE token-tiling work is expected to flatten it.
+_VERIFY_MS = (0.0, 12.163, 18.600, 20.740, 22.566, 24.620, 26.674, 28.626, 30.578)
+
 DEFAULT_PORT = 19555
 
 # Single output carrying max |x| for every intermediate, added by probe_ranges.py.
@@ -945,6 +954,51 @@ class _Worker:
             post[i].copy_(torch.cat([pre[i][:, keep:],
                                      post[i][:, L - ran:L - ran + keep]], dim=1))
 
+    def _spec_plan_params(self, K):
+        """How many of the drafter's `K` proposals each step should actually verify.
+
+        The drafter always produces a full block, but nothing obliges the target to
+        carry all of it: verifying L drafts costs `cost[L + 1]` and can return at most
+        L + 1 tokens, so block length is a tuning knob.  It is worth tuning because the
+        two curves pull against each other -- the later slots are the least likely to
+        be accepted and, per the measured cost table, the most expensive to carry.
+
+        `DSV4_SPEC_BLOCK` fixes the cap for every step; `DSV4_SPEC_CONF` is the sigmoid
+        temperature that additionally turns on the per-step planner below (0 = off).
+        """
+        cap = max(1, min(K, int(os.environ.get("DSV4_SPEC_BLOCK", K))))
+        conf_t = float(os.environ.get("DSV4_SPEC_CONF", "0"))
+        raw = os.environ.get("DSV4_SPEC_COST", "")
+        cost = [0.0] + [float(v) for v in raw.split(",")] if raw else list(_VERIFY_MS)
+        if len(cost) < cap + 2:
+            raise ProtocolError(f"DSV4_SPEC_COST needs {cap + 1} entries, got {len(cost) - 1}")
+        return cap, conf_t, cost
+
+    def _plan_block(self, conf, cap, conf_t, cost, draft_ms):
+        """Choose this step's block length, maximising expected tokens per millisecond.
+
+        `conf[i]` is the confidence head's raw logit for "slot i lands in the accepted
+        prefix" (it is trained against that prefix mask), so `sigmoid(conf[i] / T)` is
+        that probability and submitting L drafts yields `1 + sum_{i<L} p_i` tokens.
+
+        Every rank must pick the same L or the verify shapes diverge, and the logit is
+        a float that only has to agree to the last bit for the comparison to agree, so
+        rank 0 decides and broadcasts rather than each rank deciding for itself.
+        """
+        torch, dist = self.torch, self.dist
+        pick = torch.zeros(1, dtype=torch.int64, device="cuda")
+        if self.rank == 0:
+            p = torch.sigmoid(conf[0, :cap].float() / conf_t).tolist()
+            best, best_rate, expected = 1, -1.0, 1.0
+            for L in range(1, cap + 1):
+                expected += p[L - 1]
+                rate = expected / (draft_ms + cost[L + 1])
+                if rate > best_rate:
+                    best, best_rate = L, rate
+            pick[0] = best
+        dist.broadcast(pick, src=0)
+        return int(pick)
+
     def _generate_spec(self, prompts, max_new_tokens, eos_token_ids, chan):
         """Draft a block with DSpark, verify it with the target, keep the prefix.
 
@@ -962,11 +1016,14 @@ class _Worker:
             raise ProtocolError("speculative decode is batch 1 only")
         logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
         n, K = len(prompts), self.mtp_block
+        cap, conf_t, cost = self._spec_plan_params(K)
         eos, limit = set(eos_token_ids), limits[0]
         produced, stop = [[]], ["max_new_tokens" if limit == max_new_tokens else "length"]
         t_decode, steps, drafted, accepted = 0.0, 0, 0, 0
         t_draft = t_verify = 0.0
-        pos_hit, pos_n = torch.zeros(K, device="cuda"), 0
+        # Per-slot counts, not one scalar: with a planned block length the slots are
+        # no longer all offered the same number of times.
+        pos_hit, pos_n = torch.zeros(K, device="cuda"), torch.zeros(K, device="cuda")
         debug = int(os.environ.get("DSV4_SPEC_DEBUG", "0"))
 
         past = lens[0]
@@ -1019,19 +1076,21 @@ class _Worker:
             t2 = time.time()
             # The target sees the accepted token followed by the block, so one run
             # checks every draft and predicts one more beyond the last of them.
-            full = self._step(cand, past_t, full=True)
+            L = cap if conf_t <= 0 else self._plan_block(
+                conf, cap, conf_t, cost, 1000 * t_draft / max(steps, 1))
+            full = self._step(cand[:, :L + 1], past_t, full=True)
             preds = torch.argmax(full[0], dim=-1)
             t_verify += time.time() - t2
             if debug and self.rank == 0 and steps < debug:
                 print(f"[spec {steps}] draft={cand[0].tolist()} target={preds.tolist()}",
                       file=sys.stderr, flush=True)
-            match = (cand[0, 1:] == preds[:K])
-            j = int((~match).float().argmax()) if not bool(match.all()) else K
+            match = (cand[0, 1:L + 1] == preds[:L])
+            j = int((~match).float().argmax()) if not bool(match.all()) else L
             new = torch.cat([cand[0, 1:j + 1], preds[j:j + 1]])
             # Per-slot hit rate, independent of the prefix rule: it separates "the
             # drafter is weak everywhere" from "it is fine but dies with depth".
-            pos_hit += match.float()
-            pos_n += 1
+            pos_hit[:L] += match.float()
+            pos_n[:L] += 1
 
             # One collective per step, so the ranks cannot pick different lengths.
             vote.zero_()
@@ -1046,7 +1105,7 @@ class _Worker:
             j = int(g[0])
             new = g[2:2 + j + 1].to(torch.int64)
 
-            self._reslide(j + 1, K + 1)
+            self._reslide(j + 1, L + 1)
             self._push_main(self.mh_last[:, :j + 1])
             past += j + 1
             for t in new.tolist():
@@ -1057,16 +1116,19 @@ class _Worker:
                 if len(produced[0]) >= limit:
                     break
             tok = new[-1].view(1, 1)
-            drafted += K
+            drafted += L
             accepted += j
             steps += 1
             t_decode += time.time() - t1
 
         out = self._reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps)
         out["accept_rate"] = accepted / drafted if drafted else 0.0
-        out["pos_hit"] = [round(v, 3) for v in (pos_hit / max(pos_n, 1)).tolist()]
+        out["pos_hit"] = [round(v, 3) for v in
+                          (pos_hit / pos_n.clamp(min=1)).tolist()]
+        out["block_len"] = float(pos_n.sum()) / steps if steps else 0.0
         if self.rank == 0:
-            print(f"[spec] pos_hit={out['pos_hit']} steps={pos_n} "
+            print(f"[spec] pos_hit={out['pos_hit']} steps={steps} "
+                  f"block={out['block_len']:.2f} "
                   f"draft_ms={1000 * t_draft / max(steps, 1):.2f} "
                   f"verify_ms={1000 * t_verify / max(steps, 1):.2f}",
                   file=sys.stderr, flush=True)
