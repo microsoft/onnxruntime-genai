@@ -425,11 +425,20 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
   }
 
-  // Set the size after empty_past_ has been created with 0 for this field
-  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
-    const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
-    const int max_length = state_.params_->search.max_length;
+  // Compute the capacity for sliding-window layers and apply it to the cache shapes.
+  // ComputeWindowedKvCacheSize() returns 0 when the config does not call for a windowed cache.
+  const DeviceType device_type = state_.model_.p_device_->GetType();
+  const int max_length = state_.params_->search.max_length;
+  const int windowed_cache_size = ComputeWindowedKvCacheSize(
+      device_type, model_.config_->model.decoder, state_.params_->search, max_length);
+
+  if (windowed_cache_size > 0 &&
+      // Beam reordering across a compacted cache is correct in principle but untested.
+      state_.params_->search.num_beams == 1) {
+    // Only a cache smaller than max_length ever evicts, and only then is RewindTo restricted.
+    if (windowed_cache_size < max_length) {
+      windowed_cache_size_ = windowed_cache_size;
+    }
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
@@ -459,14 +468,14 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
-          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+          layer_shapes_[it->second][2] = windowed_cache_size;
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;
     } else {
       // Uniform sliding window allocation (backward compatibility)
-      shape_[2] = std::min(max_length, sliding_window_size);
+      shape_[2] = windowed_cache_size;
     }
   } else if (past_present_share_buffer_) {
     // For fixed kv-cache models the cache size comes from the model graph,
@@ -548,6 +557,8 @@ void DefaultKeyValueCache::Add() {
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  current_length_ = total_length;
+
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -593,6 +604,10 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
+    // Sliding-window layers hold only the most recent windowed_cache_size_ positions, anchored at
+    // cache index 0. Once anything has been evicted, position i no longer lives at cache offset i,
+    // so a rewind would silently read misaligned keys. Refuse instead of returning wrong logits.
+    CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
     return;
   } else if (shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");

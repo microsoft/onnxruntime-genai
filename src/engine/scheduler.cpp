@@ -5,10 +5,26 @@
 
 namespace Generators {
 
+Scheduler::Scheduler(std::shared_ptr<Model> model) {
+  constexpr size_t default_static_batch_size = 4;
+  size_t max_batch_size = default_static_batch_size;
+  const auto& engine_config = model->config_->engine;
+  if (engine_config.dynamic_batching)
+    max_batch_size = std::max(max_batch_size, engine_config.dynamic_batching->max_batch_size);
+  if (engine_config.static_batching)
+    max_batch_size = std::max(max_batch_size, engine_config.static_batching->max_batch_size);
+
+  batched_sampling_plan_.Reserve(max_batch_size);
+  batched_sampler_ = model->p_device_scoring_->CreateBatchedSampler(
+      max_batch_size, model->config_->model.vocab_size);
+}
+
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model}, cache_manager_{cache_manager} {}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  if (auto* sampler = GetBatchedSampler())
+    request->SamplingState(*sampler);
   requests_pool_.push_back(request);
 }
 
@@ -54,7 +70,8 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     }
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_, GetBatchedSampler(),
+                                       GetBatchedSamplingPlan());
 
   if (!scheduled_requests) {
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
@@ -73,9 +90,11 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model}, cache_manager_{cache_manager} {}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  if (auto* sampler = GetBatchedSampler())
+    request->SamplingState(*sampler);
   requests_pool_.push_back(request);
 }
 
@@ -118,7 +137,8 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
     }
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_, GetBatchedSampler(),
+                                       GetBatchedSamplingPlan());
 
   if (!scheduled_requests) {
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");

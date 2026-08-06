@@ -20,11 +20,16 @@ std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared
 
 }  // namespace
 
-ModelExecutor::ModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
+std::unique_ptr<ModelExecutor> ModelExecutor::Create(std::shared_ptr<Model> model,
+                                                     std::shared_ptr<CacheManager> cache_manager) {
+  return std::make_unique<DecoderModelExecutor>(model, cache_manager);
+}
+
+DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : model_{model},
       decoder_{CreateDecoder(model, cache_manager)} {}
 
-void ModelExecutor::Decode(ScheduledRequests& scheduled_requests) {
+void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests) {
   decoder_->Decode(scheduled_requests);
 }
 

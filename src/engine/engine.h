@@ -17,6 +17,24 @@
 namespace Generators {
 
 /**
+ * @struct EngineDependencies
+ * @brief Bundle of the collaborators the Engine drives.
+ *
+ * The Engine constructor assembles these from the model via CreateDependencies and forwards them
+ * to the dependency-injecting constructor, so there is a single construction flow. The injecting
+ * constructor accepts a pre-assembled bundle, which also lets a caller supply alternative
+ * collaborators. The cache manager, scheduler, and model executor are all abstract interfaces, so
+ * an alternative implementation of any of them can be supplied in place of the production one.
+ * This is a composition seam, not a setter: the dependencies are supplied once at construction and
+ * never replaced mid-run.
+ */
+struct EngineDependencies {
+  std::shared_ptr<CacheManager> cache_manager;
+  std::unique_ptr<Scheduler> scheduler;
+  std::unique_ptr<ModelExecutor> model_executor;
+};
+
+/**
  * @class Engine
  * @brief The Engine class is responsible for managing requests, executing models,
  *        and coordinating scheduling and caching mechanisms.
@@ -32,8 +50,28 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * @brief Constructs an Engine instance with the specified model.
    * @param model A shared pointer to the Model object to be used by the Engine
    *              and its components.
+   *
+   * Assembles the Engine's scheduler, cache manager, and model executor for the model via
+   * CreateDependencies and delegates to the dependency-injecting constructor. Behavior is identical
+   * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
+
+  /**
+   * @brief Dependency-injecting constructor.
+   * @param model A shared pointer to the Model object to be used by the Engine.
+   * @param dependencies A pre-assembled bundle of the Engine's collaborators.
+   *
+   * Takes ownership of the supplied collaborators as-is. The model-only constructor delegates here
+   * with the default bundle; callers may also supply an alternative bundle.
+   */
+  Engine(std::shared_ptr<Model> model, EngineDependencies dependencies);
+
+  /**
+   * @brief Assembles the Engine's collaborators (cache manager, scheduler, model executor) for a
+   *        model, in the order they depend on one another.
+   */
+  static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
   /**
    * @brief Adds a request to the Engine for processing.

@@ -9,6 +9,7 @@
 
 #include "block.h"
 #include "request.h"
+#include "engine_invariants.h"
 
 namespace Generators {
 
@@ -70,6 +71,11 @@ struct PagedKeyValueCache {
   size_t BlockTableColumns() const { return block_table_columns_; }
 
   void UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests);
+
+  // Captures an immutable snapshot of the cache's block accounting (free/allocated blocks, and per
+  // request block ids and used/empty slots) for invariant validation and state inspection. The
+  // snapshot copies out the state and holds no reference into the cache.
+  PagedCacheSnapshot Snapshot() const;
 
  private:
   struct LayerCache {
