@@ -298,7 +298,7 @@ TEST(CAPITests, SequencesOutOfBoundsAccess) {
   EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
   EXPECT_NE(sequences->SequenceData(0), nullptr);
 
-  // Out-of-bounds indices must not read past the underlying storage.
+  // Indices outside the stored range return empty results.
   EXPECT_EQ(sequences->SequenceCount(1), 0u);
   EXPECT_EQ(sequences->SequenceData(1), nullptr);
   EXPECT_EQ(sequences->SequenceCount(1000), 0u);
@@ -1182,9 +1182,8 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
-// Regression test: a top_k value larger than the model's vocab_size must be
-// rejected at generator creation time instead of triggering an out-of-bounds
-// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+// A top_k value larger than the model's vocab_size must be rejected during
+// generator creation.
 TEST(CAPITests, TopKExceedsVocabSizeThrows) {
   Phi2Test test;
 
