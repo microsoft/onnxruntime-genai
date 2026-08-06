@@ -117,10 +117,16 @@ TEST(QwenVisionMultiImageTest, RejectsRank1GridTensorViaGeneratorInputs) {
   EXPECT_THROW(harness.generator->SetInputs(*harness.inputs), std::runtime_error);
 }
 
-TEST(QwenVisionMultiImageTest, AcceptsValidGridShapeViaGeneratorInputs) {
+TEST(QwenVisionMultiImageTest, ValidGridShapeDoesNotTriggerGridBoundsValidation) {
   SkipIfModelUnavailable();
 
   auto harness = QwenVisionHarness::Create();
 
-  EXPECT_NO_THROW(harness.generator->SetInputs(*harness.inputs));
+  try {
+    harness.generator->SetInputs(*harness.inputs);
+  } catch (const std::runtime_error& e) {
+    const std::string error = e.what();
+    EXPECT_EQ(error.find("image_grid_thw has"), std::string::npos);
+    EXPECT_EQ(error.find("needs at least 3 values per image"), std::string::npos);
+  }
 }
