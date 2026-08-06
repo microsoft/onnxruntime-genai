@@ -168,6 +168,15 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "fp8_kv_cache",
+        "fuse_linear_attn_gates",
+        "use_original_fp8_weights",
+        "use_original_nvfp4_weights",
+        "enable_mtp",
+        "mtp_head_fp16",
+        "mtp_head_int4_lmhead",
+        "mtp_head_int8",
+        "mtp_emit_hidden",
     ]
 
     for key in bools:
@@ -178,6 +187,21 @@ def check_extra_options(
                 extra_options[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+
+    if "recurrent_state_window" in extra_options:
+        try:
+            recurrent_state_window = int(extra_options["recurrent_state_window"])
+        except (TypeError, ValueError) as e:
+            raise ValueError("recurrent_state_window must be a non-negative integer.") from e
+        if recurrent_state_window < 0:
+            raise ValueError("recurrent_state_window must be a non-negative integer.")
+        extra_options["recurrent_state_window"] = recurrent_state_window
+
+    if extra_options.get("enable_mtp", False):
+        if not extra_options.get("include_hidden_states", False):
+            raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
+        if extra_options.get("exclude_lm_head", False):
+            raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
 
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
@@ -723,6 +747,20 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
+                    Requires include_hidden_states=true, exclude_lm_head=false, and source safetensors containing mtp.* weights.
+                mtp_head_fp16 = Build the MTP head as a dense fp16 MoE model. Default is false.
+                    Mutually exclusive with mtp_head_quant_type.
+                mtp_head_quant_type = int4/int8/mxfp4/nvfp4: Override the MTP head quantization scheme.
+                    By default the head inherits the main model precision. For mxfp4/nvfp4, dense MatMuls use int4
+                    while routed experts use the selected FP4 QMoE format.
+                mtp_head_int4_lmhead = Keep the MTP draft lm_head at int4 when the rest of the head is int8. Default is false.
+                mtp_head_int8 = [DEPRECATED] Build an int8 MTP head. Default is false.
+                    Use mtp_head_quant_type=int8 instead.
+                recurrent_state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
+                    Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
+                    Requires ONNX Runtime kernels that implement the state_window attribute.
+                mtp_emit_hidden = Expose the MTP head's final hidden state for debugging or validation. Default is false.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
