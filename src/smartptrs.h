@@ -138,11 +138,18 @@ struct DeviceInterface {
   virtual Ort::Allocator& GetAllocator() = 0;
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 
-  // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the backend and
-  // machine support it (MIGraphX HipPinned, DML CUSTOM/L0). Null default -> callers keep the
-  // current device-memory path. Set via InitHostAccessible after the EP allocator is created.
+  // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the device
+  // supports it. Null default -> callers keep the current device-memory path.
   virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
-  virtual void InitHostAccessible(Ort::Allocator& /*allocator*/) {}
+
+  // Called once after the device allocator is created, so a device that offers additional
+  // allocators (e.g. host-accessible memory) can set them up. The default sets up nothing.
+  // `device_id` is the id the device allocator was created on.
+  virtual void InitDeviceAllocators(const ProviderOptions* /*user_options*/, int /*device_id*/) {}
+
+  // Id of the EP device this interface's allocators should bind to. 0 unless the device resolves a
+  // specific one from EP metadata.
+  virtual int GetDeviceId(const ProviderOptions* /*user_options*/) { return 0; }
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }

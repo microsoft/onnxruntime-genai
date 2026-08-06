@@ -11,6 +11,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../models/session_options.h"
 #include "interface.h"
 
 #include <stdexcept>
@@ -20,6 +21,9 @@ namespace AMDGPU {
 
 const char* device_label = "amdgpu";
 const char* label_cpu = "cpu";
+
+// Registration name the EP is discovered under, used to look up its advertised memory-info.
+constexpr const char* kExecutionProviderName = "AMDGPUExecutionProvider";
 
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
@@ -194,16 +198,48 @@ struct InterfaceImpl : DeviceInterface {
     return *ort_allocator_;
   }
 
-  // The MIGraphX backend registers its device memory-info under "Hip", keyed on the device id.
+  // The backend registers its device memory-info under "Hip", keyed on the device id.
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return OrtMemoryInfo::Create("Hip", OrtAllocatorType::OrtDeviceAllocator,
                                  device_id_, OrtMemType::OrtMemTypeDefault);
   }
 
-  void SetDeviceId(int device_id) { device_id_ = device_id; }
+  // Read the id of the EP device the model will run on, so the allocators bind to it rather than
+  // assuming device 0. Resolves to 0 on a single-GPU machine.
+  int GetDeviceId(const ProviderOptions* user_options) override {
+    auto ep_devices = FindRegisteredEpDevices(kExecutionProviderName);
+    if (user_options)
+      ep_devices = ApplyDeviceFiltering(*user_options, ep_devices);
+    if (!ep_devices.empty()) {
+      if (const OrtMemoryInfo* mi =
+              Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &device_id_));
+    }
+    return device_id_;
+  }
 
-  void InitHostAccessible(Ort::Allocator& allocator) override {
-    ort_pinned_allocator_ = &allocator;
+  // Pick up the host-accessible allocator advertised on the same device as the compute allocator,
+  // so the pinned decode inputs live on the device that runs the model. If the EP advertises none,
+  // this leaves the allocator null and callers keep the default device-memory path.
+  void InitDeviceAllocators(const ProviderOptions* /*user_options*/, int device_id) override {
+    if (ort_pinned_allocator_)
+      return;
+    try {
+      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kExecutionProviderName)) {
+        const OrtMemoryInfo* mi =
+            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
+        if (!mi)
+          continue;
+        int host_device_id = 0;
+        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
+        if (host_device_id == device_id) {
+          ort_pinned_allocator_ = GetOrtEnv().GetSharedAllocator(*mi);
+          break;
+        }
+      }
+    } catch (const Ort::Exception&) {
+      ort_pinned_allocator_ = nullptr;
+    }
   }
 
   Ort::Allocator* GetHostAccessibleAllocator() override {
@@ -233,7 +269,7 @@ struct InterfaceImpl : DeviceInterface {
  private:
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
-  // Host-accessible allocator, set by InitHostAccessible when one is available.
+  // Host-accessible allocator, set by InitDeviceAllocators when the EP advertises one.
   Ort::Allocator* ort_pinned_allocator_{};
   int device_id_{};
 };
@@ -289,10 +325,6 @@ DeviceInterface* GetAMDGPUInterface() {
   if (!g_amdgpu_device)
     g_amdgpu_device = std::make_unique<AMDGPU::InterfaceImpl>();
   return g_amdgpu_device.get();
-}
-
-void SetAMDGPUDeviceId(int device_id) {
-  static_cast<AMDGPU::InterfaceImpl*>(GetAMDGPUInterface())->SetDeviceId(device_id);
 }
 
 DeviceInterface* GetAMDGPUPinnedInputsInterface() {

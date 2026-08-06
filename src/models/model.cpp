@@ -492,17 +492,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // AMDGPU: use the selected device's id rather than a hardcoded 0. Single-GPU resolves to 0.
-  if (type == DeviceType::AMDGPU) {
-    auto ep_devices = FindRegisteredEpDevices("AMDGPUExecutionProvider");
-    if (user_provider_options)
-      ep_devices = ApplyDeviceFiltering(*user_provider_options, ep_devices);
-    if (!ep_devices.empty()) {
-      if (const OrtMemoryInfo* mi = Ort::api->EpDevice_MemoryInfo(ep_devices.front(), OrtDeviceMemoryType_DEFAULT))
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &allocator.device_id_));
-    }
-    SetAMDGPUDeviceId(allocator.device_id_);
-  }
+  // Bind the allocator to the selected device rather than assuming device 0.
+  allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
     auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
@@ -515,32 +506,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
 
-  // Host-accessible allocator for decode inputs (AMDGPU only). Request it via GetSharedAllocator;
-  // if unavailable, creation returns null and callers fall back to the default device inputs path.
-  if (!allocator.host_accessible_allocator_ && type == DeviceType::AMDGPU) {
-    try {
-      // Use the host-accessible memory-info on the same device as the compute allocator.
-      const OrtMemoryInfo* host_info = nullptr;
-      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices("AMDGPUExecutionProvider")) {
-        const OrtMemoryInfo* mi =
-            Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
-        if (!mi)
-          continue;
-        int host_device_id = 0;
-        Ort::ThrowOnError(Ort::api->MemoryInfoGetId(mi, &host_device_id));
-        if (host_device_id == allocator.device_id_) {
-          host_info = mi;
-          break;
-        }
-      }
-      if (host_info)
-        allocator.host_accessible_allocator_ = GetOrtEnv().GetSharedAllocator(*host_info);
-    } catch (const Ort::Exception&) {
-      allocator.host_accessible_allocator_ = nullptr;
-    }
-    if (allocator.host_accessible_allocator_)
-      device.InitHostAccessible(*allocator.host_accessible_allocator_);
-  }
+  // Let the device set up any additional allocators it offers (e.g. host-accessible memory for
+  // decode inputs). Devices that offer none leave the defaults in place.
+  device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
+  allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -627,8 +596,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
-  DeviceInterface* p_host_accessible_inputs =
-      p_device_->GetType() == DeviceType::AMDGPU ? GetAMDGPUPinnedInputsInterface() : nullptr;
+  DeviceInterface* p_host_accessible_inputs = GetAMDGPUPinnedInputsInterface();
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
