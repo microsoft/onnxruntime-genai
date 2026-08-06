@@ -1077,7 +1077,7 @@ class Qwen35TextModel(Model):
 
         # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
         # states (`state_window=W`): past/present_key_values.%d.{conv,recurrent}_state become
-        # [B, W, ...] instead of [B, ...], right-aligned, with slot W-1 holding the state after the
+        # [W, B, ...] instead of [B, ...], right-aligned, with slot W-1 holding the state after the
         # final token of the forward (i.e. the unwindowed state) and being the only slot the op
         # reads back. This lets a multi-token (num_speculative_tokens>1) MTP self-speculative loop
         # CROP the recurrent state to the accepted prefix on partial accept -- copying slot `a`
@@ -2473,8 +2473,17 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # alongside the main model (see ``Qwen35MtpHead``). It is disabled for the
         # MTP head itself (``is_mtp_head``) to avoid infinite recursion.
         self.mtp_head = None
-        self.enable_mtp = bool(extra_options.get("enable_mtp", False)) and not getattr(self, "is_mtp_head", False)
+        self.enable_mtp = str(extra_options.get("enable_mtp", "false")).lower() in ("1", "true", "yes")
+        self.enable_mtp = self.enable_mtp and not getattr(self, "is_mtp_head", False)
         if self.enable_mtp:
+            include_hidden_states = str(extra_options.get("include_hidden_states", "false")).lower() in (
+                "1", "true", "yes",
+            )
+            exclude_lm_head = str(extra_options.get("exclude_lm_head", "false")).lower() in ("1", "true", "yes")
+            if not include_hidden_states:
+                raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
+            if exclude_lm_head:
+                raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
             # Stash the constructor arguments so the MTP head can be built from a
             # pristine config after the main model has been generated.
             self._mtp_config = copy.deepcopy(config)
@@ -2873,7 +2882,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         and remove the duplicated bytes from mtp.onnx.data.
 
         Only tensors that are byte-identical (same name/dtype/shape and matching
-        sampled bytes) are shared; anything that differs (e.g. a quantized main
+        bytes) are shared; anything that differs (e.g. a quantized main
         lm_head vs an fp16 MTP lm_head) is left untouched. Failures are non-fatal —
         the exported models remain valid (just larger) if sharing is skipped.
         """
@@ -2901,14 +2910,18 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 entry = tensor.external_data.add()
                 entry.key, entry.value = k, str(v)
 
-        def sampled_equal(path_a, off_a, path_b, off_b, length, chunks=8, chunk_size=1 << 20):
+        def external_data_equal(path_a, off_a, path_b, off_b, length, chunk_size=1 << 22):
             with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
-                for i in range(chunks):
-                    off = (length // chunks) * i
-                    n = min(chunk_size, length - off)
-                    fa.seek(off_a + off); fb.seek(off_b + off)
-                    if fa.read(n) != fb.read(n):
+                fa.seek(off_a)
+                fb.seek(off_b)
+                remaining = length
+                while remaining:
+                    read_size = min(chunk_size, remaining)
+                    data_a = fa.read(read_size)
+                    data_b = fb.read(read_size)
+                    if len(data_a) != read_size or data_a != data_b:
                         return False
+                    remaining -= read_size
             return True
 
         try:
@@ -2931,7 +2944,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 m_dt, m_dims, m_off, m_len = main_info[name]
                 if loc != mtp_data_name or t.data_type != m_dt or tuple(t.dims) != m_dims or ln != m_len:
                     continue
-                if not sampled_equal(main_data, m_off, mtp_data, off, ln):
+                if not external_data_equal(main_data, m_off, mtp_data, off, ln):
                     continue
                 redirect[name] = (m_off, m_len)
                 remove.add((off, ln))
