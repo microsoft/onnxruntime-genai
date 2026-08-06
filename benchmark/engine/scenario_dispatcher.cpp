@@ -69,6 +69,7 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
     config.synthetic = e.value("synthetic", config.synthetic);
     config.model_path = e.value("model_path", std::string{});
     config.execution_provider = e.value("execution_provider", config.execution_provider);
+    config.execution_provider_library = e.value("execution_provider_library", std::string{});
     config.generation_tokens = e.value("generation_tokens", config.generation_tokens);
     config.measured_runs = e.value("measured_runs", config.measured_runs);
     configs.push_back(std::move(config));

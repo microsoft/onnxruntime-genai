@@ -18,6 +18,7 @@ struct ScenarioConfig {
   bool synthetic{true};
   std::string model_path;
   std::string execution_provider{"cuda"};
+  std::string execution_provider_library;
   int generation_tokens{128};
   int measured_runs{1};
 };

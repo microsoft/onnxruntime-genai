@@ -7,7 +7,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -67,6 +66,7 @@ void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const 
 ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   std::cout << "[decode_baseline] Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
+            << "', provider_library='" << config.execution_provider_library
             << "', concurrency=" << config.concurrency
             << ", measured_runs=" << config.measured_runs
             << ", prompt_length_k=" << config.prompt_length_k
@@ -74,14 +74,26 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
             << std::endl;
   std::cout << "[decode_baseline] Current working directory: " << fs::current_path().string() << std::endl;
 
-  const char* ld_library_path = std::getenv("LD_LIBRARY_PATH");
-  std::cout << "[decode_baseline] LD_LIBRARY_PATH="
-            << (ld_library_path ? ld_library_path : "<unset>")
-            << std::endl;
-
   std::cout << "[decode_baseline] Resolving model path..." << std::endl;
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
   std::cout << "[decode_baseline] Resolved model path: " << resolved_model_path << std::endl;
+
+  if (config.execution_provider == "cuda") {
+    if (config.execution_provider_library.empty()) {
+      throw std::invalid_argument(
+          "execution_provider_library is required when execution_provider is 'cuda'");
+    }
+
+    const fs::path provider_library = fs::absolute(config.execution_provider_library);
+    std::cout << "[decode_baseline] Registering CUDA execution provider library: "
+              << provider_library.string() << std::endl;
+    if (!fs::exists(provider_library)) {
+      throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
+    }
+
+    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
+    std::cout << "[decode_baseline] CUDA execution provider registered." << std::endl;
+  }
 
   std::cout << "[decode_baseline] Creating OGA config..." << std::endl;
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
