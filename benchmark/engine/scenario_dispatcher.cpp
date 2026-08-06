@@ -12,7 +12,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "onnxruntime_c_api.h"
 #include "ort_genai.h"
 
 #include "common/benchmark_types.h"
@@ -22,14 +21,6 @@ namespace fs = std::filesystem;
 
 namespace engine_benchmark {
 namespace {
-
-std::string GetOrtVersion() {
-  const OrtApiBase* api = OrtGetApiBase();
-  if (api == nullptr || api->GetVersionString == nullptr) {
-    return "unknown";
-  }
-  return api->GetVersionString();
-}
 
 std::string GetGenAIVersion() {
 #ifdef ORT_GENAI_BENCH_GENAI_VERSION
@@ -143,7 +134,6 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   fs::create_directories(out_dir);
 
   BenchmarkContext context;
-  context.ort_version = GetOrtVersion();
   context.genai_version = GetGenAIVersion();
 
   std::vector<nlohmann::json> all_results;
