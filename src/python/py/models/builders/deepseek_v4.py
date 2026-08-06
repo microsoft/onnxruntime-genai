@@ -442,6 +442,14 @@ class DeepSeekV4FlashModel(Model):
         return out
 
     def const(self, dtype: str, value):
+        # The value has to survive a round trip through the initializer's *name*:
+        # base.make_constant recovers it with ast.literal_eval on the last path
+        # segment.  ir.DataType is an IntEnum whose repr is its member name, so a
+        # dtype that reaches here by mistake produces a name that cannot be parsed
+        # back -- assert on it rather than letting it become the enum's value.
+        if isinstance(value, (list, tuple)):
+            bad = [v for v in value if type(v) not in (int, float)]
+            assert not bad, f"non-literal constant value {bad} for {dtype}"
         return f"/model/constants/{dtype}/{value!r}"
 
     def init(self, tensor, name, to=None):
@@ -1146,11 +1154,15 @@ class DeepSeekV4FlashModel(Model):
         else:
             qa = self.proj(f"{name}/qa", x, f"{p}.wq_a.weight", [B, S, self.q_lora_rank])
             kv_raw = self.proj(f"{name}/kv", x, f"{p}.wkv.weight", [B, S, D])
-        nd = io if self.norm_bf16 else ir.DataType.FLOAT
+        # Not `nd`: that is the nope dim, and `rope_last` below closes over it, so
+        # reusing the name here silently turns every later nope/rope split into a
+        # slice at the dtype's enum value.  Only the unfused paths call it late
+        # enough to be hit, which is why the fused export never showed it.
+        ndt = io if self.norm_bf16 else ir.DataType.FLOAT
         qn = self.make_rmsnorm(f"{name}/qnorm", qa,
-                               self.init_w(f"{p}.q_norm.weight", to=nd),
-                               [B, S, self.q_lora_rank], dtype=nd)
-        if nd != io:
+                               self.init_w(f"{p}.q_norm.weight", to=ndt),
+                               [B, S, self.q_lora_rank], dtype=ndt)
+        if ndt != io:
             qn = self.cast(f"{name}/qnorm_b", qn, io, [B, S, self.q_lora_rank])
         q_raw = self.proj(f"{name}/qb", qn, f"{p}.wq_b.weight", [B, S, H * D], shard_axis=0)
 
