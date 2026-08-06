@@ -26,7 +26,6 @@ target_include_directories(engine_benchmark PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${nlohmann_json_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src
-  ${ORT_HEADER_DIR}
 )
 
 target_compile_features(engine_benchmark PRIVATE cxx_std_17)
@@ -34,7 +33,6 @@ target_compile_definitions(engine_benchmark PRIVATE ORT_GENAI_BENCH_GENAI_VERSIO
 
 target_link_libraries(engine_benchmark PRIVATE
   onnxruntime-genai
-  ${ONNXRUNTIME_LIB}
 )
 
 target_link_directories(engine_benchmark PRIVATE ${ORT_LIB_DIR})
