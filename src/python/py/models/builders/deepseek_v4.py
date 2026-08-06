@@ -211,6 +211,21 @@ class DeepSeekV4FlashModel(Model):
         # dev/docs/memory/dsv4_perf_it15_lm_head_shard.md.
         self.lm_head_shard = extra_options.get("dsv4_lm_head_shard", "1") not in ("0", 0, False)
 
+        # Precision of the vocabulary projection and the Markov head.  bf16 keeps 7
+        # mantissa bits, so every logit carries ~0.4% relative error; on logits of
+        # magnitude ~20 that is ~0.08 absolute, enough to flip an argmax on a near-tie
+        # across a 129280-wide vocabulary and cost acceptance.  fp16 carries 10 bits at
+        # the same 2 bytes per element, so it is free in both memory and bandwidth.
+        # These knobs deliberately stop at the head: the body cannot run in fp16 (its
+        # later-layer activations overflow the 65504 range), but the head is downstream
+        # of the final norm and its logits stay within ~1e2, so fp16 is safe there.
+        # ``dsv4_markov_dtype`` defaults to ``dsv4_head_dtype`` but can be raised on its
+        # own: the two Markov tensors are 66 MiB each against 1.06 GB for head.weight.
+        _hd = {"io": self.io_dtype, "fp16": ir.DataType.FLOAT16, "fp32": ir.DataType.FLOAT}
+        self.head_dtype = _hd[extra_options.get("dsv4_head_dtype", "io")]
+        self.markov_dtype = _hd[extra_options.get("dsv4_markov_dtype",
+                                                  extra_options.get("dsv4_head_dtype", "io"))]
+
         # Two knobs that drain the float32 island the reference implementation leaves
         # in the decode path.  Each cast there is a full kernel launch on a [1, dim]
         # row, so they cost far more in dispatch than in arithmetic; see
@@ -2001,8 +2016,10 @@ class DeepSeekV4FlashModel(Model):
                               [B, S, dim], dtype=nd)
         if nd != io:
             n = self.cast("/norm_b", n, io, [B, S, dim])
-        # Keep the vocabulary projection in the activation type; a float copy of
-        # it would be the single largest initializer in the model.
+        # head.weight is the single largest initializer, so this is the one precision
+        # knob that costs real memory: fp16 is free (still 2 bytes), fp32 is +1.06 GB.
+        hd = self.head_dtype
+        nh = n if hd == io else self.cast("/lm_head_in", n, hd, [B, S, dim])
         shard_head = (self.lm_head_shard and self.world > 1
                       and self.vocab_size % self.world == 0)
         if shard_head:
@@ -2015,9 +2032,9 @@ class DeepSeekV4FlashModel(Model):
             # reshaping at all.  Measured on this box, a 517 KB fp32 AllReduce is 22.9 us
             # against 41.4 us for the equivalent 64 KB AllGather.
             vloc = self.vocab_size // self.world
-            lg = self.op("MatMul", [n, self.init(self.shard(self.sd["head.weight"], 0).T,
-                                                 "head/T", to=io)],
-                         "/lm_head", io, [B, S, vloc])
+            lg = self.op("MatMul", [nh, self.init(self.shard(self.sd["head.weight"], 0).T,
+                                                  "head/T", to=hd)],
+                         "/lm_head", hd, [B, S, vloc])
             # The cast has to precede the pad: CUDA Pad has no bfloat16 kernel, and an
             # unassigned node fails session initialization outright.  It is also the
             # cheaper order, since the cast then runs on an eighth of the vocabulary.
@@ -2028,8 +2045,8 @@ class DeepSeekV4FlashModel(Model):
             self.all_reduce("logits", wide, ir.DataType.FLOAT,
                             [B, S, self.vocab_size], declared=True)
         else:
-            lg = self.op("MatMul", [n, self.init(self.sd["head.weight"].T, "head/T", to=io)],
-                         "/lm_head", io, [B, S, self.vocab_size])
+            lg = self.op("MatMul", [nh, self.init(self.sd["head.weight"].T, "head/T", to=hd)],
+                         "/lm_head", hd, [B, S, self.vocab_size])
             self.make_node("Cast", inputs=[lg], outputs=["logits"], name="/logits",
                            to=int(ir.DataType.FLOAT))
 
@@ -2298,18 +2315,20 @@ class DeepSeekV4FlashModel(Model):
     def make_mtp_logits(self, n_):
         """The drafter shares the target's lm head (model.py:903)."""
         F, io, V = ir.DataType.FLOAT, self.io_dtype, self.vocab_size
+        hd = self.head_dtype
+        nh = n_ if hd == io else self.cast("/mtp/lm_head_in", n_, hd, [B, S, self.dim])
         if self.lm_head_shard and self.world > 1 and V % self.world == 0:
             vloc = V // self.world
-            lg = self.op("MatMul", [n_, self.init(self.shard(self.sd["head.weight"], 0).T,
-                                                  "head/T", to=io)], "/mtp/lm_head", io,
+            lg = self.op("MatMul", [nh, self.init(self.shard(self.sd["head.weight"], 0).T,
+                                                  "head/T", to=hd)], "/mtp/lm_head", hd,
                          [B, S, vloc])
             lgf = self.cast("/mtp/lm_head_f", lg, F, [B, S, vloc])
             pads = [0, 0, self.rank * vloc, 0, 0, (self.world - 1 - self.rank) * vloc]
             wide = self.op("Pad", [lgf, self.const("INT64", pads)], "/mtp/lm_head_pad",
                            F, [B, S, V])
             return self.all_reduce("/mtp/logits", wide, F, [B, S, V])
-        lg = self.op("MatMul", [n_, self.init(self.sd["head.weight"].T, "head/T", to=io)],
-                     "/mtp/lm_head", io, [B, S, V])
+        lg = self.op("MatMul", [nh, self.init(self.sd["head.weight"].T, "head/T", to=hd)],
+                     "/mtp/lm_head", hd, [B, S, V])
         return self.cast("/mtp/logits", lg, F, [B, S, V])
 
     def make_mtp_head(self, x, logits):
@@ -2321,21 +2340,23 @@ class DeepSeekV4FlashModel(Model):
         and sharding them would put a full-vocabulary collective inside the loop.
         """
         F, I, io = ir.DataType.FLOAT, ir.DataType.INT64, self.io_dtype
+        md = self.markov_dtype
         K, V, R, last = self.dspark_block, self.vocab_size, self.markov_rank, \
             self.num_layers + self.n_mtp - 1
         mp = f"layers.{last}.markov_head"
-        w1 = self.init_w(f"{mp}.markov_w1.weight", to=io)
-        w2 = self.init(self.sd[f"{mp}.markov_w2.weight"].T, f"{mp}.markov_w2/T", to=io)
+        w1 = self.init_w(f"{mp}.markov_w1.weight", to=md)
+        w2 = self.init(self.sd[f"{mp}.markov_w2.weight"].T, f"{mp}.markov_w2/T", to=md)
 
         cur = self.op("Squeeze", ["input_ids", self.const("INT64", [1])], "/mtp/tok0", I, [B])
         ids, embeds = [cur], []
         for i in range(K):
-            e = self.op("Gather", [w1, cur], f"/mtp/mk{i}/embed", io, [B, R], axis=0)
-            embeds.append(e)
-            bias = self.op("MatMul", [e, w2], f"/mtp/mk{i}/bias", io, [B, V])
+            e = self.op("Gather", [w1, cur], f"/mtp/mk{i}/embed", md, [B, R], axis=0)
+            # The confidence head consumes the embedding in the activation type.
+            embeds.append(e if md == io else self.cast(f"/mtp/mk{i}/embed_b", e, io, [B, R]))
+            bias = self.op("MatMul", [e, w2], f"/mtp/mk{i}/bias", md, [B, V])
+            bf = bias if md == F else self.cast(f"/mtp/mk{i}/biasf", bias, F, [B, V])
             li = self.op("Add", [self.op("Gather", [logits, self.const("INT64", i)],
-                                         f"/mtp/mk{i}/slice", F, [B, V], axis=1),
-                                 self.cast(f"/mtp/mk{i}/biasf", bias, F, [B, V])],
+                                         f"/mtp/mk{i}/slice", F, [B, V], axis=1), bf],
                          f"/mtp/mk{i}/logits", F, [B, V])
             cur = self.op("ArgMax", [li], f"/mtp/mk{i}/argmax", I, [B], axis=-1, keepdims=0)
             ids.append(cur)
