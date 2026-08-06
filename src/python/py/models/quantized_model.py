@@ -227,7 +227,7 @@ class QuantizedModel:
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = TensorModule()
-        self.layers = {}
+        self.layers = {} if load_weights else []
         self.num_layers = num_layers
         if not load_weights:
             return
@@ -1692,6 +1692,10 @@ class ModeloptModel(QuantizedModel):
         from types import SimpleNamespace
         from safetensors import safe_open
 
+        with open(os.path.join(input_path, "config.json")) as f:
+            cfg = json.load(f)
+        text_config = cfg.get("text_config", cfg)
+        num_layers = num_layers or text_config.get("num_hidden_layers")
         super().__init__(
             quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=False
         )
@@ -1700,12 +1704,6 @@ class ModeloptModel(QuantizedModel):
         self._simple_namespace = SimpleNamespace
         self._open_handles = {}
         self._handle_keys = {}
-
-        with open(os.path.join(input_path, "config.json")) as f:
-            cfg = json.load(f)
-        tc = cfg.get("text_config", cfg)
-        n_layers = num_layers or tc.get("num_hidden_layers")
-        self.num_layers = n_layers
 
         index_path = os.path.join(input_path, "model.safetensors.index.json")
         if os.path.exists(index_path):
@@ -1723,7 +1721,7 @@ class ModeloptModel(QuantizedModel):
             self._single_file = candidates[0]
 
         try:
-            self.layers = [self._build_layer(layer_id) for layer_id in range(n_layers)]
+            self.layers.extend(self._build_layer(layer_id) for layer_id in range(num_layers))
 
             # Globals: embeddings + final norm are BF16; lm_head is NVFP4.
             self.embedding.weight = self._get("model.language_model.embed_tokens.weight")
