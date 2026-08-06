@@ -356,6 +356,12 @@ struct Config {
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
         bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
         std::vector<int> layers;           // Layer indices that use sliding window attention (for models with alternating patterns)
+        // Extra key-value cache positions allocated beyond window_size on execution providers that
+        // own eviction themselves (CUDA and CPU GroupQueryAttention with sliding_window_cache=1).
+        // 0 means "use the EP default": 0 for CUDA (optimal — launch overhead dominates, attention
+        // is O(W) regardless of C), 16 for CPU (optimal — amortises O(C) shift traffic at W+16).
+        // Set explicitly to cover a whole prefill chunk or to tune the amortisation tradeoff.
+        int cache_slack{0};
       };
       std::optional<SlidingWindow> sliding_window;
 

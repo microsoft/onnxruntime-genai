@@ -50,7 +50,7 @@ void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   size_t num_tokens = next_tokens.size();
-  const auto& chunk_size_opt = model_.config_->search.chunk_size;
+  const auto& chunk_size_opt = params_->search.chunk_size;
 
   if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
     return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());

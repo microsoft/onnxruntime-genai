@@ -54,6 +54,9 @@ struct DeviceSpan {
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
+  // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
+  bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
+
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
   std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
 
@@ -88,6 +91,29 @@ struct DeviceSpan {
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
   template <typename U>
   friend struct DeviceSpan;  // All DeviceSpans are friends
+};
+
+struct BatchedSamplerState {
+  virtual ~BatchedSamplerState() = default;
+};
+
+struct BatchedSamplingParams {
+  int k{};
+  float p{};
+  float temperature{};
+};
+
+// Owns the reusable workspace for sampling Engine requests as a batch. Each request keeps the
+// state returned by CreateState so its random stream is independent of scheduler batch order.
+struct BatchedSampler {
+  virtual ~BatchedSampler() = default;
+
+  virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
+  virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
+  virtual DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
+                                     std::span<const BatchedSamplingParams> params,
+                                     std::span<BatchedSamplerState* const> states,
+                                     int vocab_size) = 0;
 };
 
 enum struct DeviceType {
@@ -131,6 +157,8 @@ struct DeviceInterface {
 
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
+  virtual std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t /*max_batch_size*/,
+                                                               int /*vocab_size*/) { return {}; }
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 

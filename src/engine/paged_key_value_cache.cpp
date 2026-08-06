@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "cache_manager.h"
+#include "admission.h"
 
 #include <numeric>
 
@@ -55,19 +56,16 @@ size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
 }
 
 // Number of KV slots the model will have addressed once the pending step has run, i.e. one per
-// token whose key and value live in the cache afterwards.
+// token whose key and value live in the cache afterwards. The pure arithmetic lives in
+// admission.h (RequiredSlots); here we only supply the request-derived counters.
 //
 // This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes the
 // unprocessed tokens at absolute positions [past, past + unprocessed), so the cache must own
-// `past + unprocessed` slots. CurrentSequenceLength() already counts the unprocessed tokens for
-// a prefill request and excludes them for a generation request, hence the branch.
-//
-// Counting appended tokens instead leaves the cache exactly one slot short on every decode step.
-// That stays invisible while the last block still has room, and turns into an out-of-bounds
-// block-table entry the moment a sequence length lands on a block boundary.
+// `past + unprocessed` slots.
 size_t RequiredSlots(const std::shared_ptr<Request>& request) {
   const size_t sequence_length = request->CurrentSequenceLength();
-  return request->IsPrefill() ? sequence_length : sequence_length + request->UnprocessedTokens().size();
+  const size_t unprocessed_count = request->IsPrefill() ? 0 : request->UnprocessedTokens().size();
+  return Generators::RequiredSlots(sequence_length, unprocessed_count, request->IsPrefill());
 }
 
 }  // namespace
@@ -193,6 +191,27 @@ void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
       return;
     }
   }
+}
+
+PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
+  PagedCacheSnapshot snapshot;
+  snapshot.block_size = block_pool_->BlockSize();
+  snapshot.total_blocks = block_pool_->Capacity();
+  snapshot.free_blocks = block_pool_->AvailableBlocks();
+  snapshot.block_table_columns = block_table_columns_;
+  snapshot.requests.reserve(block_tables_.size());
+  for (const auto& block_table : block_tables_) {
+    RequestBlockSnapshot request_snapshot;
+    request_snapshot.request_id = block_table.request.get();
+    request_snapshot.block_ids.reserve(block_table.blocks.size());
+    for (const auto& block : block_table.blocks) {
+      request_snapshot.block_ids.push_back(block->Id());
+      request_snapshot.used_slots += block->Size();
+      request_snapshot.empty_slots += block->EmptySlots();
+    }
+    snapshot.requests.push_back(std::move(request_snapshot));
+  }
+  return snapshot;
 }
 
 std::vector<std::pair<OrtValue*, OrtValue*>> PagedKeyValueCache::Cache() {

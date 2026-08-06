@@ -31,6 +31,9 @@ function(install_nuget_package NUGET_PACKAGE_NAME NUGET_PACKAGE_VERSION NUGET_PA
         list(APPEND NUGET_COMMAND -OutputDirectory ${NUGET_PACKAGE_ROOT_PATH})
         list(APPEND NUGET_COMMAND -Version ${NUGET_PACKAGE_VERSION})
         list(APPEND NUGET_COMMAND -PackageSaveMode nuspec)
+        if(NUGET_PACKAGE_SOURCE)
+            list(APPEND NUGET_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+        endif()
 
         message(STATUS "Downloading ${NUGET_PACKAGE_NAME} ${NUGET_PACKAGE_VERSION}")
         message(VERBOSE "install_nuget_package: NUGET_COMMAND = ${NUGET_COMMAND}")

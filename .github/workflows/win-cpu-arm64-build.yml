@@ -13,6 +13,7 @@ concurrency:
 env:
   binaryDir: 'build/cpu/win-arm64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
@@ -20,23 +21,23 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
 
-      - uses: nuget/setup-nuget@v2
+      - uses: nuget/setup-nuget@d105a947828025cd7a980103c35ba2bfae586d0f # v2.0.2
         with:
           nuget-version: '5.x'
 
       - name: Set up Python 3.12 for ARM64
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
           architecture: 'arm64'
           cache: 'pip'
 
       - name: Setup Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -44,7 +45,7 @@ jobs:
           cache: 'gradle'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70 # v3.5.0
         with:
           gradle-version: '8.6'
 
@@ -55,7 +56,7 @@ jobs:
           $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -Source ${{ env.ORT_NIGHTLY_SOURCE }} -x -NonInteractive
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
