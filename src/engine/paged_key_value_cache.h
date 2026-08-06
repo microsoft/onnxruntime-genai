@@ -9,6 +9,7 @@
 
 #include "block.h"
 #include "request.h"
+#include "engine_invariants.h"
 
 namespace Generators {
 
@@ -63,7 +64,18 @@ struct PagedKeyValueCache {
   // The order of the block tables is based on the order the provided requests.
   std::pair<OrtValue*, const char*> BlockTables(const std::vector<std::shared_ptr<Request>>& requests);
 
+  // Number of columns in the block table handed to the model on the most recent BlockTables() call.
+  // With graph capture this is a bucketed capacity rather than the exact longest table, so the shape
+  // is stable across steps; it also bounds the KV length any sequence in the batch can reach, which
+  // is what `attention_metadata` has to report for a captured step.
+  size_t BlockTableColumns() const { return block_table_columns_; }
+
   void UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests);
+
+  // Captures an immutable snapshot of the cache's block accounting (free/allocated blocks, and per
+  // request block ids and used/empty slots) for invariant validation and state inspection. The
+  // snapshot copies out the state and holds no reference into the cache.
+  PagedCacheSnapshot Snapshot() const;
 
  private:
   struct LayerCache {
@@ -108,6 +120,14 @@ struct PagedKeyValueCache {
   std::unique_ptr<BlockPool> block_pool_;         // Allocator for blocks
   std::vector<BlockTable> block_tables_;          // Block table for all requests in the cache
   std::unique_ptr<OrtValue> block_tables_value_;  // Block tables for all requests in the cache
+
+  // Graph capture needs the block table at a device address that never moves and at a shape that
+  // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.
+  bool graph_capture_{};
+  size_t block_table_columns_{};
+  size_t max_block_table_columns_{};
+  size_t max_block_table_rows_{};
+  std::unique_ptr<Tensor> block_tables_tensor_;
 };
 
 }  // namespace Generators

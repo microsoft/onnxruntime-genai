@@ -38,6 +38,15 @@ struct CacheManager {
 
   virtual std::vector<std::shared_ptr<Request>> AllocatedRequests() const = 0;
 
+  // Columns in the block table the model will see this step, or 0 when the cache does not use one.
+  // The decode path multiplies it by the block size to get the KV length bound it reports through
+  // `attention_metadata`.
+  virtual size_t BlockTableColumns() const { return 0; }
+
+  // Immutable snapshot of the cache's block accounting for invariant validation and state
+  // inspection. Caches that do not use paged blocks return an empty snapshot.
+  virtual PagedCacheSnapshot Snapshot() const { return {}; }
+
   virtual ~CacheManager() = default;
 
  protected:
@@ -80,6 +89,10 @@ struct PagedCacheManager : CacheManager {
   bool SupportsDynamicBatching() const override;
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
+
+  size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+
+  PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
  private:
   std::shared_ptr<GeneratorParams> params_;

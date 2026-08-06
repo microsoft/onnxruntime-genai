@@ -6,9 +6,7 @@
 #include "filesystem.h"
 #include "provider_options.h"
 
-#include <cctype>
 #include <functional>
-#include <stdexcept>
 
 namespace Generators {
 
@@ -34,6 +32,7 @@ struct Config {
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
@@ -88,6 +87,14 @@ struct Config {
     static constexpr std::string_view JoinerEncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view JoinerDecoderOutputsName = "decoder_outputs";
     static constexpr std::string_view JoinerLogitsName = "outputs";
+
+    // Tool-calling and reasoning token ID config field names.
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    static constexpr std::string_view BotTokenIdName = "bot_token_id";
+    static constexpr std::string_view EotTokenIdName = "eot_token_id";
+    static constexpr std::string_view BorTokenIdName = "bor_token_id";
+    static constexpr std::string_view EorTokenIdName = "eor_token_id";
   };
 
   fs::path config_path;   // Path of the config directory
@@ -103,46 +110,6 @@ struct Config {
   // from a package, delegates to package_resolver (sha256: shared assets, relative paths);
   // otherwise the value is joined with config_path.
   fs::path ResolvePath(std::string_view value) const;
-
-  // Validates that a config-specified filename/path stays inside the model directory.
-  // Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
-  // or contains a ".." path traversal component. Empty paths are allowed (no-op).
-  // The optional context label is prepended to error messages to identify which config
-  // field caused the failure.
-  //
-  // Defined inline so that binaries that consume this header (including tests that link
-  // the shared onnxruntime-genai library without importing internal symbols) can call it
-  // without requiring a DLL export.
-  static void ValidatePath(const std::string& path, std::string_view context = {}) {
-    if (path.empty()) return;
-
-    auto make_error = [&](const std::string& msg) -> std::string {
-      return context.empty() ? msg : (std::string{context} + ": " + msg);
-    };
-
-    // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
-    if (path[0] == '/' || path[0] == '\\') {
-      throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
-    }
-#ifdef _WIN32
-    if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
-      throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
-    }
-#endif
-
-    // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
-    std::string component;
-    for (size_t i = 0; i <= path.size(); ++i) {
-      if (i == path.size() || path[i] == '/' || path[i] == '\\') {
-        if (component == "..") {
-          throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
-        }
-        component.clear();
-      } else {
-        component += path[i];
-      }
-    }
-  }
 
   using NamedString = Generators::NamedString;
   using DeviceFilteringOptions = Generators::DeviceFilteringOptions;
@@ -187,6 +154,15 @@ struct Config {
     int boa_token_id{};  // Beginning-of-audio token ID
     int video_token_id{};
     int vision_start_token_id{};
+
+    // Tool-calling and reasoning token IDs.
+    // Follows the bos/eos/pad naming convention:
+    //   bot = beginning of tool (call), eot = end of tool (call)
+    //   bor = beginning of reasoning,   eor = end of reasoning
+    std::optional<int> bot_token_id;
+    std::optional<int> eot_token_id;
+    std::optional<int> bor_token_id;
+    std::optional<int> eor_token_id;
 
     int vocab_size{};
     int context_length{};
@@ -379,6 +355,12 @@ struct Config {
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
         bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
         std::vector<int> layers;           // Layer indices that use sliding window attention (for models with alternating patterns)
+        // Extra key-value cache positions allocated beyond window_size on execution providers that
+        // own eviction themselves (CUDA and CPU GroupQueryAttention with sliding_window_cache=1).
+        // 0 means "use the EP default": 0 for CUDA (optimal — launch overhead dominates, attention
+        // is O(W) regardless of C), 16 for CPU (optimal — amortises O(C) shift traffic at W+16).
+        // Set explicitly to cover a whole prefill chunk or to tune the amortisation tradeoff.
+        int cache_slack{0};
       };
       std::optional<SlidingWindow> sliding_window;
 
@@ -402,6 +384,7 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
         // RNNT decoder inputs

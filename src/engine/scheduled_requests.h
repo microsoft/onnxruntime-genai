@@ -9,9 +9,32 @@ namespace Generators {
 
 struct DecoderIO;
 
+struct BatchedSamplingPlan {
+  void Reserve(size_t capacity) {
+    requests.reserve(capacity);
+    logits.reserve(capacity);
+    params.reserve(capacity);
+    states.reserve(capacity);
+  }
+
+  void Clear() {
+    requests.clear();
+    logits.clear();
+    params.clear();
+    states.clear();
+  }
+
+  std::vector<Request*> requests;
+  std::vector<DeviceSpan<float>> logits;
+  std::vector<BatchedSamplingParams> params;
+  std::vector<BatchedSamplerState*> states;
+};
+
 struct ScheduledRequests {
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                    std::shared_ptr<Model> model);
+                    std::shared_ptr<Model> model,
+                    BatchedSampler* batched_sampler,
+                    BatchedSamplingPlan* sampling_plan);
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
@@ -41,10 +64,14 @@ struct ScheduledRequests {
   void GenerateNextTokens();
 
  private:
+  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
+
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::shared_ptr<GeneratorParams> params_;
+  BatchedSampler* batched_sampler_{};
+  BatchedSamplingPlan* sampling_plan_{};
 };
 
 }  // namespace Generators

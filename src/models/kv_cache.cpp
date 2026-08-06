@@ -10,8 +10,24 @@
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include <algorithm>
+#include <type_traits>
 
 namespace Generators {
+
+namespace {
+// KV cache tensors are copied/reordered as fixed-width elements. FLOAT8E4M3FN shares the
+// 1-byte width of uint8_t and is moved as raw bytes, but WrapTensor<uint8_t> asserts on the
+// tensor's element type, so wrap float8 tensors via ByteWrapTensor instead.
+template <typename T>
+DeviceSpan<T> WrapKvCacheTensor(DeviceInterface& device, OrtValue& value, ONNXTensorElementDataType type) {
+  if constexpr (std::is_same_v<T, uint8_t>) {
+    if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+      return ByteWrapTensor(device, value);
+    }
+  }
+  return WrapTensor<T>(device, value);
+}
+}  // namespace
 
 CombinedKeyValueCache::CombinedKeyValueCache(State& state)
     : state_{state},
@@ -84,6 +100,10 @@ void CombinedKeyValueCache::RewindTo(size_t index) {
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    RewindPastTensorsTo<int8_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    RewindPastTensorsTo<uint8_t>(index);
   } else {
     RewindPastTensorsTo<Ort::Float16_t>(index);
   }
@@ -102,8 +122,8 @@ void CombinedKeyValueCache::RewindPastTensorsTo(size_t index) {
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
     std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-    auto present_span = WrapTensor<T>(Device(), present);
-    auto past_span = WrapTensor<T>(Device(), *past);
+    auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
+    auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
 
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
       auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -123,10 +143,10 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
   auto past_key_size = shape_[1] * block_size_per_beam;
 
   OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past);
-  auto present_span = WrapTensor<ScoreType>(Device(), present);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -145,6 +165,10 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
 void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    PickPastState<int8_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    PickPastState<uint8_t>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }
@@ -401,11 +425,20 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
   }
 
-  // Set the size after empty_past_ has been created with 0 for this field
-  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
-    const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
-    const int max_length = state_.params_->search.max_length;
+  // Compute the capacity for sliding-window layers and apply it to the cache shapes.
+  // ComputeWindowedKvCacheSize() returns 0 when the config does not call for a windowed cache.
+  const DeviceType device_type = state_.model_.p_device_->GetType();
+  const int max_length = state_.params_->search.max_length;
+  const int windowed_cache_size = ComputeWindowedKvCacheSize(
+      device_type, model_.config_->model.decoder, state_.params_->search, max_length);
+
+  if (windowed_cache_size > 0 &&
+      // Beam reordering across a compacted cache is correct in principle but untested.
+      state_.params_->search.num_beams == 1) {
+    // Only a cache smaller than max_length ever evicts, and only then is RewindTo restricted.
+    if (windowed_cache_size < max_length) {
+      windowed_cache_size_ = windowed_cache_size;
+    }
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
@@ -435,14 +468,14 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       for (int model_layer_idx : model_.config_->model.decoder.sliding_window->layers) {
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
-          layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+          layer_shapes_[it->second][2] = windowed_cache_size;
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;
     } else {
       // Uniform sliding window allocation (backward compatibility)
-      shape_[2] = std::min(max_length, sliding_window_size);
+      shape_[2] = windowed_cache_size;
     }
   } else if (past_present_share_buffer_) {
     // For fixed kv-cache models the cache size comes from the model graph,
@@ -524,6 +557,8 @@ void DefaultKeyValueCache::Add() {
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  current_length_ = total_length;
+
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -569,6 +604,10 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
 void DefaultKeyValueCache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
+    // Sliding-window layers hold only the most recent windowed_cache_size_ positions, anchored at
+    // cache index 0. Once anything has been evicted, position i no longer lives at cache offset i,
+    // so a rewind would silently read misaligned keys. Refuse instead of returning wrong logits.
+    CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
     return;
   } else if (shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
@@ -586,6 +625,10 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    RewindPastTensorsTo<int8_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    RewindPastTensorsTo<uint8_t>(index);
   } else {
     RewindPastTensorsTo<Ort::Float16_t>(index);
   }
@@ -623,8 +666,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -648,8 +691,8 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
       OrtValue& present = *presents_[i];
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-      auto past_span = WrapTensor<T>(Device(), *past);
-      auto present_span = WrapTensor<T>(Device(), present);
+      auto past_span = WrapKvCacheTensor<T>(Device(), *past, type_);
+      auto present_span = WrapKvCacheTensor<T>(Device(), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -680,10 +723,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), tensor_shape, type_);
 
-  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
-  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+  auto past_span = WrapKvCacheTensor<ScoreType>(Device(), *past_value, type_);
+  auto present_span = WrapKvCacheTensor<ScoreType>(Device(), present_value, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -698,6 +741,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
+    PickPastState<int8_t>(beam_indices, index);
+  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
+    PickPastState<uint8_t>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }

@@ -46,6 +46,9 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
+    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # real, dependency-free modules rather than the catch-all above.
+    builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
 
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
@@ -181,19 +184,75 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert result == "quantized-proto"
 
 
+def _run_check_extra_options(
+    monkeypatch,
+    extra_options,
+    *,
+    precision="int4",
+    execution_provider="cpu",
+    tie_word_embeddings=True,
+):
+    # Avoid Hugging Face network/config loading and provide only the config fields needed.
+    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings)
+
+    def _fake_get_hf_details(*_args, **_kwargs):
+        return {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        }
+
+    monkeypatch.setattr(builder_module, "get_hf_details", _fake_get_hf_details)
+    builder_module.check_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision=precision,
+        execution_provider=execution_provider,
+        cache_dir="/tmp/fake-cache",
+        extra_options=extra_options,
+    )
+
+
 # ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
 
-def test_int8_with_qdq_is_rejected():
+def test_int8_with_qdq_is_rejected(monkeypatch):
     with pytest.raises(NotImplementedError, match="QDQ"):
-        builder_module.check_extra_options({"use_qdq": "true"}, "int8", "cpu")
+        _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int8")
 
 
-def test_int4_with_qdq_is_allowed():
+def test_int4_with_qdq_is_allowed(monkeypatch):
     # QDQ is only rejected for int8; int4 still supports it.
-    builder_module.check_extra_options({"use_qdq": "true"}, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, {"use_qdq": "true"}, precision="int4")
+
+
+@pytest.mark.parametrize(
+    "quant_type",
+    ["int8_per_tensor", "int8_per_channel", "int4_per_tensor", "int4_per_channel", "fp8_per_tensor", "fp8_per_channel"],
+)
+def test_kv_cache_quant_type_is_accepted_for_supported_providers(monkeypatch, quant_type):
+    options = {"kv_cache_quant_type": quant_type.upper()}
+
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="cuda")
+
+    assert options["kv_cache_quant_type"] == quant_type
+
+
+def test_kv_cache_quant_type_rejects_unsupported_value(monkeypatch):
+    with pytest.raises(ValueError, match="kv_cache_quant_type must be one of"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_type": "int6_per_tensor"}, precision="fp16", execution_provider="cuda"
+        )
+
+
+def test_quantized_kv_cache_rejects_unsupported_provider(monkeypatch):
+    with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
+        _run_check_extra_options(
+            monkeypatch, {"kv_cache_quant_type": "int8_per_tensor"}, precision="fp16", execution_provider="webgpu"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +287,140 @@ def test_deprecated_alias_does_not_override_new_name():
     assert kv == {"algo_config": "k_quant"}
 
 
-def test_check_extra_options_accepts_deprecated_int4_names():
+def test_check_extra_options_accepts_deprecated_int4_names(monkeypatch):
     # End-to-end through check_extra_options: deprecated names are normalized in-place.
     kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
-    builder_module.check_extra_options(kv, "int4", "cpu")
+    _run_check_extra_options(monkeypatch, kv, precision="int4")
     assert kv["algo_config"] == "k_quant"
     assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
     assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv
+
+
+def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=False,
+        )
+
+
+def test_shared_embeddings_with_tied_weights_is_accepted(monkeypatch):
+    # Should not raise when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {"shared_embeddings": "true"},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_tied_when_config_ties_embeddings(monkeypatch):
+    # When shared_embeddings is not specified, it defaults to tie_word_embeddings value
+    # Should not raise because shared_embeddings will default to True when tie_word_embeddings=True
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=True,
+    )
+
+
+def test_shared_embeddings_defaults_to_false_when_config_doesnt_tie_embeddings(monkeypatch):
+    # When shared_embeddings is not specified and tie_word_embeddings=False,
+    # shared_embeddings will default to False
+    _run_check_extra_options(
+        monkeypatch,
+        {},
+        precision="int4",
+        tie_word_embeddings=False,
+    )
+
+
+def test_shared_embeddings_handles_none_tie_word_embeddings(monkeypatch):
+    # When tie_word_embeddings is None, it should default to False
+    with pytest.raises(ValueError, match="tie_word_embeddings=false"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"shared_embeddings": "true"},
+            precision="int4",
+            tie_word_embeddings=None,
+        )
+
+
+def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
+    model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.hidden_size = 64
+    assert model.hidden_state_shape() == ["batch_size", "sequence_length", 64]
+
+
+def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_size = 64
+    assert model.hidden_state_shape() == ["num_tokens", 64]
+
+
+def test_paged_attention_uses_flat_hidden_states_output_shape():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 64
+    model.vocab_size = 128
+    model.num_kv_heads = 4
+    model.head_size = 16
+    model.extra_options = {"include_hidden_states": True}
+    model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
+    model.output_types = {"logits": ir.DataType.FLOAT16}
+    model.output_shapes = {
+        "hidden_states": ["batch_size", "sequence_length", model.hidden_size],
+        "logits": ["batch_size", "sequence_length", model.vocab_size],
+        "present.key": [],
+        "present.value": [],
+    }
+
+    model.make_outputs_init()
+
+    assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
+
+
+@pytest.mark.parametrize(
+    "extra_options, error",
+    [
+        ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "paged_block_size": "128"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
+        ({"use_paged_attention": "true", "gpu_utilization_factor": "1.1"}, "gpu_utilization_factor"),
+    ],
+)
+def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_options, error):
+    with pytest.raises(ValueError, match=error):
+        _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+
+
+def test_paged_attention_normalizes_engine_options(monkeypatch):
+    extra_options = {
+        "use_paged_attention": "true",
+        "paged_block_size": "512",
+        "gpu_utilization_factor": "0.75",
+        "max_batch_size": "32",
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["paged_block_size"] == 512
+    assert extra_options["gpu_utilization_factor"] == 0.75
+    assert extra_options["max_batch_size"] == 32
+
+
+@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head", "prune_lm_head"])
+def test_paged_attention_rejects_incompatible_graph_interfaces(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", option: "true"},
+            precision="bf16",
+            execution_provider="cuda",
+        )

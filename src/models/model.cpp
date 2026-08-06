@@ -7,17 +7,20 @@
 #include <array>
 #include <climits>
 #include <filesystem>
+#include <functional>
 #include <random>
 #include <set>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 #include "../generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
 #include "model_package.h"
+#include "tokenizer_tag_utils.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -300,7 +303,11 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 
 Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
                                        eos_token_id_{config.model.eos_token_id},
-                                       pad_token_id_{config.model.pad_token_id} {
+                                       pad_token_id_{config.model.pad_token_id},
+                                       bot_token_id_{config.model.bot_token_id},
+                                       eot_token_id_{config.model.eot_token_id},
+                                       bor_token_id_{config.model.bor_token_id},
+                                       eor_token_id_{config.model.eor_token_id} {
   // Default tokenizer options
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};
@@ -308,6 +315,33 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+
+  // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
+  // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
+  if (!bot_token_id_) bot_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::BotTokenIdName), *this);
+  if (!eot_token_id_) eot_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::EotTokenIdName), *this);
+  if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::BorTokenIdName), *this);
+  if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::EorTokenIdName), *this);
+}
+
+int32_t Tokenizer::GetBotTokenId() const {
+  if (!bot_token_id_) throw std::runtime_error("bot_token_id is not defined for this model");
+  return *bot_token_id_;
+}
+
+int32_t Tokenizer::GetEotTokenId() const {
+  if (!eot_token_id_) throw std::runtime_error("eot_token_id is not defined for this model");
+  return *eot_token_id_;
+}
+
+int32_t Tokenizer::GetBorTokenId() const {
+  if (!bor_token_id_) throw std::runtime_error("bor_token_id is not defined for this model");
+  return *bor_token_id_;
+}
+
+int32_t Tokenizer::GetEorTokenId() const {
+  if (!eor_token_id_) throw std::runtime_error("eor_token_id is not defined for this model");
+  return *eor_token_id_;
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {

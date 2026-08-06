@@ -10,6 +10,7 @@ endif()
 
 include(FetchContent)
 include(CMakeDependentOption)
+
 project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
@@ -91,6 +92,12 @@ if(ENABLE_TRACING)
   add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
+if(ENABLE_TELEMETRY)
+  message(STATUS "Telemetry is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TELEMETRY)
+  include(cmake/telemetry.cmake)
+endif()
+
 find_package(Threads REQUIRED)
 
 # GenAI normally uses an OBJECT library so white-box tests (e.g. reinit_tests) can link its internal
@@ -135,6 +142,54 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
+endif()
+
+target_compile_definitions(${ORTGENAI_COMPILE_TARGET} PRIVATE ORTGENAI_VERSION=\"${VERSION_INFO}\")
+
+if(ENABLE_TELEMETRY)
+  # cmake/telemetry.cmake defines an INTERFACE target around either a caller-supplied
+  # MSTelemetry::mat target or a FetchContent-built `mat`.
+  target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime-genai-telemetry)
+  if(WIN32)
+    target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Advapi32)
+  endif()
+
+  # Optional ingestion-token override written into a generated header in the build tree (kept off the
+  # compiler command line, so the token never appears in compile_commands.json or build logs). It may be
+  # supplied either as -DORTGENAI_TELEMETRY_TENANT_TOKEN=... or via an
+  # ORTGENAI_TELEMETRY_TENANT_TOKEN environment variable; when unset, telemetry.cpp uses the encoded
+  # in-repo default.
+  if(NOT ORTGENAI_TELEMETRY_TENANT_TOKEN AND DEFINED ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN})
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "$ENV{ORTGENAI_TELEMETRY_TENANT_TOKEN}")
+  endif()
+  # Ignore an unexpanded build-system macro (e.g. the literal "$(ORTGENAI_TELEMETRY_TENANT_TOKEN)") so the
+  # build falls back to the in-repo default instead of embedding the macro text as a bogus token.
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN MATCHES "^\\$\\(")
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN "")
+  endif()
+  if(ORTGENAI_TELEMETRY_TENANT_TOKEN)
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "#define ORTGENAI_TELEMETRY_TENANT_TOKEN \"${ORTGENAI_TELEMETRY_TENANT_TOKEN}\"")
+  else()
+    set(ORTGENAI_TELEMETRY_TENANT_TOKEN_DEFINE "")
+  endif()
+  set(_ortgenai_telemetry_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/ortgenai_telemetry")
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ortgenai_telemetry_tenant_token.h.in"
+    "${_ortgenai_telemetry_gen_dir}/ortgenai_telemetry_tenant_token.h"
+    @ONLY)
+  target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE "${_ortgenai_telemetry_gen_dir}")
+
+  # The 1DS SDK is compiled with per-function and per-data sections, so let the linker
+  # dead-strip the (large) portion of the SDK that onnxruntime-genai never references. Combined
+  # with a static MAT library this keeps the binary-size added by telemetry minimal.
+  if(MSVC)
+    target_link_options(onnxruntime-genai PRIVATE /OPT:REF /OPT:ICF)
+  elseif(APPLE)
+    target_link_options(onnxruntime-genai PRIVATE LINKER:-dead_strip)
+  else()
+    target_link_options(onnxruntime-genai PRIVATE LINKER:--gc-sections)
+  endif()
+
 endif()
 
 # Group the genai library targets under one Visual Studio solution folder so the object library and
@@ -274,16 +329,22 @@ if(USE_DML)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
-  set(NUGET_CONFIG ${PROJECT_SOURCE_DIR}/nuget.config)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
+  set(NUGET_RESTORE_COMMAND
+    ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore
+    ${PACKAGES_CONFIG}
+    -PackagesDirectory ${PACKAGES_DIR}
+  )
+  if(NUGET_PACKAGE_SOURCE)
+    list(APPEND NUGET_RESTORE_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+  endif()
 
   add_custom_command(
     OUTPUT
     ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
     DEPENDS
     ${PACKAGES_CONFIG}
-    ${NUGET_CONFIG}
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore ${PACKAGES_CONFIG} -PackagesDirectory ${PACKAGES_DIR} -ConfigFile ${NUGET_CONFIG}
+    COMMAND ${NUGET_RESTORE_COMMAND}
     VERBATIM
   )
 

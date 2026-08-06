@@ -50,6 +50,34 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
 }
 
+- (int32_t)getBotTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetBotTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
+- (int32_t)getEotTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetEotTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
+- (int32_t)getBorTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetBorTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
+- (int32_t)getEorTokenId:(NSError**)error {
+  try {
+    return _tokenizer->GetEorTokenId();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_INT32_T(error)
+}
+
 - (nullable OGASequences*)encode:(NSString*)str error:(NSError**)error {
   OGASequences* sequences = [[OGASequences alloc] initWithError:error];
   if (!sequences) {

@@ -7,6 +7,7 @@
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -348,6 +349,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_metadata") {
+      v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
@@ -532,6 +535,8 @@ struct SlidingWindow_Element : JSON::Element {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else if (name == "slide_inputs") {
       v_->slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_->cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1181,6 +1186,14 @@ struct Model_Element : JSON::Element {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
       v_.right_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::BotTokenIdName) {
+      v_.bot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::EotTokenIdName) {
+      v_.eot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::BorTokenIdName) {
+      v_.bor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::EorTokenIdName) {
+      v_.eor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1232,12 +1245,16 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
 };
 
+// Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
+// JSON::Parse_Value only re-throws with the offending field's path prepended when it sees a
+// std::runtime_error, and the public C API boundary reports std::runtime_error, so every config
+// parsing error must use that single type to keep messages (and behavior) consistent.
 int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 2. Check if the value is outside the representable range of an integer.
@@ -1248,14 +1265,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is out of int32 range ["
        << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 3. Reject fractional values — these fields must be integral.
   if (x != std::trunc(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is not an integer";
-    throw std::invalid_argument(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 4. Perform the cast.
@@ -1326,13 +1343,25 @@ struct DynamicBatching_Element : JSON::Element {
       v_ = Config::Engine::DynamicBatching{};
 
     if (name == "block_size") {
-      v_->block_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("block_size must be > 0");
+      v_->block_size = static_cast<size_t>(parsed_value);
     } else if (name == "num_blocks") {
-      v_->num_blocks = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("num_blocks must be > 0");
+      v_->num_blocks = static_cast<size_t>(parsed_value);
     } else if (name == "gpu_utilization_factor") {
-      v_->gpu_utilization_factor = static_cast<float>(JSON::Get<double>(value));
+      const auto parsed_value = JSON::Get<double>(value);
+      if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
+        throw std::out_of_range("gpu_utilization_factor must be > 0 and <= 1");
+      v_->gpu_utilization_factor = static_cast<float>(parsed_value);
     } else if (name == "max_batch_size") {
-      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_batch_size must be > 0");
+      v_->max_batch_size = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1509,13 +1538,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         // Xbox Series S Dev-Mode driver: deterministic garbage from the same
         // model that is correct on CPU EP and on non-captured ORT sessions).
         for (const auto& value : provider_options->options) {
-          if (value.first == "enable_graph_capture") {
-            std::string lower_value = value.second;
-            std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
-                           [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-            if (lower_value == "0" || lower_value == "false") {
-              return false;
-            }
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
           }
         }
         return true;
@@ -1716,34 +1740,74 @@ fs::path Config::ResolvePath(std::string_view value) const {
 // Validates every config-driven filename/path field after parsing so downstream code
 // (model/processor/adapter loading) can rely on paths being safe. Centralising the checks
 // here keeps individual model families free of path-validation calls.
-static void ValidateModelPaths(const Config& config) {
-  const auto& m = config.model;
-  Config::ValidatePath(m.encoder.filename, "model.encoder.filename");
-  Config::ValidatePath(m.embedding.filename, "model.embedding.filename");
+namespace {
 
-  Config::ValidatePath(m.vision.filename, "model.vision.filename");
-  Config::ValidatePath(m.vision.config_filename, "model.vision.config_filename");
-  if (m.vision.adapter_filename.has_value()) {
-    Config::ValidatePath(*m.vision.adapter_filename, "model.vision.adapter_filename");
+// Validates that a config-specified filename/path stays inside the model directory.
+// Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
+// or contains a ".." path traversal component. Empty paths are allowed (no-op). The
+// optional context label is prepended to error messages so callers can identify which
+// config field caused the failure.
+void ValidateConfigPath(const std::string& path, std::string_view context = {}) {
+  if (path.empty()) return;
+
+  auto make_error = [&](const std::string& msg) -> std::string {
+    return context.empty() ? msg : (std::string{context} + ": " + msg);
+  };
+
+  // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
+  if (path[0] == '/' || path[0] == '\\') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
   }
-  for (const auto& stage : m.vision.pipeline) {
-    Config::ValidatePath(stage.filename, "model.vision.pipeline.filename");
+#ifdef _WIN32
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
   }
+#endif
 
-  Config::ValidatePath(m.speech.filename, "model.speech.filename");
-  Config::ValidatePath(m.speech.config_filename, "model.speech.config_filename");
-  if (m.speech.adapter_filename.has_value()) {
-    Config::ValidatePath(*m.speech.adapter_filename, "model.speech.adapter_filename");
-  }
-
-  Config::ValidatePath(m.joiner.filename, "model.joiner.filename");
-  Config::ValidatePath(m.vad.filename, "model.vad.filename");
-
-  Config::ValidatePath(m.decoder.filename, "model.decoder.filename");
-  for (const auto& stage : m.decoder.pipeline) {
-    Config::ValidatePath(stage.filename, "model.decoder.pipeline.filename");
+  // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
+  std::string component;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == '/' || path[i] == '\\') {
+      if (component == "..") {
+        throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
+      }
+      component.clear();
+    } else {
+      component += path[i];
+    }
   }
 }
+
+void ValidateModelPaths(const Config& config) {
+  const auto& m = config.model;
+  ValidateConfigPath(m.encoder.filename, "model.encoder.filename");
+  ValidateConfigPath(m.embedding.filename, "model.embedding.filename");
+
+  ValidateConfigPath(m.vision.filename, "model.vision.filename");
+  ValidateConfigPath(m.vision.config_filename, "model.vision.config_filename");
+  if (m.vision.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.vision.adapter_filename, "model.vision.adapter_filename");
+  }
+  for (const auto& stage : m.vision.pipeline) {
+    ValidateConfigPath(stage.filename, "model.vision.pipeline.filename");
+  }
+
+  ValidateConfigPath(m.speech.filename, "model.speech.filename");
+  ValidateConfigPath(m.speech.config_filename, "model.speech.config_filename");
+  if (m.speech.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.speech.adapter_filename, "model.speech.adapter_filename");
+  }
+
+  ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
+  ValidateConfigPath(m.vad.filename, "model.vad.filename");
+
+  ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
+  for (const auto& stage : m.decoder.pipeline) {
+    ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
+  }
+}
+
+}  // namespace
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);

@@ -16,7 +16,7 @@ See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/gena
 
 | Support matrix | Supported now | Under development | On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> HunYuan Dense V1 <br/> InternLM2 <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Granite MoE Hybrid <br/> HunYuan Dense V1 <br/> InternLM2 <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
 | API | Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
 | O/S | Linux <br/> Windows <br/>Mac  <br/>Android || iOS |||
 | Architecture | x86 <br/> x64 <br/> arm64 ||||
@@ -154,6 +154,10 @@ pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_pa
 
 See the [Discussions](https://github.com/microsoft/onnxruntime-genai/discussions) to request new features and up-vote existing requests.
 
+
+## Data/Telemetry
+
+This project may collect usage data and send it to Microsoft to help improve our products and services. See the [privacy statement](docs/Privacy.md) for details.
 
 ## Contributing
 

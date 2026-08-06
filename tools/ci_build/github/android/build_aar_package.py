@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -76,6 +77,9 @@ def _parse_build_settings(args):
         )
 
     build_settings["build_params"] = build_params
+    build_settings["telemetry_enabled"] = not any(
+        param.split("=", 1)[0] == "--no_telemetry" for param in build_params
+    )
 
     return build_settings
 
@@ -100,6 +104,12 @@ def _build_aar(args):
     base_build_command += build_settings["build_params"]
 
     header_files_path = None
+    telemetry_java_src_dir = None
+    telemetry_resource_dir = None
+
+    if jnilibs_dir.exists():
+        shutil.rmtree(jnilibs_dir)
+    jnilibs_dir.mkdir(parents=True)
 
     # Build binary for each ABI, one by one
     for abi in build_settings["build_abis"]:
@@ -111,21 +121,35 @@ def _build_aar(args):
         # create symbolic links for libonnxruntime-genai.so and libonnxruntime-genai-jni.so
         # to jnilibs/[abi] for later compiling the aar package
         abi_jnilibs_dir = jnilibs_dir / abi
-        abi_jnilibs_dir.mkdir(parents=True, exist_ok=True)
-        for lib_name in ["libonnxruntime-genai.so", "libonnxruntime-genai-jni.so"]:
+        abi_jnilibs_dir.mkdir()
+        native_lib_names = ["libonnxruntime-genai.so", "libonnxruntime-genai-jni.so"]
+        if build_settings["telemetry_enabled"]:
+            native_lib_names.append("libmat.so")
+        for lib_name in native_lib_names:
             src_lib_name = abi_build_dir / build_config / "src" / "java" / "android" / abi / lib_name
             target_lib_name = abi_jnilibs_dir / lib_name
-            # If the symbolic already exists, delete it first
-            target_lib_name.unlink(missing_ok=True)
             target_lib_name.symlink_to(src_lib_name)
 
         # we only need to define the header files path once
         if not header_files_path:
             header_files_path = abi_build_dir / build_config / "src" / "java" / "android" / "headers"
+        if build_settings["telemetry_enabled"]:
+            java_build_dir = abi_build_dir / build_config / "src" / "java"
+            telemetry_java_src_dir = java_build_dir / "telemetry-java"
+            telemetry_resource_dir = java_build_dir / "telemetry-resources"
 
     # The directory to publish final AAR
     aar_publish_dir = os.path.join(build_dir, "aar_out", build_config)
     os.makedirs(aar_publish_dir, exist_ok=True)
+
+    if build_settings["telemetry_enabled"]:
+        if (
+            telemetry_java_src_dir is None
+            or telemetry_resource_dir is None
+            or not telemetry_java_src_dir.is_dir()
+            or not telemetry_resource_dir.is_dir()
+        ):
+            raise FileNotFoundError("Android telemetry Java bridge output was not generated")
 
     gradle_path = JAVA_ROOT / ("gradlew" if not util.is_windows() else "gradlew.bat")
 
@@ -142,6 +166,11 @@ def _build_aar(args):
         f"-DminSdkVer={build_settings['android_min_sdk_version']}",
         f"-DtargetSdkVer={build_settings['android_target_sdk_version']}",
     ]
+    if build_settings["telemetry_enabled"]:
+        gradle_command += [
+            f"-DtelemetryJavaSrcDir={telemetry_java_src_dir}",
+            f"-DtelemetryResourceDir={telemetry_resource_dir}",
+        ]
 
     # clean, build, and publish to a local directory
     subprocess.run([*gradle_command, "clean"], env=temp_env, shell=False, check=True, cwd=JAVA_ROOT)

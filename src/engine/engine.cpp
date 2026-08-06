@@ -6,10 +6,31 @@
 namespace Generators {
 
 Engine::Engine(std::shared_ptr<Model> model)
-    : model_{model},
-      cache_manager_{CacheManager::Create(model)},
-      scheduler_{Scheduler::Create(model, cache_manager_)},
-      model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {}
+    : Engine(model, CreateDependencies(model)) {}
+
+Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
+    : model_{std::move(model)},
+      cache_manager_{std::move(dependencies.cache_manager)},
+      scheduler_{std::move(dependencies.scheduler)},
+      model_executor_{std::move(dependencies.model_executor)} {
+  // Fail fast on a missing collaborator rather than crashing later on first use.
+  if (!cache_manager_) {
+    throw std::runtime_error("Engine requires a non-null cache manager.");
+  }
+  if (!scheduler_) {
+    throw std::runtime_error("Engine requires a non-null scheduler.");
+  }
+  if (!model_executor_) {
+    throw std::runtime_error("Engine requires a non-null model executor.");
+  }
+}
+
+EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
+  auto scheduler = Scheduler::Create(model, cache_manager);
+  auto model_executor = ModelExecutor::Create(model, cache_manager);
+  return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
+}
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
   request->Assign(shared_from_this());
@@ -21,34 +42,26 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 std::shared_ptr<Request> Engine::Step() {
-  if (!HasPendingRequests()) {
-    return nullptr;
-  }
+  // An EOS-only batch may complete without adding anything to ready_requests_.
+  while (HasPendingRequests()) {
+    if (!ready_requests_.empty()) {
+      auto request = ready_requests_.front();
+      ready_requests_.pop();
+      return request;
+    }
 
-  if (!ready_requests_.empty()) {
-    auto request = ready_requests_.front();
-    ready_requests_.pop();
-    return request;
-  }
-
-  if (auto scheduled_requests = scheduler_->Schedule()) {
+    auto scheduled_requests = scheduler_->Schedule();
     model_executor_->Decode(scheduled_requests);
     scheduled_requests.GenerateNextTokens();
 
     for (auto& request : scheduled_requests) {
-      if (request->HasUnseenTokens()) {
+      if (request->HasUnseenTokens() || request->IsDone()) {
         ready_requests_.push(request);
       }
     }
   }
 
-  if (ready_requests_.empty()) {
-    throw std::runtime_error("Expected at least one request to be ready, but none were found.");
-  }
-
-  auto request = ready_requests_.front();
-  ready_requests_.pop();
-  return request;
+  return nullptr;
 }
 
 bool Engine::HasPendingRequests() const {

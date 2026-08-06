@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -19,6 +20,8 @@
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
 #include "models/model_package.h"
+#include "telemetry/model_telemetry.h"
+#include "telemetry/telemetry.h"
 #include "dll_load_error.h"
 
 namespace Generators {
@@ -105,7 +108,16 @@ extern "C" {
   }
 
 void OGA_API_CALL OgaShutdown() {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().Shutdown();
+  }
   Generators::Shutdown();
+}
+
+void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
+  if (!Generators::GenAiTelemetry::IsDestroyed()) {
+    Generators::GenAiTelemetry::Instance().SetEnabled(enabled);
+  }
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -244,7 +256,8 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings);
+  auto model = Generators::CreateModelWithTelemetry(
+      [&] { return Generators::CreateModel(Generators::GetOrtEnv(), config_path, settings); });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -370,8 +383,10 @@ OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(Oga
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto config_copy = std::make_unique<Generators::Config>(*config);
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  auto model = Generators::CreateModelWithTelemetry([&] {
+    auto config_copy = std::make_unique<Generators::Config>(*config);
+    return Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  });
   *out = ReturnShared<OgaModel>(model);
   return nullptr;
   OGA_CATCH
@@ -680,6 +695,34 @@ OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer
 OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
   OGA_TRY
   *out = tokenizer->GetPadTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEotTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEotTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetBorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetBorTokenId();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerGetEorTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
+  OGA_TRY
+  *out = tokenizer->GetEorTokenId();
   return nullptr;
   OGA_CATCH
 }
@@ -1026,6 +1069,7 @@ OgaResult* OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name) {
 OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, const char* adapter_name) {
   OGA_TRY
   generator->state_->SetActiveAdapter(adapters, adapter_name);
+  generator->LogAdapterActivated();
   return nullptr;
   OGA_CATCH
 }
