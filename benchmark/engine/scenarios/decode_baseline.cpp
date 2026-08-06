@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -71,6 +72,12 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
             << ", prompt_length_k=" << config.prompt_length_k
             << ", generation_tokens=" << config.generation_tokens
             << std::endl;
+  std::cout << "[decode_baseline] Current working directory: " << fs::current_path().string() << std::endl;
+
+  const char* ld_library_path = std::getenv("LD_LIBRARY_PATH");
+  std::cout << "[decode_baseline] LD_LIBRARY_PATH="
+            << (ld_library_path ? ld_library_path : "<unset>")
+            << std::endl;
 
   std::cout << "[decode_baseline] Resolving model path..." << std::endl;
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
@@ -78,13 +85,24 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
   std::cout << "[decode_baseline] Creating OGA config..." << std::endl;
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
+  std::cout << "[decode_baseline] OGA config created. Clearing providers..." << std::endl;
   oga_config->ClearProviders();
+  std::cout << "[decode_baseline] Providers cleared. Appending provider '"
+            << config.execution_provider << "'..." << std::endl;
   oga_config->AppendProvider(config.execution_provider.c_str());
+  std::cout << "[decode_baseline] Provider appended." << std::endl;
 
-  std::cout << "[decode_baseline] Creating model/tokenizer/engine..." << std::endl;
+  std::cout << "[decode_baseline] About to create OgaModel..." << std::endl;
   auto model = OgaModel::Create(*oga_config);
+  std::cout << "[decode_baseline] OgaModel created." << std::endl;
+
+  std::cout << "[decode_baseline] About to create OgaTokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
+  std::cout << "[decode_baseline] OgaTokenizer created." << std::endl;
+
+  std::cout << "[decode_baseline] About to create OgaEngine..." << std::endl;
   auto engine = OgaEngine::Create(*model);
+  std::cout << "[decode_baseline] OgaEngine created." << std::endl;
 
   std::cout << "[decode_baseline] Building synthetic prompt..." << std::endl;
   const std::string prompt = BuildPromptText(config.prompt_length_k);
