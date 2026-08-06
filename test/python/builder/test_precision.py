@@ -215,6 +215,38 @@ def _run_check_extra_options(
 
 
 # ---------------------------------------------------------------------------
+# MTP options are normalized and enforce the main-model output contract.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_mtp_false_string_is_disabled(monkeypatch):
+    options = {"enable_mtp": "false"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is False
+
+
+def test_enable_mtp_requires_hidden_states(monkeypatch):
+    with pytest.raises(ValueError, match="requires include_hidden_states=true"):
+        _run_check_extra_options(monkeypatch, {"enable_mtp": "true"})
+
+
+def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
+    options = {"enable_mtp": "true", "include_hidden_states": "true"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is True
+    assert options["include_hidden_states"] is True
+
+
+def test_recurrent_state_window_must_be_non_negative(monkeypatch):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _run_check_extra_options(monkeypatch, {"recurrent_state_window": "-1"})
+
+
+# ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
