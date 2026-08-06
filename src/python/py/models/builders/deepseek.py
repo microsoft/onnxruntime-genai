@@ -89,6 +89,13 @@ class DeepSeekV4Model(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        self.local_cache_capacity = self.window_size if self.window_size > 0 else self.context_length
+        fixed_kv_shape = ["batch_size", 1, self.local_cache_capacity, self.head_size]
+        self.input_shapes["past_key_values.key"] = fixed_kv_shape
+        self.input_shapes["past_key_values.value"] = fixed_kv_shape
+        self.output_shapes["present.key"] = fixed_kv_shape
+        self.output_shapes["present.value"] = fixed_kv_shape
+
         # ------------------------------------------------------------------ #
         # DeepSeek V4 – specific hyper-parameters
         # ------------------------------------------------------------------ #
@@ -185,25 +192,28 @@ class DeepSeekV4Model(Model):
     def initialize_compression_states(self) -> None:
         for layer_id, layer_type in enumerate(self.layer_types):
             if layer_type == "heavily_compressed_attention":
-                self.add_compression_state(layer_id, "pending_kv", ["batch_size", "pending_length", self.head_size])
-                self.add_compression_state(layer_id, "pending_gate", ["batch_size", "pending_length", self.head_size])
-                self.add_compression_state(layer_id, "entries", ["batch_size", 1, "compressed_length", self.head_size])
+                rate = self.compress_rates[layer_type]
+                entry_capacity = (self.context_length + rate - 1) // rate
+                self.add_compression_state(layer_id, "pending_kv", ["batch_size", rate - 1, self.head_size])
+                self.add_compression_state(layer_id, "pending_gate", ["batch_size", rate - 1, self.head_size])
+                self.add_compression_state(layer_id, "entries", ["batch_size", 1, entry_capacity, self.head_size])
             elif layer_type == "compressed_sparse_attention":
                 rate = self.compress_rates[layer_type]
+                entry_capacity = (self.context_length + rate - 1) // rate
                 for prefix, width, rank4 in (
                     ("compressor", self.head_size, True),
                     ("indexer", self.index_head_dim, False),
                 ):
                     self.add_compression_state(
-                        layer_id, f"{prefix}_pending_kv", ["batch_size", "pending_length", 2 * width]
+                        layer_id, f"{prefix}_pending_kv", ["batch_size", rate - 1, 2 * width]
                     )
                     self.add_compression_state(
-                        layer_id, f"{prefix}_pending_gate", ["batch_size", "pending_length", 2 * width]
+                        layer_id, f"{prefix}_pending_gate", ["batch_size", rate - 1, 2 * width]
                     )
                     entries_shape = (
-                        ["batch_size", 1, "compressed_length", width]
+                        ["batch_size", 1, entry_capacity, width]
                         if rank4
-                        else ["batch_size", "compressed_length", width]
+                        else ["batch_size", entry_capacity, width]
                     )
                     self.add_compression_state(layer_id, f"{prefix}_entries", entries_shape)
                     self.add_compression_state(layer_id, f"{prefix}_overlap_kv", ["batch_size", rate, width])
@@ -250,6 +260,10 @@ class DeepSeekV4Model(Model):
         ]
         common_attrs = {
             "compress_rate": self.compress_rates[layer_type],
+            "entry_capacity": (
+                self.context_length + self.compress_rates[layer_type] - 1
+            )
+            // self.compress_rates[layer_type],
             "rotary_dim": self.qk_rope_head_dim,
             "rms_norm_epsilon": self.rms_norm_epsilon,
         }
@@ -277,8 +291,9 @@ class DeepSeekV4Model(Model):
                 domain="com.microsoft",
                 **common_attrs,
             )
-            self.make_value(outputs[0], self.io_dtype, ["batch_size", 1, "compressed_length", self.head_size])
-            self.make_value(outputs[1], self.io_dtype, ["batch_size", 1, "sequence_length", "compressed_length"])
+            entry_capacity = common_attrs["entry_capacity"]
+            self.make_value(outputs[0], self.io_dtype, ["batch_size", 1, entry_capacity, self.head_size])
+            self.make_value(outputs[1], self.io_dtype, ["batch_size", 1, "sequence_length", entry_capacity])
             return outputs[0], outputs[1], ""
 
         states = [
@@ -306,7 +321,9 @@ class DeepSeekV4Model(Model):
             domain="com.microsoft",
             **common_attrs,
         )
-        self.make_value(outputs[0], self.io_dtype, ["batch_size", 1, "compressed_length", self.head_size])
+        self.make_value(
+            outputs[0], self.io_dtype, ["batch_size", 1, common_attrs["entry_capacity"], self.head_size]
+        )
 
         indexer = compressor.indexer
         index_base = f"{base}/indexer"
@@ -358,9 +375,8 @@ class DeepSeekV4Model(Model):
         return outputs[0], "", index_outputs[0]
 
     def make_compressed_attention_bias(self, layer_id: int, compressed_kv: str, block_bias: str) -> str:
-        local_bias = f"{self.mask_attrs['mask_name']}/output_0" if self.mask_attrs["mask_name"] else ""
         if not compressed_kv:
-            return local_bias
+            return ""
         if not block_bias:
             base = f"/model/layers.{layer_id}/attn/compressed_bias"
             compressed_shape = f"{base}/compressed/Shape"
@@ -409,13 +425,7 @@ class DeepSeekV4Model(Model):
                 ["batch_size", 1, "sequence_length", "compressed_length"],
             )
             block_bias = f"{zeros_name}/output_0"
-        if not local_bias:
-            return block_bias
-        combined_name = f"/model/layers.{layer_id}/attn/combined_bias/Concat"
-        self.make_concat(
-            combined_name, [local_bias, block_bias], self.io_dtype, ["batch_size", 1, "sequence_length", None], axis=-1
-        )
-        return f"{combined_name}/output_0"
+        return block_bias
 
     def make_compressed_attention(
         self,
@@ -426,18 +436,31 @@ class DeepSeekV4Model(Model):
         attention_bias: str,
         selected_indices: str,
         head_sink: str,
+        past_local_kv: str = "",
+        present_local_kv: str = "",
     ) -> str:
         name = f"/model/layers.{layer_id}/attn/CompressedAttention"
         output = f"{name}/output_0"
+        inputs = [query, local_kv, compressed_kv, attention_bias, selected_indices, head_sink]
+        outputs = [output]
+        if past_local_kv:
+            inputs.extend([past_local_kv, self.input_names["position_ids"]])
+            outputs.append(present_local_kv)
         self.make_node(
             "CompressedAttention",
-            [query, local_kv, compressed_kv, attention_bias, selected_indices, head_sink],
-            [output],
+            inputs,
+            outputs,
             name=name,
             domain="com.microsoft",
             scale=self.head_size**-0.5,
         )
         self.make_value(output, self.io_dtype, ["batch_size", self.num_attn_heads, "sequence_length", self.head_size])
+        if present_local_kv:
+            self.make_value(
+                present_local_kv,
+                self.io_dtype,
+                ["batch_size", 1, self.local_cache_capacity, self.head_size],
+            )
         return output
 
     def make_layernorm_no_skip(self, layer_id: int, layernorm, root_input: str, location: str) -> str:
@@ -472,7 +495,7 @@ class DeepSeekV4Model(Model):
         # Always use MultiHeadAttention to get the right mask reformatting subgraph.
         # The actual attention is implemented manually in make_deepseek_attention.
         self.attention_attrs["op_type"] = "MultiHeadAttention"
-        self.past_present_share_buffer = False
+        self.past_present_share_buffer = True
 
     # ------------------------------------------------------------------ #
     # Helpers: RMS norm without learnable weight
@@ -1369,42 +1392,9 @@ class DeepSeekV4Model(Model):
         # kv_rope_name: [B, 1, S, head_dim]
 
         # ---------------------------------------------------------------- #
-        # KV cache: Concat past_kv with current kv
+        # KV cache: fixed local ring owned by CompressedAttention
         # ---------------------------------------------------------------- #
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
-
-        # Concat along the sequence dimension (axis=2)
-        kv_concat_name = f"{base}/kv_cache/Concat"
-        self.make_concat(
-            kv_concat_name,
-            [past_k, kv_rope_name],
-            self.io_dtype,
-            ["batch_size", 1, "total_sequence_length", head_dim],
-            axis=2,
-        )
-        # Register this as present_k and present_v (K==V in V4)
-        # We need to assign the output to both present_k and present_v
-        # In ONNX we can have two outputs reference the same node output by
-        # creating alias nodes (Identity)
-        kv_total = f"{kv_concat_name}/output_0"
-
-        # present.{layer_id}.key
-        self.make_identity(
-            f"{base}/present_k/Identity",
-            kv_total,
-            self.io_dtype,
-            ["batch_size", 1, "total_sequence_length", head_dim],
-            output_name=present_k,
-        )
-
-        # present.{layer_id}.value (same tensor)
-        self.make_identity(
-            f"{base}/present_v/Identity",
-            kv_total,
-            self.io_dtype,
-            ["batch_size", 1, "total_sequence_length", head_dim],
-            output_name=present_v,
-        )
 
         compressed_kv, block_bias, selected_indices = self.make_compressor(layer_id, attn, collapsed, q_a_norm_output)
         attention_bias = self.make_compressed_attention_bias(layer_id, compressed_kv, block_bias)
@@ -1414,11 +1404,21 @@ class DeepSeekV4Model(Model):
         attn_out_output = self.make_compressed_attention(
             layer_id,
             q_rope_name,
-            kv_total,
+            kv_rope_name,
             compressed_kv,
             attention_bias,
             selected_indices,
             sinks_init_name,
+            past_k,
+            present_k,
+        )
+
+        self.make_identity(
+            f"{base}/present_v/Identity",
+            present_k,
+            self.io_dtype,
+            ["batch_size", 1, self.local_cache_capacity, head_dim],
+            output_name=present_v,
         )
 
         # Transpose to [B, S, H, head_dim]

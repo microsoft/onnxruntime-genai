@@ -99,6 +99,8 @@ def _make_builder(layer_types: list[str]) -> DeepSeekV4Model:
     model.hc_sinkhorn_iters = 3
     model.layer_types = layer_types
     model.num_layers = len(layer_types)
+    model.context_length = 16
+    model.local_cache_capacity = 8
     model.rope_attrs = {"cache_length": 16}
     model.input_names = {"position_ids": "position_ids"}
     model.input_types = {"position_ids": ir.DataType.INT64}
@@ -130,6 +132,20 @@ def test_emits_compression_contrib_contracts_and_state_config():
     assert contracts["CompressedSparseAttention"] == (13, 6)
     assert contracts["LightningIndexer"] == (16, 6)
     assert len(model.compression_state_names) == 13
+    nodes = {node.op_type: node for node in proto.graph.node if node.domain == "com.microsoft"}
+    for op_type, capacity in (
+        ("HeavilyCompressedAttention", 4),
+        ("CompressedSparseAttention", 8),
+        ("LightningIndexer", 8),
+    ):
+        attributes = {attribute.name: attribute for attribute in nodes[op_type].attribute}
+        assert attributes["entry_capacity"].i == capacity
+
+    assert model.input_shapes["past_compression.0.pending_kv"] == ["batch_size", 3, 6]
+    assert model.input_shapes["past_compression.0.entries"] == ["batch_size", 1, 4, 6]
+    assert model.input_shapes["past_compression.1.compressor_pending_kv"] == ["batch_size", 1, 12]
+    assert model.input_shapes["past_compression.1.compressor_entries"] == ["batch_size", 1, 8, 6]
+    assert model.input_shapes["past_compression.1.indexer_entries"] == ["batch_size", 8, 4]
 
     config = {"model": {"decoder": {"inputs": {}, "outputs": {}}}}
     model.update_genai_config(config)
@@ -152,6 +168,31 @@ def test_emits_compressed_attention_contract():
     proto = ir.to_proto(model.model)
     node = next(node for node in proto.graph.node if node.op_type == "CompressedAttention")
     assert (len(node.input), len(node.output)) == (6, 1)
+
+
+def test_emits_fixed_local_cache_contract():
+    model = _make_builder(["sliding_attention"])
+    model.make_value("query", ir.DataType.FLOAT, ["batch_size", 2, "sequence_length", 6])
+    model.make_value("current_kv", ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", 6])
+    model.make_value("sinks", ir.DataType.FLOAT, [2])
+
+    model.make_compressed_attention(
+        0,
+        "query",
+        "current_kv",
+        "",
+        "",
+        "",
+        "sinks",
+        "past_key_values.0.key",
+        "present.0.key",
+    )
+
+    proto = ir.to_proto(model.model)
+    node = next(node for node in proto.graph.node if node.op_type == "CompressedAttention")
+    assert (len(node.input), len(node.output)) == (8, 2)
+    assert node.input[6:] == ["past_key_values.0.key", "position_ids"]
+    assert node.output[1] == "present.0.key"
 
 
 def test_emits_hyper_connection_and_head_contracts():

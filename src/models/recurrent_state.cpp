@@ -13,15 +13,17 @@ RecurrentState::RecurrentState(State& state)
     : state_{state} {
   input_name_strings_ = model_.config_->model.decoder.inputs.past_state_names;
   output_name_strings_ = model_.config_->model.decoder.outputs.present_state_names;
-  dynamic_states_ = !input_name_strings_.empty();
   if (input_name_strings_.size() != output_name_strings_.size()) {
     throw std::runtime_error("RecurrentState: past_state_names and present_state_names must have the same size.");
   }
 
   if (!input_name_strings_.empty()) {
-    for (const auto& name : input_name_strings_) {
-      if (!model_.session_info_.HasInput(name)) {
-        throw std::runtime_error("RecurrentState: configured input '" + name + "' was not found in the model.");
+    for (size_t i = 0; i < input_name_strings_.size(); ++i) {
+      if (!model_.session_info_.HasInput(input_name_strings_[i])) {
+        throw std::runtime_error("RecurrentState: configured input '" + input_name_strings_[i] + "' was not found in the model.");
+      }
+      if (!model_.session_info_.HasOutput(output_name_strings_[i])) {
+        throw std::runtime_error("RecurrentState: configured output '" + output_name_strings_[i] + "' was not found in the model.");
       }
     }
   } else {
@@ -94,9 +96,25 @@ RecurrentState::RecurrentState(State& state)
   };
   types_.reserve(input_name_strings_.size());
   shapes_.reserve(input_name_strings_.size());
-  for (const auto& name : input_name_strings_) {
-    types_.push_back(model_.session_info_.GetInputDataType(name));
-    shapes_.push_back(fix_batch_dim(model_.session_info_.GetInputShape(name)));
+  const bool configured_states = !model_.config_->model.decoder.inputs.past_state_names.empty();
+  for (size_t i = 0; i < input_name_strings_.size(); ++i) {
+    const auto& name = input_name_strings_[i];
+    const auto input_type = model_.session_info_.GetInputDataType(name);
+    auto input_shape = fix_batch_dim(model_.session_info_.GetInputShape(name));
+    if (configured_states) {
+      const auto output_type = model_.session_info_.GetOutputDataType(output_name_strings_[i]);
+      const auto output_shape = fix_batch_dim(model_.session_info_.GetOutputShape(output_name_strings_[i]));
+      if (input_type != output_type) {
+        throw std::runtime_error("RecurrentState: configured input/output types do not match for '" + name + "'.");
+      }
+      if (input_shape != output_shape ||
+          std::any_of(input_shape.begin() + std::min<size_t>(1, input_shape.size()), input_shape.end(),
+                      [](int64_t dim) { return dim <= 0; })) {
+        dynamic_states_ = true;
+      }
+    }
+    types_.push_back(input_type);
+    shapes_.push_back(std::move(input_shape));
     if (dynamic_states_) {
       for (size_t axis = 1; axis < shapes_.back().size(); ++axis) {
         if (shapes_.back()[axis] <= 0) shapes_.back()[axis] = 0;
