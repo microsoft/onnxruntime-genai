@@ -625,25 +625,23 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
+  // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
+  // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
+  DeviceInterface* p_host_accessible_inputs =
+      p_device_->GetType() == DeviceType::AMDGPU ? GetAMDGPUPinnedInputsInterface() : nullptr;
+
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
       p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
+  else if (p_host_accessible_inputs)
+    p_device_inputs_ = p_host_accessible_inputs;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
 
-  // Host-accessible decode inputs (AMDGPU): route the small decode inputs through a
-  // host-accessible interface so the CPU updates them in place with no per-step roundtrip.
-  // KV cache and scoring stay on the default interface. Falls back if no allocator.
-  if (p_device_->GetType() == DeviceType::AMDGPU &&
-      p_device_->GetHostAccessibleAllocator() != nullptr) {
-    if (auto* pinned = GetAMDGPUPinnedInputsInterface())
-      p_device_inputs_ = pinned;
-  }
-
-  // Logits are CPU-read; AMDGPU host-accessible inputs aren't CPU-read-coherent, so route to CPU.
+  // Logits are read back on the CPU every step, which is slow from a host-accessible allocation.
   p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
 
   // Search and sampling are performed on the CPU for all device types,
