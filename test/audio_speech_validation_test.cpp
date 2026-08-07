@@ -41,10 +41,17 @@ TEST(AudioSpeechValidationTests, NemotronMelTensorRankValidation) {
 }
 
 TEST(AudioSpeechValidationTests, NemotronEncoderShapeValidation) {
-  const std::string mels_error = GetExceptionMessage([] {
-    Generators::ValidateNemotronMelInputShape({1, 79, 1234}, 80);
+  EXPECT_NO_THROW(Generators::ValidateNemotronEncoderOutputShape({1, 64, 512}, 512));
+
+  const std::string rank_error = GetExceptionMessage([] {
+    Generators::ValidateNemotronEncoderOutputShape({1, 64, 512, 1}, 512);
   });
-  EXPECT_NE(mels_error.find("expected num_mels"), std::string::npos);
+  EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
+
+  const std::string hidden_dim_error = GetExceptionMessage([] {
+    Generators::ValidateNemotronEncoderOutputShape({1, 64, 511}, 512);
+  });
+  EXPECT_NE(hidden_dim_error.find("hidden_dim"), std::string::npos);
 }
 
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
@@ -68,6 +75,7 @@ TEST(AudioSpeechValidationTests, ParakeetDecoderDimensionValidation) {
 TEST(AudioSpeechValidationTests, Rank1TensorsRejected) {
   EXPECT_THROW(Generators::ValidateWhisperAudioFeaturesShape({3000}, 3000), std::runtime_error);
   EXPECT_THROW(Generators::ValidateNemotronMelInputShape({3000}, 80), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateNemotronEncoderOutputShape({512}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({512}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetDecoderOutputShape({1024}, 1024), std::runtime_error);
 }
@@ -75,6 +83,7 @@ TEST(AudioSpeechValidationTests, Rank1TensorsRejected) {
 TEST(AudioSpeechValidationTests, DimensionMismatchesCaught) {
   EXPECT_THROW(Generators::ValidateWhisperAudioFeaturesShape({1, 80, 2999}, 3000), std::runtime_error);
   EXPECT_THROW(Generators::ValidateNemotronMelInputShape({2, 80, 3000}, 80), std::runtime_error);
+  EXPECT_THROW(Generators::ValidateNemotronEncoderOutputShape({1, 64, 256}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({1, 256, 64}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetDecoderOutputShape({2, 1024, 1}, 1024), std::runtime_error);
 }
