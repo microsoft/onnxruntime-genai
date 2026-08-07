@@ -95,8 +95,16 @@ steps:
       addToPath: true
       architecture: '${{ parameters.arch }}'
 
-  - script: python -m pip install pybind11 wheel requests
+  - script: python -m pip install pybind11 wheel requests pybind11-stubgen numpy
     displayName: 'Install build-time Python deps (${{ pyVer }})'
+
+  # Type-stub generation (pybind11-stubgen) imports the freshly built extension,
+  # which loads an onnxruntime runtime. The WinML SDK bundles an older ORT than
+  # the GenAI core is built against, so the import otherwise fails with an ORT API
+  # version mismatch. Install a matching ORT runtime so the stubgen import
+  # resolves the newer API before build.py runs the stubgen POST_BUILD step.
+  - script: python -m pip install onnxruntime==1.28.0
+    displayName: 'Install onnxruntime 1.28.0 for stub generation (${{ pyVer }})'
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
