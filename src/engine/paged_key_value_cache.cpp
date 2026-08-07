@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 #include "cache_manager.h"
-#include "admission.h"
+
+#include <numeric>
 
 namespace Generators {
 
@@ -38,17 +39,16 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
           num_caches_per_layer);
 }
 
-// Number of KV slots the model will have addressed once the pending step has run, i.e. one per
-// token whose key and value live in the cache afterwards. The pure arithmetic lives in
-// admission.h (RequiredSlots); here we only supply the request-derived counters.
-//
-// This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes the
-// unprocessed tokens at absolute positions [past, past + unprocessed), so the cache must own
-// `past + unprocessed` slots.
+size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
+  return std::accumulate(blocks.begin(), blocks.end(), size_t{0},
+                         [](size_t sum, const std::shared_ptr<Block>& block) {
+                           return sum + block->Size();
+                         });
+}
+
+// Once the pending step completes, every token currently in the sequence has a KV slot.
 size_t RequiredSlots(const std::shared_ptr<Request>& request) {
-  const size_t sequence_length = request->CurrentSequenceLength();
-  const size_t unprocessed_count = request->IsPrefill() ? 0 : request->UnprocessedTokens().size();
-  return Generators::RequiredSlots(sequence_length, unprocessed_count, request->IsPrefill());
+  return static_cast<size_t>(request->CurrentSequenceLength());
 }
 
 }  // namespace
@@ -145,6 +145,8 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 
   const size_t required_slots = RequiredSlots(request);
   const size_t used_slots = block_table_it->committed_slots;
+  assert(UsedSlots(block_table_it->blocks) == used_slots);
+  assert(used_slots == static_cast<size_t>(request->ProcessedSequenceLength()));
   if (required_slots <= used_slots) {
     return;
   }

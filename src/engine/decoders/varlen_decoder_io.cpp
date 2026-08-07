@@ -119,19 +119,15 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     }
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
-    if (entry) {
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(
-          entry->is_prefill
-              ? entry->sequence_length_before - static_cast<int64_t>(entry->unprocessed_token_count)
-              : entry->sequence_length_before);
-    } else if (request->IsPrefill()) {
-      // When a request is created, the current sequence length becomes the prompt length.
-      // But the kv cache is not updated until the first token is generated.
-      // So we set the past sequence length to current sequence length minus the unprocessed tokens length.
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength() - input_ids.size());
-    } else {
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength());
+    // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
+    // number of tokens already in the cache and therefore the base position for this step.
+    const int64_t processed_sequence_length = request->ProcessedSequenceLength();
+    if (entry &&
+        processed_sequence_length !=
+            entry->sequence_length_before - static_cast<int64_t>(entry->unprocessed_token_count)) {
+      throw std::runtime_error("Step plan processed sequence length does not match the request.");
     }
+    sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);
 
     running_length += input_ids.size();
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
@@ -189,11 +185,8 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   } else {
     for (auto& request : scheduled_requests) {
       const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      // CurrentSequenceLength() already counts the unprocessed tokens for a prefill request, and
-      // excludes them for a generation request, mirroring how past_sequence_lengths is filled above.
-      const int32_t kv_len = request->IsPrefill()
-                                 ? static_cast<int32_t>(request->CurrentSequenceLength())
-                                 : static_cast<int32_t>(request->CurrentSequenceLength()) + query_len;
+      // KV length after the step is past length plus query length, which is the current length.
+      const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
       max_query_len = std::max(max_query_len, query_len);
       max_kv_len = std::max(max_kv_len, kv_len);
     }

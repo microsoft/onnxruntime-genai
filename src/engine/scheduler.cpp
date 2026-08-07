@@ -197,9 +197,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.unprocessed_token_count =
         static_cast<size_t>(unprocessed_token_count);
     entry.target_cache_slots = RequiredSlots(
-        static_cast<size_t>(snapshot.current_sequence_length),
-        entry.unprocessed_token_count,
-        snapshot.is_prefill);
+        static_cast<size_t>(snapshot.processed_sequence_length),
+        entry.unprocessed_token_count);
     entry.is_prefill = snapshot.is_prefill;
     entry.newly_admitted = newly_admitted;
     plan.requests.push_back(std::move(entry));

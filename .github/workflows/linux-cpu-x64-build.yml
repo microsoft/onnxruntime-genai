@@ -19,32 +19,32 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: '8.0.x'
 
       - name: Setup Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70 # v3.5.0
         with:
           gradle-version: '8.6'
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11.x'
           architecture: 'x64'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
