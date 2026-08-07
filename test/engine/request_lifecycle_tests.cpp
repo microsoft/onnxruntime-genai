@@ -23,6 +23,16 @@ namespace {
 
 std::vector<int32_t> Prompt() { return {2, 3, 4}; }
 
+DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
+  auto logits = model.p_device_inputs_->Allocate<float>(
+      static_cast<size_t>(model.config_->model.vocab_size));
+  auto cpu_logits = logits.CpuSpan();
+  std::fill(cpu_logits.begin(), cpu_logits.end(), 0.0f);
+  cpu_logits[token] = 100.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
 class RequestLifecycleTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -42,6 +52,13 @@ class RequestLifecycleTest : public ::testing::Test {
 TEST_F(RequestLifecycleTest, EmptyAppendIsRejected) {
   auto request = NewRequest();
   EXPECT_THROW(request->AddTokens({}), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
+  auto request = NewRequest();
+
+  EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
 }
 
 // An append that would exceed the model's max length is rejected before any tokens are buffered, so
@@ -130,6 +147,87 @@ TEST_F(RequestLifecycleTest, RemoveReturnsRequestToUnassigned) {
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
   EXPECT_EQ(engine_.cache->deallocate_calls, 1);
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+}
+
+TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  const auto before = request->Snapshot();
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = before.current_sequence_length;
+  const int32_t next_token = 5;
+  auto logits = LogitsForToken(*model_, next_token);
+
+  request->SaveStateForTransaction();
+  const auto result = request->ApplyLogitsForTransaction(logits);
+
+  const auto staged = request->Snapshot();
+  EXPECT_TRUE(result.token_appended);
+  EXPECT_FALSE(result.done);
+  EXPECT_EQ(staged.status, before.status);
+  EXPECT_EQ(staged.processed_sequence_length, before.processed_sequence_length);
+  EXPECT_EQ(staged.is_prefill, before.is_prefill);
+  EXPECT_EQ(staged.current_sequence_length, before.current_sequence_length + 1);
+
+  request->CommitStateForTransaction();
+  request->CommitStep(plan, result);
+
+  const auto committed = request->Snapshot();
+  EXPECT_EQ(committed.status, RequestStatus::InProgress);
+  EXPECT_EQ(committed.processed_sequence_length, before.current_sequence_length);
+  EXPECT_FALSE(committed.is_prefill);
+  ASSERT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), next_token);
+}
+
+TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  const auto before = request->Snapshot();
+  auto logits = LogitsForToken(*model_, 5);
+
+  request->SaveStateForTransaction();
+  request->ApplyLogitsForTransaction(logits);
+  request->RestoreStateForTransaction();
+
+  const auto restored = request->Snapshot();
+  EXPECT_EQ(restored.status, before.status);
+  EXPECT_EQ(restored.current_sequence_length, before.current_sequence_length);
+  EXPECT_EQ(restored.processed_sequence_length, before.processed_sequence_length);
+  EXPECT_EQ(restored.is_prefill, before.is_prefill);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
+TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  const auto before = request->Snapshot();
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = before.current_sequence_length;
+  auto logits = LogitsForToken(*model_, EosToken(*model_));
+
+  request->SaveStateForTransaction();
+  const auto result = request->ApplyLogitsForTransaction(logits);
+  request->CommitStateForTransaction();
+  request->CommitStep(plan, result);
+
+  EXPECT_TRUE(result.done);
+  EXPECT_EQ(request->status_, RequestStatus::Completed);
+}
+
+TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
+  auto params = MakeGreedyParams(*model_);
+  params->search.batch_size = 2;
+  EXPECT_THROW(
+      {
+        auto request = std::make_shared<Request>(params);
+        static_cast<void>(request);
+      },
+      std::runtime_error);
 }
 
 }  // namespace

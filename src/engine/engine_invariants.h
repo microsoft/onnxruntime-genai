@@ -47,6 +47,14 @@ struct RequestBlockSnapshot {
   size_t empty_slots{};           // Slots reserved for the Request but not yet written.
 };
 
+struct RequestReservationSnapshot {
+  const void* request_id{nullptr};
+  size_t committed_slots{};
+  size_t target_slots{};
+  size_t tail_slots_to_consume{};
+  std::vector<size_t> reserved_block_ids;
+};
+
 // Immutable view of the paged cache's block accounting. Produced by PagedKeyValueCache::Snapshot().
 struct PagedCacheSnapshot {
   size_t block_size{};
@@ -54,9 +62,14 @@ struct PagedCacheSnapshot {
   size_t free_blocks{};          // Blocks currently owned by no Request.
   size_t block_table_columns{};  // Padded block-table width the model sees, or 0 when unused.
   std::vector<RequestBlockSnapshot> requests;
+  std::vector<size_t> transaction_reserved_block_ids;
+  std::vector<RequestReservationSnapshot> reservations;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).
   size_t AllocatedBlocks() const;
+  size_t TransactionReservedBlocks() const {
+    return transaction_reserved_block_ids.size();
+  }
 };
 
 // A single invariant violation, carrying a human-readable description of what was inconsistent.

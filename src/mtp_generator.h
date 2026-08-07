@@ -129,8 +129,8 @@ struct MtpGenerator {
   // corrupts chained drafts; the main model alone captures the verify shapes).
   std::shared_ptr<GeneratorParams> mtp_params_;
 
-  std::shared_ptr<Tensor> hidden_slice_;  // reusable [1,1,hidden] device buffer for the handoff
-  std::shared_ptr<Tensor> hidden_slice2_;  // reusable [1,2,hidden] buffer for the batched 2-token draft
+  std::shared_ptr<Tensor> hidden_slice_;     // reusable [1,1,hidden] device buffer for the handoff
+  std::shared_ptr<Tensor> hidden_slice2_;    // reusable [1,2,hidden] buffer for the batched 2-token draft
   std::shared_ptr<Tensor> head_out_hidden_;  // [1,1,hidden] capture of the head's own hidden (chain feedback)
   std::shared_ptr<Tensor> refeed_hidden_;    // [1,1,hidden] scratch for re-feeding accepted drafts (main hidden)
   // Per-size [1,j,hidden] hidden buffers (j=1..N) used to re-materialize the accepted drafts in the
@@ -172,27 +172,27 @@ struct MtpGenerator {
   std::vector<int32_t> verify_argmax_;  // scratch: main argmax of the N+1 verify rows
 
   // --- Speculative-sampling (do_sample=true) state. ---
-  bool sampling_{false};       // true when do_sample && temperature > 0: use rejection sampling
-  int top_k_{};                // top-k truncation shared by draft (q) and target (p) distributions
-  float top_p_{};              // top-p (nucleus) truncation
-  float temperature_{1.0f};    // sampling temperature
-  std::mt19937 rng_;           // RNG for draft sampling + accept/reject + correction/bonus draws
-  SampledCategorical sampled_scratch_;              // reused truncated-distribution scratch
+  bool sampling_{false};                // true when do_sample && temperature > 0: use rejection sampling
+  int top_k_{};                         // top-k truncation shared by draft (q) and target (p) distributions
+  float top_p_{};                       // top-p (nucleus) truncation
+  float temperature_{1.0f};             // sampling temperature
+  std::mt19937 rng_;                    // RNG for draft sampling + accept/reject + correction/bonus draws
+  SampledCategorical sampled_scratch_;  // reused truncated-distribution scratch
   std::unique_ptr<LogitsPenaltyProcessor> main_logits_penalties_;
-  std::vector<std::vector<int32_t>> draft_idx_;     // per draft position: truncated draft support
-  std::vector<std::vector<float>> draft_prob_;      // per draft position: truncated draft probs q_k
-  std::vector<std::vector<int32_t>> target_idx_;    // per verify row: truncated target support
-  std::vector<std::vector<float>> target_prob_;     // per verify row: truncated target probs p_k
-  std::vector<float> main_logits_cpu_;              // host fp32 copy of the requested verify rows (CPU fallback)
-  std::vector<int32_t> topk_tok_scratch_;           // device top-k token ids (host, [num_rows*k])
-  std::vector<float> topk_score_scratch_;           // device top-k raw scores (host, [num_rows*k])
-  std::vector<float> topk_prob_scratch_;            // per-row softmax scratch over the k scores
-  int topk_k_{};                                    // effective k used for the last device top-k
+  std::vector<std::vector<int32_t>> draft_idx_;   // per draft position: truncated draft support
+  std::vector<std::vector<float>> draft_prob_;    // per draft position: truncated draft probs q_k
+  std::vector<std::vector<int32_t>> target_idx_;  // per verify row: truncated target support
+  std::vector<std::vector<float>> target_prob_;   // per verify row: truncated target probs p_k
+  std::vector<float> main_logits_cpu_;            // host fp32 copy of the requested verify rows (CPU fallback)
+  std::vector<int32_t> topk_tok_scratch_;         // device top-k token ids (host, [num_rows*k])
+  std::vector<float> topk_score_scratch_;         // device top-k raw scores (host, [num_rows*k])
+  std::vector<float> topk_prob_scratch_;          // per-row softmax scratch over the k scores
+  int topk_k_{};                                  // effective k used for the last device top-k
 
   // Loop carry state (see the design doc draft/verify invariant):
-  int32_t next_token_{};   // token predicted for the current cache length L (not yet committed)
-  size_t length_{};        // committed cache length L
-  bool primed_{false};     // whether AppendTokens has run the prompt
+  int32_t next_token_{};  // token predicted for the current cache length L (not yet committed)
+  size_t length_{};       // committed cache length L
+  bool primed_{false};    // whether AppendTokens has run the prompt
   bool done_{false};
   // Pipelined draft: on an accepted step the next step's draft is computed ahead (fused into the
   // post-accept KV-advance as one 2-token MTP forward), so the next GenerateNextToken reuses it

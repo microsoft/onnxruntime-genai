@@ -418,6 +418,36 @@ void LaunchScatterSamplingTokens(const int32_t* packed_tokens, const int* output
   CUDA_CHECK_LAUNCH();
 }
 
+__global__ void GatherCurandStatesKernel(const curandState* states, const int* state_indices,
+                                         curandState* checkpoint, int count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < count)
+    checkpoint[index] = states[state_indices[index]];
+}
+
+void LaunchGatherCurandStates(const curandState* states, const int* state_indices,
+                              curandState* checkpoint, int count, cudaStream_t stream) {
+  constexpr int block_size = 256;
+  GatherCurandStatesKernel<<<CeilDiv(count, block_size), block_size, 0, stream>>>(
+      states, state_indices, checkpoint, count);
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void ScatterCurandStatesKernel(const curandState* checkpoint, const int* state_indices,
+                                          curandState* states, int count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < count)
+    states[state_indices[index]] = checkpoint[index];
+}
+
+void LaunchScatterCurandStates(const curandState* checkpoint, const int* state_indices,
+                               curandState* states, int count, cudaStream_t stream) {
+  constexpr int block_size = 256;
+  ScatterCurandStatesKernel<<<CeilDiv(count, block_size), block_size, 0, stream>>>(
+      checkpoint, state_indices, states, count);
+  CUDA_CHECK_LAUNCH();
+}
+
 // Implementation for the general-purpose block-wise softmax, used by beam search.
 template <int kBlockSize, bool is_log_softmax>
 __global__ void BlockwiseSoftmaxKernel(float* output, const float* input, int softmax_elements, int input_stride,

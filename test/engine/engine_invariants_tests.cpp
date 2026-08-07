@@ -6,6 +6,7 @@
 // model, cache, scheduler, or GPU: they construct snapshots directly and assert which invariant
 // violations are (and are not) reported.
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,105 @@ TEST(InvariantValidatorTest, AllocatedBlocksCountsOwnedBlocks) {
   const auto cache = MakeValidCache();
   EXPECT_EQ(cache.AllocatedBlocks(), 3u);
   EXPECT_EQ(cache.free_blocks + cache.AllocatedBlocks(), cache.total_blocks);
+  EXPECT_EQ(cache.TransactionReservedBlocks(), 0u);
+}
+
+TEST(InvariantValidatorTest, ValidTransactionReservationBalancesAccounting) {
+  auto cache = MakeValidCache();
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {3};
+  cache.reservations = {
+      RequestReservationSnapshot{
+          kRequestA,
+          /*committed_slots=*/kBlockSize + 1,
+          /*target_slots=*/2 * kBlockSize + 1,
+          /*tail_slots_to_consume=*/kBlockSize - 1,
+          /*reserved_block_ids=*/{3},
+      },
+  };
+
+  EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+  EXPECT_EQ(cache.free_blocks + cache.TransactionReservedBlocks() +
+                cache.AllocatedBlocks(),
+            cache.total_blocks);
+}
+
+TEST(InvariantValidatorTest, InitialAdmissionReservationValidatesWithoutCommittedRows) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 1;
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {0};
+  cache.reservations = {
+      RequestReservationSnapshot{kRequestA, 0, 1, 0, {0}},
+  };
+
+  EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+}
+
+TEST(InvariantValidatorTest, InitialAdmissionRequiresEveryReservedBlockInADelta) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 1;
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {0};
+
+  const auto violations = ValidateCacheInvariants(cache);
+
+  ASSERT_EQ(violations.size(), 1u);
+  EXPECT_NE(violations[0].message.find(
+                "Not every transaction-reserved block belongs to exactly one Request delta"),
+            std::string::npos);
+}
+
+TEST(InvariantValidatorTest, InitialAdmissionRejectsUnreservedDeltaBlock) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 2;
+  cache.free_blocks = 1;
+  cache.transaction_reserved_block_ids = {0};
+  cache.reservations = {
+      RequestReservationSnapshot{kRequestA, 0, 1, 0, {1}},
+  };
+
+  const auto violations = ValidateCacheInvariants(cache);
+
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("that is not transaction-reserved") !=
+                                  std::string::npos;
+                         }),
+            violations.end());
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find(
+                                      "Not every transaction-reserved block belongs to exactly one Request delta") !=
+                                  std::string::npos;
+                         }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, ReservedBlockCannotAlsoBeCommitted) {
+  auto cache = MakeValidCache();
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {2};
+  cache.reservations = {
+      RequestReservationSnapshot{kRequestB, 4, 5, 0, {2}},
+  };
+
+  EXPECT_FALSE(ValidateCacheInvariants(cache).empty());
+}
+
+TEST(InvariantValidatorTest, EveryReservedBlockNeedsOneRequestDelta) {
+  auto cache = MakeValidCache();
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {3};
+
+  const auto violations = ValidateCacheInvariants(cache);
+  ASSERT_EQ(violations.size(), 1u);
+  EXPECT_NE(violations[0].message.find(
+                "Not every transaction-reserved block belongs to exactly one Request delta"),
+            std::string::npos);
 }
 
 TEST(InvariantValidatorTest, BlockAccountingMismatchReported) {

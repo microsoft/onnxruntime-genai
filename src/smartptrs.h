@@ -110,6 +110,14 @@ struct BatchedSampler {
 
   virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
   virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
+  virtual bool SupportsTransactions() const { return false; }
+  virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void RestoreStateForTransaction() {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void CommitStateForTransaction() noexcept {}
   virtual DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
                                      std::span<const BatchedSamplingParams> params,
                                      std::span<BatchedSamplerState* const> states,

@@ -78,6 +78,11 @@ inline void ApplyNoRepeatNgramToLogits(std::span<float> logits, std::span<const 
 
 struct LogitsPenaltyProcessor {
   LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
+                         std::span<const int32_t> eos_token_ids)
+      : LogitsPenaltyProcessor(vocab_size, repetition_penalty, min_length,
+                               /*no_repeat_ngram_size=*/0, eos_token_ids) {}
+
+  LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
                          int no_repeat_ngram_size, std::span<const int32_t> eos_token_ids)
       : repetition_penalty_{repetition_penalty},
         min_length_{min_length},

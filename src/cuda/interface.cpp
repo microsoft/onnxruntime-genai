@@ -151,6 +151,8 @@ struct CudaBatchedSamplerState final : BatchedSamplerState {
 struct CudaBatchedSampler final : BatchedSampler {
   CudaBatchedSampler(int max_batch_size, int /*vocab_size*/)
       : state_pool_{std::make_shared<CudaSamplerStatePool>(max_batch_size)},
+        transaction_state_indices_{AllocateCudaSpan<int>(std::max(max_batch_size, 1))},
+        transaction_states_{AllocateCudaSpan<curandState>(std::max(max_batch_size, 1))},
         max_batch_size_{std::max(max_batch_size, 1)} {
     // The GPU workspace scales with max_batch_size * vocab_size, so it is grown on demand from the
     // first observed batch rather than reserved at model load. Only the cheap host-side planning
@@ -158,6 +160,7 @@ struct CudaBatchedSampler final : BatchedSampler {
     row_order_.reserve(max_batch_size_);
     bucket_offsets_.reserve(static_cast<size_t>(max_batch_size_) + 1);
     bucket_params_.reserve(max_batch_size_);
+    transaction_state_indices_.CpuSpan();
   }
 
   std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
@@ -167,6 +170,48 @@ struct CudaBatchedSampler final : BatchedSampler {
   bool OwnsState(const BatchedSamplerState& state) const override {
     const auto* cuda_state = dynamic_cast<const CudaBatchedSamplerState*>(&state);
     return cuda_state && cuda_state->pool_.get() == state_pool_.get();
+  }
+
+  bool SupportsTransactions() const override { return true; }
+
+  void SaveStateForTransaction(std::span<BatchedSamplerState* const> states) override {
+    if (transaction_active_)
+      throw std::logic_error("Batched sampler transaction checkpoint is already active.");
+    if (states.size() > static_cast<size_t>(max_batch_size_))
+      throw std::runtime_error("Batched sampler transaction exceeds the configured batch size.");
+
+    auto indices = transaction_state_indices_.CpuSpan();
+    for (size_t i = 0; i < states.size(); ++i) {
+      auto* state = dynamic_cast<CudaBatchedSamplerState*>(states[i]);
+      if (!state || state->pool_.get() != state_pool_.get())
+        throw std::runtime_error("Batched sampler received an RNG state from a different sampler.");
+      indices[i] = state->index_;
+    }
+    transaction_state_count_ = static_cast<int>(states.size());
+    if (transaction_state_count_ > 0) {
+      transaction_state_indices_.CopyCpuToDevice();
+      cuda::LaunchGatherCurandStates(
+          state_pool_->Data(), transaction_state_indices_.Span().data(),
+          transaction_states_.Span().data(), transaction_state_count_, GetStream());
+    }
+    transaction_active_ = true;
+  }
+
+  void RestoreStateForTransaction() override {
+    if (!transaction_active_)
+      throw std::logic_error("Batched sampler transaction checkpoint is not active.");
+    if (transaction_state_count_ > 0) {
+      cuda::LaunchScatterCurandStates(
+          transaction_states_.Span().data(), transaction_state_indices_.Span().data(),
+          state_pool_->Data(), transaction_state_count_, GetStream());
+    }
+    transaction_active_ = false;
+    transaction_state_count_ = 0;
+  }
+
+  void CommitStateForTransaction() noexcept override {
+    transaction_active_ = false;
+    transaction_state_count_ = 0;
   }
 
   DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
@@ -288,6 +333,8 @@ struct CudaBatchedSampler final : BatchedSampler {
   }
 
   std::shared_ptr<CudaSamplerStatePool> state_pool_;
+  DeviceSpan<int> transaction_state_indices_;
+  DeviceSpan<curandState> transaction_states_;
   DeviceSpan<const float*> score_ptrs_;
   DeviceSpan<int> output_indices_;
   DeviceSpan<int> state_indices_;
@@ -302,6 +349,8 @@ struct CudaBatchedSampler final : BatchedSampler {
   int max_batch_size_{};
   int batch_capacity_{};
   int vocab_capacity_{};
+  int transaction_state_count_{};
+  bool transaction_active_{};
 };
 
 struct CudaInterfaceImplBase : DeviceInterface {
@@ -600,9 +649,9 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::unique_ptr<cuda::TopkData> topk_data_;
   int topk_batch_{0};
   int topk_vocab_{0};
-  cuda_unique_ptr<float> argmax_fp32_;          // fp16 -> fp32 scratch (device)
+  cuda_unique_ptr<float> argmax_fp32_;  // fp16 -> fp32 scratch (device)
   size_t argmax_fp32_count_{0};
-  cuda_host_unique_ptr<int32_t> argmax_host_;   // pinned host buffer for the small index copy
+  cuda_host_unique_ptr<int32_t> argmax_host_;  // pinned host buffer for the small index copy
   size_t argmax_host_count_{0};
   cuda_host_unique_ptr<int32_t> top2_indices_host_;
   cuda_host_unique_ptr<float> top2_scores_host_;

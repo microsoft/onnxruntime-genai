@@ -412,7 +412,7 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
-        std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        std::string hidden_states;                          // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;
@@ -455,7 +455,7 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
-      int num_hidden_layers{1};   // The MTP head has a single decoder layer.
+      int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};
       int head_size{};
 
@@ -479,6 +479,8 @@ struct Config {
       } outputs;
     } mtp;
 
+    std::optional<Decoder> draft;
+
   } model;
 
   struct Search {
@@ -501,6 +503,12 @@ struct Config {
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
   } search;
+
+  struct Speculative {
+    // Four is a conservative default that amortizes target verification without excessive draft
+    // work; the best value depends on the model pair and execution provider.
+    int max_draft_tokens{4};
+  } speculative;
 
   struct Engine {
     struct DynamicBatching {
@@ -528,6 +536,7 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

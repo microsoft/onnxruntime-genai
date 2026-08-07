@@ -56,7 +56,7 @@ struct HiddenStatesOutputs {
   HiddenStatesOutputs(const HiddenStatesOutputs&) = delete;
   HiddenStatesOutputs& operator=(const HiddenStatesOutputs&) = delete;
 
-  void Add();                       // Register the hidden_states output (called once at init).
+  void Add();                        // Register the hidden_states output (called once at init).
   void Update(int sequence_length);  // Resize the output buffer to match the step's sequence length.
 
  private:
