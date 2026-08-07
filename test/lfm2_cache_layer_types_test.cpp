@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -71,17 +72,29 @@ fs_std::path WriteModelWithLayerTypes(const std::string& suffix, const std::stri
   return dst_dir;
 }
 
-std::string CaptureThrowMessage(const fs_std::path& model_dir) {
+void CreateGeneratorForModel(const fs_std::path& model_dir) {
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+  (void)generator;
+}
+
+std::string CaptureRuntimeErrorMessage(const fs_std::path& model_dir) {
   try {
-    auto model = OgaModel::Create(model_dir.string().c_str());
-    auto params = OgaGeneratorParams::Create(*model);
-    auto generator = OgaGenerator::Create(*model, *params);
-    (void)generator;
-  } catch (const std::exception& e) {
+    CreateGeneratorForModel(model_dir);
+  } catch (const std::runtime_error& e) {
     return e.what();
   }
 
-  return {};
+  throw std::runtime_error("Expected std::runtime_error was not thrown.");
+}
+
+void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual_size, int expected_layers) {
+  EXPECT_NE(message.find("LFM2Cache"), std::string::npos) << message;
+  EXPECT_NE(message.find("layer_types"), std::string::npos) << message;
+  EXPECT_NE(message.find("num_hidden_layers"), std::string::npos) << message;
+  EXPECT_NE(message.find("layer_types array size (" + std::to_string(actual_size) + ")"), std::string::npos) << message;
+  EXPECT_NE(message.find("num_hidden_layers (" + std::to_string(expected_layers) + ")"), std::string::npos) << message;
 }
 
 }  // namespace
@@ -90,12 +103,8 @@ TEST(LFM2CacheLayerTypesValidationTest, UndersizedLayerTypesArray) {
   SkipIfModelUnavailable();
 
   const auto model_dir = WriteModelWithLayerTypes("undersized", "[\"conv\"]");
-  const std::string message = CaptureThrowMessage(model_dir);
-
-  EXPECT_FALSE(message.empty());
-  EXPECT_NE(message.find("LFM2Cache"), std::string::npos) << message;
-  EXPECT_NE(message.find("layer_types"), std::string::npos) << message;
-  EXPECT_NE(message.find("num_hidden_layers"), std::string::npos) << message;
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  ExpectLayerTypesValidationMessage(message, 1, 4);
 }
 
 TEST(LFM2CacheLayerTypesValidationTest, OversizedLayerTypesArray) {
@@ -104,20 +113,16 @@ TEST(LFM2CacheLayerTypesValidationTest, OversizedLayerTypesArray) {
   const auto model_dir = WriteModelWithLayerTypes(
       "oversized",
       "[\"conv\", \"full_attention\", \"conv\", \"full_attention\", \"conv\"]");
-  const std::string message = CaptureThrowMessage(model_dir);
-
-  EXPECT_FALSE(message.empty());
-  EXPECT_NE(message.find("layer_types"), std::string::npos) << message;
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  ExpectLayerTypesValidationMessage(message, 5, 4);
 }
 
 TEST(LFM2CacheLayerTypesValidationTest, EmptyLayerTypesArray) {
   SkipIfModelUnavailable();
 
   const auto model_dir = WriteModelWithLayerTypes("empty", "[]");
-  const std::string message = CaptureThrowMessage(model_dir);
-
-  EXPECT_FALSE(message.empty());
-  EXPECT_NE(message.find("layer_types"), std::string::npos) << message;
+  const std::string message = CaptureRuntimeErrorMessage(model_dir);
+  ExpectLayerTypesValidationMessage(message, 0, 4);
 }
 
 TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
@@ -127,8 +132,7 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
       "valid",
       "[\"full_attention\", \"conv\", \"full_attention\", \"conv\"]");
 
-  const std::string message = CaptureThrowMessage(model_dir);
-  EXPECT_EQ(message.find("LFM2Cache"), std::string::npos) << message;
-  EXPECT_EQ(message.find("layer_types"), std::string::npos) << message;
-  EXPECT_EQ(message.find("num_hidden_layers"), std::string::npos) << message;
+  EXPECT_NO_THROW({
+    CreateGeneratorForModel(model_dir);
+  });
 }

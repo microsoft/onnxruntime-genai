@@ -825,7 +825,12 @@ LFM2Cache::LFM2Cache(State& state)
       layer_types_{model_.config_->model.decoder.layer_types},
       layer_count_{model_.config_->model.decoder.num_hidden_layers} {
   // Validate layer_types array size matches num_hidden_layers before accessing elements.
-  if (layer_count_ < 0 || layer_types_.size() != static_cast<size_t>(layer_count_)) {
+  if (layer_count_ < 0) {
+    throw std::runtime_error("LFM2Cache: num_hidden_layers must be non-negative. Actual: " + std::to_string(layer_count_));
+  }
+
+  const size_t expected_layer_types_size = static_cast<size_t>(layer_count_);
+  if (layer_types_.size() != expected_layer_types_size) {
     throw std::runtime_error("LFM2Cache: layer_types array size (" + std::to_string(layer_types_.size()) +
                              ") does not match num_hidden_layers (" + std::to_string(layer_count_) + ")");
   }
