@@ -198,7 +198,6 @@ struct InterfaceImpl : DeviceInterface {
     return *ort_allocator_;
   }
 
-  // The backend registers its device memory-info under "Hip", keyed on the device id.
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return OrtMemoryInfo::Create("Hip", OrtAllocatorType::OrtDeviceAllocator,
                                  device_id_, OrtMemType::OrtMemTypeDefault);
