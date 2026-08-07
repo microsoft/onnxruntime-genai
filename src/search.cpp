@@ -58,6 +58,34 @@ void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
+void Search_Cpu::SaveStateForTransactionImpl(bool /*checkpoint_local_state*/) {
+  auto sequence_lengths = sequence_lengths_.CpuSpan();
+  transaction_sequence_lengths_.assign(sequence_lengths.begin(), sequence_lengths.end());
+  transaction_done_ = done_;
+}
+
+void Search_Cpu::RestoreStateForTransactionImpl() {
+  copy(std::span<const int32_t>{transaction_sequence_lengths_}, sequence_lengths_.CpuSpan());
+  sequence_lengths_.CopyCpuToDevice();
+  done_ = transaction_done_;
+}
+
+void GreedySearch_Cpu::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cpu::SaveStateForTransactionImpl(checkpoint_local_state);
+  transaction_next_tokens_.assign(next_tokens_.begin(), next_tokens_.end());
+  if (!transaction_eos_seen_)
+    transaction_eos_seen_ = std::make_unique<bool[]>(eos_seen_.size());
+  copy(std::span<const bool>{eos_seen_}, std::span<bool>{transaction_eos_seen_.get(), eos_seen_.size()});
+  transaction_not_done_count_ = not_done_count_;
+}
+
+void GreedySearch_Cpu::RestoreStateForTransactionImpl() {
+  Search_Cpu::RestoreStateForTransactionImpl();
+  copy(std::span<const int32_t>{transaction_next_tokens_}, next_tokens_);
+  copy(std::span<const bool>{transaction_eos_seen_.get(), eos_seen_.size()}, eos_seen_);
+  not_done_count_ = transaction_not_done_count_;
+}
+
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
   return next_tokens_ptr_;
 }

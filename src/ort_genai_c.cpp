@@ -618,7 +618,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, co
 OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* generator, OgaTensor** out) {
   OGA_TRY
   auto logits_span = generator->GetLogits();
-  const std::array<int64_t, 3> shape{generator->state_->params_->search.batch_size, 1, generator->model_->config_->model.vocab_size};
+  const std::array<int64_t, 3> shape{generator->state_->params_->BatchBeamSize(), 1, generator->model_->config_->model.vocab_size};
   std::span<const float> cpu_logits_span = logits_span.CopyDeviceToCpu();
   const size_t expected_size = static_cast<size_t>(shape[0]) * static_cast<size_t>(shape[2]);
   if (cpu_logits_span.size() != expected_size)

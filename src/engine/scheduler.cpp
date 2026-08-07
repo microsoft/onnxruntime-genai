@@ -2,13 +2,41 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "admission.h"
 
 namespace Generators {
 
+Scheduler::Scheduler(std::shared_ptr<Model> model)
+    : model_{model} {
+  constexpr size_t default_static_batch_size = 4;
+  size_t max_batch_size = default_static_batch_size;
+  const auto& engine_config = model->config_->engine;
+  if (engine_config.dynamic_batching)
+    max_batch_size = std::max(max_batch_size, engine_config.dynamic_batching->max_batch_size);
+  if (engine_config.static_batching)
+    max_batch_size = std::max(max_batch_size, engine_config.static_batching->max_batch_size);
+
+  batched_sampling_plan_.Reserve(max_batch_size);
+  batched_sampler_ = model->p_device_scoring_->CreateBatchedSampler(
+      max_batch_size, model->config_->model.vocab_size);
+}
+
+ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
+  std::vector<std::shared_ptr<Request>> requests;
+  requests.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    requests.push_back(entry.request);
+  }
+  return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
+                           GetBatchedSamplingPlan()};
+}
+
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model}, cache_manager_{cache_manager} {}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  if (auto* sampler = GetBatchedSampler())
+    request->SamplingState(*sampler);
   requests_pool_.push_back(request);
 }
 
@@ -54,7 +82,8 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     }
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_, GetBatchedSampler(),
+                                       GetBatchedSamplingPlan());
 
   if (!scheduled_requests) {
     throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
@@ -73,9 +102,11 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model}, cache_manager_{cache_manager} {}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  if (auto* sampler = GetBatchedSampler())
+    request->SamplingState(*sampler);
   requests_pool_.push_back(request);
 }
 
@@ -87,6 +118,38 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 ScheduledRequests DynamicBatchScheduler::Schedule() {
+  StepPlan plan;
+  const auto result = PlanStep(plan);
+  if (!result.executable) {
+    if (result.outcome.kind == StepOutcomeKind::UnserviceableRequest) {
+      throw std::runtime_error("A request cannot be serviced by the configured paged cache.");
+    }
+    throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
+  }
+
+  std::vector<std::shared_ptr<Request>> newly_admitted;
+  for (const auto& entry : plan.requests) {
+    if (entry.newly_admitted) {
+      newly_admitted.push_back(entry.request);
+    }
+  }
+  if (!newly_admitted.empty()) {
+    cache_manager_->Allocate(newly_admitted);
+    for (const auto& request : newly_admitted) {
+      request->Schedule();
+    }
+  }
+
+  std::vector<std::shared_ptr<Request>> requests;
+  requests.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    requests.push_back(entry.request);
+  }
+  return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
+                           GetBatchedSamplingPlan()};
+}
+
+void DynamicBatchScheduler::ReapCompletedRequests() {
   auto allocated_requests = cache_manager_->AllocatedRequests();
   std::vector<std::shared_ptr<Request>> completed_requests;
   std::copy_if(allocated_requests.begin(), allocated_requests.end(),
@@ -103,28 +166,73 @@ ScheduledRequests DynamicBatchScheduler::Schedule() {
                        }),
         requests_pool_.end());
   }
+}
 
-  std::vector<std::shared_ptr<Request>> requests_to_schedule;
-  for (auto& request : requests_pool_) {
+StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
+  ReapCompletedRequests();
+
+  plan.requests.clear();
+  plan.token_count = 0;
+  plan.proposed_block_table_columns = 0;
+  plan.graph_capture_eligible = false;
+
+  const auto add_request = [&plan](const std::shared_ptr<Request>& request,
+                                   bool newly_admitted) {
+    const auto snapshot = request->Snapshot();
+    const RequestStatus expected_status =
+        newly_admitted ? RequestStatus::Assigned : RequestStatus::InProgress;
+    if (snapshot.status != expected_status) {
+      throw std::runtime_error("Request status is invalid for dynamic step planning.");
+    }
+    const auto unprocessed_token_count =
+        snapshot.current_sequence_length - snapshot.processed_sequence_length;
+    if (unprocessed_token_count <= 0) {
+      throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
+    }
+
+    RequestStepPlan entry;
+    entry.request = request;
+    entry.request_id = request.get();
+    entry.sequence_length_before = snapshot.current_sequence_length;
+    entry.unprocessed_token_count =
+        static_cast<size_t>(unprocessed_token_count);
+    entry.target_cache_slots = RequiredSlots(
+        static_cast<size_t>(snapshot.processed_sequence_length),
+        entry.unprocessed_token_count);
+    entry.is_prefill = snapshot.is_prefill;
+    entry.newly_admitted = newly_admitted;
+    plan.requests.push_back(std::move(entry));
+  };
+
+  const auto allocated_requests = cache_manager_->AllocatedRequests();
+  for (const auto& request : allocated_requests) {
+    add_request(request, false);
+  }
+  const size_t committed_request_count = plan.requests.size();
+
+  for (const auto& request : requests_pool_) {
     if (request->status_ == RequestStatus::Assigned) {
-      requests_to_schedule.push_back(request);
+      add_request(request, true);
     }
   }
 
-  for (auto& request : requests_to_schedule) {
-    if (cache_manager_->CanAllocate({request})) {
-      cache_manager_->Allocate({request});
-      request->Schedule();
-    }
+  auto result = cache_manager_->PlanStepResources(plan, committed_request_count);
+  if (!result.executable) {
+    return result;
   }
 
-  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
-
-  if (!scheduled_requests) {
-    throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
+  size_t packed_token_offset = 0;
+  plan.graph_capture_eligible = true;
+  for (auto& entry : plan.requests) {
+    entry.packed_token_offset = packed_token_offset;
+    entry.logits_row_index =
+        packed_token_offset + entry.unprocessed_token_count - 1;
+    packed_token_offset += entry.unprocessed_token_count;
+    plan.token_count += entry.unprocessed_token_count;
+    plan.graph_capture_eligible &=
+        !entry.is_prefill && entry.unprocessed_token_count == 1;
   }
-
-  return scheduled_requests;
+  return result;
 }
 
 bool DynamicBatchScheduler::HasPendingRequests() const {

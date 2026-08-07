@@ -33,11 +33,15 @@ size_t Block::Capacity() const {
 }
 
 void Block::AddSlot() {
-  if (IsFull()) {
-    throw std::runtime_error("Cannot add a slot. The block is full.");
+  AddSlots(1);
+}
+
+void Block::AddSlots(size_t slots) {
+  if (slots > EmptySlots()) {
+    throw std::runtime_error("Cannot add slots beyond the block capacity.");
   }
 
-  size_++;
+  size_ += slots;
 }
 
 std::vector<size_t> Block::SlotIds() const {
@@ -86,6 +90,38 @@ std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
+  // Validate every block before mutating any pool state so that an invalid request (a null block,
+  // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
+  // is rejected without partially freeing the batch. Work stays proportional to the batch size
+  // rather than the pool capacity.
+  std::vector<size_t> ids;
+  ids.reserve(blocks.size());
+  for (const auto& block : blocks) {
+    if (!block) {
+      throw std::runtime_error("Cannot free a null block.");
+    }
+
+    const size_t id = block->Id();
+    if (id >= Capacity()) {
+      throw std::runtime_error("Cannot free block with out-of-range id " + std::to_string(id) +
+                               " for a pool with capacity " + std::to_string(Capacity()) + ".");
+    }
+
+    if (blocks_[id] != block) {
+      throw std::runtime_error("Cannot free block with id " + std::to_string(id) +
+                               " that is not currently allocated by this pool.");
+    }
+
+    ids.push_back(id);
+  }
+
+  std::sort(ids.begin(), ids.end());
+  const auto duplicate = std::adjacent_find(ids.begin(), ids.end());
+  if (duplicate != ids.end()) {
+    throw std::runtime_error("Cannot free block with id " + std::to_string(*duplicate) +
+                             " more than once in the same call.");
+  }
+
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
   }
