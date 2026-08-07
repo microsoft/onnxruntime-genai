@@ -42,6 +42,11 @@ struct State {
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+  virtual void SetExtraInputsForAppend(const std::vector<ExtraInput>& extra_inputs, int64_t current_length) {
+    (void)extra_inputs;
+    (void)current_length;
+    throw std::runtime_error("AppendInputs is not supported for this model type.");
+  }
 
   void DumpInputs();
   void DumpOutputs();

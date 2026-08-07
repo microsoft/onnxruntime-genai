@@ -124,6 +124,8 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override;
 
+  void PrepareMultimodalAppend(int64_t position_offset);
+
   void SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                       const std::shared_ptr<Tensor>& video_grid_thw,
                       const std::shared_ptr<Tensor>& second_per_grid_ts);
@@ -162,6 +164,8 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::unique_ptr<Tensor> attention_mask_;
 
   bool is_first_update_{true};
+  bool force_multimodal_update_{false};
+  int64_t position_offset_{0};
 
   // Cached data from processor
   std::shared_ptr<Tensor> image_grid_thw_;

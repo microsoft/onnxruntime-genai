@@ -18,6 +18,7 @@ struct MultiModalFeatures {
   void Add();
   void Update(bool is_prompt);
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
+  void Reset(int64_t batch_size, int64_t num_feature_tokens);
 
   // Pre-allocate an empty features tensor for Input mode when no source session provides one.
   // Used when the embedding model requires an input (e.g., audio_features) but no corresponding
@@ -31,6 +32,8 @@ struct MultiModalFeatures {
   OrtValue* Get() { return features_.get(); }
 
  private:
+  void SetShape(int64_t batch_size, int64_t num_feature_tokens);
+
   State& state_;
   const Model& model_{state_.model_};
 
