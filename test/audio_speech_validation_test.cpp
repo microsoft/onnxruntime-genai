@@ -47,6 +47,15 @@ TEST(AudioSpeechValidationTests, NemotronMelDimensionValidation) {
   EXPECT_NE(mels_error.find("expected num_mels"), std::string::npos);
 }
 
+TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
+  EXPECT_NO_THROW(Generators::ValidateNemotronEncoderOutputRank({1, 64, 512}));
+
+  const std::string rank_error = GetExceptionMessage([] {
+    Generators::ValidateNemotronEncoderOutputRank({1, 64});
+  });
+  EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
+}
+
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
   EXPECT_NO_THROW(Generators::ValidateParakeetEncoderOutputShape({1, 512, 64}, 512));
 
