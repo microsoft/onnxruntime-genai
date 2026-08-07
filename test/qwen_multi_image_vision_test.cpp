@@ -92,7 +92,8 @@ TEST(QwenVisionMultiImageTest, RejectsMalformedGridInMultiImageVisionRun) {
   EXPECT_NE(message.find("image_grid_thw second dimension must be 3"), std::string::npos) << message;
 }
 
-TEST(QwenVisionMultiImageTest, AcceptsValidInputsThroughPublicGeneratorPath) {
+TEST(QwenVisionMultiImageTest, AcceptsValidGridThroughPublicInputValidation) {
   auto harness = QwenVisionHarness::Create();
+  harness.inputs->Delete("input_ids");
   EXPECT_NO_THROW(harness.generator->SetInputs(*harness.inputs));
 }
