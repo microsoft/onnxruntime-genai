@@ -27,13 +27,11 @@ import types
 
 import numpy as np
 import onnx_ir as ir
-import pytest
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src", "python", "py"))
 
 from models.builders.gemma import Gemma4Model
-
 
 # 6-layer synthetic config: 5 sliding + 1 full, mirroring the gemma4 pattern.
 LAYER_TYPES = ["sliding_attention"] * 5 + ["full_attention"] + ["sliding_attention"] * 4
@@ -46,15 +44,15 @@ def _make_minimal_config(**overrides):
         model_type="gemma4_unified_text",
         hidden_size=256,
         num_attention_heads=8,
-        num_key_value_heads=4,          # sliding KV heads
-        num_global_key_value_heads=1,   # full KV heads
+        num_key_value_heads=4,  # sliding KV heads
+        num_global_key_value_heads=1,  # full KV heads
         num_hidden_layers=len(layer_types),
         intermediate_size=512,
         vocab_size=128,
         max_position_embeddings=64,
         hidden_activation="gelu_pytorch_tanh",
-        head_dim=32,                    # sliding head dim
-        global_head_dim=64,             # full head dim
+        head_dim=32,  # sliding head dim
+        global_head_dim=64,  # full head dim
         sliding_window=16,
         rms_norm_eps=1e-6,
         layer_types=layer_types,
@@ -79,9 +77,7 @@ def _make_minimal_config(**overrides):
 def _hf_proportional_cos_sin(head_dim, base, partial_rotary_factor, cache_length):
     """HF _compute_proportional_rope_parameters reference (cos/sin, halved)."""
     rope_angles = int(partial_rotary_factor * head_dim // 2)
-    inv_freq_rotated = 1.0 / (
-        base ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.int64).float() / head_dim)
-    )
+    inv_freq_rotated = 1.0 / (base ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.int64).float() / head_dim))
     nope_angles = head_dim // 2 - rope_angles
     if nope_angles > 0:
         inv_freq = torch.cat((inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)), dim=0)

@@ -431,3 +431,243 @@ class Gemma4Model(Gemma3Model):
                 shape=["batch_size", "sequence_length", self.hidden_size],
             )
             self.layernorm_attrs[attr] = f"{mul_name}/output_0"
+
+
+class Gemma4MoEModel(Gemma4Model):
+    """Builder for the text decoder of Gemma4 MoE (gemma-4-26B-A4B-it).
+
+    Inherits the entire attention / RoPE / per-layer-KV / layer_scalar stack from
+    the dense `Gemma4Model`. The only structural difference is the FFN: every layer
+    runs a dense MLP AND a top-k expert MoE block in parallel, then sums them:
+
+        residual = hidden                         # after attention + post_attn norm
+        h1 = post_ffn_norm_1(mlp(pre_ffn_norm(residual)))         # dense branch
+        h2 = post_ffn_norm_2(experts(pre_ffn_norm_2(residual)))   # MoE branch
+        h  = post_ffn_norm(h1 + h2)
+        hidden = residual + h
+        hidden *= layer_scalar
+
+    Only `make_mlp` is overridden: the parent's LayerNorm/residual threading (and
+    layer_scalar) then work unchanged, with `make_mlp` producing the combined
+    dense+MoE contribution as the FFN block's `skip_input`.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # The base MoE init (base.Model) reads num_local_experts / num_experts_per_tok.
+        if not hasattr(config, "num_local_experts"):
+            config.num_local_experts = config.num_experts
+        if not hasattr(config, "num_experts_per_tok"):
+            config.num_experts_per_tok = config.top_k_experts
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Base __init__ prefers config.moe_intermediate_size for self.intermediate_size
+        # when present. Gemma4 keeps a parallel DENSE MLP alongside the experts, so pin
+        # self.intermediate_size back to the dense size (config.intermediate_size) and
+        # track the expert size separately as moe_intermediate_size.
+        self.intermediate_size = config.intermediate_size
+        self.moe_intermediate_size = config.moe_intermediate_size
+
+        # Gemma4 experts use GeGLU (gelu_pytorch_tanh(gate) * up). This maps to the fused QMoE
+        # op's "geglu" activation with swiglu_fusion=1 (interleaved gate|up), which applies the
+        # gelu-tanh gate on the gate half. HF renormalizes the selected top-k weights to sum to 1.
+        self.moe_attrs["activation_type"] = "geglu"
+        self.moe_attrs["swiglu_fusion"] = 1
+        self.moe_attrs["normalize_routing_weights"] = True
+
+        # MoE layers emit MoE/QMoE ops instead of dense /mlp/ MatMuls for the experts, but
+        # the parallel DENSE mlp is still a normal MatMul path — keep its mixed-precision
+        # overrides. (No pruning needed here, unlike pure-MoE models.)
+
+    def load_weights(self, input_path):
+        # Same text-only remap as the dense model, but the MoE checkpoint is a
+        # `Gemma4ForConditionalGeneration` whose text tower is `Gemma4ForCausalLM`.
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super(Gemma4Model, self).load_weights(input_path)
+
+        import glob
+
+        from safetensors import safe_open
+        from transformers import AutoConfig
+        from transformers.models.gemma4 import Gemma4ForCausalLM
+
+        config = AutoConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote
+        )
+        text_config = config.text_config
+        text_config.num_hidden_layers = self.num_layers
+        text_config.layer_types = text_config.layer_types[: self.num_layers]
+
+        with torch.device("meta"):
+            model = Gemma4ForCausalLM(text_config)
+
+        prefix = "model.language_model."
+        state_dict = {}
+        for shard in sorted(glob.glob(os.path.join(self.model_name_or_path, "*.safetensors"))):
+            with safe_open(shard, framework="pt") as f:
+                for key in f.keys():
+                    if not key.startswith(prefix):
+                        continue
+                    new_key = key[len(prefix) :]
+                    if new_key.startswith("layers."):
+                        if int(new_key.split(".")[1]) >= self.num_layers:
+                            continue
+                    state_dict["model." + new_key] = f.get_tensor(key)
+
+        if getattr(text_config, "tie_word_embeddings", False):
+            state_dict["lm_head.weight"] = state_dict["model.embed_tokens.weight"]
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        if missing:
+            raise ValueError(f"Missing weights while loading Gemma4 MoE text model: {missing}")
+        if unexpected:
+            raise ValueError(f"Unexpected weights while loading Gemma4 MoE text model: {unexpected}")
+
+        return model
+
+    def make_layer(self, layer_id, layer):
+        # Stash the full layer so make_mlp can reach the router/experts/extra norms
+        # (the parent only passes layer.mlp to make_mlp).
+        self._current_layer = layer
+        super().make_layer(layer_id, layer)
+        self._current_layer = None
+
+    def make_gemma4_rmsnorm(self, name, root_input, weight, with_scale=True):
+        # Standalone Gemma4 RMSNorm (SimplifiedLayerNormalization, fp32 accumulation)
+        # on a [B, S, H] tensor. `weight` is the HF parameter (or None if scaleless).
+        weight_name = f"model.{name}.weight"
+        if with_scale:
+            self.make_initializer(weight + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+        else:
+            self.make_initializer(torch.ones(self.hidden_size), weight_name, to=self.io_dtype)
+        # Node paths use '/' separators (initializer names keep the '.'-joined form).
+        ln_name = f"/model/{name.replace('.', '/')}/SimplifiedLayerNormalization"
+        output = f"{ln_name}/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=[root_input, weight_name],
+            outputs=[output],
+            name=ln_name,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        return output
+
+    def make_mlp(self, layer_id, mlp, root_input):
+        # Build the parallel dense-MLP + MoE FFN. `root_input` is
+        # pre_feedforward_layernorm(residual); the pre-FFN residual itself is carried
+        # in layernorm_attrs["root_input"] (output_3 of the pre-FFN SkipLayerNorm).
+        layer = self._current_layer
+        residual = self.layernorm_attrs["root_input"]
+
+        # --- Dense branch: mlp(root_input) -> post_feedforward_layernorm_1 ---
+        super().make_mlp(layer_id, mlp, root_input)
+        dense_out = self.layernorm_attrs["skip_input"]
+        h1 = self.make_gemma4_rmsnorm(
+            f"layers.{layer_id}.post_feedforward_layernorm_1", dense_out, layer.post_feedforward_layernorm_1.weight
+        )
+
+        # --- MoE branch on the pre-FFN residual ---
+        expert_input = self.make_gemma4_rmsnorm(
+            f"layers.{layer_id}.pre_feedforward_layernorm_2", residual, layer.pre_feedforward_layernorm_2.weight
+        )
+        moe_out = self.make_moe(layer_id, layer, router_input=residual, expert_input=expert_input)
+        h2 = self.make_gemma4_rmsnorm(
+            f"layers.{layer_id}.post_feedforward_layernorm_2", moe_out, layer.post_feedforward_layernorm_2.weight
+        )
+
+        # --- Combine dense + MoE; the sum is the FFN block contribution ---
+        combine_name = f"/model/layers.{layer_id}/ffn_combine/Add"
+        self.make_add(
+            combine_name, [h1, h2], dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
+        )
+        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
+
+    def make_moe(self, layer_id, layer, router_input, expert_input):
+        # Router pre-projection (built as explicit nodes) feeds raw logits to the fused
+        # MoE/QMoE op; the op runs the experts on `expert_input` and does topk+softmax
+        # internally. Returns the MoE op output tensor name.
+        basename = f"/model/layers.{layer_id}/moe"
+        op_type = self.moe_attrs["moe_op_type"]
+        num_experts = self.moe_attrs["num_experts"]
+        router = layer.router
+
+        # scaleless RMSNorm(router_input) * router.scale * hidden^-0.5
+        router_norm = self.make_gemma4_rmsnorm(
+            f"layers.{layer_id}.moe.router.norm", router_input, None, with_scale=False
+        )
+        scale_vec = router.scale * (self.hidden_size**-0.5)
+        scale_name = f"model.layers.{layer_id}.moe.router.scale"
+        self.make_initializer(scale_vec, scale_name, to=self.io_dtype)
+        scale_mul_name = f"{basename}/router/scale/Mul"
+        self.make_mul(
+            scale_mul_name,
+            [router_norm, scale_name],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+
+        # Router projection -> logits, reshaped to [tokens, num_experts]
+        router_matmul_name = self.make_matmul(router.proj, f"{basename}/router/MatMul", f"{scale_mul_name}/output_0")
+        router_reshape_name = f"{basename}/router/Reshape"
+        self.make_reshape(
+            router_reshape_name,
+            [f"{router_matmul_name}/output_0", f"/model/constants/INT64/{[-1, num_experts]}"],
+            dtype=self.io_dtype,
+            shape=["batch_size * sequence_length", num_experts],
+        )
+
+        # Expert weights. HF: experts.gate_up_proj [E, 2*inter, hidden] (gate|up concat),
+        # experts.down_proj [E, hidden, inter]. Fold per_expert_scale into down_proj (a pure
+        # per-expert output constant, exactly equivalent to scaling each expert's output).
+        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
+        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
+        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
+        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
+        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
+        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
+        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+
+        raw_gate_up = layer.experts.gate_up_proj
+        half = raw_gate_up.shape[1] // 2
+        # Interleave [gate|up] -> [g0,u0,g1,u1,...] for swiglu_fusion=1.
+        interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+        down_scaled = layer.experts.down_proj * layer.router.per_expert_scale.reshape(-1, 1, 1)
+
+        if op_type == "MoE":
+            self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(down_scaled, down_proj_weight, to=self.io_dtype)
+        else:
+            gate_up_qw, gate_up_sc, down_qw, down_sc = [], [], [], []
+            for i in range(num_experts):
+                qw1, sc1 = self.make_qmoe_weights(interleaved[i])
+                gate_up_qw.append(qw1)
+                gate_up_sc.append(sc1)
+                qw2, sc2 = self.make_qmoe_weights(down_scaled[i])
+                down_qw.append(qw2)
+                down_sc.append(sc2)
+            self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_proj_weight)
+            self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_proj_weight)
+            self.make_initializer(torch.stack(gate_up_sc, dim=0), gate_up_proj_scales, to=self.io_dtype)
+            self.make_initializer(torch.stack(down_sc, dim=0), down_proj_scales, to=self.io_dtype)
+
+        # Experts have no bias; the op still expects the (empty) bias inputs.
+        self.make_initializer(
+            torch.zeros(num_experts, 2 * self.moe_intermediate_size), gate_up_proj_bias, to=self.io_dtype
+        )
+        self.make_initializer(torch.zeros(num_experts, self.hidden_size), down_proj_bias, to=self.io_dtype)
+
+        moe_name = f"{basename}/{op_type}"
+        self.make_moe_op(
+            moe_name,
+            root_input=expert_input,
+            router_probs=f"{router_reshape_name}/output_0",
+            weight1=gate_up_proj_weight,
+            scales1=gate_up_proj_scales if op_type == "QMoE" else "",
+            bias1=gate_up_proj_bias,
+            weight2=down_proj_weight,
+            scales2=down_proj_scales if op_type == "QMoE" else "",
+            bias2=down_proj_bias,
+        )
+        return f"{moe_name}/output_0"

@@ -22,6 +22,7 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4MoEModel,
     Gemma4Model,
     GemmaModel,
     GPTOSSModel,
@@ -485,6 +486,15 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
         text_config = config.text_config
         for key in text_config:
