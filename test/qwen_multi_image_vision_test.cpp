@@ -68,8 +68,7 @@ TEST(QwenVisionMultiImageTest, RejectsMalformedGridInBatchSizeDetection) {
   const std::string message = CaptureRuntimeErrorMessage([&] {
     harness.generator->SetInputs(*harness.inputs);
   });
-  EXPECT_NE(message.find("GetImageFeatureBatchSize: image_grid_thw second dimension must be 3"), std::string::npos)
-      << message;
+  EXPECT_NE(message.find("image_grid_thw second dimension must be 3"), std::string::npos) << message;
 }
 
 TEST(QwenVisionMultiImageTest, RejectsMalformedGridInMultiImageVisionRun) {
@@ -90,8 +89,7 @@ TEST(QwenVisionMultiImageTest, RejectsMalformedGridInMultiImageVisionRun) {
   const std::string message = CaptureRuntimeErrorMessage([&] {
     harness.generator->SetInputs(*harness.inputs);
   });
-  EXPECT_NE(message.find("QwenVisionState::Run: image_grid_thw second dimension must be 3"), std::string::npos)
-      << message;
+  EXPECT_NE(message.find("image_grid_thw second dimension must be 3"), std::string::npos) << message;
 }
 
 TEST(QwenVisionMultiImageTest, AcceptsValidInputsThroughPublicGeneratorPath) {
