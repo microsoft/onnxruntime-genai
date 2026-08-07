@@ -233,7 +233,7 @@ class Qwen25VLTextModel(Model):
         # MatMul: [3, B, H/2, 1] @ [3, B, 1, S] -> [3, B, H/2, S]
         matmul_name = f"{basename}/freqs/MatMul"
         matmul_output = f"{matmul_name}/output_0"
-        self.make_node("MatMul", [expand_output, cast_output], [matmul_output], name=matmul_name)
+        self.op.MatMul(expand_output, cast_output, _name=matmul_name, _outputs=[matmul_output])
         self.make_value(
             matmul_output,
             ir.DataType.FLOAT,
@@ -326,11 +326,9 @@ class Qwen25VLTextModel(Model):
             # Create a Constant node for mrope_sections: [16, 24, 24]
             sections_name = f"{basename}/mrope_sections/Constant"
             sections_output = f"{basename}/mrope_sections"
-            self.make_node(
-                "Constant",
-                [],
-                [sections_output],
-                name=sections_name,
+            self.op.Constant(
+                _name=sections_name,
+                _outputs=[sections_output],
                 value=ir.tensor(torch.tensor(self.mrope_sections, dtype=torch.int64), name=sections_output),
             )
             self.make_value(sections_output, ir.DataType.INT64, [3])
@@ -338,13 +336,7 @@ class Qwen25VLTextModel(Model):
             # 2. Split: [3, B, S, H/2] -> 3 * [3, B, S, section_dim]
             split_name = f"{basename}/{name_suffix}/Split"
             split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
-            self.make_node(
-                "Split",
-                [slice_output, sections_output],
-                split_outputs,
-                name=split_name,
-                axis=-1,
-            )
+            self.op.Split(slice_output, sections_output, _name=split_name, _outputs=split_outputs, axis=-1)
 
             # 3. Gather + Squeeze: Reorder T, H, W
             gathered_chunks = []
@@ -352,11 +344,11 @@ class Qwen25VLTextModel(Model):
                 # Chunk 0->T(0), Chunk 1->H(1), Chunk 2->W(2)
                 gather_name = f"{basename}/{name_suffix}/chunk_{i}/Gather"
                 gather_output = f"{gather_name}/output_0"
-                self.make_node(
-                    "Gather",
-                    [split_outputs[i], f"/model/constants/INT64/[{i}]"],
-                    [gather_output],
-                    name=gather_name,
+                self.op.Gather(
+                    split_outputs[i],
+                    f"/model/constants/INT64/[{i}]",
+                    _name=gather_name,
+                    _outputs=[gather_output],
                     axis=0,
                 )
                 # Gather output is [1, B, S, dim]
@@ -536,12 +528,14 @@ class Qwen25VLTextModel(Model):
         # 5. RotaryEmbedding Node
         rope_node = f"{basename}/RotaryEmbedding"
         rope_output = f"{rope_node}/output_0"
-        self.make_node(
-            "RotaryEmbedding",
-            [rope_input, pos_ids_out, rope_cos, rope_sin],
-            [rope_output],
-            name=rope_node,
-            domain="com.microsoft",
+        self.op.RotaryEmbedding(
+            rope_input,
+            pos_ids_out,
+            rope_cos,
+            rope_sin,
+            _name=rope_node,
+            _outputs=[rope_output],
+            _domain="com.microsoft",
             rotary_embedding_dim=self.head_size,
             num_heads=num_heads,
             interleaved=0,  # False, matches rotate_half logic
@@ -772,11 +766,9 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
                     continue
                 pname = f"{shared_base}/dim{dim_idx}/Positions/Constant"
                 pout = f"{shared_base}/dim{dim_idx}/positions"
-                self.make_node(
-                    "Constant",
-                    [],
-                    [pout],
-                    name=pname,
+                self.op.Constant(
+                    _name=pname,
+                    _outputs=[pout],
                     value=ir.tensor(torch.tensor(positions, dtype=torch.int64), name=pout),
                 )
                 self.make_value(pout, ir.DataType.INT64, [len(positions)])
@@ -785,11 +777,9 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
             # Emit shared reorder constant
             rname = f"{shared_base}/Reorder/Constant"
             rout = f"{shared_base}/reorder"
-            self.make_node(
-                "Constant",
-                [],
-                [rout],
-                name=rname,
+            self.op.Constant(
+                _name=rname,
+                _outputs=[rout],
                 value=ir.tensor(torch.tensor(reorder_indices, dtype=torch.int64), name=rout),
             )
             self.make_value(rout, ir.DataType.INT64, [half_head])
@@ -830,11 +820,11 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
                 # Gather this dimension: [3, B, S, H/2] -> [1, B, S, H/2] via index dim_idx on axis 0
                 gather_dim_name = f"{basename}/{name_suffix}/dim{dim_idx}/Gather"
                 gather_dim_output = f"{gather_dim_name}/output_0"
-                self.make_node(
-                    "Gather",
-                    [slice_output, f"/model/constants/INT64/[{dim_idx}]"],
-                    [gather_dim_output],
-                    name=gather_dim_name,
+                self.op.Gather(
+                    slice_output,
+                    f"/model/constants/INT64/[{dim_idx}]",
+                    _name=gather_dim_name,
+                    _outputs=[gather_dim_output],
                     axis=0,
                 )
 
@@ -1217,11 +1207,11 @@ class Qwen35TextModel(Model):
         split_name = f"/model/layers.{layer_id}/attn/q_gate_split/Split"
         q_4d_output = f"{split_name}/output_0"
         gate_4d_output = f"{split_name}/output_1"
-        self.make_node(
-            "Split",
-            [rs_qg_output, f"/model/constants/INT64/[{self.head_size}, {self.head_size}]"],
-            [q_4d_output, gate_4d_output],
-            name=split_name,
+        self.op.Split(
+            rs_qg_output,
+            f"/model/constants/INT64/[{self.head_size}, {self.head_size}]",
+            _name=split_name,
+            _outputs=[q_4d_output, gate_4d_output],
             axis=-1,
         )
         self.make_value(
@@ -1464,7 +1454,7 @@ class Qwen35TextModel(Model):
         the product implicitly (Reshape is metadata-only) and avoids an
         explicit INT64 Mul that would fall back to CPU on WebGPU.
 
-        Uses a fixed basename so ``make_node`` dedup ensures nodes are
+        Uses a fixed basename so the op builder's node-name dedup ensures nodes are
         created once and reused across all layers and Q/K calls.
         """
         basename = "/model/attn/synthetic_pos_ids"
@@ -1579,7 +1569,7 @@ class Qwen35TextModel(Model):
         # --- Build synthetic position_ids [B, S] = Range(0, B*S).reshape(B, S) ---
         # Derive B and S from the position_ids input [3, B, S] instead of
         # using Shape on intermediate Q/K tensors.  Shared across all layers
-        # and Q/K calls via make_node dedup.
+        # and Q/K calls via the op builder's node-name dedup.
         pos_ids = self._make_synthetic_position_ids()
 
         # --- Reshape Q/K to [B, N, S, H] for com.microsoft.RotaryEmbedding ---
@@ -1611,15 +1601,17 @@ class Qwen35TextModel(Model):
         # --- com.microsoft.RotaryEmbedding ---
         rope_name = f"{basename}/RotaryEmbedding"
         rope_out = f"{rope_name}/output_0"
-        self.make_node(
-            "RotaryEmbedding",
-            [rope_input, pos_ids, rope_cos, rope_sin],
-            [rope_out],
-            name=rope_name,
-            domain="com.microsoft",
+        self.op.RotaryEmbedding(
+            rope_input,
+            pos_ids,
+            rope_cos,
+            rope_sin,
+            _name=rope_name,
+            _outputs=[rope_out],
+            _domain="com.microsoft",
             num_heads=num_heads,
             rotary_embedding_dim=self.mrope_rotary_dim,
-            interleaved=0,
+            interleaved=0,  # False, matches rotate_half logic
         )
         self.make_value(rope_out, compute_dtype, bnsh_shape)
 
@@ -1808,11 +1800,11 @@ class Qwen35TextModel(Model):
         q_out = f"{split_qkv_name}/output_0"
         k_out = f"{split_qkv_name}/output_1"
         v_out = f"{split_qkv_name}/output_2"
-        self.make_node(
-            "Split",
-            [conv_out_3d, f"/model/constants/INT64/[{k_dim}, {k_dim}, {v_dim}]"],
-            [q_out, k_out, v_out],
-            name=split_qkv_name,
+        self.op.Split(
+            conv_out_3d,
+            f"/model/constants/INT64/[{k_dim}, {k_dim}, {v_dim}]",
+            _name=split_qkv_name,
+            _outputs=[q_out, k_out, v_out],
             axis=-1,
         )
         self.make_value(q_out, self.io_dtype, ["batch_size", "sequence_length", k_dim])
@@ -1978,11 +1970,11 @@ class Qwen35TextModel(Model):
         # SimplifiedLayerNormalization (com.microsoft, no offset for gated norm)
         norm_name = f"{basename}/SimplifiedLayerNormalization"
         norm_output = f"{norm_name}/output_0"
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            [flat_output, norm_weight],
-            [norm_output],
-            name=norm_name,
+        self.op.SimplifiedLayerNormalization(
+            flat_output,
+            norm_weight,
+            _name=norm_name,
+            _outputs=[norm_output],
             epsilon=self.layernorm_attrs["epsilon"],
             axis=-1,
             stash_type=1,

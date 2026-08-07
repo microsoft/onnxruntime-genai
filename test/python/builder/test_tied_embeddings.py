@@ -324,14 +324,12 @@ def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetri
     def _make_reshape(name, inputs, dtype, shape):
         model._reshape_calls.append((name, inputs, dtype, shape))
 
-    def _make_node(op_type, inputs, outputs, name, **kwargs):
-        model._node_calls.append((op_type, inputs, outputs, name, kwargs))
 
     def _make_value(_name, _dtype, shape=None):
         return shape
 
     model.make_reshape = _make_reshape
-    model.make_node = _make_node
+    model.op = _RecordingOps(model._node_calls)
     model.make_value = _make_value
 
     return model
@@ -393,7 +391,7 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
 
     gather_calls = [call for call in model._node_calls if call[0] == "GatherBlockQuantized"]
     assert len(gather_calls) == 1
-    gather_inputs = gather_calls[0][1]
+    gather_inputs = gather_calls[0][1]["inputs"]
     if expected_scale_name:  # Only check scale name if it's not empty
         assert expected_scale_name in gather_inputs
     if expected_zp_name is not None:
@@ -401,6 +399,22 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     else:
         assert "lm_head.MatMul.weight_zp" not in gather_inputs
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
+
+
+class _RecordingOps:
+    """Stand-in for ``Model.op`` that records the ops a builder method creates.
+
+    Each recorded entry is ``(op_type, {"inputs": [...], **attributes})``.
+    """
+
+    def __init__(self, sink):
+        self._sink = sink
+
+    def __getattr__(self, op_type):
+        def record(*inputs, _name=None, _outputs=None, _domain="", **attributes):
+            self._sink.append((op_type, {"inputs": list(inputs), "outputs": _outputs, "name": _name, **attributes}))
+
+        return record
 
 
 def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
@@ -430,15 +444,13 @@ def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=Fals
     def _make_initializer(tensor, name, to=None):
         model._initializer_calls.append((tensor, name, to))
 
-    def _make_node(op_type, **kwargs):
-        model._node_calls.append((op_type, kwargs))
 
     def _make_value(name, dtype, shape):
         model._value_calls.append((name, dtype, shape))
 
     model.make_transpose = _make_transpose
     model.make_initializer = _make_initializer
-    model.make_node = _make_node
+    model.op = _RecordingOps(model._node_calls)
     model.make_value = _make_value
     return model
 
@@ -508,15 +520,13 @@ def _make_minimal_model_for_int4_matmul():
     def _make_initializer(tensor, name, to=None):
         model._initializers.append((name, to, tensor))
 
-    def _make_node(op_type, **kwargs):
-        model._nodes.append((op_type, kwargs))
 
     def _make_value(name, dtype, shape):
         model._values.append((name, dtype, shape))
 
     model.make_matmul_float = _make_matmul_float
     model.make_initializer = _make_initializer
-    model.make_node = _make_node
+    model.op = _RecordingOps(model._nodes)
     model.make_value = _make_value
     return model
 

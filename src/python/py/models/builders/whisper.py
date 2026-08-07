@@ -87,7 +87,7 @@ class WhisperEncoder(Model):
 
         gelu_1_name = f"{basename}/Gelu_1"
         gelu_1_output = f"{gelu_1_name}/output_0"
-        self.make_node("Gelu", inputs=[f"{conv_1_name}/output_0"], outputs=[gelu_1_output], name=gelu_1_name, approximate="none")
+        self.op.Gelu(f"{conv_1_name}/output_0", _name=gelu_1_name, _outputs=[gelu_1_output], approximate="none")
         self.make_value(gelu_1_output, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, 3000])
 
         conv_2_weight = "encoder.conv2.weight"
@@ -101,7 +101,7 @@ class WhisperEncoder(Model):
 
         gelu_2_name = f"{basename}/Gelu_2"
         gelu_2_output = f"{gelu_2_name}/output_0"
-        self.make_node("Gelu", inputs=[f"{conv_2_name}/output_0"], outputs=[gelu_2_output], name=gelu_2_name, approximate="none")
+        self.op.Gelu(f"{conv_2_name}/output_0", _name=gelu_2_name, _outputs=[gelu_2_output], approximate="none")
         self.make_value(gelu_2_output, dtype=self.io_dtype, shape=["batch_size", self.hidden_size, self.max_source_positions])
 
         transpose_name = f"{basename}/Transpose"
@@ -173,11 +173,10 @@ class WhisperEncoder(Model):
 
                 transpose_name = f"{basename}/Transpose"
                 output_name = f"present_{'key' if proj_type == 'k_proj' else 'value'}_cross_{i}"
-                self.make_node(
-                    "Transpose",
-                    inputs=[f"{reshape_name}/output_0"],
-                    outputs=[output_name],
-                    name=transpose_name,
+                self.op.Transpose(
+                    f"{reshape_name}/output_0",
+                    _name=transpose_name,
+                    _outputs=[output_name],
                     perm=[0, 2, 1, 3],
                 )
 

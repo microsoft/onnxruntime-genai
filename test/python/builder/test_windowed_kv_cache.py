@@ -55,6 +55,19 @@ Model = base_module.Model
 # ===========================================================================
 
 
+class _RecordingOps:
+    """Stand-in for ``Model.op`` that records the ops a builder method creates."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def __getattr__(self, op_type):
+        def record(*inputs, _name=None, _outputs=None, _domain="", **attributes):
+            self._model.nodes.append({"op_type": op_type, "inputs": list(inputs), "attributes": attributes})
+
+        return record
+
+
 def _make_gqa_model(ep, window_size):
     model = Model.__new__(Model)
     model.ep = ep
@@ -78,10 +91,7 @@ def _make_gqa_model(ep, window_size):
     model.io_dtype = None
     model.nodes = []
 
-    def make_node(op_type, inputs, outputs, name, domain="", **attributes):
-        model.nodes.append({"op_type": op_type, "inputs": inputs, "attributes": attributes})
-
-    model.make_node = make_node
+    model.op = _RecordingOps(model)
     model.make_value = lambda *args, **kwargs: None
     return model
 

@@ -529,6 +529,19 @@ def test_scale_file_with_wrong_per_channel_size_is_rejected(tmp_path):
 # ===========================================================================
 
 
+class _RecordingOps:
+    """Stand-in for ``Model.op`` that records the ops a builder method creates."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def __getattr__(self, op_type):
+        def record(*inputs, _name=None, _outputs=None, _domain="", **attributes):
+            self._model.nodes.append({"op_type": op_type, "inputs": list(inputs), "attributes": attributes})
+
+        return record
+
+
 def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_cache_bit_width=8):
     model = Model.__new__(Model)
     model.num_attn_heads = 8
@@ -549,10 +562,7 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
     model.kv_cache_bit_width = kv_cache_bit_width
     model.nodes = []
 
-    def make_node(op_type, inputs, outputs, name, domain="", **attributes):
-        model.nodes.append({"op_type": op_type, "inputs": inputs, "attributes": attributes})
-
-    model.make_node = make_node
+    model.op = _RecordingOps(model)
     model.make_value = lambda *args, **kwargs: None
     return model
 

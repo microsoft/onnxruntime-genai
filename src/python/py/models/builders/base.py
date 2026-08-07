@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import onnx_ir as ir
 import torch
+from onnx_ir import _tape as ir_tape
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -34,6 +35,72 @@ from transformers import (
 
 from .cuda_quantizer import CudaQuantizer
 from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
+
+
+class ModelGraphBuilder(ir_tape.Builder):
+    """``onnx_ir._tape.Builder`` bound to the model graph.
+
+    Provides the same ``op.MatMul(...)``, ``op.Reshape(...)``, ``op.Cast(...)``, ... syntax
+    that onnxscript uses to author ONNX graphs (``onnxscript.rewriter``'s
+    ``RewriterContext`` is the same class). Every op in the model builder is created
+    through this object, e.g.::
+
+        self.op.MatMul(root_input, weight, _name=name, _outputs=[output])
+
+    Because the model builder addresses values and nodes by their string names, this
+    subclass extends the ``Builder`` protocol with a few ``_``-prefixed keywords:
+
+    * ``_name``  - the node name (required).
+    * ``_outputs`` - a sequence of output value names.  Defaults to ``[f"{_name}/output_0"]``.
+    * ``_domain`` - the op domain, e.g. ``"com.microsoft"`` (inherited from ``Builder``).
+
+    Positional inputs may be ``str`` (a value name, resolved against the model's value
+    table, auto-materializing ``/model/constants/...`` entries), an ``ir.Value``, or
+    ``None``/``""`` for a missing optional input.
+    """
+
+    def __init__(self, model: Model) -> None:
+        super().__init__(model.graph)
+        self._model = model
+
+    def _make_node(self, op_type: str, inputs, kwargs: dict):
+        model = self._model
+        name = kwargs.pop("_name", None)
+        domain = kwargs.pop("_domain", "") or ""
+        version = kwargs.pop("_version", None)
+        outputs = kwargs.pop("_outputs", None)
+
+        assert name, "Node name must be provided"
+        if name in model.node_names:
+            # Note:
+            #
+            # This approach allows functions that make similar subgraphs with the same naming schema
+            # to share existing nodes without needing to know whether the nodes already exist or not
+            # (e.g. attention mask subgraphs).
+            #
+            # This means that the nodes can be created in those functions regardless of their actual
+            # status in the graph. This check can then decide whether the proposed node actually
+            # needs to be added into the graph or not.
+            return None
+
+        if outputs is None:
+            outputs = [f"{name}/output_0"]
+
+        input_values = [model.resolve_value(value) for value in inputs]
+        # Output names are never constants, so they are resolved without materializing `Constant` nodes
+        output_values = [value if isinstance(value, ir.Value) else model.make_value(value or "") for value in outputs]
+
+        results = self.op_multi_out(
+            op_type,
+            inputs=input_values,
+            attributes=kwargs,
+            domain=domain,
+            version=version,
+            name=name,
+            outputs=output_values,
+        )
+        model.node_names.add(name)
+        return results[0] if len(results) == 1 else results
 
 
 class Model:
@@ -204,6 +271,10 @@ class Model:
 
         # Store names of nodes already created
         self.node_names = set()
+
+        # onnxscript-style op builder used to create every op in the graph
+        # (e.g. `self.op.MatMul(...)`, `self.op.Reshape(...)`)
+        self.op = ModelGraphBuilder(self)
 
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
@@ -1351,30 +1422,28 @@ class Model:
         self.model.graph.register_initializer(value)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
-        assert name, "Node name must be provided"
-        if name in self.node_names:
-            # Note:
-            #
-            # This approach allows functions that make similar subgraphs with the same naming schema
-            # to share existing nodes without needing to know whether the nodes already exist or not
-            # (e.g. attention mask subgraphs).
-            #
-            # This means that the nodes can be created in those functions regardless of their actual
-            # status in the graph. This checks can then decide whether the proposed node actually
-            # needs to be added into the graph or not.
-            return
+        """Create a node in the graph through the onnxscript-style op builder.
 
+        This is a thin, name-based facade over ``self.op.<OpType>(...)``. Prefer calling
+        ``self.op.<OpType>(...)`` directly in new code.
+        """
+        return getattr(self.op, op_type)(*inputs, _name=name, _domain=domain, _outputs=outputs, **kwargs)
+
+    def resolve_value(self, value: str | ir.Value | None) -> ir.Value:
+        """Resolve an op input/output into an ``ir.Value``.
+
+        Strings are looked up (or created) in the model's value table; ``/model/constants/...``
+        names are materialized as ``Constant`` nodes on first use. ``ir.Value`` instances are
+        returned as-is, and ``None``/``""`` map to a missing optional input/output.
+        """
+        if value is None:
+            return ir.Value(name="")
+        if isinstance(value, ir.Value):
+            return value
         # Save any constants as nodes
-        for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.node_names:
-                self.make_constant(input_name)
-
-        # Resolve values from names
-        input_values = [self.make_value(name) for name in inputs]
-        output_values = [self.make_value(name) for name in outputs]
-        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
-        self.model.graph.append(node)
-        self.node_names.add(name)
+        if value.startswith("/model/constants") and value.replace("constants", "constant_nodes") not in self.node_names:
+            self.make_constant(value)
+        return self.make_value(value)
 
     def make_value(
         self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None
@@ -1440,107 +1509,107 @@ class Model:
         tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
-        self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
+        self.op.Constant(_name=node_name, _outputs=[name], value=tensor)
         self.make_value(name, onnx_dtype, shape=[])
 
     def make_gather(self, name, inputs, dtype, shape, axis):
         output = f"{name}/output_0"
-        self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.op.Gather(*inputs, _name=name, _outputs=[output], axis=axis)
         self.make_value(output, dtype, shape=shape)
 
     def make_reshape(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
+        self.op.Reshape(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_shape(self, name, root_input, shape):
         output = f"{name}/output_0"
-        self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
+        self.op.Shape(root_input, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("ConstantOfShape", inputs=[root_input], outputs=[output], name=name, value=value)
+        self.op.ConstantOfShape(root_input, _name=name, _outputs=[output], value=value)
         self.make_value(output, dtype, shape=shape)
 
     def make_unsqueeze(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Unsqueeze", inputs=inputs, outputs=[output], name=name)
+        self.op.Unsqueeze(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_squeeze(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Squeeze", inputs=inputs, outputs=[output], name=name)
+        self.op.Squeeze(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_concat(self, name, inputs, dtype, shape, axis=0):
         output = f"{name}/output_0"
-        self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.op.Concat(*inputs, _name=name, _outputs=[output], axis=axis)
         self.make_value(output, dtype, shape=shape)
 
     def make_tile(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Tile", inputs=inputs, outputs=[output], name=name)
+        self.op.Tile(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
-        self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
+        self.op.Equal(*inputs, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_greater(self, name, inputs, shape):
         output = f"{name}/output_0"
-        self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
+        self.op.Greater(*inputs, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_greater_or_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
-        self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
+        self.op.GreaterOrEqual(*inputs, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_and(self, name, inputs, shape):
         output = f"{name}/output_0"
-        self.make_node("And", inputs=inputs, outputs=[output], name=name)
+        self.op.And(*inputs, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_isinf(self, name, root_input, shape):
         output = f"{name}/output_0"
-        self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
+        self.op.IsInf(root_input, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_clip(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Clip", inputs=inputs, outputs=[output], name=name)
+        self.op.Clip(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_where(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Where", inputs=inputs, outputs=[output], name=name)
+        self.op.Where(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_expand(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Expand", inputs=inputs, outputs=[output], name=name)
+        self.op.Expand(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_reduce_sum(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        self.make_node("ReduceSum", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.op.ReduceSum(*inputs, _name=name, _outputs=[output], keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_reduce_max(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.op.ReduceMax(*inputs, _name=name, _outputs=[output], keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.op.ReduceMean(*inputs, _name=name, _outputs=[output], keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
+        self.op.Sqrt(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_rsqrt(self, name, inputs, dtype, shape):
@@ -1548,102 +1617,102 @@ class Model:
         sqrt_name = f"{name}/Sqrt"
         self.make_sqrt(sqrt_name, inputs, dtype, shape)
         output = f"{name}/output_0"
-        self.make_node("Reciprocal", inputs=[f"{sqrt_name}/output_0"], outputs=[output], name=f"{name}/Reciprocal")
+        self.op.Reciprocal(f"{sqrt_name}/output_0", _name=f"{name}/Reciprocal", _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_cast(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
+        self.op.Cast(root_input, _name=name, _outputs=[output], to=dtype)
         self.make_value(output, dtype, shape=shape)
 
     def make_add(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Add", inputs=inputs, outputs=[output], name=name)
+        self.op.Add(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Sub", inputs=inputs, outputs=[output], name=name)
+        self.op.Sub(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_less(self, name, inputs):
         output = f"{name}/output_0"
-        self.make_node("Less", inputs=inputs, outputs=[output], name=name)
+        self.op.Less(*inputs, _name=name, _outputs=[output])
         self.make_value(output, ir.DataType.BOOL, shape=None)
 
     def make_range(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Range", inputs=inputs, outputs=[output], name=name)
+        self.op.Range(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
+        self.op.Slice(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1):
-        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
+        self.op.Split(*inputs, _name=name, _outputs=outputs, axis=axis)
         for out, dt, shape in zip(outputs, dtypes, shapes):
             self.make_value(out, dt, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
+        self.op.Mul(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
-        self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
+        self.op.Transpose(root_input, _name=name, _outputs=[output], perm=perm)
         self.make_value(output, dtype, shape=shape)
 
     def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
         output = f"{name}/output_0"
-        self.make_node("LpNormalization", inputs=[root_input], outputs=[output], name=name, axis=axis, p=p)
+        self.op.LpNormalization(root_input, _name=name, _outputs=[output], axis=axis, p=p)
         self.make_value(output, dtype, shape=shape)
 
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Div", inputs=inputs, outputs=[output], name=name)
+        self.op.Div(*inputs, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_tanh(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Tanh", inputs=[root_input], outputs=[output], name=name)
+        self.op.Tanh(root_input, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_softmax(self, name, root_input, dtype, shape, axis=-1):
         output = f"{name}/output_0"
-        self.make_node("Softmax", inputs=[root_input], outputs=[output], name=name, axis=axis)
+        self.op.Softmax(root_input, _name=name, _outputs=[output], axis=axis)
         self.make_value(output, dtype, shape=shape)
 
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
+        self.op.Sigmoid(root_input, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_cos(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Cos", inputs=[root_input], outputs=[output], name=name)
+        self.op.Cos(root_input, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_sin(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Sin", inputs=[root_input], outputs=[output], name=name)
+        self.op.Sin(root_input, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_softplus(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
-        self.make_node("Softplus", inputs=[root_input], outputs=[output], name=name)
+        self.op.Softplus(root_input, _name=name, _outputs=[output])
         self.make_value(output, dtype, shape=shape)
 
     def make_reduce_l2(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        self.make_node("ReduceL2", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.op.ReduceL2(*inputs, _name=name, _outputs=[output], keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
 
     def make_conv(self, name, inputs, dtype, shape, **kwargs):
         output = f"{name}/output_0"
-        self.make_node("Conv", inputs=inputs, outputs=[output], name=name, **kwargs)
+        self.op.Conv(*inputs, _name=name, _outputs=[output], **kwargs)
         self.make_value(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
@@ -1672,7 +1741,7 @@ class Model:
         last_dim = matmul.weight.shape[0]
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-        self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
+        self.op.MatMul(root_input, weight, _name=name, _outputs=[output])
         self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
 
         return name
@@ -1722,12 +1791,11 @@ class Model:
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        self.make_node(
-            "MatMulNBits",
-            inputs=inputs,
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
+        self.op.MatMulNBits(
+            *inputs,
+            _name=name,
+            _outputs=[output],
+            _domain="com.microsoft",
             accuracy_level=self.quant_attrs["accuracy_level"],
             bits=bits,
             block_size=group_size,
@@ -1771,11 +1839,10 @@ class Model:
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
-        self.make_node(
-            "DequantizeLinear",
-            inputs=dequantize_inputs,
-            outputs=[dequantize_output],
-            name=dequantize_name,
+        self.op.DequantizeLinear(
+            *dequantize_inputs,
+            _name=dequantize_name,
+            _outputs=[dequantize_output],
             block_size=quantized_op.group_size,
             axis=-1,
         )
@@ -1811,9 +1878,7 @@ class Model:
 
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         matmul_output = "logits" if kwargs.get("logits", False) else f"{matmul_name}/output_0"
-        self.make_node(
-            "MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name
-        )
+        self.op.MatMul(root_input, f"{transpose_name}/output_0", _name=matmul_name, _outputs=[matmul_output])
         self.make_value(
             matmul_output,
             self.io_dtype,
@@ -1948,7 +2013,7 @@ class Model:
 
         if kwargs.get("logits", False):
             output = "logits"
-            self.make_node("Add", inputs=add_bias_inputs, outputs=[output], name=name)
+            self.op.Add(*add_bias_inputs, _name=name, _outputs=[output])
             self.make_value(output, dtype=self.io_dtype, shape=shape)
         else:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
@@ -1989,12 +2054,11 @@ class Model:
             if tied_weight_zp_name:
                 input_names.append(tied_weight_zp_name)
 
-            self.make_node(
-                "GatherBlockQuantized",
-                inputs=input_names,
-                outputs=[gather_output],
-                name=gather_name,
-                domain="com.microsoft",
+            self.op.GatherBlockQuantized(
+                *input_names,
+                _name=gather_name,
+                _outputs=[gather_output],
+                _domain="com.microsoft",
                 bits=bits,
                 block_size=int(self.matmul_block_size),
                 gather_axis=0,
@@ -2015,7 +2079,7 @@ class Model:
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node("Gather", inputs=[transpose_output, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+            self.op.Gather(transpose_output, self.input_names["input_ids"], _name=gather_name, _outputs=[gather_output])
 
         else:
             weight = "model.embed_tokens.weight"
@@ -2023,7 +2087,7 @@ class Model:
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+            self.op.Gather(weight, self.input_names["input_ids"], _name=gather_name, _outputs=[gather_output])
 
         self.make_value(gather_output, self.io_dtype, shape=self.hidden_state_shape())
 
@@ -2035,7 +2099,7 @@ class Model:
                 f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.embed_attrs['scale']}",
             ]
             mul_output = f"{mul_name}/output_0"
-            self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.op.Mul(*mul_inputs, _name=mul_name, _outputs=[mul_output])
             self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape())
 
             layernorm_attrs_value = mul_output
@@ -2137,9 +2201,7 @@ class Model:
             # Cast root_input
             root_input_cast_name = f"{name}/root_input/Cast"
             root_input_cast_output = f"{root_input_cast_name}/output_0"
-            self.make_node(
-                "Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype
-            )
+            self.op.Cast(root_input, _name=root_input_cast_name, _outputs=[root_input_cast_output], to=new_dtype)
             self.make_value(root_input_cast_output, new_dtype, shape=root_input_shape)
             inputs[0] = root_input_cast_output
 
@@ -2148,9 +2210,7 @@ class Model:
             assert skip_input is not None
             skip_input_cast_name = f"{name}/skip_input/Cast"
             skip_input_cast_output = f"{skip_input_cast_name}/output_0"
-            self.make_node(
-                "Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype
-            )
+            self.op.Cast(skip_input, _name=skip_input_cast_name, _outputs=[skip_input_cast_output], to=new_dtype)
             self.make_value(skip_input_cast_output, new_dtype, shape=self.values[skip_input].shape)
             inputs[1] = skip_input_cast_output
 
@@ -2158,9 +2218,7 @@ class Model:
             # Cast output_0
             output_0_cast_name = f"{name}/output_0/Cast"
             output_0_cast_output = f"{output_0_cast_name}/output_0"
-            self.make_node(
-                "Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype
-            )
+            self.op.Cast(output_0_cast_output, _name=output_0_cast_name, _outputs=[output_0], to=old_dtype)
             self.make_value(output_0, old_dtype, shape=root_input_shape)
             outputs[0] = output_0_cast_output
 
@@ -2169,9 +2227,7 @@ class Model:
             assert output_3 is not None
             output_3_cast_name = f"{name}/output_3/Cast"
             output_3_cast_output = f"{output_3_cast_name}/output_3"
-            self.make_node(
-                "Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype
-            )
+            self.op.Cast(output_3_cast_output, _name=output_3_cast_name, _outputs=[output_3], to=old_dtype)
             self.make_value(output_3, old_dtype, shape=root_input_shape)
             outputs[3] = output_3_cast_output
 
@@ -2190,7 +2246,13 @@ class Model:
 
     def make_layernorm_op(self, name, op_type, inputs, outputs, skip, new_io_dtype, **kwargs):
         # Create the LayerNorm, SimplifiedLayerNorm, SkipLayerNorm, or SkipSimplifiedLayerNorm op
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        getattr(self.op, op_type)(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft" if skip else None,
+            **kwargs,
+        )
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -2339,16 +2401,13 @@ class Model:
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
-        self.make_node(
-            "RotaryEmbedding",
-            inputs=inputs,
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
+        self.op.RotaryEmbedding(
+            *inputs,
+            _name=name,
+            _outputs=[output],
+            _domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
-            num_heads=(
-                0 if self.rope_attrs["partial_rotary_factor"] == 1.0 else num_heads
-            ),  # default is 0 in RotaryEmbedding kernel
+            num_heads=0 if self.rope_attrs["partial_rotary_factor"] == 1.0 else num_heads,  # default is 0 in RotaryEmbedding kernel
             rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * num_heads])
@@ -2474,11 +2533,10 @@ class Model:
         )
 
         # Create single If node with multiple outputs
-        self.make_node(
-            "If",
-            inputs=[f"{greater_name}/output_0"],
-            outputs=[cos_cache_name, sin_cache_name],
-            name=if_name,
+        self.op.If(
+            f"{greater_name}/output_0",
+            _name=if_name,
+            _outputs=[cos_cache_name, sin_cache_name],
             then_branch=ir.Graph(
                 inputs=[],
                 outputs=[
@@ -2565,11 +2623,10 @@ class Model:
         if cast:
             q_layernorm_inputs, q_layernorm_outputs = self.make_layernorm_casts(q_layernorm_name, q_layernorm_inputs, q_layernorm_outputs, old_io_dtype, new_io_dtype)
 
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=q_layernorm_inputs,
-            outputs=q_layernorm_outputs,
-            name=q_layernorm_name,
+        self.op.SimplifiedLayerNormalization(
+            *q_layernorm_inputs,
+            _name=q_layernorm_name,
+            _outputs=q_layernorm_outputs,
             **layernorm_kwargs,
         )
         self.make_value(
@@ -2619,11 +2676,10 @@ class Model:
                 k_layernorm_name, k_layernorm_inputs, k_layernorm_outputs, old_io_dtype, new_io_dtype
             )
 
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=k_layernorm_inputs,
-            outputs=k_layernorm_outputs,
-            name=k_layernorm_name,
+        self.op.SimplifiedLayerNormalization(
+            *k_layernorm_inputs,
+            _name=k_layernorm_name,
+            _outputs=k_layernorm_outputs,
             **layernorm_kwargs,
         )
         self.make_value(
@@ -2751,7 +2807,7 @@ class Model:
         )
         concat_1_name = f"{basename}/Concat_1"
         concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
-        self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
+        self.op.Concat(*concat_1_inputs, _name=concat_1_name, _outputs=[present_kv], axis=2)
 
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
@@ -2948,12 +3004,11 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_key_values", "")]
-        self.make_node(
-            "Attention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
+        self.op.Attention(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft",
             do_rotary=self.attention_attrs["use_rope_in_attn"],
             mask_filter_value=self.attention_attrs["mask_filter_value"],
             num_heads=self.num_attn_heads,
@@ -2980,12 +3035,11 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node(
-            "MultiHeadAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
+        self.op.MultiHeadAttention(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft",
             num_heads=self.num_attn_heads,
             scale=self.attention_attrs["scale"],
             unidirectional=self.attention_attrs["unidirectional"],
@@ -3082,14 +3136,7 @@ class Model:
         attributes = self.get_attention_op_attributes(**kwargs)
         if self.kv_cache_quant_type != "none":
             attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
-        self.make_node(
-            "GroupQueryAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
+        self.op.GroupQueryAttention(*inputs, _name=name, _outputs=outputs, _domain="com.microsoft", **attributes)
         self.make_value(
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
@@ -3104,12 +3151,11 @@ class Model:
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
         outputs = [output, present_conv]
-        self.make_node(
-            "CausalConvWithState",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
+        self.op.CausalConvWithState(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft",
             ndim=kwargs.get("ndim", 1),
             activation=kwargs.get("activation", "silu"),
         )
@@ -3128,12 +3174,11 @@ class Model:
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         outputs = [output, present_recurrent]
-        self.make_node(
-            "LinearAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
+        self.op.LinearAttention(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft",
             q_num_heads=kwargs["q_num_heads"],
             kv_num_heads=kwargs["kv_num_heads"],
             update_rule=kwargs.get("update_rule", "gated_delta"),
@@ -3158,12 +3203,11 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node(
-            "SparseAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
+        self.op.SparseAttention(
+            *inputs,
+            _name=name,
+            _outputs=outputs,
+            _domain="com.microsoft",
             num_heads=self.num_attn_heads,
             kv_num_heads=self.num_kv_heads,
             scale=self.attention_attrs["scale"],
@@ -3215,14 +3259,7 @@ class Model:
         # PagedAttention derives the cache element type from the tensor itself, so unlike
         # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
         attributes = self.get_attention_op_attributes(**kwargs)
-        self.make_node(
-            "PagedAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
+        self.op.PagedAttention(*inputs, _name=name, _outputs=outputs, _domain="com.microsoft", **attributes)
         self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3889,12 +3926,11 @@ class Model:
         extra_kwargs = (
             {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
         )
-        self.make_node(
-            "MoE",
-            inputs=inputs,
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
+        self.op.MoE(
+            *inputs,
+            _name=name,
+            _outputs=[output],
+            _domain="com.microsoft",
             activation_alpha=self.moe_attrs["activation_alpha"],
             activation_beta=self.moe_attrs["activation_beta"],
             activation_type=self.moe_attrs["activation_type"],
@@ -4048,12 +4084,11 @@ class Model:
         if weights_prepacked != -1 and self.ep == "cuda" and not is_fp4:
             extra_kwargs["weights_prepacked"] = weights_prepacked
 
-        self.make_node(
-            "QMoE",
-            inputs=inputs,
-            outputs=[output],
-            name=name,
-            domain="com.microsoft",
+        self.op.QMoE(
+            *inputs,
+            _name=name,
+            _outputs=[output],
+            _domain="com.microsoft",
             activation_alpha=self.moe_attrs["activation_alpha"],
             activation_beta=self.moe_attrs["activation_beta"],
             activation_type=self.moe_attrs["activation_type"],
@@ -4319,7 +4354,7 @@ class Model:
         #           Mul
         act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         act_output = f"{act_name}/output_0"
-        self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
+        getattr(self.op, activation)(root_input, _name=act_name, _outputs=[act_output], _domain=domain)
         self.make_value(
             act_output,
             dtype=self.io_dtype,
@@ -4347,11 +4382,11 @@ class Model:
         output = f"{gelu_name}/output_0"
 
         if activation == "Gelu":
-            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none")
+            self.op.Gelu(root_input, _name=gelu_name, _outputs=[output], approximate="none")
         elif activation == "FastGelu":
-            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
+            self.op.Gelu(root_input, _name=gelu_name, _outputs=[output], approximate="tanh")
         else:
-            self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+            getattr(self.op, activation)(root_input, _name=gelu_name, _outputs=[output], _domain="com.microsoft")
 
         self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
 
@@ -4360,7 +4395,7 @@ class Model:
     def make_relu(self, layer_id, root_input, activation):
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
-        self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
+        getattr(self.op, activation)(root_input, _name=relu_name, _outputs=[output], _domain="")
         self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
         return relu_name
 
@@ -4369,7 +4404,7 @@ class Model:
         basename = f"/model/layers.{layer_id}/mlp/square/{activation}"
         pow_name = f"{basename}/pow"
         pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/[2]"]
-        self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
+        self.op.Pow(*pow_inputs, _name=pow_name, _outputs=[f"{pow_name}/output_0"], _domain="")
         self.make_value(
             f"{pow_name}/output_0",
             self.io_dtype,
@@ -4445,7 +4480,7 @@ class Model:
             mul_name = f"{basename}/Mul"
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
-            self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.op.Mul(*mul_inputs, _name=mul_name, _outputs=[mul_output])
             self.make_value(
                 mul_output,
                 self.io_dtype,
@@ -4461,7 +4496,7 @@ class Model:
             where_name = f"{basename}/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(to_torch_dtype(self.io_dtype)).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
-            self.make_node("Where", inputs=where_inputs, outputs=[where_output], name=where_name)
+            self.op.Where(*where_inputs, _name=where_name, _outputs=[where_output])
             self.make_value(
                 where_output,
                 self.io_dtype,
@@ -4491,7 +4526,7 @@ class Model:
             mul_name = f"{basename}/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
-            self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.op.Mul(*mul_inputs, _name=mul_name, _outputs=[mul_output])
             self.make_value(
                 mul_output,
                 self.io_dtype,
@@ -4503,7 +4538,7 @@ class Model:
             # Add final cast from io_dtype to logits_dtype
             cast_name = f"{basename}/Cast"
             cast_output = "logits"
-            self.make_node("Cast", inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types["logits"])
+            self.op.Cast(f"{lm_name}/output_0", _name=cast_name, _outputs=[cast_output], to=self.output_types["logits"])
             self.make_value(
                 cast_output,
                 self.output_types["logits"],

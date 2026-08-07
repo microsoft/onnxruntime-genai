@@ -27,6 +27,19 @@ base_module = _load_builder_module("base")
 Model = base_module.Model
 
 
+class _RecordingOps:
+    """Stand-in for ``Model.op`` that records the ops a builder method creates."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def __getattr__(self, op_type):
+        def record(*inputs, _name=None, _outputs=None, _domain="", **attributes):
+            self._model.nodes.append({"inputs": list(inputs), "attributes": attributes})
+
+        return record
+
+
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
     make_group_query_attention = Model.make_group_query_attention
@@ -57,9 +70,7 @@ class _FakeGQAModel:
         self.rope_attrs = {"interleaved": 0}
         self.io_dtype = None
         self.nodes = []
-
-    def make_node(self, op_type, inputs, outputs, name, domain, **attributes):
-        self.nodes.append({"inputs": inputs, "attributes": attributes})
+        self.op = _RecordingOps(self)
 
     def make_value(self, *args, **kwargs):
         pass

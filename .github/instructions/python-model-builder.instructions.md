@@ -13,7 +13,7 @@ Read both documents to understand the intended usage, supported models, design p
 
 ## Code Style Guidelines
 
-1. When a node is inserted into the model, prefer using `self.make_op_name` as the wrapper method for `self.make_node` + `self.make_value` calls.
+1. When a node is inserted into the model, prefer using `self.make_op_name` as the wrapper method for `self.op.<OpType>` + `self.make_value` calls. Ops are created with onnxscript-style calls (e.g. `self.op.MatMul(...)`, `self.op.Reshape(...)`); do not construct `ir.Node` objects directly.
 2. Ignore any CodeQL warnings about how an __init__ method calls an overridden method. These warnings are false positives and can be safely ignored. The warning message is: "this call to ABC in an initialization method is overwritten by XYZ".
 3. Find ways to reduce code duplication by reusing existing functionality and implementing common patterns.
 4. Discover ways to leverage the use of shared code in the base classes to avoid code duplication and improve maintainability.

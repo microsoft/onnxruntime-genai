@@ -72,7 +72,7 @@ class TRT_RTX:
         #                      SimplifiedLayerNorm----> output (0)
         make_add_name = f"{basename}/Add"
         output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        self.op.Add(root_input, skip_input, _name=make_add_name, _outputs=[output_3])
         self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
@@ -92,7 +92,7 @@ class TRT_RTX:
         #                      LayerNormalization-----> output (0)
         make_add_name = f"{basename}/Add"
         output_3 = f"{make_add_name}/output_0" if output_3 is None else output_3
-        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        self.op.Add(root_input, skip_input, _name=make_add_name, _outputs=[output_3])
         self.make_value(output_3, io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
         make_layer_norm_name = f"{basename}/LayerNormalization"
@@ -101,7 +101,7 @@ class TRT_RTX:
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         kwargs.update({"axis": -1, "stash_type": 1})
 
-        self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
+        self.op.LayerNormalization(*inputs, _name=make_layer_norm_name, _outputs=[output_0], **kwargs)
         self.make_value(output_0, io_dtype, shape=shape)
 
     # This expansion contrib-op can be updated / deprecated in the future.
@@ -134,9 +134,7 @@ class TRT_RTX:
         make_pow_name = f"{basename}/Pow"
         make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/2"]
 
-        self.make_node(
-            "Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain=""
-        )
+        self.op.Pow(*make_pow_inputs, _name=make_pow_name, _outputs=[f"{make_pow_name}/output_0"], _domain="")
         self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
@@ -170,5 +168,5 @@ class TRT_RTX:
         make_mul_1_name = f"{basename}/Mul_1"
         make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
 
-        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
+        self.op.Mul(*make_mul_1_inputs, _name=make_mul_1_name, _outputs=[output_0])
         self.make_value(output_0, dtype=io_dtype, shape=shape)

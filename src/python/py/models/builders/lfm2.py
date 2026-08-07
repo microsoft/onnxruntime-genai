@@ -110,11 +110,11 @@ class LFM2Model(Model):
         b_out = f"{split_name}/output_0"
         c_out = f"{split_name}/output_1"
         x_out = f"{split_name}/output_2"
-        self.make_node(
-            "Split",
-            inputs=[f"{transpose_1_name}/output_0", split_tensor_name],
-            outputs=[b_out, c_out, x_out],
-            name=split_name,
+        self.op.Split(
+            f"{transpose_1_name}/output_0",
+            split_tensor_name,
+            _name=split_name,
+            _outputs=[b_out, c_out, x_out],
             axis=1,
         )
         for out_val in [b_out, c_out, x_out]:
@@ -192,16 +192,13 @@ class LFM2Model(Model):
         # 3. Cache update: slice the conv input to keep last conv_L_cache elements
         present_conv_name = f"present_conv.{layer_id}"
         slice_cache_name = f"{basename}/Slice_2"
-        self.make_node(
-            "Slice",
-            inputs=[
-                conv_input,
-                f"/model/constants/INT64/[-{self.conv_L_cache}]",
-                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
-                "/model/constants/INT64/[2]",
-            ],
-            outputs=[present_conv_name],
-            name=slice_cache_name,
+        self.op.Slice(
+            conv_input,
+            f"/model/constants/INT64/[-{self.conv_L_cache}]",
+            f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+            "/model/constants/INT64/[2]",
+            _name=slice_cache_name,
+            _outputs=[present_conv_name],
         )
         self.make_value(present_conv_name, self.io_dtype, shape=["batch_size", self.hidden_size, self.conv_L_cache])
 

@@ -78,6 +78,27 @@ If a `Make` function is creating more than one op, please draw a diagram of the 
 
 Finally, creating many `Make` functions to abstract the entire model building process allows for fully customizing the process of building new models without having to modify other function signatures and worry about the fallout effects from those changes.
 
+### Creating Ops
+
+Every op in the graph is created through `self.op`, an onnxscript-style op builder (`ModelGraphBuilder`, a subclass of `onnx_ir._tape.Builder`). Ops are created by calling the op type as a method, e.g. `self.op.MatMul(...)`, `self.op.Reshape(...)`, `self.op.Cast(...)`. This is the same authoring API that onnxscript's rewriter exposes through its `RewriterContext`.
+
+Because the model builder addresses nodes and values by their string names (see [Namespaces](#namespaces)), the builder accepts a few `_`-prefixed keyword arguments in addition to the op's attributes:
+
+- `_name` - the node name (required).
+- `_outputs` - the list of output value names. Defaults to `[f"{_name}/output_0"]`.
+- `_domain` - the op domain, e.g. `"com.microsoft"`. Defaults to the default ONNX domain.
+
+Positional arguments are the op's inputs. They may be value names, `ir.Value` instances, or `""`/`None` for a missing optional input. Value names in the `/model/constants/...` namespace are materialized into `Constant` nodes automatically, and a node whose `_name` was already created is skipped so that subgraph builders can be called idempotently.
+
+For example,
+
+```python
+self.op.MatMul(root_input, weight, _name=name, _outputs=[output])
+self.op.RotaryEmbedding(root_input, position_ids, cos_cache, sin_cache, _name=name, _domain="com.microsoft", interleaved=interleaved)
+```
+
+Prefer the `self.make_{op_name}` wrappers (e.g. `self.make_matmul`, `self.make_reshape`) where they exist, since they pair the `self.op` call with the `self.make_value` call that records the output's dtype and shape.
+
 ### Namespaces
 
 Names are created using the following namespace format.

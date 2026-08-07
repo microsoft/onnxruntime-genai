@@ -331,9 +331,7 @@ class GPTOSSModel(Model):
             f"/model/constants/INT64/[{self.moe_attrs['top_k']}]",
         ]
         topk_outputs = [f"{topk_name}/output_0", f"{topk_name}/output_1"]
-        self.make_node(
-            "TopK", inputs=topk_inputs, outputs=topk_outputs, name=topk_name, axis=-1, largest=True, sorted=True
-        )
+        self.op.TopK(*topk_inputs, _name=topk_name, _outputs=topk_outputs, axis=-1, largest=True, sorted=True)
         self.make_value(
             topk_outputs[0], ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.moe_attrs["top_k"]]
         )
@@ -458,11 +456,11 @@ class GPTOSSModel(Model):
         # Make Gate/Up proj nodes (MatMul --> Add)
         gate_up_proj_weight_name = f"{basename}/gate_up_proj/MatMul"
         gate_up_proj_weight_output = f"{gate_up_proj_weight_name}/output_0"
-        self.make_node(
-            "MatMul",
-            inputs=[f"{mlp1_weight_gather_name}/output_0", f"{expand_root_input_unsqueeze_2_name}/output_0"],
-            outputs=[gate_up_proj_weight_output],
-            name=gate_up_proj_weight_name,
+        self.op.MatMul(
+            f"{mlp1_weight_gather_name}/output_0",
+            f"{expand_root_input_unsqueeze_2_name}/output_0",
+            _name=gate_up_proj_weight_name,
+            _outputs=[gate_up_proj_weight_output],
         )
         self.make_value(
             gate_up_proj_weight_output,
@@ -585,11 +583,11 @@ class GPTOSSModel(Model):
         # Make Down proj nodes (MatMul --> Add --> Cast)
         down_proj_weight_name = f"{basename}/down_proj/MatMul"
         down_proj_weight_output = f"{down_proj_weight_name}/output_0"
-        self.make_node(
-            "MatMul",
-            inputs=[f"{mlp2_weight_gather_name}/output_0", f"{act_fn_mul_3_name}/output_0"],
-            outputs=[down_proj_weight_output],
-            name=down_proj_weight_name,
+        self.op.MatMul(
+            f"{mlp2_weight_gather_name}/output_0",
+            f"{act_fn_mul_3_name}/output_0",
+            _name=down_proj_weight_name,
+            _outputs=[down_proj_weight_output],
         )
         self.make_value(
             down_proj_weight_output,
