@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <random>
+#include <stdexcept>
 #include <vector>
 #include "span.h"
 
@@ -187,6 +189,22 @@ struct SampledCategorical {
   std::vector<float> probs;
   std::vector<int32_t> scratch;
 };
+
+inline int32_t SampleCategoricalToken(std::span<const int32_t> indices,
+                                      std::span<const float> probs,
+                                      std::mt19937& rng) {
+  if (indices.empty() || indices.size() != probs.size())
+    throw std::invalid_argument(
+        "Categorical sampling requires equally sized, non-empty token and probability arrays.");
+
+  std::discrete_distribution<int> distribution(probs.begin(), probs.end());
+  return indices[static_cast<size_t>(distribution(rng))];
+}
+
+inline int32_t SampleCategoricalToken(const SampledCategorical& categorical,
+                                      std::mt19937& rng) {
+  return SampleCategoricalToken(categorical.indices, categorical.probs, rng);
+}
 
 // New function consolidating the top-k/top-p/top-k+top-p paths from search.cpp's SampleTop*;
 // added so standard and speculative decoding build the distribution through one shared routine.

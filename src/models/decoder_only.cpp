@@ -37,18 +37,23 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
   if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
     return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
-  } else {
-    UpdateInputsOutputs(next_tokens, next_indices, total_length);
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
-
-    // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
-    bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
-    State::Run(*model_.session_decoder_, graph_capture_this_run);
-
-    return logits_.Get();
   }
+
+  return RunUnchunked(total_length, next_tokens, next_indices);
+}
+
+DeviceSpan<float> DecoderOnly_State::RunUnchunked(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                                  DeviceSpan<int32_t> next_indices) {
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+
+  // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
+  bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
+  State::Run(*model_.session_decoder_, graph_capture_this_run);
+
+  return logits_.Get();
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,

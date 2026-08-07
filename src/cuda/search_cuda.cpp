@@ -40,16 +40,12 @@ void GreedySearch_Cuda::EnsureSamplingData() {
   if (samplingdata_)
     return;
 
-  unsigned long long random_seed = (params_->search.random_seed != -1)
-                                       ? params_->search.random_seed
-                                       : std::random_device{}();
-
   // Allocate a single buffer for all sampling data
   size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params_->search.batch_size, params_->config.model.vocab_size, GetStream());
   sampling_buffer_ = params_->p_device->Allocate<uint8_t>(sampling_buffer_size);
 
   // Create SamplingData with the externally allocated buffer
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
+  samplingdata_ = std::make_unique<cuda::SamplingData>(0, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
                                                        sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
@@ -229,7 +225,14 @@ void BeamSearch_Cuda::SelectTop() {
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 }
 
-void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
+void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
+  EnsureSamplingData();
+  samplingdata_->ReInitCurandStates(static_cast<unsigned long long>(rng()),
+                                    params_->search.batch_size, GetStream());
+  SampleTopKTopPImpl(k, p, temperature);
+}
+
+void GreedySearch_Cuda::SampleTopKTopPImpl(int k, float p, float temperature) {
   EnsureSamplingData();
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
@@ -389,7 +392,7 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 void GreedySearch_Cuda::RewindTo(size_t index) {
   ResetDone();
   if (index > 0)
-    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index), sequences_.max_length_, GetStream());
+    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index + 1), sequences_.max_length_, GetStream());
   else
     CUDA_CHECK(cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), GetStream()));
   sequences_.RewindTo(index);

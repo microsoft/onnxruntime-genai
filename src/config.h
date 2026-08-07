@@ -466,8 +466,14 @@ struct Config {
 
   struct Speculative {
     // Four is a conservative default that amortizes target verification without excessive draft
-    // work; the best value depends on the model pair and execution provider.
+    // work; the best value depends on repetition/acceptance and the execution provider. When
+    // adaptive_k_bool is enabled, this is treated as the initial width (adaptive probing may grow up to 16).
     int max_draft_tokens{4};
+    int ngram_size{};                 // 0 disables n-gram decoding; N matches the last N-1 tokens.
+    int ngram_chained_lookup_bool{};  // 1 refills the proposal by repeatedly looking up synthetic context.
+    int adaptive_k_bool{};            // 0 uses max_draft_tokens every round; 1 adapts up to the hard limit.
+    int adaptive_k_min{2};            // Starting width and floor when adaptive_k_bool is enabled.
+    int cooldown_bool{};              // 1 skips one speculative attempt after three zero-accept rounds.
   } speculative;
 
   struct Engine {

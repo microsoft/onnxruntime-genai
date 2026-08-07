@@ -195,6 +195,29 @@ class TestSpeculativeConfigGuards:
         with pytest.raises(Exception, match="max_draft_tokens"):
             og.Model(path)
 
+    @pytest.mark.parametrize("value", [-1, 2, 0.5])
+    def test_adaptive_k_rejects_values_other_than_zero_or_one(
+            self, tmp_path, value):
+        path = _write_config(
+            tmp_path / f"adaptive_k_{value}",
+            _spec_config(speculative={
+                "max_draft_tokens": 4,
+                "adaptive_k_bool": value,
+            }),
+        )
+        with pytest.raises(Exception, match="adaptive_k_bool"):
+            og.Model(path)
+
+    @pytest.mark.parametrize("value", [0, 17, 1.5])
+    def test_adaptive_k_min_rejects_values_outside_supported_range(
+            self, tmp_path, value):
+        path = _write_config(
+            tmp_path / f"adaptive_k_min_{value}",
+            _spec_config(speculative={"adaptive_k_min": value}),
+        )
+        with pytest.raises(Exception, match="adaptive_k_min"):
+            og.Model(path)
+
 
 # ---------------------------------------------------------------------------
 # Generation tests (require a real decoder-only model under --test_models)
@@ -427,7 +450,8 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
 
 
 def _greedy(model_path: str, prompt, max_length: int, k: int | None = None,
-            repetition_penalty: float | None = None, min_length: int | None = None):
+            repetition_penalty: float | None = None, min_length: int | None = None,
+            adaptive_k_bool: bool = False, adaptive_k_min: int = 2):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     opts = dict(do_sample=False, max_length=max_length)
@@ -437,7 +461,11 @@ def _greedy(model_path: str, prompt, max_length: int, k: int | None = None,
         opts["min_length"] = min_length
     params.set_search_options(**opts)
     if k is not None:
-        params.set_speculative_options(max_draft_tokens=k)
+        params.set_speculative_options(
+            max_draft_tokens=k,
+            adaptive_k_bool=adaptive_k_bool,
+            adaptive_k_min=adaptive_k_min,
+        )
     gen = og.Generator(model, params)
     gen.append_tokens(np.array([prompt], dtype=np.int32))
     while not gen.is_done():
@@ -464,7 +492,8 @@ def _vocab_size(model_dir: str) -> int:
 
 
 def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None = None,
-            top_k: int = 0, top_p: float = 0.0, temperature: float = 1.0):
+            top_k: int = 0, top_p: float = 0.0, temperature: float = 1.0,
+            adaptive_k_bool: bool = False, adaptive_k_min: int = 2):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     opts = dict(do_sample=True, max_length=max_length, random_seed=seed, temperature=temperature)
@@ -474,7 +503,11 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
         opts["top_p"] = top_p
     params.set_search_options(**opts)
     if k is not None:
-        params.set_speculative_options(max_draft_tokens=k)
+        params.set_speculative_options(
+            max_draft_tokens=k,
+            adaptive_k_bool=adaptive_k_bool,
+            adaptive_k_min=adaptive_k_min,
+        )
     gen = og.Generator(model, params)
     gen.append_tokens(np.array([prompt], dtype=np.int32))
     while not gen.is_done():
@@ -484,7 +517,291 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
     return seq, stats
 
 
+def _tiny_spec_generator(model_path, prompt, max_length, *,
+                         max_draft_tokens=4, adaptive_k_bool=True,
+                         adaptive_k_min=2, cooldown_bool=False,
+                         do_sample=False, random_seed=0):
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=do_sample,
+        max_length=max_length,
+        random_seed=random_seed,
+    )
+    params.set_speculative_options(
+        max_draft_tokens=max_draft_tokens,
+        adaptive_k_bool=adaptive_k_bool,
+        adaptive_k_min=adaptive_k_min,
+        cooldown_bool=cooldown_bool,
+    )
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([prompt], dtype=np.int32))
+    return generator
+
+
+def _generate_steps(generator, count):
+    for _ in range(count):
+        assert not generator.is_done()
+        generator.generate_next_token()
+
+
 class TestSpeculativeGeneration:
+    def test_shared_cooldown_reconciles_draft_after_one_standard_step(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "base_cooldown",
+            "llama",
+            context_length=32,
+            draft_switch_at=0,
+        )
+        prompt = [1]
+        generator = _tiny_spec_generator(
+            path,
+            prompt,
+            max_length=7,
+            max_draft_tokens=2,
+            adaptive_k_bool=False,
+            cooldown_bool=True,
+        )
+
+        _generate_steps(generator, 3)
+        before_fallback = generator.get_speculative_stats()
+        assert before_fallback["rounds"] == 3
+        assert before_fallback["draft_tokens_accepted"] == 0
+        assert before_fallback["cooldown_entries"] == 1
+        assert before_fallback["cooldown_remaining"] == 1
+
+        generator.generate_next_token()
+        after_fallback = generator.get_speculative_stats()
+        assert after_fallback["rounds"] == 3
+        assert after_fallback["cooldown_steps"] == 1
+        assert after_fallback["cooldown_remaining"] == 0
+        assert after_fallback["standard_fallback_steps"] == 1
+
+        while not generator.is_done():
+            generator.generate_next_token()
+        actual = list(int(token) for token in generator.get_sequence(0))
+        expected, _ = _greedy(path, prompt, max_length=7)
+        assert actual == expected
+        assert generator.get_speculative_stats()["rounds"] == 5
+
+    def test_adaptive_k_option_round_trips_as_shared_speculative_option(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_option", "llama", context_length=16)
+        model = og.Model(path)
+        params = og.GeneratorParams(model)
+
+        assert params.get_speculative_options()["adaptive_k_bool"] is False
+        assert params.get_speculative_options()["adaptive_k_min"] == 2
+        assert params.get_speculative_options()["cooldown_bool"] is False
+        params.set_speculative_options(
+            max_draft_tokens=6, adaptive_k_bool=True, adaptive_k_min=3,
+            cooldown_bool=True)
+        options = params.get_speculative_options()
+
+        assert options["max_draft_tokens"] == 6
+        assert options["adaptive_k_bool"] is True
+        assert options["adaptive_k_min"] == 3
+        assert options["cooldown_bool"] is True
+
+    def test_non_adaptive_mode_uses_fixed_max_draft_tokens_not_adaptive_floor(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "fixed_k_ignores_adaptive_floor",
+            "llama",
+            context_length=20,
+        )
+        generator = _tiny_spec_generator(
+            path,
+            [3],
+            16,
+            max_draft_tokens=6,
+            adaptive_k_bool=False,
+            adaptive_k_min=1,
+        )
+
+        assert generator.get_speculative_stats()["effective_k"] == 6
+
+    def test_adaptive_k_starts_at_two_and_waits_for_smoothed_evidence(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_initial", "llama", context_length=20)
+        generator = _tiny_spec_generator(
+            path, [3], 16, max_draft_tokens=4)
+
+        assert generator.get_speculative_stats()["effective_k"] == 2
+        generator.generate_next_token()
+        active = generator.get_speculative_stats()
+        assert active["active_rounds"] == 1
+        assert active["effective_k"] == 2
+        _generate_steps(generator, 2)
+        completed = generator.get_speculative_stats()
+
+        assert completed["completed_rounds"] == 1
+        assert completed["draft_tokens_proposed"] == 2
+        assert completed["draft_tokens_accepted"] == 2
+        assert completed["effective_k"] == 2
+        assert completed["adaptive_k_observations"] == 1
+        assert completed["adaptive_k_probes"] == 0
+        assert completed["adaptive_k_increases"] == 0
+        assert completed["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_uses_bounded_adjacent_probes(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_cap", "llama", context_length=32)
+        generator = _tiny_spec_generator(
+            path, [3], 24, max_draft_tokens=4)
+
+        _generate_steps(generator, 6)  # Two K=2 rounds establish a baseline.
+        stats = generator.get_speculative_stats()
+
+        assert stats["rounds"] == 2
+        assert stats["draft_tokens_proposed"] == 4
+        assert stats["draft_tokens_accepted"] == 4
+        assert stats["effective_k"] == 3
+        assert stats["adaptive_k_observations"] == 2
+        assert stats["adaptive_k_probes"] == 1
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_partial_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_partial", "llama", context_length=16,
+            draft_switch_at=2)
+        generator = _tiny_spec_generator(
+            path, [3], 12, max_draft_tokens=4)
+
+        _generate_steps(generator, 2)
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_zero_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_zero", "llama", context_length=16,
+            draft_switch_at=1)
+        generator = _tiny_spec_generator(
+            path, [3], 12, max_draft_tokens=4)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_interrupted_round_does_not_update_policy(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_interrupted", "llama", context_length=16)
+        generator = _tiny_spec_generator(
+            path, [3], 2, max_draft_tokens=4)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert generator.is_done()
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_mid_round_append_does_not_train_on_discarded_output(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_append", "llama", context_length=24)
+        generator = _tiny_spec_generator(
+            path, [3], 20, max_draft_tokens=4)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["active_rounds"] == 1
+
+        generator.append_tokens(np.array([[3]], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_reset_restores_initial_width(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_reset", "llama", context_length=24)
+        generator = _tiny_spec_generator(
+            path, [3], 20, max_draft_tokens=4)
+        _generate_steps(generator, 6)
+        assert generator.get_speculative_stats()["effective_k"] == 3
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([[3]], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_throughput"] == 0.0
+
+    def test_adaptive_k_state_is_independent_between_generators(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_isolation", "llama", context_length=24)
+        first = _tiny_spec_generator(path, [3], 20, max_draft_tokens=4)
+        second = _tiny_spec_generator(path, [3], 20, max_draft_tokens=4)
+
+        _generate_steps(first, 6)
+
+        assert first.get_speculative_stats()["effective_k"] == 3
+        assert second.get_speculative_stats()["effective_k"] == 2
+        assert second.get_speculative_stats()["adaptive_k_observations"] == 0
+        assert second.get_speculative_stats()["adaptive_k_increases"] == 0
+
+    def test_disabling_adaptive_k_preserves_fixed_width_behavior(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_disabled", "llama", context_length=20)
+        generator = _tiny_spec_generator(
+            path, [3], 16, max_draft_tokens=4, adaptive_k_bool=False)
+
+        _generate_steps(generator, 5)
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 4
+        assert stats["effective_k"] == 4
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_probes"] == 0
+
+    def test_adaptive_k_floor_one_starts_at_one(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "adaptive_k1", "llama", context_length=16)
+        generator = _tiny_spec_generator(
+            path, [3], 12, max_draft_tokens=4, adaptive_k_min=1)
+
+        _generate_steps(generator, 2)
+        stats = generator.get_speculative_stats()
+
+        assert stats["completed_rounds"] == 1
+        assert stats["effective_k"] == 1
+        assert stats["adaptive_k_increases"] == 0
+
     def test_logits_vocab_mismatch_fails_during_model_creation(self, tmp_path):
         path = _make_tiny_draft_spec_model(
             tmp_path / "vocab_mismatch", "llama", context_length=16,
@@ -517,6 +834,38 @@ class TestSpeculativeGeneration:
         gen.generate_next_token()
 
         assert gen.get_speculative_stats()["rounds"] == 1
+
+    def test_interleaved_sampled_generators_have_independent_rng_streams(
+            self, tmp_path):
+        path = _make_tiny_draft_spec_model(
+            tmp_path / "interleaved_sampling", "llama", context_length=24)
+        prompt = [3]
+        max_length = 16
+        seed = 1357
+        expected, _ = _sample(
+            path, prompt, max_length, seed, k=4, top_k=5, temperature=0.8)
+
+        def make_generator():
+            model = og.Model(path)
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                do_sample=True, max_length=max_length, random_seed=seed,
+                top_k=5, temperature=0.8)
+            params.set_speculative_options(max_draft_tokens=4)
+            generator = og.Generator(model, params)
+            generator.append_tokens(np.array([prompt], dtype=np.int32))
+            return generator
+
+        first = make_generator()
+        second = make_generator()
+        while not first.is_done() or not second.is_done():
+            if not first.is_done():
+                first.generate_next_token()
+            if not second.is_done():
+                second.generate_next_token()
+
+        assert [int(token) for token in first.get_sequence(0)] == expected
+        assert [int(token) for token in second.get_sequence(0)] == expected
 
     @pytest.mark.parametrize(
         ("model_type", "threshold"),
@@ -584,6 +933,49 @@ class TestSpeculativeGeneration:
         _, stats = _greedy(spec_path, _PROMPT, max_length, k=k)
         assert stats["rounds"] > 0
         assert stats["acceptance_rate"] >= 0.9
+
+    def test_adaptive_k_qwen_greedy_collects_throughput_telemetry(
+            self, decoder_only_model_path, tmp_path):
+        max_k = 8
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(
+            decoder_only_model_path, tmp_path / "adaptive_qwen_greedy", max_k)
+
+        result, stats = _greedy(
+            spec_path, _PROMPT, max_length, k=max_k, adaptive_k_bool=True)
+
+        assert result
+        assert stats["rounds"] > 0
+        assert stats["acceptance_rate"] >= 0.9
+        assert stats["adaptive_k_observations"] > 0
+        assert stats["adaptive_k_throughput"] > 0.0
+        assert 2 <= stats["effective_k"] <= 16
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_adaptive_k_qwen_sampling_collects_throughput_telemetry(
+            self, decoder_only_model_path, tmp_path, seed):
+        max_k = 8
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec(
+            decoder_only_model_path,
+            tmp_path / f"adaptive_qwen_sampling_{seed}",
+            max_k,
+        )
+        options = {
+            "k": max_k,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+            "adaptive_k_bool": True,
+        }
+
+        result, stats = _sample(
+            spec_path, _PROMPT, max_length, seed=seed, **options)
+
+        assert result
+        assert stats["adaptive_k_observations"] > 0
+        assert stats["adaptive_k_throughput"] > 0.0
+        assert 2 <= stats["effective_k"] <= 16
 
     def test_stats_are_consistent(self, decoder_only_model_path, tmp_path):
         max_length = len(_PROMPT) + 16
@@ -700,6 +1092,33 @@ class TestSpeculativeStatsContract:
             s["tokens_emitted"] + s["tokens_discarded"] + s["tokens_buffered"])
         assert s["draft_tokens_accepted"] <= s["draft_tokens_evaluated"]
         assert s["draft_tokens_evaluated"] <= s["draft_tokens_proposed"]
+        assert (
+            s["full_accept_rounds"] +
+            s["partial_accept_rounds"] +
+            s["zero_accept_rounds"]
+        ) <= s["completed_rounds"]
+        assert s["target_forward_passes"] == (
+            s["target_verify_forward_passes"] +
+            s["target_reanchor_forward_passes"] +
+            s["target_reconciliation_forward_passes"]
+        )
+        assert s["total_target_ms"] == pytest.approx(
+            s["total_target_verify_ms"] +
+            s["total_target_reanchor_ms"],
+            rel=1e-6,
+            abs=1e-4,
+        )
+        for key in (
+                "ngram_lookup_hits",
+                "ngram_lookup_misses",
+                "ngram_lookup_tokens_proposed",
+                "ngram_chained_tokens_proposed",
+                "ngram_grammar_candidate_rejections",
+                "ngram_history_syncs",
+                "ngram_history_tokens_synced"):
+            assert s[key] == 0
+        assert s["total_ngram_history_sync_ms"] == 0.0
+        assert s["total_ngram_lookup_ms"] == 0.0
         if s["draft_tokens_evaluated"]:
             assert s["acceptance_rate"] == pytest.approx(
                 s["draft_tokens_accepted"] / s["draft_tokens_evaluated"], abs=1e-6)
@@ -1579,7 +1998,7 @@ def guidance_model_path(decoder_only_model_path):
 
 
 def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=False,
-                   repetition_penalty=None, min_length=None):
+                   repetition_penalty=None, min_length=None, adaptive_k_bool=False):
     """Greedy + guidance generation. k=None -> regular; k set -> speculative. Returns the generated
     tail token ids (after the prompt); with want_stats=True also returns the speculative stats dict."""
     model = og.Model(model_path)
@@ -1591,7 +2010,10 @@ def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=Fals
         opts["min_length"] = min_length
     params.set_search_options(**opts)
     if k is not None:
-        params.set_speculative_options(max_draft_tokens=k)
+        params.set_speculative_options(
+            max_draft_tokens=k,
+            adaptive_k_bool=adaptive_k_bool,
+        )
     params.set_guidance(gtype, gdata)
     gen = og.Generator(model, params)
     gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
@@ -1604,7 +2026,8 @@ def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=Fals
 
 
 def _sampled_guided_tokens(model_path, gtype, gdata, max_length, seed, k=None,
-                           temperature=1.0, top_p=1.0, top_k=0):
+                           temperature=1.0, top_p=1.0, top_k=0,
+                           adaptive_k_bool=False, want_stats=False):
     """Sampling (do_sample=True) + guidance. k=None -> regular; k set -> speculative. Returns the
     generated tail token ids. A fixed seed makes a single run reproducible."""
     model = og.Model(model_path)
@@ -1616,13 +2039,19 @@ def _sampled_guided_tokens(model_path, gtype, gdata, max_length, seed, k=None,
         opts["top_k"] = top_k
     params.set_search_options(**opts)
     if k is not None:
-        params.set_speculative_options(max_draft_tokens=k)
+        params.set_speculative_options(
+            max_draft_tokens=k,
+            adaptive_k_bool=adaptive_k_bool,
+        )
     params.set_guidance(gtype, gdata)
     gen = og.Generator(model, params)
     gen.append_tokens(np.array([_PROMPT], dtype=np.int32))
     while not gen.is_done():
         gen.generate_next_token()
-    return [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+    tail = [int(t) for t in gen.get_sequence(0)][len(_PROMPT):]
+    if want_stats:
+        return tail, gen.get_speculative_stats()
+    return tail
 
 
 _GUIDANCE_CASES = [
@@ -1645,6 +2074,58 @@ class TestSpeculativeGuidance:
     the speculative speedup under guidance. The strategy reuses the regular constrained-decoding
     ops (ProcessLogits mask + CommitTokens + fast-forward) and commits accepted draft tokens by their
     per-token value, exactly like the non-guidance accept loop."""
+
+    def test_adaptive_k_guidance_output_is_deterministic_and_grammar_valid(
+            self, guidance_model_path, tmp_path):
+        pattern = r"[0-9]{3}-[0-9]{3}"
+        max_k = 8
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(
+            guidance_model_path, tmp_path / "adaptive_guidance", max_k)
+
+        first, first_stats = _guided_tokens(
+            spec_path, "regex", pattern, max_length, k=max_k,
+            adaptive_k_bool=True, want_stats=True)
+        second, second_stats = _guided_tokens(
+            spec_path, "regex", pattern, max_length, k=max_k,
+            adaptive_k_bool=True, want_stats=True)
+        eos = _eos_ids(guidance_model_path)
+        text = og.Tokenizer(og.Model(spec_path)).decode(
+            [token for token in first if token not in eos])
+
+        assert first == second
+        assert re.fullmatch(pattern, text)
+        for stats in (first_stats, second_stats):
+            assert stats["adaptive_k_observations"] > 0
+            assert stats["adaptive_k_throughput"] > 0.0
+            assert 2 <= stats["effective_k"] <= 16
+            assert not stats["formula_supported"]
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_adaptive_k_sampled_guidance_produces_output(
+            self, guidance_model_path, tmp_path, seed):
+        grammar = 'start: "answer:" /[0-9]{2}/'
+        max_k = 8
+        max_length = len(_PROMPT) + 24
+        spec_path = _build_self_spec_guided(
+            guidance_model_path,
+            tmp_path / f"adaptive_sampled_guidance_{seed}",
+            max_k,
+        )
+        options = {
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "top_k": 40,
+            "adaptive_k_bool": True,
+            "want_stats": True,
+        }
+
+        result, stats = _sampled_guided_tokens(
+            spec_path, "lark_grammar", grammar, max_length, seed, max_k,
+            **options)
+
+        assert result
+        assert 2 <= stats["effective_k"] <= 16
 
     @pytest.mark.parametrize("gtype,gdata", _GUIDANCE_CASES)
     def test_k1_matches_regular_guidance(self, guidance_model_path, tmp_path, gtype, gdata):
