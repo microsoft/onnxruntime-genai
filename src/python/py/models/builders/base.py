@@ -1550,6 +1550,11 @@ class Model:
         self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
         self.make_value(output, dtype, shape=shape)
 
+    def make_identity(self, name, root_input, dtype, shape, output_name=None):
+        output = output_name or f"{name}/output_0"
+        self.make_node("Identity", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_add(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Add", inputs=inputs, outputs=[output], name=name)
@@ -1585,6 +1590,11 @@ class Model:
         self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
+    def make_neg(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Neg", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
@@ -1613,6 +1623,45 @@ class Model:
     def make_sigmoid(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_exp(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Exp", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_log(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Log", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_topk(self, name, inputs, dtype, values_shape, indices_shape, axis=-1, largest=1, sorted=1):
+        values_output = f"{name}/output_0"
+        indices_output = f"{name}/output_1"
+        self.make_node(
+            "TopK",
+            inputs=inputs,
+            outputs=[values_output, indices_output],
+            name=name,
+            axis=axis,
+            largest=largest,
+            sorted=sorted,
+        )
+        self.make_value(values_output, dtype, shape=values_shape)
+        self.make_value(indices_output, ir.DataType.INT64, shape=indices_shape)
+        return values_output, indices_output
+
+    def make_gather_elements(self, name, inputs, dtype, shape, axis):
+        output = f"{name}/output_0"
+        self.make_node("GatherElements", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_scatter_elements(self, name, inputs, dtype, shape, axis, reduction=None):
+        output = f"{name}/output_0"
+        attributes = {"axis": axis}
+        if reduction is not None:
+            attributes["reduction"] = reduction
+        self.make_node("ScatterElements", inputs=inputs, outputs=[output], name=name, **attributes)
         self.make_value(output, dtype, shape=shape)
 
     def make_cos(self, name, root_input, dtype, shape):
@@ -3878,6 +3927,8 @@ class Model:
             kwargs.get("weight3", ""),
             kwargs.get("bias3", ""),
         ]
+        if kwargs.get("router_weights"):
+            inputs.append(kwargs["router_weights"])
         output = f"{name}/output_0"
 
         extra_kwargs = (
@@ -3987,6 +4038,11 @@ class Model:
                 kwargs.get("zero_points2", ""),
                 kwargs.get("zero_points3", ""),
             ])
+
+        if kwargs.get("router_weights"):
+            while len(inputs) < 15:
+                inputs.append("")
+            inputs[14] = kwargs["router_weights"]
 
         is_fp4 = self.moe_attrs.get("quant_type") == "fp4"
         if is_fp4:

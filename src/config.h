@@ -386,6 +386,7 @@ struct Config {
         std::string block_table{Defaults::BlockTableName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+        std::vector<std::string> past_state_names;    // Explicit recurrent state input names
 
         // RNNT decoder inputs
         std::string targets;
@@ -407,6 +408,7 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
+        std::vector<std::string> present_state_names;       // Explicit recurrent state output names
 
         // RNNT decoder outputs
         std::string outputs;

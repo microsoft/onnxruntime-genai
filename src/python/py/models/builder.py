@@ -19,6 +19,7 @@ import onnx_ir as ir
 import torch
 from builders import (
     ChatGLMModel,
+    DeepSeekV4Model,
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
@@ -441,6 +442,8 @@ def create_model(
         config.hidden_act = "swiglu"
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
+    elif config.architectures[0] == "DeepseekV4ForCausalLM":
+        onnx_model = DeepSeekV4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Ernie4_5ForCausalLM":
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GemmaForCausalLM":
