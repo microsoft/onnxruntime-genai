@@ -10,6 +10,40 @@ namespace Generators {
 
 namespace {
 
+void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
+                                        size_t elem_count,
+                                        int64_t num_images,
+                                        const char* tensor_name) {
+  if (num_images < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
+  }
+
+  if (shape.size() != 2) {
+    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
+  }
+
+  if (shape[0] < 0 || shape[1] < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
+  }
+
+  if (shape[1] != 3) {
+    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
+  }
+
+  const size_t shape_image_count = static_cast<size_t>(shape[0]);
+  const size_t expected_image_count = static_cast<size_t>(num_images);
+  if (shape_image_count < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape_image_count) +
+                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
+  }
+
+  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
+                             ") is less than required for " + std::to_string(num_images) +
+                             " images (need at least 3 values per image)");
+  }
+}
+
 int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
@@ -82,7 +116,7 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
       const int64_t num_images = shape.empty() ? 0 : shape[0];
       const size_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
-      ValidateImageGridThwLayoutAndCount(shape, elem_count, num_images, "image_grid_thw");
+      ValidateImageGridThwLayoutAndCount(shape, elem_count, num_images, "GetImageFeatureBatchSize: image_grid_thw");
       return num_images;
     }
   }
@@ -199,7 +233,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   const auto grid_shape = grid_full->GetTensorTypeAndShapeInfo()->GetShape();
   const size_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
-  ValidateImageGridThwLayoutAndCount(grid_shape, grid_elem_count, num_images_, "image_grid_thw");
+  ValidateImageGridThwLayoutAndCount(grid_shape, grid_elem_count, num_images_, "QwenVisionState::Run: image_grid_thw");
 
   // Check if the ONNX model accepts dynamic num_images.
   // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
