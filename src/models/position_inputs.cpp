@@ -76,6 +76,36 @@ struct InitAttentionMaskFunctor {
   }
 };
 
+constexpr int64_t kMaxQwen2VLGridDim = 16384;
+
+void ValidateQwen2VLGridTensorValues(const int64_t* grid_data, size_t elem_count, const char* tensor_name) {
+  if (elem_count % 3 != 0) {
+    throw std::runtime_error(std::string(tensor_name) + " element count must be divisible by 3");
+  }
+
+  for (size_t i = 0; i < elem_count; ++i) {
+    if (grid_data[i] < 0) {
+      throw std::runtime_error(std::string(tensor_name) + " values must be non-negative");
+    }
+    if (grid_data[i] > kMaxQwen2VLGridDim) {
+      throw std::runtime_error(std::string(tensor_name) + " values must be <= " + std::to_string(kMaxQwen2VLGridDim));
+    }
+  }
+}
+
+void ValidateQwen2VLVisionLengthFitsSequence(int64_t llm_grid_t, int64_t llm_grid_h, int64_t llm_grid_w,
+                                             int64_t ed, int64_t seq_len) {
+  const int64_t vision_len = llm_grid_t * llm_grid_h * llm_grid_w;
+  if (ed + vision_len > seq_len) {
+    throw std::runtime_error("Image/video grid dimensions (t=" + std::to_string(llm_grid_t) +
+                             " h=" + std::to_string(llm_grid_h) +
+                             " w=" + std::to_string(llm_grid_w) +
+                             ") result in " + std::to_string(vision_len) +
+                             " tokens but only " + std::to_string(seq_len - ed) +
+                             " positions available in sequence");
+  }
+}
+
 DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name)
     : model_{model},
       state_{state},
@@ -648,8 +678,8 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                                            const std::shared_ptr<Tensor>& video_grid_thw,
                                            const std::shared_ptr<Tensor>& second_per_grid_ts) {
-  // Validate grid tensor dimensions to prevent overflow during position computation
-  constexpr int64_t kMaxGridDim = 16384;  // Conservative upper bound to prevent overflow
+  // Typical Qwen2-VL grids are far below this threshold (usually <= 10^3); this limit is
+  // intentionally conservative and blocks pathological dimensions that can explode vision_len.
   const auto validate_grid_tensor = [&](const std::shared_ptr<Tensor>& grid_tensor, const char* tensor_name) {
     if (!grid_tensor) {
       return;
@@ -659,24 +689,14 @@ void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_
       throw std::runtime_error(std::string(tensor_name) + " must be int64.");
     }
 
-    const auto* grid_data = grid_tensor->GetData<int64_t>();
-    const size_t elem_count = grid_tensor->GetElementCount();
-    if (elem_count % 3 != 0) {
-      throw std::runtime_error(std::string(tensor_name) + " element count must be divisible by 3");
-    }
-
-    for (size_t i = 0; i < elem_count; ++i) {
-      if (grid_data[i] < 0) {
-        throw std::runtime_error(std::string(tensor_name) + " values must be non-negative");
-      }
-      if (grid_data[i] > kMaxGridDim) {
-        throw std::runtime_error(std::string(tensor_name) + " values must be <= " + std::to_string(kMaxGridDim));
-      }
-    }
+    ValidateQwen2VLGridTensorValues(grid_tensor->GetData<int64_t>(), grid_tensor->GetElementCount(), tensor_name);
   };
 
   validate_grid_tensor(image_grid_thw, "image_grid_thw");
   validate_grid_tensor(video_grid_thw, "video_grid_thw");
+  if (second_per_grid_ts && second_per_grid_ts->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error("second_per_grid_ts must be float32.");
+  }
 
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
@@ -844,17 +864,8 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
       // 2. Fill Vision Part
       st_idx = max_pos_for_batch + 1;
+      ValidateQwen2VLVisionLengthFitsSequence(llm_grid_t, llm_grid_h, llm_grid_w, ed, seq_len);
       int64_t vision_len = llm_grid_t * llm_grid_h * llm_grid_w;
-
-      // Validate that the vision tokens fit within the sequence
-      if (ed + vision_len > seq_len) {
-        throw std::runtime_error("Image/video grid dimensions (t=" + std::to_string(llm_grid_t) +
-                                 " h=" + std::to_string(llm_grid_h) +
-                                 " w=" + std::to_string(llm_grid_w) +
-                                 ") result in " + std::to_string(vision_len) +
-                                 " tokens but only " + std::to_string(seq_len - ed) +
-                                 " positions available in sequence");
-      }
 
       for (int64_t s = 0; s < vision_len; ++s) {
         int64_t gt = s / (llm_grid_h * llm_grid_w);

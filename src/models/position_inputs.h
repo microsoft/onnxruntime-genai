@@ -108,6 +108,11 @@ struct WindowedPositionInputs : PositionInputs {
   size_t num_windows_{};
   size_t window_index_{};
 };
+
+void ValidateQwen2VLGridTensorValues(const int64_t* grid_data, size_t elem_count, const char* tensor_name);
+void ValidateQwen2VLVisionLengthFitsSequence(int64_t llm_grid_t, int64_t llm_grid_h, int64_t llm_grid_w,
+                                             int64_t ed, int64_t seq_len);
+
 // Qwen2-VL uses 3D rotary position embeddings (mrope) for multimodal (vision + text) content.
 // Position IDs have shape [3, batch_size, seq_len] where the 3 dimensions represent:
 //   - Dimensions 0: Temporal position
