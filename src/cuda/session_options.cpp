@@ -84,6 +84,11 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          bool /*disable_graph_capture*/) {
   auto device = GetDeviceInterface(DeviceType::CUDA);
   AddCudaStreamConfig(session_options, device);
+
+  // CUDA EP honors enable_cuda_graph from the config as-is. Non-decoder
+  // sessions (vision, embedding, speech) should set enable_cuda_graph=0
+  // in their own session_options in genai_config.json.
+
   // Try pre-registered plugin path first
   if (!AppendExecutionProviderV2(session_options, provider_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {

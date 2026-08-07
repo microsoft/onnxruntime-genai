@@ -18,14 +18,17 @@ env:
 
 jobs:
   linux-cpu-arm64-build:
+    permissions:
+      contents: read
+      packages: write # needed for GHCR push
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: 'true'
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: |
             8.0.x
@@ -62,7 +65,7 @@ jobs:
           ls -R microsoft.ml.onnxruntime
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
@@ -73,25 +76,39 @@ jobs:
       - name: Download Docker Image
         run: |
           set -e -x
-          az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
+          az login --identity --object-id 161bbca8-9899-4f61-950c-4d556fbcf830
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          docker login --username "$GITHUB_ACTOR" --password '${{ secrets.GITHUB_TOKEN }}' ghcr.io
+
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
           --repository ort_genai_linux_arm64_gha
 
       - name: Docker -- Configure with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON"
 
       - name: Docker -- Build with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild"
+
+      - name: Docker -- Build the C Examples
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            /usr/bin/cmake -S examples/c -B examples/c/build \
+              -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+              -DORT_INCLUDE_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/build/native/include \
+              -DORT_LIB_DIR=/onnxruntime_src/build/cpu/_deps/ortlib-src/runtimes/linux-arm64/native \
+              -DOGA_INCLUDE_DIR=/onnxruntime_src/src \
+              -DOGA_LIB_DIR=/onnxruntime_src/build/cpu && \
+            /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Docker -- Check test directory
         run: |
@@ -104,3 +121,42 @@ jobs:
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/unit_tests"
+
+      - name: Docker -- Install Python Wheel and Run Python Tests
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            python3 -m pip install -r test/python/requirements.txt --user && \
+            python3 -m pip install -r test/python/cpu/torch/requirements.txt --user && \
+            python3 -m pip install -r test/python/cpu/ort/requirements.txt --user && \
+            python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai && \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib && \
+            python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models"
+
+      - name: Docker -- Build and Run the C# Tests
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          --volume $DOTNET_INSTALL_DIR:/opt/dotnet \
+          -e PATH="/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          -e DOTNET_ROOT=/opt/dotnet \
+          -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            cd /onnxruntime_src/test/csharp && \
+            dotnet test /p:Configuration=Release /p:NativeBuildOutputDir=../../build/cpu/ /p:OrtLibDir=../../ort/lib/ --verbosity normal"
+
+      - name: Docker -- Build the C# Examples
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          --volume $DOTNET_INSTALL_DIR:/opt/dotnet \
+          -e PATH="/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          -e DOTNET_ROOT=/opt/dotnet \
+          -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            cd /onnxruntime_src/examples/csharp/ModelChat && dotnet build -c Release && \
+            cd /onnxruntime_src/examples/csharp/ModelMM && dotnet build -c Release"

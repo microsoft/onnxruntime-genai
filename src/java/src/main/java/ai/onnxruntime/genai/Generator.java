@@ -133,6 +133,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   /**
    * Returns the token count in the generator.
    *
+   * @return The number of tokens.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public long tokenCount() throws GenAIException {
@@ -185,6 +186,20 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     }
 
     return getSequenceNative(nativeHandle, sequenceIndex);
+  }
+
+  /**
+   * Returns the accumulated speculative decoding statistics.
+   *
+   * @return The accumulated speculative decoding statistics.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public SpeculativeStats getSpeculativeStats() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return new SpeculativeStats(getSpeculativeStatsNative(nativeHandle));
   }
 
   /**
@@ -301,6 +316,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native int[] getSequenceNative(long nativeHandle, long sequenceIndex)
       throws GenAIException;
+
+  private native long getSpeculativeStatsNative(long nativeHandle) throws GenAIException;
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
       throws GenAIException;

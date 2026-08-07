@@ -3,11 +3,14 @@
 //
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
+#include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
 #include <memory>
+#include <type_traits>  // for std::remove_const_t
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
+#include "provider_options.h"        // for ProviderOptions
 namespace Ort {
 struct Allocator;
 }
@@ -16,6 +19,7 @@ namespace Generators {
 struct Search;
 struct Sequences;
 struct GeneratorParams;
+struct Config;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -49,6 +53,9 @@ struct DeviceSpan {
   operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
+
+  // True if both spans are views of the same allocation, so that pointer arithmetic between them is meaningful
+  bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
 
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
   std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
@@ -86,12 +93,44 @@ struct DeviceSpan {
   friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
+struct BatchedSamplerState {
+  virtual ~BatchedSamplerState() = default;
+};
+
+struct BatchedSamplingParams {
+  int k{};
+  float p{};
+  float temperature{};
+};
+
+// Owns the reusable workspace for sampling Engine requests as a batch. Each request keeps the
+// state returned by CreateState so its random stream is independent of scheduler batch order.
+struct BatchedSampler {
+  virtual ~BatchedSampler() = default;
+
+  virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
+  virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
+  virtual bool SupportsTransactions() const { return false; }
+  virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void RestoreStateForTransaction() {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void CommitStateForTransaction() noexcept {}
+  virtual DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
+                                     std::span<const BatchedSamplingParams> params,
+                                     std::span<BatchedSamplerState* const> states,
+                                     int vocab_size) = 0;
+};
+
 enum struct DeviceType {
   CPU,
   CUDA,
   DML,
   WEBGPU,
-  QNN,
+  QnnHtp,
+  QnnGpu,
   OpenVINO,
   NvTensorRtRtx,
   RyzenAI,
@@ -104,6 +143,7 @@ struct DeviceInterface {
   virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
+  virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
@@ -116,6 +156,8 @@ struct DeviceInterface {
 
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
+  virtual std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t /*max_batch_size*/,
+                                                               int /*vocab_size*/) { return {}; }
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
@@ -132,6 +174,16 @@ struct DeviceInterface {
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void FinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const Ort::Float16_t* /*cross_qk_buffer_data*/, Ort::Float16_t* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
   virtual void GetAvailableMemory(size_t& /* free_bytes */, size_t& /* total_bytes */) { assert(false); }
+
+  // Allow each EP to shape the trivial init-session ProviderOptions used by EnsureDeviceOrtInit.
+  // The default does nothing; EPs that need global singletons configured (e.g. WebGPU) or
+  // allocator gating options (e.g. QNN) override this. `user_options` is the user-supplied entry
+  // for this provider from config.model.decoder.session_options.provider_options, or nullptr if
+  // the user did not provide one.
+  virtual void ShapeInitSessionProviderOptions(ProviderOptions& /*init_options*/,
+                                               const ProviderOptions* /*user_options*/) const {}
+
+  virtual bool SupportsPhi3RopeRewind(const Config& /*config*/) const { return true; }
 
   virtual void* GetCudaStream() {
     assert(false);

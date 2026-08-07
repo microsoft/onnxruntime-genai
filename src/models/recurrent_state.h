@@ -19,6 +19,8 @@ struct RecurrentState {
   bool IsEmpty() const { return layer_indices_.empty(); }
 
  private:
+  void ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states);
+
   State& state_;
   const Model& model_{state_.model_};
 
@@ -28,29 +30,21 @@ struct RecurrentState {
   std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::vector<std::unique_ptr<OrtValue>> presents_;
 
+  // Mirrors past_present_share_buffer config: true means inputs alias outputs (same allocation,
+  // stable handles for graph capture). False uses separate past/present buffers with per-step swap.
+  bool share_buffers_{false};
+  size_t input_index_{~0U};
+  size_t output_index_{~0U};
+
   // Kept alive for state_ const char* pointers
   std::vector<std::string> input_name_strings_;
   std::vector<std::string> output_name_strings_;
-
-  size_t input_index_{~0U};
-  size_t output_index_{~0U};
 
   ONNXTensorElementDataType conv_type_{};
   ONNXTensorElementDataType recurrent_type_{};
 
   std::vector<int64_t> conv_shape_;
   std::vector<int64_t> recurrent_shape_;
-
-  // Precomputed for allocation and RewindTo
-  size_t conv_bytes_{};
-  size_t recurrent_bytes_{};
-  size_t recurrent_offset_{};  // Aligned offset of recurrent tensor within each layer block
-  size_t per_layer_stride_{};  // Aligned stride per layer
-
-  // Self-owned contiguous memory blocks (not from ORT arena)
-  std::unique_ptr<OrtMemoryInfo> cpu_mem_info_;
-  std::unique_ptr<uint8_t[]> past_block_;
-  std::unique_ptr<uint8_t[]> present_block_;
 };
 
 // Factory: returns nullptr if no recurrent layers are found in the session.

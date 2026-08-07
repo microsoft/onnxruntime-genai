@@ -12,10 +12,16 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configurations>Debug;RelWithDebInfo;Release</Configurations>
-    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
+    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json;https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json</RestoreAdditionalProjectSources>
     <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
+    <OrtPackageVersion>1.28.0-dev-20260610-0510-50c9510000</OrtPackageVersion>
+    <!-- EP-plugin pipelines (e.g. WebGPU) pass /p:EPDir=<dir> pointing at the directory of EP plugin
+         libraries the pipeline downloaded. At runtime the tests enumerate that directory and register
+         each plugin; when EPDir is not set, registration is a no-op. -->
+    <RuntimeIdentifier Condition="'$(EPDir)' != '' and '$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+    <SelfContained Condition="'$(EPDir)' != ''">false</SelfContained>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -80,10 +86,10 @@
         <Visible>false</Visible>
     </None>
 
-    <None Include="$(TestsSrcRoot)\test_models\**">
+    <None Include="$(TestsSrcRoot)\models\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
-      <LinkBase>"test_models\"</LinkBase>
+      <LinkBase>"models\"</LinkBase>
     </None>
   </ItemGroup>
 
@@ -91,6 +97,15 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
     <PackageReference Include="xunit" Version="2.4.1" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OrtPackageVersion)" />
+  </ItemGroup>
+
+  <!-- Surface the /p:EPDir MSBuild property to the test at runtime as assembly metadata. -->
+  <ItemGroup Condition="'$(EPDir)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>EPDir</_Parameter1>
+      <_Parameter2>$(EPDir)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>

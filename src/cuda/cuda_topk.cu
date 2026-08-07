@@ -111,6 +111,7 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* bu
   CUDA_CHECK(cudaGetDevice(&device_id));
 
   local_algo_cache_.fill(TopkAlgo::UNKNOWN);
+  local_algo_cache_batch_size_.fill(0);
 
   if (buffer) {
     // Wrap an externally provided buffer. The caller is responsible for ensuring the size is sufficient.
@@ -165,7 +166,10 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
   assert(k > 0 && k <= vocab_size);
 
   // 1. Check the fast, local cache first.
-  TopkAlgo algo = (k <= kMaxBenchmarkLocalCache) ? topk_data->local_algo_cache_[k] : TopkAlgo::UNKNOWN;
+  TopkAlgo algo = (k <= kMaxBenchmarkLocalCache &&
+                   topk_data->local_algo_cache_batch_size_[k] == batch_size)
+                      ? topk_data->local_algo_cache_[k]
+                      : TopkAlgo::UNKNOWN;
 
   if (algo == TopkAlgo::UNKNOWN) {
     // 2. Local cache miss, check the persistent global cache.
@@ -179,6 +183,7 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
     // Update the local cache for subsequent calls within this session.
     if (k <= kMaxBenchmarkLocalCache) {
       topk_data->local_algo_cache_[k] = algo;
+      topk_data->local_algo_cache_batch_size_[k] = batch_size;
     }
   }
 

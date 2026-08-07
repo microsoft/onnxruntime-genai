@@ -14,10 +14,7 @@
 #include <ort_genai.h>
 #include <gtest/gtest.h>
 
-// Our working directory is generators/build so one up puts us in the root directory:
-#ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
-#endif
+#include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
@@ -31,7 +28,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
                                    0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   auto model = OgaModel::Create(*config);
   auto params = OgaGeneratorParams::Create(*model);
@@ -59,7 +56,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   int batch_size = 4;
 
@@ -84,6 +81,48 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   }
 }
 
+// Regression test: beam search with a vocab_size too small to supply
+// 2*num_beams candidates must be rejected at generator creation instead of
+// driving an out-of-bounds partial_sort in BeamSearch_Cpu::SelectTop.
+TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 1 } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("num_beams", 2);
+
+  try {
+    OgaGenerator::Create(*model, *params);
+    FAIL() << "Expected std::runtime_error for beam search with vocab_size < 2";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("vocab_size"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
+// Regression test: an eos_token_id outside [0, vocab_size) must be rejected at
+// generator creation time instead of causing an out-of-bounds write in
+// Search_Cpu::ApplyMinLength (which uses eos_token_id as a score-row index).
+TEST(SamplingTests, EosTokenIdExceedsVocabSizeThrowsCpu) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 5 } })");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOption("min_length", 5);
+
+  try {
+    OgaGenerator::Create(*model, *params);
+    FAIL() << "Expected std::runtime_error for eos_token_id >= vocab_size";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos)
+        << "Unexpected error message: " << e.what();
+  }
+}
+
 TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
@@ -92,7 +131,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
 
   int batch_size = 4;
 
@@ -226,7 +265,7 @@ void Softmax(std::span<float> scores, float temperature) {
 void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_iter, float temperature, bool use_cuda) {
   // --- 1. Setup Model and Generator Parameters ---
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  std::string overlay_json = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
+  std::string overlay_json = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"(, "eos_token_id" : 0 } })";
   config->Overlay(overlay_json.c_str());
 
   if (use_cuda) {
@@ -238,9 +277,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   params->SetSearchOptionBool("do_sample", true);
-  if (k > 0) {
-    params->SetSearchOption("top_k", k);
-  }
+  params->SetSearchOption("top_k", k);  // Always set; k=0 disables top-k, routing to SampleTopP
   if (p < 1.0f) {
     params->SetSearchOption("top_p", p);
   }
@@ -339,6 +376,191 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   RunSamplingTest(/*batch_size*/ 5, /*k*/ 7, /*p*/ 0.75f, /*vocab_size*/ 21, /*num_iter*/ 1000, /*temperature*/ 1.0f, /*use_cuda*/ false);
 }
 
+// Statistical distribution test for pure TopP (k=0) on CPU.
+// This exercises the SampleTopP adaptive partial_sort path and verifies that the
+// observed token distribution matches the expected nucleus-filtered distribution.
+TEST(SamplingTests, RandomizedSamplingTopPOnlyCpu) {
+  RunSamplingTest(/*batch_size*/ 5, /*k*/ 0, /*p*/ 0.95f, /*vocab_size*/ 21, /*num_iter*/ 1000, /*temperature*/ 1.0f, /*use_cuda*/ false);
+}
+
+// Tests SampleTopP with a flat (near-uniform) logit distribution.
+// This is the edge case where the adaptive partial_sort must expand beyond the
+// initial K=256 candidates to reach the nucleus. With a uniform distribution over
+// vocab_size tokens, top_p=0.95 should require ~95% of the vocabulary.
+// The test verifies that all tokens within the nucleus are sampled (none are
+// incorrectly excluded due to premature cutoff).
+TEST(SamplingTests, TopPFlatDistributionCpu) {
+  const int vocab_size = 500;
+  const int batch_size = 1;
+  const float top_p = 0.95f;
+  const int num_iter = 5000;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 500 } })");
+
+  auto model = OgaModel::Create(*config);
+
+  // Create flat logits: all tokens have equal scores
+  std::vector<float> logits_cpu(vocab_size * batch_size, 1.0f);
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+
+  std::map<int32_t, int> token_counts;
+  std::mt19937 rng(42);
+  std::uniform_int_distribution<int> seed_dist;
+
+  for (int i = 0; i < num_iter; i++) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 10);
+    params->SetSearchOptionBool("do_sample", true);
+    params->SetSearchOption("top_k", 0);
+    params->SetSearchOption("top_p", top_p);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("random_seed", static_cast<double>(seed_dist(rng)));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+    token_counts[next_tokens[0]]++;
+  }
+
+  // With a uniform distribution and top_p=0.95, we expect all 500 tokens to be
+  // in the nucleus since each has probability 1/500 = 0.002 and we need 475+ tokens
+  // to reach 95%. Verify that a large fraction of the vocabulary was actually sampled.
+  int unique_tokens = static_cast<int>(token_counts.size());
+  // With 5000 samples from a uniform distribution over 500 tokens, we should see
+  // nearly all tokens. Allow for some statistical variation.
+  EXPECT_GT(unique_tokens, vocab_size * 85 / 100)
+      << "Expected most tokens to be sampled from a flat distribution, but only "
+      << unique_tokens << " of " << vocab_size << " were observed.";
+}
+
+// Functional correctness test for ApplyRepetitionPenalty.
+// Verifies that the repetition penalty actually modifies scores: tokens that
+// appeared in the sequence should have suppressed probabilities relative to
+// tokens that did not appear.
+TEST(SamplingTests, RepetitionPenaltyCorrectnessCpu) {
+  const int vocab_size = 1000;  // Must match tiny-random-gpt2-fp32 model's actual vocab
+  const int batch_size = 1;
+  const int num_iter = 500;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  // Logits: all tokens have equal score, so without penalty all are equally likely
+  std::vector<float> logits_cpu(vocab_size * batch_size, 5.0f);
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+
+  // Pre-fill the sequence with tokens 0-9 so those get penalized
+  std::vector<int32_t> prefill_tokens = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+  std::map<int32_t, int> token_counts;
+  std::mt19937 rng(123);
+  std::uniform_int_distribution<int> seed_dist;
+
+  for (int i = 0; i < num_iter; i++) {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 25);
+    params->SetSearchOptionBool("do_sample", true);
+    params->SetSearchOption("top_k", vocab_size);
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 2.0);
+    params->SetSearchOption("random_seed", static_cast<double>(seed_dist(rng)));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(prefill_tokens.data(), static_cast<int>(prefill_tokens.size()));
+
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+    token_counts[next_tokens[0]]++;
+  }
+
+  // With penalty=2.0, tokens 0-9 (which appeared in the sequence) should have
+  // their scores divided by 2.0 (since scores are positive: 5.0 -> 2.5),
+  // while tokens 10-999 keep score 5.0. Compare per-token average frequency
+  // to detect actual penalty effect vs. mere count imbalance (990 vs 10 tokens).
+  int penalized_count = 0;    // tokens 0-9 (10 tokens)
+  int unpenalized_count = 0;  // tokens 10-999 (990 tokens)
+  for (auto& [token, count] : token_counts) {
+    if (token < 10)
+      penalized_count += count;
+    else
+      unpenalized_count += count;
+  }
+
+  // Compare per-token average: unpenalized_avg vs penalized_avg.
+  // Without penalty, both groups have equal logits so per-token avg would be similar.
+  // With penalty=2.0 on positive scores (5.0 -> 2.5), exp(5)/exp(2.5) ≈ 12x ratio.
+  // Use a conservative 3x threshold that clearly separates "penalty working" from "no penalty".
+  double penalized_avg = static_cast<double>(penalized_count) / 10.0;       // 10 penalized tokens
+  double unpenalized_avg = static_cast<double>(unpenalized_count) / 990.0;  // 990 unpenalized tokens
+  EXPECT_GT(unpenalized_avg, penalized_avg * 3.0)
+      << "Repetition penalty doesn't appear to suppress repeated tokens. "
+      << "Penalized per-token avg=" << penalized_avg
+      << " Unpenalized per-token avg=" << unpenalized_avg;
+}
+
+TEST(SamplingTests, TopKExceedingVocabSizeIsRejected) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 25);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 5000);  // vocab_size is 1000
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+// Functional correctness test for ApplyNoRepeatNgram.
+// Greedy decoding is forced toward a token that would repeat an n-gram already
+// present in the sequence. With no_repeat_ngram_size=3 that token must be banned
+// so the next-best allowed token is chosen instead.
+TEST(SamplingTests, NoRepeatNgramCorrectnessCpu) {
+  const int vocab_size = 1000;  // Must match tiny-random-gpt2-fp32 model's actual vocab
+  const int batch_size = 1;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->ClearProviders();
+  auto model = OgaModel::Create(*config);
+
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
+  std::vector<float> logits_cpu(vocab_size * batch_size, 5.0f);
+  logits_cpu[7] = 10.0f;  // highest score; would complete the repeated 3-gram (5, 6, 7)
+  logits_cpu[42] = 8.0f;  // best score among allowed tokens
+
+  // Sequence already contains the 3-gram (5, 6, 7) and currently ends with the
+  // prefix (5, 6), so token 7 would repeat that 3-gram.
+  std::vector<int32_t> prefill_tokens = {5, 6, 7, 8, 5, 6};
+
+  auto first_token = [&](int ngram_size) -> int32_t {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 32);
+    params->SetSearchOptionBool("do_sample", false);  // greedy
+    params->SetSearchOption("batch_size", batch_size);
+    params->SetSearchOption("repetition_penalty", 1.0);  // isolate the n-gram effect
+    params->SetSearchOption("no_repeat_ngram_size", static_cast<double>(ngram_size));
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokens(prefill_tokens.data(), static_cast<int>(prefill_tokens.size()));
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), shape));
+    generator->GenerateNextToken();
+    return generator->GetNextTokens()[0];
+  };
+
+  // Baseline: without n-gram blocking, greedy picks the highest-scoring token (7).
+  EXPECT_EQ(first_token(0), 7)
+      << "Greedy should pick the highest-scoring token when n-gram blocking is off.";
+
+  // With no_repeat_ngram_size=3, token 7 would repeat the 3-gram (5, 6, 7) and
+  // must be banned, so greedy falls back to the next-best allowed token (42).
+  EXPECT_EQ(first_token(3), 42)
+      << "Token 7 should be banned (repeats 3-gram 5,6,7); expected fallback to token 42.";
+}
+
 #if USE_CUDA
 TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
@@ -351,7 +573,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -359,6 +581,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 1);
   params->SetSearchOption("top_p", 0.25f);
   params->SetSearchOption("batch_size", batch_size);
 
@@ -380,7 +603,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -413,7 +636,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   int vocab_size = 5;
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 0 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
   auto model = OgaModel::Create(*config);
@@ -572,7 +795,7 @@ struct NvTensorRtRtxTestSetup {
 
     // Create config with vocab_size overlay
     auto config = OgaConfig::Create(resolved_path.c_str());
-    std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
+    std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"(, "eos_token_id" : 0 } })";
     config->Overlay(overlay.c_str());
     config->ClearProviders();
     config->AppendProvider("NvTensorRtRtx");

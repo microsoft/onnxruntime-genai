@@ -1,16 +1,20 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #pragma once
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
 #include "utils.h"
+#include <optional>
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
+#include "parakeet_processor.h"
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
+#include "gemma4_multimodal_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
@@ -34,8 +38,8 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
-  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
-  void SetRunOption(const char* key, const char* value);
+  virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+  virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
@@ -60,6 +64,11 @@ struct State {
 
  private:
   std::string graph_id_{};
+  int graph_id_value_{0};  // integer form of graph_id_, used to avoid re-parsing in the destructor
+  // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
+  // outlives this State because State is owned by Generator, and Generator is
+  // destroyed before the Model (and its session) that produced it.
+  OrtSession* graph_capture_session_{nullptr};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };
@@ -98,12 +107,26 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
   int32_t GetPadTokenId() const { return pad_token_id_; }
 
+  // Tool-calling and reasoning token IDs.
+  // Naming follows the bos/eos/pad convention:
+  //   bot = beginning of tool (call), eot = end of tool (call)
+  //   bor = beginning of reasoning,   eor = end of reasoning
+  // Throws if the model does not define the requested token.
+  int32_t GetBotTokenId() const;
+  int32_t GetEotTokenId() const;
+  int32_t GetBorTokenId() const;
+  int32_t GetEorTokenId() const;
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
+  std::optional<int32_t> bot_token_id_;
+  std::optional<int32_t> eot_token_id_;
+  std::optional<int32_t> bor_token_id_;
+  std::optional<int32_t> eor_token_id_;
 };
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
@@ -168,17 +191,21 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   DeviceInterface* p_device_scoring_{};  // Device for search/scoring (sequences, token allocation).
   DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
 
+  uint32_t telemetry_session_id_{0};  // Session ID for telemetry event correlation
+
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
 
- protected:
-  void CreateSessionOptions();
-
+  /// Create session options from config. Public so components like VAD can create
+  /// properly configured sessions using the GenAI infrastructure.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
                                       bool disable_graph_capture = false);
+
+ protected:
+  void CreateSessionOptions();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

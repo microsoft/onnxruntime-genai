@@ -19,6 +19,8 @@ struct PhiMultiModalProcessor : Processor {
   ONNXTensorElementDataType attention_mask_type_;
   ONNXTensorElementDataType audio_features_type_;
   ONNXTensorElementDataType audio_sizes_type_;
+
+  bool has_speech_{false};
 };
 
 }  // namespace Generators

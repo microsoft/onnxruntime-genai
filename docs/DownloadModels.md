@@ -33,7 +33,7 @@ This guide covers ways to download models for use with ONNX Runtime GenAI.
    ```
    huggingface-cli download microsoft/Phi-4-mini-instruct-onnx --include gpu/* --local-dir .
    ```
-5. Identify the path to the model on disk. For example: gpu/gpu-int4-rtn-block-32
+4. Identify the path to the model on disk. For example: gpu/gpu-int4-rtn-block-32
 
 
 ## Build a Model

@@ -3,33 +3,36 @@
 
 from __future__ import annotations
 
+import importlib
+import json
+import logging
 import os
+import re
 import shutil
 import sysconfig
 import tempfile
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
 
-if not sysconfig.get_platform().endswith("arm64"):
-    # Skip importing onnx if running on ARM64
-    # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
-    # there is a version bump
-    import onnx
+logger = logging.getLogger(__name__)
 
-devices = ["cpu"]
+# Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
+register_plugin_providers(logger)
+
+has_accelerator_ep = og.is_cuda_available() or og.is_dml_available() or og.is_webgpu_available()
+devices = [] if has_accelerator_ep else ["cpu"]
 
 if og.is_cuda_available():
     devices.append("cuda")
 
 if og.is_dml_available():
     devices.append("dml")
-
-if og.is_rocm_available():
-    devices.append("rocm")
 
 if og.is_openvino_available():
     devices.append("openvino")
@@ -38,8 +41,13 @@ if og.is_webgpu_available():
     devices.append("webgpu")
 
 
+@pytest.fixture
+def test_data_path(request):
+    return os.fspath(Path(request.config.getoption("--test_models")).parent)
+
+
 def test_config(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -47,6 +55,11 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
+
+def test_telemetry_control():
+    og.disable_telemetry_events()
+    og.enable_telemetry_events()
 
 
 def test_log_callback(test_data_path):
@@ -59,7 +72,7 @@ def test_log_callback(test_data_path):
     og.set_log_options(enabled=True, generate_next_token=True)
     og.set_log_callback(_log_callback)
 
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     model = og.Model(config)
 
@@ -86,7 +99,7 @@ def test_log_filename(test_data_path):
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as log_file:
         og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
 
-        model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+        model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
         config = og.Config(model_path)
         model = og.Model(config)
 
@@ -105,7 +118,7 @@ def test_log_filename(test_data_path):
     og.set_log_callback(None)
 
 
-def test_NamedTensors():
+def test_named_tensors():
     named_tensors = og.NamedTensors()
     named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
     named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
@@ -139,7 +152,7 @@ def test_NamedTensors():
     ),
 )
 def test_greedy_search(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     config = og.Config(model_path)  # Test using config vs path directly
     model = og.Model(config)
@@ -153,7 +166,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
 
     assert int(search_params.get_search_options()["max_length"]) == 10
-    assert search_params.get_search_options()["early_stopping"] == True
+    assert search_params.get_search_options()["early_stopping"]
     assert int(generator.token_count()) == 4
 
     while not generator.is_done():
@@ -189,7 +202,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     ),
 )
 def test_rewind_cuda(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -246,7 +259,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
 )
 def test_rewind(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -276,12 +289,6 @@ def test_rewind(test_data_path, relative_model_path):
 
 
 # Test Model Loading with No Chat Template
-
-
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])
 def test_tokenizer_encode_decode(device, phi2_for, batch):
@@ -308,10 +315,6 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
 
 
 # Test Chat Template Supported Model
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi3_chat_template(device, phi3_for):
     model_path = phi3_for(device)
@@ -324,14 +327,10 @@ def test_phi3_chat_template(device, phi3_for):
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to apply chat template: {e}"
+        raise AssertionError(f"Error while trying to apply chat template: {e}") from e
 
 
 # Test Chat Template Unsupported Model with Template String Override
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi2_chat_template(device, phi2_for):
     model_path = phi2_for(device)
@@ -347,13 +346,9 @@ def test_phi2_chat_template(device, phi2_for):
     try:
         tokenizer.apply_chat_template(template_str=template_string, messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to override chat template: {e}"
+        raise AssertionError(f"Error while trying to override chat template: {e}") from e
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_stream(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -375,10 +370,6 @@ def test_stream(device, phi2_for):
         assert decoded_string == prompt
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
     if device == "dml":
@@ -400,14 +391,10 @@ def test_batching(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_e2e(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -429,14 +416,10 @@ def test_e2e(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("wrapper_bytes_function", [lambda x: x, bytearray, memoryview])
 def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
@@ -462,7 +445,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -479,7 +462,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     ),
 )
 def test_model_device_type(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path[0])
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path[0])
 
     model = og.Model(model_path)
 
@@ -501,7 +484,7 @@ def test_model_device_type(test_data_path, relative_model_path):
     ),
 )
 def test_get_output(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -547,10 +530,6 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
@@ -619,10 +598,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
     _split(
         Path(phi2_for("cuda")) / "model.onnx",
-        Path(test_data_path) / relative_model_path,
+        Path(test_data_path) / "models" / relative_model_path,
     )
 
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
@@ -656,10 +635,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         assert equal
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -671,10 +650,10 @@ def test_vision_preprocessing(test_data_path, relative_model_path, relative_imag
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -689,13 +668,13 @@ def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_mod
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_vision_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -714,16 +693,12 @@ def test_vision_preprocessing_multiple_images(test_data_path, relative_model_pat
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize("multiple_adapters", [True, False])
 def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     def _prepare_adapter_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "multiple_adapters" if multiple_adapters else "adapters"
-        adapter_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        adapter_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
         if os.path.exists(adapter_model_path):
             shutil.rmtree(adapter_model_path)
 
@@ -840,10 +815,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize(
     "extra_inputs",
     [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)],
@@ -852,7 +823,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     def _prepare_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "preset_extra_inputs"
-        extra_inputs_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        extra_inputs_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
         shutil.copytree(phi2_model_path, extra_inputs_model_path, dirs_exist_ok=True)
 
@@ -924,10 +895,10 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
             generator.generate_next_token()
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -941,13 +912,29 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     _ = processor(prompts, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
+def test_whisper_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+
+    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
+    audios = og.Audios.open(audio_path)
+
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    prompt = "".join(decoder_prompt_tokens)
+    _ = processor(prompt, audios=audios)
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
 )
-def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -975,9 +962,8 @@ def test_streaming_asr_create(nemotron_speech_model_path):
 
 def _load_streaming_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
-    import json
     config_path = os.path.join(model_path, "genai_config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
     return config["model"]["sample_rate"], config["model"]["chunk_samples"]
 
@@ -1066,9 +1052,60 @@ def test_streaming_asr_config_model_type(nemotron_speech_model_path):
     assert model.type == "nemotron_speech"
 
 
+def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
+    """Test that VAD can be controlled via set_option/get_option on StreamingProcessor."""
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+
+    # Default: VAD disabled
+    assert processor.get_option("use_vad") == "false"
+
+    # Set and get min_silence_chunks
+    processor.set_option("silence_duration_ms", "1000")
+    assert processor.get_option("silence_duration_ms") == "1000"
+
+    # Enable VAD if silero model is available
+    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    if os.path.exists(vad_path):
+        processor.set_option("use_vad", "true")
+        assert processor.get_option("use_vad") == "true"
+
+        processor.set_option("vad_threshold", "0.8")
+        assert processor.get_option("use_vad") == "true"
+
+        # Disable
+        processor.set_option("use_vad", "false")
+        assert processor.get_option("use_vad") == "false"
+
+
+def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
+    """Test that VAD uses consecutive silence logic — doesn't drop until min_silence_chunks exceeded."""
+    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
+    if not os.path.exists(vad_path):
+        pytest.skip("silero_vad.onnx not found in model dir")
+
+    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    model = og.Model(nemotron_speech_model_path)
+    processor = og.StreamingProcessor(model)
+    processor.set_option("use_vad", "true")
+    processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
+
+    silence = np.zeros(chunk_samples, dtype=np.float32)
+
+    # First 2 silence chunks should still be processed
+    mel1 = processor.process(silence)
+    assert mel1 is not None  # Chunk 1: processed (1 consecutive)
+
+    mel2 = processor.process(silence)
+    assert mel2 is not None  # Chunk 2: processed (2 consecutive)
+
+    # Third silence chunk should be dropped
+    mel3 = processor.process(silence)
+    assert mel3 is None  # Chunk 3: dropped (> min_silence_chunks)
+
+
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
-    import re
 
     def normalize(text):
         text = re.sub(r"[^\w\s]", "", text.lower())
@@ -1093,7 +1130,7 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
 def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
     """Test that transcription of a known audio file has acceptable WER."""
     try:
-        import soundfile as sf
+        sf = importlib.import_module("soundfile")
     except ImportError:
         pytest.skip("soundfile not installed")
         return
@@ -1109,9 +1146,10 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
     if sr != sample_rate:
         try:
-            import scipy.signal
+            scipy_signal = importlib.import_module("scipy.signal")
+
             num_samples = int(len(audio) * sample_rate / sr)
-            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+            audio = scipy_signal.resample(audio, num_samples).astype(np.float32)
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
@@ -1139,8 +1177,77 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     )
 
     wer = _word_error_rate(reference, transcript)
-    assert wer < 0.15, (
-        f"WER too high: {wer:.1%}\n"
-        f"  Reference:  {reference}\n"
-        f"  Hypothesis: {transcript.lower()}"
-    )
+    assert wer < 0.15, f"WER too high: {wer:.1%}\n  Reference:  {reference}\n  Hypothesis: {transcript.lower()}"
+
+
+# ---------------------------------------------------------------------------
+# Graph capture tests
+# ---------------------------------------------------------------------------
+# Note: Graph capture tests use separate fixtures (qwen_graph_for) that resolve
+# to models stored under "-graph" aliases. This keeps them isolated from regular
+# unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.), which use
+# different fixtures (phi4_for, qwen_for) and thus won't accidentally run on
+# graph-capture-enabled models.
+#
+# Graph capture requires expensive recompilation and model generation, so we only
+# build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
+    """Verify that Qwen generates deterministically with graph capture across multiple runs."""
+    if device not in {"cuda", "webgpu"}:
+        # TODO: fix this for DML
+        pytest.skip(f"Graph capture is not supported for Qwen-2.5 on {device}.")
+
+    model = og.Model(qwen_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Qwen graph capture model produced different outputs across two identical greedy runs"
+
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_phi4_graph_capture_output_consistency(phi4_graph_for, device):
+    """Verify that Phi-4-mini generates deterministically with graph capture across multiple runs.
+
+    Graph capture CI is currently unstable on DML, so this test is restricted to WebGPU.
+    CUDA is excluded because If nodes break CUDA graph capture for Phi-4-mini.
+    """
+    if device not in {"webgpu"}:
+        # TODO: re-enable DML once graph-capture CI becomes stable on DML.
+        pytest.skip(f"Graph capture is not supported for Phi-4 mini on {device}.")
+    model = og.Model(phi4_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Phi-4-mini graph capture model produced different outputs across two identical greedy runs"

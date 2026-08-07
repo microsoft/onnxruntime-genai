@@ -21,6 +21,11 @@ NS_ASSUME_NONNULL_BEGIN
   self.continueAfterFailure = NO;
 }
 
+- (void)testTelemetryControl {
+  [OGAGenerator setTelemetryEnabled:NO];
+  [OGAGenerator setTelemetryEnabled:YES];
+}
+
 + (void)tearDown {
   [OGAGenerator shutdown];
 }
@@ -40,7 +45,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(config, error);
 
@@ -78,7 +83,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(model, error);
 
@@ -145,6 +150,30 @@ NS_ASSUME_NONNULL_BEGIN
   }
   [generator generateNextTokenWithError:&error];
   ORTAssertBoolResultSuccessful(ret, error);
+}
+
+- (void)testSpeculativeAPIs {
+  NSError* error = nil;
+  OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(model, error);
+
+  OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+  ORTAssertNullableResultSuccessful(params, error);
+  BOOL ret = [params setSpeculativeNumber:@"max_draft_tokens" doubleValue:4 error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+  XCTAssertEqual([params getSpeculativeNumber:@"max_draft_tokens" error:&error], 4);
+  XCTAssertNil(error);
+
+  OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model params:params error:&error];
+  ORTAssertNullableResultSuccessful(generator, error);
+  OGASpeculativeStats* stats = [generator getSpeculativeStatsWithError:&error];
+  ORTAssertNullableResultSuccessful(stats, error);
+  XCTAssertEqual([stats getCount:@"rounds" error:&error], 0);
+  XCTAssertNil(error);
+  XCTAssertFalse([stats getBool:@"formula_supported" error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqual([stats getNumber:@"acceptance_rate" error:&error], 0);
+  XCTAssertNil(error);
 }
 
 @end

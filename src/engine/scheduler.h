@@ -6,6 +6,7 @@
 #include "request.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
+#include "step_plan.h"
 
 /**
  * @file scheduler.h
@@ -21,7 +22,7 @@ struct Scheduler {
    * @param model A shared pointer to the Model object to be used by the Scheduler.
    * @param cache_manager A shared pointer to the CacheManager for managing cache states.
    */
-  Scheduler() = default;
+  explicit Scheduler(std::shared_ptr<Model> model);
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
@@ -51,6 +52,12 @@ struct Scheduler {
    */
   virtual ScheduledRequests Schedule() = 0;
 
+  virtual StepPlanningResult PlanStep(StepPlan&) {
+    throw std::logic_error("Scheduler does not support transactional step planning.");
+  }
+
+  ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
+
   /**
    * @brief Checks if the Scheduler has any pending requests.
    * @return True if there are pending requests, false otherwise.
@@ -61,6 +68,15 @@ struct Scheduler {
   virtual bool HasPendingRequests() const = 0;
 
   virtual ~Scheduler() = default;
+
+ protected:
+  BatchedSampler* GetBatchedSampler() const { return batched_sampler_.get(); }
+  BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::unique_ptr<BatchedSampler> batched_sampler_;
+  BatchedSamplingPlan batched_sampling_plan_;
 };
 
 struct StaticBatchScheduler : Scheduler {
@@ -90,9 +106,13 @@ struct DynamicBatchScheduler : Scheduler {
 
   ScheduledRequests Schedule() override;
 
+  StepPlanningResult PlanStep(StepPlan& plan) override;
+
   bool HasPendingRequests() const override;
 
  private:
+  void ReapCompletedRequests();
+
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;

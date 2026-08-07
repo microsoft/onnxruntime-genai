@@ -9,6 +9,35 @@
 namespace Generators {
 
 /**
+ * @struct VarlenGraphBuffers
+ * @brief Fixed-address input and output buffers for capturable decode steps.
+ *
+ * CUDA graph replay re-issues the launches recorded at capture time together with the device
+ * pointers they were given, and it never re-runs the operators' host-side code. Every buffer the
+ * captured step reads or writes must therefore stay at the same address for the life of the graph,
+ * which the per-step tensors of an ordinary decode step do not. This holder outlives the per-step
+ * VarlenDecoderIO and hands it the same allocations every time.
+ *
+ * The buffers are sized once for the largest batch the engine will schedule; a given step views a
+ * smaller prefix of them. Steps that differ in shape are captured under different annotation ids.
+ */
+struct VarlenGraphBuffers {
+  VarlenGraphBuffers(DecoderOnly_Model& model);
+
+  // Annotation id for a decode step of this shape. Distinct (batch, block table columns) pairs need
+  // distinct graphs because the captured launches bake in grid dimensions derived from both.
+  static int GraphId(size_t batch_size, size_t block_table_columns);
+
+  bool Fits(size_t batch_size) const { return batch_size <= max_batch_size; }
+
+  std::unique_ptr<Tensor> input_ids;
+  std::unique_ptr<Tensor> cumulative_sequence_lengths;
+  std::unique_ptr<Tensor> past_sequence_lengths;
+  std::unique_ptr<Tensor> logits;
+  size_t max_batch_size{};
+};
+
+/**
  * @class VarlenDecoderIO
  * @brief Prepares and manages the inputs and outputs for a variable-length decoder model.
  *
@@ -18,6 +47,7 @@ namespace Generators {
  * - Input IDs - int64[total_num_tokens]
  * - Cumulative Sequence Lengths - int32[batch_size + 1]
  * - Past Sequence Lengths - int32[batch_size]
+ * - Attention Metadata - int32[2] (CPU), optional
  * Outputs:
  * - Logits - float16/float32[total_num_tokens, vocab_size]
  *
@@ -27,16 +57,24 @@ namespace Generators {
 struct VarlenDecoderIO : DecoderIO {
   VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                   ScheduledRequests& scheduled_requests,
-                  std::shared_ptr<CacheManager> cache_manager);
+                  std::shared_ptr<CacheManager> cache_manager,
+                  const ExecutionContext* execution_context = nullptr,
+                  VarlenGraphBuffers* graph_buffers = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 
+  // Non-null when this step is being captured or replayed, in which case the tensors below are
+  // borrowed from the holder instead of being allocated fresh.
+  VarlenGraphBuffers* graph_buffers_{};
+  const ExecutionContext* execution_context_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;
+  Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
 };
 

@@ -1,0 +1,30 @@
+{
+  "feature_extraction": {
+    "sequence": [
+      {
+        "operation": {
+          "name": "audio_decoder",
+          "type": "AudioDecoder"
+        }
+      },
+      {
+        "operation": {
+          "name": "gemma4_log_mel",
+          "type": "Gemma4LogMel",
+          "attrs": {
+            "feature_size": 128,
+            "sampling_rate": 16000,
+            "frame_length_ms": 20.0,
+            "hop_length_ms": 10.0,
+            "min_frequency": 0.0,
+            "max_frequency": 8000.0,
+            "preemphasis": 0.0,
+            "preemphasis_htk_flavor": 1,
+            "fft_overdrive": 0,
+            "mel_floor": 0.001
+          }
+        }
+      }
+    ]
+  }
+}

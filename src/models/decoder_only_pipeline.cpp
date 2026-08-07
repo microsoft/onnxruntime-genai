@@ -44,7 +44,9 @@ bool IntermediatePipelineState::HasOutput(std::string_view name) const {
 }
 
 bool IntermediatePipelineState::SupportsPrimaryDevice() const {
-  if (model_.p_device_->GetType() == DeviceType::CPU || model_.p_device_->GetType() == DeviceType::QNN) {
+  if (model_.p_device_->GetType() == DeviceType::CPU ||
+      model_.p_device_->GetType() == DeviceType::QnnHtp ||
+      model_.p_device_->GetType() == DeviceType::QnnGpu) {
     return true;
   } else if (model_.p_device_->GetType() == DeviceType::CUDA) {
     if (!model_.config_->model.decoder.pipeline[id_].session_options.has_value()) {
@@ -344,6 +346,10 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         }
       }
     }
+
+    // Notify derived classes that this pipeline stage has completed.
+    // This allows e.g. Qwen VL to inject vision embeddings after the embeddings stage.
+    OnStageComplete(pipeline_state->id_);
   }
 }
 

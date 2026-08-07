@@ -38,7 +38,15 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process(const Tokenizer& tokeniz
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(mel.get(), allocator)));
   }
 
-  std::shared_ptr<Tensor> input_ids = tokenizer.EncodeBatch(payload.prompts);
+  std::shared_ptr<Tensor> input_ids;
+  if (!payload.prompts.empty()) {
+    input_ids = tokenizer.EncodeBatch(payload.prompts);
+  } else if (!payload.prompt.empty()) {
+    const char* prompt_ptr = payload.prompt.c_str();
+    input_ids = tokenizer.EncodeBatch(std::span<const char*>(&prompt_ptr, 1));
+  } else {
+    throw std::runtime_error("No prompt or prompts provided to WhisperProcessor::Process.");
+  }
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), input_ids);
 
   return named_tensors;

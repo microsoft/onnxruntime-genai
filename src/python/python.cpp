@@ -192,6 +192,24 @@ struct PyGeneratorParams {
     }
   }
 
+  void SetSpeculativeOptions(const pybind11::kwargs& dict) {
+    for (auto& entry : dict) {
+      auto name = entry.first.cast<std::string>();
+      if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
+      } else
+        throw std::runtime_error("Unknown speculative option type, must be int or float: " + name);
+    }
+  }
+
+  pybind11::dict GetSpeculativeOptions() {
+    pybind11::dict d;
+    d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
+    return d;
+  }
+
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
@@ -290,6 +308,25 @@ struct PyGenerator {
     generator_->SetRuntimeOption(key.c_str(), value.c_str());
   }
 
+  pybind11::dict GetSpeculativeStats() {
+    auto stats = generator_->GetSpeculativeStats();
+    pybind11::dict d;
+    for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+                            "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
+                            "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
+                            "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+                            "target_forward_passes"})
+      d[key] = stats->GetCount(key);
+    d["formula_supported"] = stats->GetBool("formula_supported");
+    for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+                            "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
+                            "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+                            "avg_target_ms_per_round", "target_baseline_ms_per_token",
+                            "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
+      d[key] = stats->GetNumber(key);
+    return d;
+  }
+
  private:
   std::unique_ptr<OgaGenerator> generator_;
 };
@@ -343,6 +380,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("set_speculative_options", &PyGeneratorParams::SetSpeculativeOptions)
+      .def("get_speculative_options", &PyGeneratorParams::GetSpeculativeOptions)
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
            pybind11::arg("enable_ff_tokens") = false)
@@ -394,6 +433,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return ToPython(t.GetEosTokenIds());
       })
       .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
+      .def_property_readonly("bot_token_id", &OgaTokenizer::GetBotTokenId)
+      .def_property_readonly("eot_token_id", &OgaTokenizer::GetEotTokenId)
+      .def_property_readonly("bor_token_id", &OgaTokenizer::GetBorTokenId)
+      .def_property_readonly("eor_token_id", &OgaTokenizer::GetEorTokenId)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;
@@ -435,6 +478,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaConfig>(m, "Config")
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
+      .def_static(
+          "from_package_ep",
+          [](const std::string& config_path, const std::string& ep) {
+            return OgaConfig::CreateFromPackageEp(config_path.c_str(), ep.empty() ? nullptr : ep.c_str());
+          },
+          pybind11::arg("config_path"), pybind11::arg("ep"),
+          "Load an OgaConfig from a model package, selecting the variant whose execution "
+          "provider matches `ep`. Pass an empty string to auto-detect when the package "
+          "declares a single ep across all variants.")
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders)
@@ -496,7 +548,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
-      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption)
+      .def("get_speculative_stats", &PyGenerator::GetSpeculativeStats);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -660,14 +713,30 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             }
             return pybind11::none();
           },
-          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.");
+          "Flush remaining buffered audio (pads with silence). Returns NamedTensors or None.")
+      .def(
+          "set_option",
+          [](OgaStreamingProcessor& proc, const std::string& key, const std::string& value) {
+            proc.SetOption(key.c_str(), value.c_str());
+          },
+          pybind11::arg("key"),
+          pybind11::arg("value"),
+          "Set a processor option. Keys: 'use_vad', 'vad_threshold', 'silence_duration_ms', 'prefix_padding_ms'.")
+      .def(
+          "get_option",
+          [](OgaStreamingProcessor& proc, const std::string& key) {
+            return std::string(proc.GetOption(key.c_str()));
+          },
+          pybind11::arg("key"),
+          "Get a processor option value by key.");
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
+  m.def("enable_telemetry_events", []() { OgaSetTelemetryEnabled(true); }, "Enable non-essential ONNX Runtime GenAI telemetry events.");
+  m.def("disable_telemetry_events", []() { OgaSetTelemetryEnabled(false); }, "Disable non-essential ONNX Runtime GenAI telemetry events.");
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
-  m.def("is_rocm_available", []() { return USE_ROCM != 0; });
   m.def("is_webgpu_available", []() { return true; });
   m.def("is_qnn_available", []() { return true; });
   m.def("is_openvino_available", []() { return true; });

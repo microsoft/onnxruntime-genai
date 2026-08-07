@@ -19,32 +19,32 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: '8.0.x'
 
       - name: Setup Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70 # v3.5.0
         with:
           gradle-version: '8.6'
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11.x'
           architecture: 'x64'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -84,7 +84,7 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
@@ -97,9 +97,20 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
           cmake --build --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
+
+      - name: Build the C Examples
+        run: |
+          set -e -x
+          cmake -S examples/c -B examples/c/build \
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
+            -DORT_INCLUDE_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/build/native/include \
+            -DORT_LIB_DIR=$GITHUB_WORKSPACE/build/cpu/_deps/ortlib-src/runtimes/linux-x64/native \
+            -DOGA_INCLUDE_DIR=$GITHUB_WORKSPACE/src \
+            -DOGA_LIB_DIR=$GITHUB_WORKSPACE/build/cpu
+          cmake --build examples/c/build --config Release
 
       - name: Install the Python wheel and test dependencies
         run: |
@@ -115,17 +126,17 @@ jobs:
           ls -l ${{ github.workspace }}/build/cpu
           ls -l ${{ github.workspace }}/build/cpu/wheel
 
-      - name: Build the Java API and Run the Java Tests
+      - name: Run the Java tests
         run: |
           set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+          ctest --test-dir build/cpu/src/java --build-config Release --verbose --timeout 10800
 
-      # This will also download all the test models to the test/test_models directory
+      # This will also download all the test models to the test/models directory
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the Python tests
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
-          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
 
       - name: Build the C# API and Run the C# Tests
         run: |
@@ -144,8 +155,8 @@ jobs:
       - name: Test the C# LLM Example with Tool Calling
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
-          python3 test/python/special_tokens.py -p test/test_models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
-          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/test_models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/test_models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
+          python3 test/python/special_tokens.py -p test/models/qwen-2.5-0.5b/int4/cpu/tokenizer.json -s "<tool_call>" -e "</tool_call>"
+          ./examples/csharp/ModelChat/bin/Release/net8.0/ModelChat -m test/models/qwen-2.5-0.5b/int4/cpu/ -e cpu --response_format lark_grammar --tools_file test/models/tool-definitions/weather.json --tool_call_start "<tool_call>" --tool_call_end "</tool_call>" --user_prompt "What is the weather in Redmond, WA?" --tool_output --non_interactive --verbose
 
       - name: Run tests
         run: |
@@ -153,3 +164,4 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
           ./build/cpu/unit_tests
+          ./build/cpu/engine_unit_tests

@@ -130,10 +130,10 @@ class Gemma3Model(Gemma2Model):
     def is_local(self, layer_id):
         return bool((layer_id + 1) % 6)
 
-    def make_attention_init(self):
+    def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
+        super().make_attention_init(config)
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"

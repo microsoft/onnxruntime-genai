@@ -171,10 +171,33 @@ struct InterfaceImpl : DeviceInterface {
  private:
   Ort::Allocator* ort_allocator_{};
   const OrtMemoryInfo* ort_memory_info_{};
+  // Reusable CPU staging buffers for UpdateAttentionMask, pre-filled with 1s.
+  // Content is always all 1s so sharing across generators is safe; only upload_bytes
+  // worth of data is copied each call, regardless of buffer capacity.
+  std::vector<int32_t> mask_staging_buffer_i32_;
+  std::vector<int64_t> mask_staging_buffer_i64_;
 
  public:
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
+  }
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    try {
+      return OrtMemoryInfo::Create("WebGPU_Buf", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    } catch (const Ort::Exception& e) {
+      // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
+      // Try the old name before giving up.
+      try {
+        return OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      } catch (const Ort::Exception& fallback_e) {
+        throw std::runtime_error(
+            "Failed to create memory info for WebGPU. "
+            "Primary name 'WebGPU_Buf' error: " +
+            std::string(e.what()) +
+            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
+      }
+    }
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -189,6 +212,47 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do?
+
+  bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (batch_beam_size != 1 || !update_only) {
+      return false;  // Fall back to CPU for multi-beam or non-static mask
+    }
+    if (type != Ort::TypeToTensorType<int32_t> && type != Ort::TypeToTensorType<int64_t>) {
+      return false;  // Unsupported mask type; fall back to CPU handling.
+    }
+    // For batch_beam_size == 1 with static mask (update_only=true, no padding),
+    // the mask is always all 1s for attended positions.
+    size_t num_elements = static_cast<size_t>(total_length);
+    size_t upload_bytes;
+    void* staging_data;
+
+    // Use the correctly typed staging buffer. Each grows monotonically and
+    // only newly extended positions need to be filled with 1.
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      if (mask_staging_buffer_i32_.size() < num_elements) {
+        mask_staging_buffer_i32_.resize(num_elements, static_cast<int32_t>(1));
+      }
+      staging_data = mask_staging_buffer_i32_.data();
+      upload_bytes = num_elements * sizeof(int32_t);
+    } else {
+      if (mask_staging_buffer_i64_.size() < num_elements) {
+        mask_staging_buffer_i64_.resize(num_elements, static_cast<int64_t>(1));
+      }
+      staging_data = mask_staging_buffer_i64_.data();
+      upload_bytes = num_elements * sizeof(int64_t);
+    }
+
+    int64_t shape_val = static_cast<int64_t>(upload_bytes);
+    std::span<const int64_t> shape{&shape_val, 1};
+    static const auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, staging_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, mask_data, upload_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+
+    return true;
+  }
 
   bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (!ort_allocator_) {
@@ -208,20 +272,104 @@ struct InterfaceImpl : DeviceInterface {
         input_type,
         output_type,
         element_count,
-        "WebGPU",
+        GetType(),
+        "WebGpuExecutionProvider",
         ort_memory_info_,
         session_config_keys,
         session_config_values);
 
     return true;
   }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (batch_beam_size != 1) {
+      return false;
+    }
+    if (new_kv_length <= 0 || total_length < new_kv_length) {
+      return false;
+    }
+    if (type != Ort::TypeToTensorType<int32_t> && type != Ort::TypeToTensorType<int64_t>) {
+      return false;
+    }
+
+    int start = total_length - new_kv_length;
+    if (type == Ort::TypeToTensorType<int32_t>) {
+      UploadPositionIds<int32_t>(position_ids, start, new_kv_length);
+    } else {
+      UploadPositionIds<int64_t>(position_ids, start, new_kv_length);
+    }
+
+    return true;
+  }
+
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (!user_options) return;
+
+    // Forward only global/singleton WebGPU options to the init session so that the
+    // process-wide WebGpuContext singleton is initialized with the correct settings.
+    // Per-session options (preferredLayout, enableGraphCapture, sessionBufferPoolGenerations,
+    // enableInt64, multiRotaryCacheConcatOffset, forceCpuNodeNames, enablePIXCapture) are
+    // excluded because they are meaningless for the trivial initialization model.
+    // Keep this list in sync with ParseWebGpuContextConfig in
+    // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
+    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+        "deviceId",
+        "webgpuInstance",
+        "webgpuDevice",
+        "dawnProcTable",
+        "dawnBackendType",
+        "powerPreference",
+        "validationMode",
+        "preserveDevice",
+        "maxStorageBufferBindingSize",
+        "maxNumPendingDispatches",
+        "storageBufferCacheMode",
+        "uniformBufferCacheMode",
+        "queryResolveBufferCacheMode",
+        "defaultBufferCacheMode",
+    };
+    for (const auto& opt : user_options->options) {
+      if (std::find(kWebGpuGlobalOptions.begin(), kWebGpuGlobalOptions.end(), opt.first) != kWebGpuGlobalOptions.end()) {
+        init_options.options.emplace_back(opt);
+      }
+    }
+  }
+
+ private:
+  template <typename T>
+  void UploadPositionIds(void* position_ids, int start, int new_kv_length) {
+    // For the common single-token decode, use a stack variable to avoid heap allocation
+    T stack_val;
+    std::vector<T> heap_buf;
+    T* cpu_data;
+    if (new_kv_length == 1) {
+      stack_val = static_cast<T>(start);
+      cpu_data = &stack_val;
+    } else {
+      heap_buf.resize(new_kv_length);
+      for (int i = 0; i < new_kv_length; i++) {
+        heap_buf[i] = static_cast<T>(start + i);
+      }
+      cpu_data = heap_buf.data();
+    }
+
+    size_t byte_size = static_cast<size_t>(new_kv_length) * sizeof(T);
+    int64_t shape_val = static_cast<int64_t>(byte_size);
+    std::span<const int64_t> shape{&shape_val, 1};
+    static const auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, cpu_data, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, position_ids, byte_size, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
+    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
+    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+  }
 };
 
 }  // namespace WebGPU
 
-DeviceInterface* GetWebGPUInterface() {
-  static std::unique_ptr<DeviceInterface> g_device = std::make_unique<WebGPU::InterfaceImpl>();
-  return g_device.get();
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface() {
+  return std::make_unique<WebGPU::InterfaceImpl>();
 }
 
 }  // namespace Generators

@@ -59,8 +59,11 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
     throw std::runtime_error("Number of audio data buffers does not match the number of audio data sizes");
 
   std::vector<int64_t> sizes;
-  for (size_t i = 0; i < audio_data_sizes.size(); ++i)
+  for (size_t i = 0; i < audio_data_sizes.size(); ++i) {
+    if (audio_data_sizes[i] == 0)
+      throw std::runtime_error("Audio buffer " + std::to_string(i) + " is empty.");
     sizes.push_back(audio_data_sizes[i]);
+  }
 
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
   CheckResult(OrtxCreateRawAudios(audios.ToBeAssigned(), audio_data.data(), sizes.data(), audio_data.size()));
@@ -199,7 +202,20 @@ std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(OrtxTensor* tensor, Ort:
 }
 
 template std::unique_ptr<OrtValue> ProcessTensor<float>(OrtxTensor* tensor, Ort::Allocator& allocator);
+template std::unique_ptr<OrtValue> ProcessTensor<int32_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::Allocator& allocator);
+
+void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
+                            OrtxTensor* tensor, ONNXTensorElementDataType type,
+                            Ort::Allocator& allocator) {
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(tensor, allocator)));
+  } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(tensor, allocator)));
+  } else {
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(tensor, allocator)));
+  }
+}
 
 }  // namespace Generators

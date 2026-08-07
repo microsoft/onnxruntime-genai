@@ -9,6 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <cstring>
+#include "session_options.h"
 
 namespace Generators {
 
@@ -42,6 +43,7 @@ uint64_t GenerateCacheKey(
 // Create a new session for the given model and EP
 std::unique_ptr<OrtSession> CreateSession(
     OrtModel* model,
+    DeviceType device_type,
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
@@ -55,7 +57,10 @@ std::unique_ptr<OrtSession> CreateSession(
 
   // Append execution provider
   if (!ep_name.empty()) {
-    session_options->AppendExecutionProvider(ep_name.c_str(), nullptr, nullptr, 0);
+    if (!AppendExecutionProviderV2(*session_options, Config::ProviderOptions(),
+                                   device_type, ep_name)) {
+      AppendExecutionProviderV1(*session_options, Config::ProviderOptions());
+    }
   }
 
   // Create session from OrtModel using Model Editor API
@@ -69,6 +74,7 @@ std::unique_ptr<OrtSession> CreateSession(
 // Get or create a cached session
 OrtSession* GetOrCreateSession(
     const ModelConfig& config,
+    DeviceType device_type,
     const std::string& ep_name,
     const std::vector<const char*>& session_config_keys,
     const std::vector<const char*>& session_config_values) {
@@ -86,7 +92,7 @@ OrtSession* GetOrCreateSession(
   auto model = GraphBuilder::Build(config);
 
   // Create session from model
-  auto session = CreateSession(model.get(), ep_name, session_config_keys, session_config_values);
+  auto session = CreateSession(model.get(), device_type, ep_name, session_config_keys, session_config_values);
 
   OrtSession* session_ptr = session.get();
   cache.sessions_[key] = std::move(session);
@@ -110,6 +116,7 @@ void GraphExecutor::Execute(
   // Get or create session
   OrtSession* session = GetOrCreateSession(
       model_config,
+      exec_params.device_type,
       exec_params.execution_provider_name,
       exec_params.session_config_keys,
       exec_params.session_config_values);
@@ -158,6 +165,7 @@ void ExecuteCastOp(
     ONNXTensorElementDataType input_type,
     ONNXTensorElementDataType output_type,
     size_t element_count,
+    DeviceType device_type,
     const std::string& execution_provider_name,
     const OrtMemoryInfo* memory_info,
     const std::vector<const char*>& session_config_keys,
@@ -169,7 +177,7 @@ void ExecuteCastOp(
   config.attributes.push_back(AttributeValue::Int("to", static_cast<int64_t>(output_type)));
 
   // Build execution parameters
-  ExecutionParams params(execution_provider_name, memory_info);
+  ExecutionParams params(device_type, execution_provider_name, memory_info);
   params.inputs.push_back(TensorSpec(
       input_data,
       input_type,

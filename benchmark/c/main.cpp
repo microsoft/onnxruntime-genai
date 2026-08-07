@@ -4,11 +4,16 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <iomanip>
+#include <random>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "ort_genai.h"
@@ -40,6 +45,35 @@ class Timing {
  private:
   std::vector<Duration>& measurements_;
   const Clock::time_point start_;
+};
+
+class ScopedProfilingRuntimeOption {
+ public:
+  ScopedProfilingRuntimeOption(OgaGenerator* generator, bool enabled, const char* value)
+      : generator_{generator}, enabled_{enabled} {
+    if (enabled_) {
+      generator_->SetRuntimeOption("enable_profiling", value);
+    }
+  }
+
+  ScopedProfilingRuntimeOption(const ScopedProfilingRuntimeOption&) = delete;
+  ScopedProfilingRuntimeOption& operator=(const ScopedProfilingRuntimeOption&) = delete;
+
+  ~ScopedProfilingRuntimeOption() {
+    if (!enabled_) {
+      return;
+    }
+
+    // Best effort reset to avoid leaving profiling enabled after an exception.
+    try {
+      generator_->SetRuntimeOption("enable_profiling", "0");
+    } catch (...) {
+    }
+  }
+
+ private:
+  OgaGenerator* generator_;
+  bool enabled_;
 };
 
 struct Statistics {
@@ -158,7 +192,10 @@ void RunBenchmark(const benchmark::Options& opts) {
   bool need_generate_prompt = false;
   std::string prompt;
 
-  if (const size_t* npt = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
+  if (opts.use_random_tokens) {
+    num_prompt_tokens = std::get<size_t>(opts.prompt_num_tokens_or_content);
+    need_generate_prompt = false;
+  } else if (const size_t* npt = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
     num_prompt_tokens = *npt;
     need_generate_prompt = true;
   } else {
@@ -203,8 +240,21 @@ void RunBenchmark(const benchmark::Options& opts) {
   }
 
   auto prompt_sequences = OgaSequences::Create();
-  for (size_t i = 0; i < opts.batch_size; ++i) {
-    tokenizer->Encode(prompt.c_str(), *prompt_sequences);
+  if (opts.use_random_tokens) {
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_int_distribution<int32_t> dist(0, 99);
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      std::vector<int32_t> random_tokens(num_prompt_tokens);
+      std::generate(random_tokens.begin(), random_tokens.end(), [&]() {
+        return dist(rng);
+      });
+      prompt_sequences->Append(random_tokens.data(), random_tokens.size());
+    }
+  } else {
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      tokenizer->Encode(prompt.c_str(), *prompt_sequences);
+    }
   }
 
   // warmup
@@ -226,7 +276,12 @@ void RunBenchmark(const benchmark::Options& opts) {
 
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
-      std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+      if (opts.use_random_tokens) {
+        std::cout << "[PROMPT] random token IDs in [0, 99], batch_size=" << opts.batch_size
+                  << ", tokens per sequence=" << num_prompt_tokens << "\n";
+      } else {
+        std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+      }
       const auto output_sequence_length = gen->TokenCount();
       const auto* output_sequence_data = gen->GetSequenceData(0);
       const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
@@ -242,6 +297,28 @@ void RunBenchmark(const benchmark::Options& opts) {
   sampling_times.reserve(opts.num_iterations * opts.num_tokens_to_generate);
 
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
+
+#ifdef _WIN32
+  // Peak GPU memory usage sampled while a generator (and its KV cache) is still alive.
+  benchmark::utils::GpuMemoryInfo gpu_mem = {};
+#endif
+
+  // Select the "middle" iteration index (0-based) for optional ORT profiling.
+  //   n=1 -> 0, n=2 -> 1, n=3 -> 1, n=4 -> 2, ...
+  const size_t profile_iter_index = opts.num_iterations / 2;
+  const bool any_profiling = opts.profile_prefill || opts.profile_generation;
+  // ORT writes "<prefix>_<timestamp>.json", so these are the full prefixes.
+  constexpr const char* prefill_profile_prefix = "prefill_profile";
+  constexpr const char* generation_profile_prefix = "generation_profile";
+  if (opts.verbose && any_profiling) {
+    std::cout << "Profiling will run on iteration index " << profile_iter_index
+              << " (1-based: " << profile_iter_index + 1 << " of " << opts.num_iterations << ")\n";
+    if (opts.profile_prefill)
+      std::cout << "  Prefill profile prefix:    " << prefill_profile_prefix << "\n";
+    if (opts.profile_generation)
+      std::cout << "  Generation profile prefix: " << generation_profile_prefix << "\n";
+  }
+
   for (size_t i = 0; i < opts.num_iterations; ++i) {
     std::unique_ptr<OgaGenerator> new_gen;
     if (opts.reuse_generator) {
@@ -251,16 +328,23 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
     auto* gen = opts.reuse_generator ? generator.get() : new_gen.get();
 
+    const bool profile_this_iter = (i == profile_iter_index);
+    const bool profile_prefill_now = profile_this_iter && opts.profile_prefill;
+    const bool profile_generation_now = profile_this_iter && opts.profile_generation;
+
     {
       Timing e2e_gen_timing{e2e_gen_times};
 
       {
         Timing prompt_processing_timing{prompt_processing_times};
+        ScopedProfilingRuntimeOption prefill_profile_guard{gen, profile_prefill_now, prefill_profile_prefix};
         gen->AppendTokenSequences(*prompt_sequences);
       }
 
       const size_t target_token_count = gen->TokenCount() + opts.num_tokens_to_generate;
       bool generator_done = false;
+
+      ScopedProfilingRuntimeOption generation_profile_guard{gen, profile_generation_now, generation_profile_prefix};
 
       {
         Timing sampling_timing{sampling_times};
@@ -277,6 +361,17 @@ void RunBenchmark(const benchmark::Options& opts) {
         }
       }
     }
+
+#ifdef _WIN32
+    // Capture GPU memory while the generator (and its KV cache) is still alive. When
+    // --reuse_generator is not set, new_gen is destroyed at the end of each iteration,
+    // so sampling here (and keeping the peak) reflects actual KV cache usage.
+    {
+      const auto iter_mem = benchmark::utils::GetGpuMemoryUsage();
+      gpu_mem.dedicated = std::max(gpu_mem.dedicated, iter_mem.dedicated);
+      gpu_mem.shared = std::max(gpu_mem.shared, iter_mem.shared);
+    }
+#endif
   }
 
   // Release the generator before printing results
@@ -299,13 +394,32 @@ void RunBenchmark(const benchmark::Options& opts) {
     WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
     WriteE2EStats("E2E generation (entire generation loop)", e2e_gen_stats);
 
-    std::cout << "Peak working set size (bytes): " << benchmark::utils::GetPeakWorkingSetSizeInBytes() << "\n";
+    auto human_bytes = [](uint64_t bytes) -> std::string {
+      std::ostringstream oss;
+      oss << std::fixed << std::setprecision(2);
+      if (bytes >= (1ULL << 40))
+        oss << (double)bytes / (1ULL << 40) << " TB";
+      else if (bytes >= (1ULL << 30))
+        oss << (double)bytes / (1ULL << 30) << " GB";
+      else
+        oss << (double)bytes / (1ULL << 20) << " MB";
+      return oss.str();
+    };
+
+    auto peak_ws = benchmark::utils::GetPeakWorkingSetSizeInBytes();
+    std::cout << "Peak working set size: " << peak_ws << " bytes (" << human_bytes(peak_ws) << ")\n";
+#ifdef _WIN32
+    std::cout << "Dedicated GPU memory usage: " << gpu_mem.dedicated << " bytes (" << human_bytes(gpu_mem.dedicated) << ")\n";
+    std::cout << "Shared GPU memory usage: " << gpu_mem.shared << " bytes (" << human_bytes(gpu_mem.shared) << ")\n";
+    std::cout << "Total GPU memory usage: " << gpu_mem.Total() << " bytes (" << human_bytes(gpu_mem.Total()) << ")\n";
+#endif
   }
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  Oga::SetTelemetryEnabled(false);
   OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);

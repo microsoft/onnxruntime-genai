@@ -5,44 +5,48 @@
 
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+// Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
-#define MODEL_PATH "../../test/test_models/"
+#define MODEL_PATH "../../test/models/"
 #endif
 
 namespace test_utils {
 
-// Helper function to get the appropriate PHI2 model path based on available models
-inline const std::string& GetPhi2Path() {
-  static std::string phi2_path;
-  if (!phi2_path.empty()) {
-    return phi2_path;
+// Tests run across different environments where only one EP's model artifacts
+// may be present. This helper probes cuda/dml/webgpu/cpu directories in order
+// and returns the first path containing genai_config.json.
+// Caches results per model_type so different models resolve independently.
+inline const std::string& GetModelPath(const std::string& model_type) {
+  static std::unordered_map<std::string, std::string> model_paths;
+  auto it = model_paths.find(model_type);
+  if (it != model_paths.end()) {
+    return it->second;
   }
 
   std::vector<std::string> candidate_paths = {
-      MODEL_PATH "phi-2/int4/cuda",
-      MODEL_PATH "phi-2/int4/dml",
-      MODEL_PATH "phi-2/int4/webgpu",
-      MODEL_PATH "phi-2/int4/cpu"};
+      std::string(MODEL_PATH) + model_type + "/int4/cuda",
+      std::string(MODEL_PATH) + model_type + "/int4/dml",
+      std::string(MODEL_PATH) + model_type + "/int4/webgpu",
+      std::string(MODEL_PATH) + model_type + "/int4/cpu"};
 
   for (const auto& path : candidate_paths) {
-    std::filesystem::path model_path(path);
-    if (std::filesystem::exists(model_path / "genai_config.json")) {
-      phi2_path = path;
-      return phi2_path;
+    std::filesystem::path model_path_fs(path);
+    if (std::filesystem::exists(model_path_fs / "genai_config.json")) {
+      return model_paths.emplace(model_type, path).first->second;
     }
   }
 
   // Fallback to CPU path
-  phi2_path = MODEL_PATH "phi-2/int4/cpu";
-  return phi2_path;
+  return model_paths.emplace(model_type, std::string(MODEL_PATH) + model_type + "/int4/cpu").first->second;
 }
 
 // Helper to detect if we're using WebGPU or DML EP based on the model path
 inline bool IsEngineTestsEnabled() {
 #if TEST_PHI2
-  std::string path = GetPhi2Path();
+  std::string path = GetModelPath("phi-2");
   // Skip engine tests for DML and WebGPU (batching not fully tested)
   return path.find("/dml") == std::string::npos &&
          path.find("/webgpu") == std::string::npos;
@@ -52,3 +56,15 @@ inline bool IsEngineTestsEnabled() {
 }
 
 }  // namespace test_utils
+
+#ifndef PHI2_PATH
+#define PHI2_PATH test_utils::GetModelPath("phi-2").c_str()
+#endif
+
+#ifndef QWEN_2_5_PATH
+#define QWEN_2_5_PATH test_utils::GetModelPath("qwen-2.5-0.5b").c_str()
+#endif
+
+#ifndef QWEN_2_5_GRAPH_PATH
+#define QWEN_2_5_GRAPH_PATH test_utils::GetModelPath("qwen-2.5-0.5b-graph").c_str()
+#endif

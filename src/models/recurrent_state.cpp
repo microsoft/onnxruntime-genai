@@ -6,7 +6,6 @@
 #include "kv_cache.h"  // For ComposeKeyValueName
 #include "recurrent_state.h"
 #include <algorithm>
-#include <cstring>
 
 namespace Generators {
 
@@ -87,43 +86,37 @@ RecurrentState::RecurrentState(State& state)
   validate_shape(conv_shape_, "conv_state");
   validate_shape(recurrent_shape_, "recurrent_state");
 
-  size_t conv_elems = 1;
-  for (auto d : conv_shape_) conv_elems *= static_cast<size_t>(d);
-  size_t recurrent_elems = 1;
-  for (auto d : recurrent_shape_) recurrent_elems *= static_cast<size_t>(d);
-
-  conv_bytes_ = conv_elems * Ort::SizeOf(conv_type_);
-  recurrent_bytes_ = recurrent_elems * Ort::SizeOf(recurrent_type_);
-
-  // Align offsets to 8 bytes so each tensor's data pointer satisfies its element type alignment
-  constexpr size_t kAlignment = 8;
-  recurrent_offset_ = (conv_bytes_ + kAlignment - 1) & ~(kAlignment - 1);
-  per_layer_stride_ = (recurrent_offset_ + recurrent_bytes_ + kAlignment - 1) & ~(kAlignment - 1);
-
   const int num_layers = static_cast<int>(layer_indices_.size());
-  const size_t total_bytes = per_layer_stride_ * num_layers;
 
-  pasts_.resize(num_layers * 2);
+  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+
+  if (state_.params_->use_graph_capture && !share_buffers_) {
+    throw std::runtime_error(
+        "Graph capture requires past/present buffer sharing for models with recurrent state. "
+        "Ensure past_present_share_buffer=true in genai_config.json and num_beams=1 "
+        "(beam search disables buffer sharing).");
+  }
+
+  if (!share_buffers_) {
+    pasts_.resize(num_layers * 2);
+  }
   presents_.reserve(num_layers * 2);
 
-  past_block_ = std::make_unique<uint8_t[]>(total_bytes);
-  present_block_ = std::make_unique<uint8_t[]>(total_bytes);
-  cpu_mem_info_ = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto& allocator = model_.p_device_kvcache_->GetAllocator();
 
   for (int i = 0; i < num_layers; ++i) {
-    auto* past_base = past_block_.get() + i * per_layer_stride_;
-    auto* present_base = present_block_.get() + i * per_layer_stride_;
-
-    pasts_[i * 2] = OrtValue::CreateTensor(
-        *cpu_mem_info_, past_base, conv_bytes_, conv_shape_, conv_type_);
-    pasts_[i * 2 + 1] = OrtValue::CreateTensor(
-        *cpu_mem_info_, past_base + recurrent_offset_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
-
-    presents_.push_back(OrtValue::CreateTensor(
-        *cpu_mem_info_, present_base, conv_bytes_, conv_shape_, conv_type_));
-    presents_.push_back(OrtValue::CreateTensor(
-        *cpu_mem_info_, present_base + recurrent_offset_, recurrent_bytes_, recurrent_shape_, recurrent_type_));
+    if (!share_buffers_) {
+      pasts_[i * 2] = OrtValue::CreateTensor(allocator, conv_shape_, conv_type_);
+      pasts_[i * 2 + 1] = OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_);
+    }
+    presents_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
+    presents_.push_back(OrtValue::CreateTensor(allocator, recurrent_shape_, recurrent_type_));
   }
+
+  if (!share_buffers_) {
+    ZeroStates(pasts_);
+  }
+  ZeroStates(presents_);
 }
 
 void RecurrentState::Add() {
@@ -134,7 +127,9 @@ void RecurrentState::Add() {
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
-    state_.inputs_.push_back(pasts_[i].get());
+    // Shared buffers: alias input=output for stable addresses (required for graph capture).
+    // Separate buffers: use distinct past/present allocations with per-step pointer swap.
+    state_.inputs_.push_back(share_buffers_ ? presents_[i].get() : pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -142,7 +137,7 @@ void RecurrentState::Add() {
 }
 
 void RecurrentState::Update() {
-  if (layer_indices_.empty()) return;
+  if (layer_indices_.empty() || share_buffers_) return;
 
   const int num_layers = static_cast<int>(layer_indices_.size());
   for (int i = 0; i < num_layers * 2; ++i) {
@@ -156,38 +151,29 @@ void RecurrentState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
-    // Recurrent states cannot be partially rewound — they are compressed summaries
-    // with no per-position history. Non-zero rewind is a no-op; the state remains unchanged.
-    if (g_log.enabled)
-      Log("warning", "RecurrentState::RewindTo(" + std::to_string(index) +
-                         ") is a no-op. Recurrent states cannot be partially rewound.");
-    return;
+    throw std::runtime_error(
+        "RecurrentState::RewindTo(" + std::to_string(index) +
+        ") is not supported. Recurrent states cannot be partially rewound.");
   }
+  if (share_buffers_) {
+    // Shared buffers: zero in place, addresses stay stable.
+    ZeroStates(presents_);
+  } else {
+    // Zero and rebind all state buffers.
+    ZeroStates(pasts_);
+    ZeroStates(presents_);
+    const int num_layers = static_cast<int>(layer_indices_.size());
+    for (int i = 0; i < num_layers * 2; ++i) {
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
+  }
+}
 
-  const int num_layers = static_cast<int>(layer_indices_.size());
-
-  std::memset(past_block_.get(), 0, per_layer_stride_ * num_layers);
-  std::memset(present_block_.get(), 0, per_layer_stride_ * num_layers);
-
-  // Recreate OrtValue views after swap
-  for (int i = 0; i < num_layers; ++i) {
-    auto* past_base = past_block_.get() + i * per_layer_stride_;
-    auto* present_base = present_block_.get() + i * per_layer_stride_;
-
-    pasts_[i * 2] = OrtValue::CreateTensor(
-        *cpu_mem_info_, past_base, conv_bytes_, conv_shape_, conv_type_);
-    pasts_[i * 2 + 1] = OrtValue::CreateTensor(
-        *cpu_mem_info_, past_base + recurrent_offset_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
-
-    presents_[i * 2] = OrtValue::CreateTensor(
-        *cpu_mem_info_, present_base, conv_bytes_, conv_shape_, conv_type_);
-    presents_[i * 2 + 1] = OrtValue::CreateTensor(
-        *cpu_mem_info_, present_base + recurrent_offset_, recurrent_bytes_, recurrent_shape_, recurrent_type_);
-
-    state_.inputs_[input_index_ + i * 2] = pasts_[i * 2].get();
-    state_.inputs_[input_index_ + i * 2 + 1] = pasts_[i * 2 + 1].get();
-    state_.outputs_[output_index_ + i * 2] = presents_[i * 2].get();
-    state_.outputs_[output_index_ + i * 2 + 1] = presents_[i * 2 + 1].get();
+void RecurrentState::ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states) {
+  auto& device = *model_.p_device_kvcache_;
+  for (auto& val : states) {
+    ByteWrapTensor(device, *val).Zero();
   }
 }
 

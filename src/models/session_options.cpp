@@ -3,6 +3,7 @@
 
 #include "session_options.h"
 
+#include <algorithm>
 #include <functional>
 #include <unordered_map>
 
@@ -11,7 +12,6 @@
 #include "../nvtensorrtrtx/session_options.h"
 #include "../openvino/session_options.h"
 #include "../qnn/session_options.h"
-#include "../rocm/session_options.h"
 #include "../ryzenai/session_options.h"
 #include "../vitisai/session_options.h"
 #include "../webgpu/session_options.h"
@@ -114,8 +114,9 @@ bool AppendExecutionProviderV2(
   }
 
   auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
-  if (device_type == DeviceType::WEBGPU) {
-    // WebGPU EP factory currently only supports one device at a time
+  if (device_type == DeviceType::WEBGPU ||
+      device_type == DeviceType::CUDA) {
+    // WebGPU EP factory and CUDA EP factory currently only support one device at a time.
     filtered_ep_device_ptrs = {filtered_ep_device_ptrs.front()};
   }
 
@@ -145,16 +146,31 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                                          const Config&,
                                                          bool);
 
+  // CPU EP is always implicitly registered — no action needed.
+  // Throws if users attempt to set provider options (which would be silently lost).
+  static auto CPUAppendExecutionProvider = [](OrtSessionOptions&,
+                                              const Config::ProviderOptions& provider_options,
+                                              const Config&,
+                                              bool) -> DeviceInterface* {
+    if (!provider_options.options.empty()) {
+      throw std::runtime_error(
+          "CPU execution provider does not support provider options. "
+          "CPU is always available as the default fallback and does not need to be explicitly registered. "
+          "Remove the CPU provider entry and its options from your configuration.");
+    }
+    return nullptr;
+  };
+
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},
       {"NvTensorRtRtx", NvTensorRtRtxExecutionProvider::AppendExecutionProvider},
       {"OpenVINO", OpenVINOExecutionProvider::AppendExecutionProvider},
       {"RyzenAI", RyzenAIExecutionProvider::AppendExecutionProvider},
       {"QNN", QNNExecutionProvider::AppendExecutionProvider},
-      {"rocm", ROCmExecutionProvider::AppendExecutionProvider},
       {"VitisAI", VitisAIExecutionProvider::AppendExecutionProvider},
       {"WebGPU", WebGPUExecutionProvider::AppendExecutionProvider},
   };

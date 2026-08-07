@@ -9,11 +9,12 @@ import onnxruntime_genai as og
 from common import (
     apply_chat_template,
     get_config,
+    get_ep_args,
     get_generator_params_args,
     get_guidance,
     get_guidance_args,
-    get_user_prompt,
     get_search_options,
+    get_user_prompt,
     register_ep,
     set_logger,
 )
@@ -28,7 +29,7 @@ def main(args):
         print("Loading model...")
 
     # Create model
-    config = get_config(args.model_path, args.execution_provider)
+    config = get_config(args.model_path, args.execution_provider, args.ep_path)
     model = og.Model(config)
     if args.verbose:
         print("Model loaded")
@@ -102,7 +103,13 @@ def main(args):
 
         # Apply chat template
         try:
-            prompt = apply_chat_template(model_path=args.model_path, tokenizer=tokenizer, messages=messages, tools=tools, add_generation_prompt=True)
+            prompt = apply_chat_template(
+                model_path=args.model_path,
+                tokenizer=tokenizer,
+                messages=messages,
+                tools=tools,
+                add_generation_prompt=True,
+            )
         except Exception as e:
             if args.verbose:
                 print(f"Exception in apply_chat_template: {e}")
@@ -163,18 +170,56 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI question/answer example for ORT GenAI")
-    parser.add_argument('-m', '--model_path', type=str, required=True, help='ONNX model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
-    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
-    parser.add_argument('-d', '--debug', action='store_true', default=False, help='Dump input and output tensors with debug mode. Defaults to false')
-    parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
-    parser.add_argument('-up', '--user_prompt', type=str, default='What color is the sky?', help='User prompt to use for the model.')
-    parser.add_argument("--non_interactive", action=argparse.BooleanOptionalAction, required=False, default=False, help="Non-interactive mode, mainly for CI usage")
-    parser.add_argument("--ep_path", type=str, required=False, default='', help='Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)')
-    parser.add_argument("--use_winml", action=argparse.BooleanOptionalAction, required=False, default=False, help='Use WinML to register execution providers')
+    parser = argparse.ArgumentParser(
+        argument_default=argparse.SUPPRESS, description="End-to-end AI question/answer example for ORT GenAI"
+    )
+    parser.add_argument(
+        "-m",
+        "--model_path",
+        type=str,
+        required=True,
+        help="ONNX model folder path (must contain genai_config.json and model.onnx)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print verbose output and timing information. Defaults to false",
+    )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Dump input and output tensors with debug mode. Defaults to false",
+    )
+    parser.add_argument(
+        "-g",
+        "--timings",
+        action="store_true",
+        default=False,
+        help="Print timing information for each generation step. Defaults to false",
+    )
+    parser.add_argument(
+        "-sp",
+        "--system_prompt",
+        type=str,
+        default="You are a helpful AI assistant.",
+        help="System prompt to use for the model.",
+    )
+    parser.add_argument(
+        "-up", "--user_prompt", type=str, default="What color is the sky?", help="User prompt to use for the model."
+    )
+    parser.add_argument(
+        "--non_interactive",
+        action=argparse.BooleanOptionalAction,
+        required=False,
+        default=False,
+        help="Non-interactive mode, mainly for CI usage",
+    )
 
+    get_ep_args(parser)
     get_generator_params_args(parser)
     get_guidance_args(parser)
 

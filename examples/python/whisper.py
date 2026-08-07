@@ -12,7 +12,7 @@ import onnxruntime_genai as og
 
 
 def _complete(text, state):
-    return (glob.glob(text + "*") + [None])[state]
+    return ([*glob.glob(text + "*"), None])[state]
 
 
 class Format:
@@ -30,7 +30,6 @@ def run(args: argparse.Namespace):
             config.append_provider(args.execution_provider)
     model = og.Model(config)
     processor = model.create_multimodal_processor()
-    tokenizer = og.Tokenizer(model)
 
     while True:
         readline.set_completer_delims(" \t\n;")

@@ -1,11 +1,13 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -14,11 +16,22 @@
 
 namespace Generators {
 
-// Fix casing of certain historical names to match current Onnxruntime names
+// Normalizes historical casings, short aliases, and full ORT names (e.g.
+// "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
   std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  if (lower_name == "qnn") {
+  // Strip the shared "ExecutionProvider" suffix so full ORT names normalize like the aliases.
+  constexpr std::string_view kEpSuffix = "executionprovider";
+  if (lower_name.size() > kEpSuffix.size() &&
+      lower_name.compare(lower_name.size() - kEpSuffix.size(), kEpSuffix.size(), kEpSuffix) == 0) {
+    lower_name.resize(lower_name.size() - kEpSuffix.size());
+  }
+  if (lower_name == "cpu") {
+    return "CPU";
+  } else if (lower_name == "cuda") {
+    return "cuda";
+  } else if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
     return "WebGPU";
@@ -28,6 +41,8 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "OpenVINO";
   } else if (lower_name == "vitisai") {
     return "VitisAI";
+  } else if (lower_name == "ryzenai") {
+    return "RyzenAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
   }
@@ -74,7 +89,7 @@ struct Int_Array_Element : JSON::Element {
   explicit Int_Array_Element(std::vector<int>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    v_.emplace_back(static_cast<int>(JSON::Get<double>(value)));
+    v_.emplace_back(SafeDoubleToInt(JSON::Get<double>(value), name));
   }
 
  private:
@@ -183,13 +198,13 @@ struct SessionOptions_Element : JSON::Element {
     } else if (name == "enable_profiling") {
       v_.enable_profiling = JSON::Get<std::string_view>(value);
     } else if (name == "intra_op_num_threads") {
-      v_.intra_op_num_threads = static_cast<int>(JSON::Get<double>(value));
+      v_.intra_op_num_threads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "inter_op_num_threads") {
-      v_.inter_op_num_threads = static_cast<int>(JSON::Get<double>(value));
+      v_.inter_op_num_threads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "log_severity_level") {
-      v_.log_severity_level = static_cast<int>(JSON::Get<double>(value));
+      v_.log_severity_level = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "log_verbosity_level") {
-      v_.log_verbosity_level = static_cast<int>(JSON::Get<double>(value));
+      v_.log_verbosity_level = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "enable_cpu_mem_arena") {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {
@@ -250,6 +265,8 @@ struct EncoderInputs_Element : JSON::Element {
       v_.cache_last_time = JSON::Get<std::string_view>(value);
     } else if (name == "cache_last_channel_len") {
       v_.cache_last_channel_len = JSON::Get<std::string_view>(value);
+    } else if (name == "lang_id") {
+      v_.lang_id = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -332,12 +349,20 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_metadata") {
+      v_.attention_metadata = JSON::Get<std::string_view>(value);
+    } else if (name == "past_conv_names") {
+      v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
+    } else if (name == "targets_length") {
+      v_.targets_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -363,12 +388,16 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
       v_.rnn_states = JSON::Get<std::string_view>(value);
+    } else if (name == "present_conv_names") {
+      v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
       v_.lstm_hidden_state = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_cell_state") {
       v_.lstm_cell_state = JSON::Get<std::string_view>(value);
+    } else if (name == "outputs_length") {
+      v_.outputs_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -393,7 +422,7 @@ struct IntArray_Element : JSON::Element {
   explicit IntArray_Element(std::vector<int>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(static_cast<int>(JSON::Get<double>(value)));
+    v_.push_back(SafeDoubleToInt(JSON::Get<double>(value), name));
   }
 
  private:
@@ -424,7 +453,7 @@ struct PipelineModel_Element : JSON::Element {
     } else if (name == "is_lm_head") {
       v_.is_lm_head = JSON::Get<bool>(value);
     } else if (name == "reset_session_idx") {
-      v_.reset_session_idx = static_cast<int>(JSON::Get<double>(value));
+      v_.reset_session_idx = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -497,15 +526,17 @@ struct SlidingWindow_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "window_size") {
-      v_->window_size = static_cast<int>(JSON::Get<double>(value));
+      v_->window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "pad_value") {
-      v_->pad_value = static_cast<int>(JSON::Get<double>(value));
+      v_->pad_value = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "alignment") {
       v_->alignment = JSON::Get<std::string_view>(value);
     } else if (name == "slide_key_value_cache") {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else if (name == "slide_inputs") {
       v_->slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_->cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -534,15 +565,15 @@ struct Encoder_Element : JSON::Element {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
-      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
+      v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_attention_heads") {
-      v_.num_attention_heads = static_cast<int>(JSON::Get<double>(value));
+      v_.num_attention_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_hidden_layers") {
-      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_key_value_heads") {
-      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "head_size") {
-      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -583,15 +614,17 @@ struct Decoder_Element : JSON::Element {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_size") {
-      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
+      v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_attention_heads") {
-      v_.num_attention_heads = static_cast<int>(JSON::Get<double>(value));
+      v_.num_attention_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_hidden_layers") {
-      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_key_value_heads") {
-      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "head_size") {
-      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "conv_cache_size") {
+      v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -628,6 +661,10 @@ struct Decoder_Element : JSON::Element {
     if (name == "pipeline") {
       return pipeline_;
     }
+    if (name == "layer_types") {
+      layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
+      return *layer_types_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -640,6 +677,7 @@ struct Decoder_Element : JSON::Element {
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
+  std::unique_ptr<StringArray_Element> layer_types_;
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -648,6 +686,8 @@ struct VisionInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "pixel_values") {
       v_.pixel_values = JSON::Get<std::string_view>(value);
+    } else if (name == "pixel_position_ids") {
+      v_.pixel_position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "image_grid_thw") {
@@ -760,11 +800,15 @@ struct Vision_Element : JSON::Element {
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
     } else if (name == "spatial_merge_size") {
-      v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+      v_.spatial_merge_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "tokens_per_second") {
       v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "patch_size") {
-      v_.patch_size = static_cast<int>(JSON::Get<double>(value));
+      v_.patch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "num_visual_tokens") {
+      v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "window_size") {
+      v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -962,6 +1006,43 @@ struct Joiner_Element : JSON::Element {
   JoinerOutputs_Element outputs_{v_.outputs};
 };
 
+struct VAD_Element : JSON::Element {
+  explicit VAD_Element(Config::Model::VAD& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "threshold") {
+      v_.threshold = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "silence_duration_ms") {
+      v_.silence_duration_ms = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "prefix_padding_ms") {
+      v_.prefix_padding_ms = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::VAD& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -987,6 +1068,8 @@ struct EmbeddingOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "per_layer_inputs") {
+      v_.per_layer_inputs = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1041,54 +1124,76 @@ struct Model_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
       v_.type = JSON::Get<std::string_view>(value);
+    } else if (name == "tokenizer_dir") {
+      v_.tokenizer_dir = JSON::Get<std::string_view>(value);
     } else if (name == "vocab_size") {
-      v_.vocab_size = static_cast<int>(JSON::Get<double>(value));
+      v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {
-      v_.context_length = static_cast<int>(JSON::Get<double>(value));
+      v_.context_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.context_length <= 0)
+        throw std::out_of_range("context_length must be > 0, got " + std::to_string(v_.context_length));
     } else if (name == "pad_token_id") {
-      v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.pad_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "eos_token_id") {
-      v_.eos_token_id.assign(1, static_cast<int>(JSON::Get<double>(value)));
+      v_.eos_token_id.assign(1, SafeDoubleToInt(JSON::Get<double>(value), name));
     } else if (name == "bos_token_id") {
-      v_.bos_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.bos_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "decoder_start_token_id") {
-      v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.decoder_start_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "sep_token_id") {
-      v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.sep_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "image_token_id") {
-      v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.image_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "audio_token_id") {
+      v_.audio_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "boa_token_id") {
+      v_.boa_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "video_token_id") {
-      v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.video_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "vision_start_token_id") {
-      v_.vision_start_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.vision_start_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_mels") {
-      v_.num_mels = static_cast<int>(JSON::Get<double>(value));
+      v_.num_mels = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "fft_size") {
-      v_.fft_size = static_cast<int>(JSON::Get<double>(value));
+      v_.fft_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "hop_length") {
-      v_.hop_length = static_cast<int>(JSON::Get<double>(value));
+      v_.hop_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "win_length") {
-      v_.win_length = static_cast<int>(JSON::Get<double>(value));
+      v_.win_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "preemph") {
       v_.preemph = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "log_eps") {
       v_.log_eps = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "norm_eps") {
+      v_.norm_eps = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "subsampling_factor") {
-      v_.subsampling_factor = static_cast<int>(JSON::Get<double>(value));
+      v_.subsampling_factor = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "left_context") {
-      v_.left_context = static_cast<int>(JSON::Get<double>(value));
+      v_.left_context = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "conv_context") {
-      v_.conv_context = static_cast<int>(JSON::Get<double>(value));
+      v_.conv_context = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "pre_encode_cache_size") {
-      v_.pre_encode_cache_size = static_cast<int>(JSON::Get<double>(value));
+      v_.pre_encode_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "sample_rate") {
-      v_.sample_rate = static_cast<int>(JSON::Get<double>(value));
+      v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "chunk_samples") {
-      v_.chunk_samples = static_cast<int>(JSON::Get<double>(value));
+      v_.chunk_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "blank_id") {
-      v_.blank_id = static_cast<int>(JSON::Get<double>(value));
+      v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
-      v_.max_symbols_per_step = static_cast<int>(JSON::Get<double>(value));
+      v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "left_context_samples") {
+      v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "right_context_samples") {
+      v_.right_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::BotTokenIdName) {
+      v_.bot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::EotTokenIdName) {
+      v_.eot_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::BorTokenIdName) {
+      v_.bor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == Config::Defaults::EorTokenIdName) {
+      v_.eor_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1097,6 +1202,8 @@ struct Model_Element : JSON::Element {
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
       return eos_token_id_;
+    if (name == "tdt_durations")
+      return tdt_durations_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1106,6 +1213,13 @@ struct Model_Element : JSON::Element {
     }
     if (name == "decoder") {
       return decoder_;
+    }
+    if (name == "draft") {
+      if (!v_.draft)
+        v_.draft.emplace();
+      if (!draft_)
+        draft_ = std::make_unique<Decoder_Element>(*v_.draft);
+      return *draft_;
     }
     if (name == "vision") {
       return vision_;
@@ -1119,6 +1233,9 @@ struct Model_Element : JSON::Element {
     if (name == "joiner") {
       return joiner_;
     }
+    if (name == "vad") {
+      return vad_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1126,19 +1243,26 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
+  std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
+  Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
+  VAD_Element vad_{v_.vad};
 };
 
+// Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
+// JSON::Parse_Value only re-throws with the offending field's path prepended when it sees a
+// std::runtime_error, and the public C API boundary reports std::runtime_error, so every config
+// parsing error must use that single type to keep messages (and behavior) consistent.
 int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 2. Check if the value is outside the representable range of an integer.
@@ -1149,11 +1273,17 @@ int SafeDoubleToInt(double x, std::string_view name) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is out of int32 range ["
        << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
-  // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
-  // If rounding is desired, use `return static_cast<int>(std::round(x));`
+  // 3. Reject fractional values — these fields must be integral.
+  if (x != std::trunc(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is not an integer";
+    throw std::runtime_error(ss.str());
+  }
+
+  // 4. Perform the cast.
   return static_cast<int>(x);
 }
 
@@ -1162,17 +1292,17 @@ struct Search_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "min_length") {
-      v_.min_length = static_cast<int>(JSON::Get<double>(value));
+      v_.min_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_length") {
-      v_.max_length = static_cast<int>(JSON::Get<double>(value));
+      v_.max_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "batch_size") {
-      v_.batch_size = static_cast<int>(JSON::Get<double>(value));
+      v_.batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_beams") {
-      v_.num_beams = static_cast<int>(JSON::Get<double>(value));
+      v_.num_beams = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_return_sequences") {
-      v_.num_return_sequences = static_cast<int>(JSON::Get<double>(value));
+      v_.num_return_sequences = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "top_k") {
-      v_.top_k = static_cast<int>(JSON::Get<double>(value));
+      v_.top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "top_p") {
       v_.top_p = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "temperature") {
@@ -1182,7 +1312,7 @@ struct Search_Element : JSON::Element {
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "no_repeat_ngram_size") {
-      v_.no_repeat_ngram_size = static_cast<int>(JSON::Get<double>(value));
+      v_.no_repeat_ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "diversity_penalty") {
       v_.diversity_penalty = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "length_penalty") {
@@ -1202,6 +1332,8 @@ struct Search_Element : JSON::Element {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
+    } else if (name == "blank_penalty") {
+      v_.blank_penalty = static_cast<float>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1209,6 +1341,30 @@ struct Search_Element : JSON::Element {
 
  private:
   Config::Search& v_;
+};
+
+struct Speculative_Element : JSON::Element {
+  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+
+  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  static constexpr int kMinK = 1;
+  static constexpr int kMaxK = 16;
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_draft_tokens") {
+      int k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (k < kMinK || k > kMaxK)
+        throw std::runtime_error(
+            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+      v_.max_draft_tokens = k;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Speculative& v_;
 };
 
 struct DynamicBatching_Element : JSON::Element {
@@ -1219,13 +1375,25 @@ struct DynamicBatching_Element : JSON::Element {
       v_ = Config::Engine::DynamicBatching{};
 
     if (name == "block_size") {
-      v_->block_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("block_size must be > 0");
+      v_->block_size = static_cast<size_t>(parsed_value);
     } else if (name == "num_blocks") {
-      v_->num_blocks = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("num_blocks must be > 0");
+      v_->num_blocks = static_cast<size_t>(parsed_value);
     } else if (name == "gpu_utilization_factor") {
-      v_->gpu_utilization_factor = static_cast<float>(JSON::Get<double>(value));
+      const auto parsed_value = JSON::Get<double>(value);
+      if (!std::isfinite(parsed_value) || parsed_value <= 0 || parsed_value > 1)
+        throw std::out_of_range("gpu_utilization_factor must be > 0 and <= 1");
+      v_->gpu_utilization_factor = static_cast<float>(parsed_value);
     } else if (name == "max_batch_size") {
-      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_batch_size must be > 0");
+      v_->max_batch_size = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1288,8 +1456,67 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   }
 }
 
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
 void ClearProviders(Config& config) {
   config.model.decoder.session_options.providers.clear();
+}
+
+// Escape a string for safe embedding inside a JSON string literal. Prevents JSON
+// injection when caller-supplied values are concatenated into a JSON document that
+// will subsequently be parsed (e.g. in SetProviderOption below). Handles the
+// mandatory JSON escapes: quote, backslash, and the C0 control-character shortcuts
+// that the local JSON parser understands (\b \f \n \r \t).
+//
+// Other C0 control characters (< 0x20) have no shortcut and would require a
+// \uXXXX escape, which the local JSON parser in src/json.cpp does not support
+// (it throws "Unsupported uXXXX code used"). Since provider option names and
+// values are configuration strings that are not expected to contain raw
+// control characters, reject them here with a clear error rather than
+// producing JSON that the parser cannot consume.
+static std::string EscapeJsonString(std::string_view s) {
+  std::string result;
+  result.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        result += "\\\"";
+        break;
+      case '\\':
+        result += "\\\\";
+        break;
+      case '\b':
+        result += "\\b";
+        break;
+      case '\f':
+        result += "\\f";
+        break;
+      case '\n':
+        result += "\\n";
+        break;
+      case '\r':
+        result += "\\r";
+        break;
+      case '\t':
+        result += "\\t";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          throw std::runtime_error(
+              "Unsupported control character in provider option string (code " +
+              std::to_string(static_cast<unsigned char>(c)) + ")");
+        }
+        result += c;
+        break;
+    }
+  }
+  return result;
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
@@ -1314,10 +1541,14 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     }
   }
 
+  // JSON-escape all caller-supplied string fragments before concatenating them into the
+  // JSON document. Without escaping, quote/backslash characters in provider_name,
+  // option_name, or option_value would let a caller inject arbitrary JSON structure
+  // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
-  json << R"({")" << provider_name << R"(":{)";
+  json << R"({")" << EscapeJsonString(provider_name) << R"(":{)";
   if (!option_name.empty()) {
-    json << R"(")" << option_name << R"(":")" << option_value << R"(")";
+    json << R"(")" << EscapeJsonString(option_name) << R"(":")" << EscapeJsonString(option_value) << R"(")";
   }
   json << R"(}})";
 
@@ -1334,13 +1565,23 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
                                                });
     if (provider_options != session_options.provider_options.end()) {
       if (provider_options->name == "cuda") {
-        // Graph Capture is currently broken for CUDA
         for (const auto& value : provider_options->options) {
           if (value.first == "enable_cuda_graph" && value.second == "1") {
-            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+            return true;
           }
         }
+        return false;
       } else if (provider_options->name == "DML") {
+        // Graph capture defaults to ON for DML but can be opted out via the
+        // provider option "enable_graph_capture": "0". Captured-command-list
+        // replay computes wrong logits on some D3D12 devices (observed on the
+        // Xbox Series S Dev-Mode driver: deterministic garbage from the same
+        // model that is correct on CPU EP and on non-captured ORT sessions).
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_graph_capture" && value.second == "0") {
+            return false;
+          }
+        }
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
@@ -1456,6 +1697,7 @@ struct Root_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
+    if (name == "speculative") return speculative_element_;
     if (name == "engine") return engine_element_;
     throw JSON::unknown_value_error{};
   }
@@ -1463,6 +1705,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Speculative_Element speculative_element_{config_.speculative};
   Engine_Element engine_element_{config_.engine};
 };
 
@@ -1516,6 +1759,98 @@ void OverlayConfig(Config& config, std::string_view json) {
   JSON::Parse(element, json);
 }
 
+fs::path Config::ResolvePath(std::string_view value) const {
+  if (value.empty()) {
+    return config_path;
+  }
+  if (package_resolver) {
+    // Loaded from a model package: ORT owns all path-reference resolution (sha256: shared
+    // assets with manifest overrides, relative paths, confinement).
+    return package_resolver(config_path, value);
+  }
+  // Flat directory: sha256: shared-asset references are only meaningful inside a model package.
+  constexpr std::string_view kSharedAssetPrefix = "sha256:";
+  if (value.substr(0, kSharedAssetPrefix.size()) == kSharedAssetPrefix) {
+    throw std::runtime_error(
+        "\"" + std::string{value} +
+        "\" is a sha256: shared-asset reference, which is only valid when loading from a model "
+        "package; this model was loaded from a plain directory.");
+  }
+  return config_path / std::string{value};
+}
+
+// Validates every config-driven filename/path field after parsing so downstream code
+// (model/processor/adapter loading) can rely on paths being safe. Centralising the checks
+// here keeps individual model families free of path-validation calls.
+namespace {
+
+// Validates that a config-specified filename/path stays inside the model directory.
+// Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
+// or contains a ".." path traversal component. Empty paths are allowed (no-op). The
+// optional context label is prepended to error messages so callers can identify which
+// config field caused the failure.
+void ValidateConfigPath(const std::string& path, std::string_view context = {}) {
+  if (path.empty()) return;
+
+  auto make_error = [&](const std::string& msg) -> std::string {
+    return context.empty() ? msg : (std::string{context} + ": " + msg);
+  };
+
+  // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
+  if (path[0] == '/' || path[0] == '\\') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+  }
+#ifdef _WIN32
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+  }
+#endif
+
+  // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
+  std::string component;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == '/' || path[i] == '\\') {
+      if (component == "..") {
+        throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
+      }
+      component.clear();
+    } else {
+      component += path[i];
+    }
+  }
+}
+
+void ValidateModelPaths(const Config& config) {
+  const auto& m = config.model;
+  ValidateConfigPath(m.encoder.filename, "model.encoder.filename");
+  ValidateConfigPath(m.embedding.filename, "model.embedding.filename");
+
+  ValidateConfigPath(m.vision.filename, "model.vision.filename");
+  ValidateConfigPath(m.vision.config_filename, "model.vision.config_filename");
+  if (m.vision.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.vision.adapter_filename, "model.vision.adapter_filename");
+  }
+  for (const auto& stage : m.vision.pipeline) {
+    ValidateConfigPath(stage.filename, "model.vision.pipeline.filename");
+  }
+
+  ValidateConfigPath(m.speech.filename, "model.speech.filename");
+  ValidateConfigPath(m.speech.config_filename, "model.speech.config_filename");
+  if (m.speech.adapter_filename.has_value()) {
+    ValidateConfigPath(*m.speech.adapter_filename, "model.speech.adapter_filename");
+  }
+
+  ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
+  ValidateConfigPath(m.vad.filename, "model.vad.filename");
+
+  ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
+  for (const auto& stage : m.decoder.pipeline) {
+    ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
+  }
+}
+
+}  // namespace
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
@@ -1534,6 +1869,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  if (model.draft) {
+    for (const auto& provider_option : model.draft->session_options.provider_options) {
+      model.draft->session_options.providers.push_back(provider_option.name);
+    }
   }
 
   if (model.encoder.session_options.has_value()) {
@@ -1559,6 +1900,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
       model.embedding.session_options->providers.push_back(provider_option.name);
     }
   }
+
+  // Validate all config-specified filenames/paths after parsing so downstream loaders
+  // (model/processor/adapter creation) can rely on them being safe.
+  ValidateModelPaths(*this);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

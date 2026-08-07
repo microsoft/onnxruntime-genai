@@ -49,12 +49,18 @@ struct CpuInterface : DeviceInterface {
   DeviceType GetType() const override { return DeviceType::CPU; }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
-    assert(!ort_allocator_);
+    // Idempotent: on re-initialization this is called again with the same process-global default
+    // allocator (CpuMemory allocates through Ort::Allocator::GetWithDefaultOptions(), which is not
+    // env-scoped), so re-assigning the same pointer is harmless.
     ort_allocator_ = &allocator;
   }
 
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
+  }
+
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    throw std::runtime_error("GetMemoryInfo for CPU should not be used.");
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -166,9 +172,8 @@ struct CpuInterface : DeviceInterface {
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
 };
 
-DeviceInterface* GetCpuInterface() {
-  static std::unique_ptr<CpuInterface> g_cpu = std::make_unique<CpuInterface>();
-  return g_cpu.get();
+std::unique_ptr<DeviceInterface> CreateCpuInterface() {
+  return std::make_unique<CpuInterface>();
 }
 
 }  // namespace Generators

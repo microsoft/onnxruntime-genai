@@ -38,7 +38,6 @@ set(ENGINE_ROOT ${SRC_ROOT}/engine)
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
-  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
 elseif(APPLE)
   if(IOS OR MAC_CATALYST)
     add_library(onnxruntime IMPORTED STATIC)
@@ -54,17 +53,15 @@ elseif(APPLE)
   else()
     set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
     set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
-    set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
   endif()
 else()
-  #In AIX, only CPU inferencing is supported, so no need to update ONNXRUNTIME_PROVIDERS_CUDA_LIB and ONNXRUNTIME_PROVIDERS_ROCM_LIB
+  #In AIX, only CPU inferencing is supported
   if (CMAKE_SYSTEM_NAME MATCHES "AIX")
     set(ONNXRUNTIME_LIB "libonnxruntime.a")
   else()
     set(ONNXRUNTIME_LIB "libonnxruntime.so")
   endif()
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
-  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
 endif()
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS
@@ -86,10 +83,10 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.cpp"
   "${GENERATORS_ROOT}/vitisai/*.h"
   "${GENERATORS_ROOT}/vitisai/*.cpp"
-  "${GENERATORS_ROOT}/rocm/session_options.h"
-  "${GENERATORS_ROOT}/rocm/session_options.cpp"
   "${GENERATORS_ROOT}/dml/session_options.h"
   "${GENERATORS_ROOT}/dml/session_options.cpp"
+  "${GENERATORS_ROOT}/telemetry/*.h"
+  "${GENERATORS_ROOT}/telemetry/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
   "${ENGINE_ROOT}/*.h"
@@ -118,59 +115,5 @@ endif()
 
 
 # normalize the target platform to x64 or arm64. additional architectures can be added as needed.
-if (MSVC)
-  if (CMAKE_VS_PLATFORM_NAME)
-    # cross-platform generator
-    set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
-  else()
-    set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
-  endif()
-
-  if (genai_target_platform STREQUAL "arm64")
-    # pass
-  elseif (genai_target_platform STREQUAL "ARM64" OR
-          genai_target_platform STREQUAL "ARM64EC")
-    set(genai_target_platform "arm64")
-  elseif (genai_target_platform STREQUAL "x64" OR
-          genai_target_platform STREQUAL "x86_64" OR
-          genai_target_platform STREQUAL "AMD64" OR
-          CMAKE_GENERATOR MATCHES "Win64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-elseif(APPLE)
-  # TODO: do we need to support CMAKE_OSX_ARCHITECTURES having multiple values?
-  set(_apple_target_arch ${CMAKE_OSX_ARCHITECTURES})
-  if (NOT _apple_target_arch)
-    set(_apple_target_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
-  endif()
-
-  if (_apple_target_arch STREQUAL "arm64")
-    set(genai_target_platform "arm64")
-  elseif (_apple_target_arch STREQUAL "x86_64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. ${_apple_target_arch}")
-  endif()
-elseif(ANDROID)
-  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
-    set(genai_target_platform "arm64")
-  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_ANDROID_ARCH_ABI: ${CMAKE_ANDROID_ARCH_ABI}")
-  endif()
-else()
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64.*")
-    set(genai_target_platform "arm64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64.*")
-    set(genai_target_platform "arm64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-    set(genai_target_platform "x64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc")
-    set(genai_target_platform "powerpc")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-endif()
+# Extracted into a standalone module so standalone SDK projects can reuse it (sets genai_target_platform).
+include(${CMAKE_CURRENT_LIST_DIR}/target_platform.cmake)

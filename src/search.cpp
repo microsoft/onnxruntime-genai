@@ -1,18 +1,17 @@
 #include "generators.h"
 #include "softmax.h"
+#include "sampling_distribution.h"
 #include "search.h"
 #include "beam_search_scorer.h"
-#include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
 #include <limits>
-#include <unordered_set>
 
 namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      cpu_device_{*GetCpuInterface()} {
+      cpu_device_{*GetDeviceInterface(DeviceType::CPU)} {
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_ = cpu_device_.Allocate<int32_t>(batch_beam_size);
@@ -69,6 +68,36 @@ void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
+void Search_Cpu::SaveStateForTransactionImpl(bool /*checkpoint_local_state*/) {
+  auto sequence_lengths = sequence_lengths_.CpuSpan();
+  transaction_sequence_lengths_.assign(sequence_lengths.begin(), sequence_lengths.end());
+  transaction_done_ = done_;
+}
+
+void Search_Cpu::RestoreStateForTransactionImpl() {
+  copy(std::span<const int32_t>{transaction_sequence_lengths_}, sequence_lengths_.CpuSpan());
+  sequence_lengths_.CopyCpuToDevice();
+  done_ = transaction_done_;
+}
+
+void GreedySearch_Cpu::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cpu::SaveStateForTransactionImpl(checkpoint_local_state);
+  transaction_next_tokens_.assign(next_tokens_.begin(), next_tokens_.end());
+  if (!transaction_eos_seen_)
+    transaction_eos_seen_ = std::make_unique<bool[]>(eos_seen_.size());
+  copy(std::span<const bool>{eos_seen_}, std::span<bool>{transaction_eos_seen_.get(), eos_seen_.size()});
+  transaction_not_done_count_ = not_done_count_;
+  transaction_gen_ = gen_;
+}
+
+void GreedySearch_Cpu::RestoreStateForTransactionImpl() {
+  Search_Cpu::RestoreStateForTransactionImpl();
+  copy(std::span<const int32_t>{transaction_next_tokens_}, next_tokens_);
+  copy(std::span<const bool>{transaction_eos_seen_.get(), eos_seen_.size()}, eos_seen_);
+  not_done_count_ = transaction_not_done_count_;
+  gen_ = transaction_gen_;
+}
+
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
   return next_tokens_ptr_;
 }
@@ -107,13 +136,6 @@ void BeamSearch_Cpu::SelectTop() {
 
   const size_t top_k = 2 * params_->search.num_beams;
 
-  struct ScoreIndex {
-    float score;
-    int32_t index;
-
-    bool operator<(const ScoreIndex& s) const { return score < s.score; }
-  };
-
   auto scores = std::make_unique<float[]>(top_k * params_->search.batch_size);     // Score of top_k tokens
   auto indices = std::make_unique<int32_t[]>(top_k * params_->search.batch_size);  // beam index of top_k tokens
   auto tokens = std::make_unique<int32_t[]>(top_k * params_->search.batch_size);   // token id of top_k tokens
@@ -122,23 +144,34 @@ void BeamSearch_Cpu::SelectTop() {
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_->search.batch_size);
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_->search.batch_size);
 
-  // TODO(aciddelgado): Optimize this top k with partial sort
+  // Use partial_sort to find only the top 2*num_beams elements per batch,
+  // instead of heapifying the entire vocab*beams array via priority_queue.
+  const size_t total_elements = static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size;
+  // Defense-in-depth: a plain assert() is compiled out under NDEBUG (release
+  // builds), so enforce the invariant that partial_sort relies on at runtime.
+  // This is normally guaranteed by the vocab_size >= 2 validation for beam
+  // search in Generator::Generator.
+  if (total_elements < top_k)
+    throw std::runtime_error("Beam search requires num_beams * vocab_size (" + std::to_string(total_elements) + ") to be at least 2 * num_beams (" + std::to_string(top_k) + "); vocab_size is too small");
+
+  // Reuse class member to avoid re-allocating on every call (size is constant).
+  select_top_idx_.resize(total_elements);
+
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->search.batch_size); batch_index++) {
-    std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
-    auto token_scores_sub = next_token_scores.subspan(batch_index * params_->search.num_beams * params_->config.model.vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size);
-    for (int i = 0; i < token_scores_sub.size(); i++) {
-      queue.push({token_scores_sub[i], i});
-    }
+    auto token_scores_sub = next_token_scores.subspan(batch_index * total_elements, total_elements);
+
+    // Build index array and partial_sort to find top_k elements
+    std::iota(select_top_idx_.begin(), select_top_idx_.end(), 0);
+    std::partial_sort(select_top_idx_.begin(), select_top_idx_.begin() + top_k, select_top_idx_.end(),
+                      [&token_scores_sub](int32_t a, int32_t b) { return token_scores_sub[a] > token_scores_sub[b]; });
 
     auto next_indices_sub = next_indices.subspan(top_k * batch_index, top_k);
     auto next_tokens_sub = next_tokens.subspan(top_k * batch_index, top_k);
     auto next_scores_sub = next_scores.subspan(top_k * batch_index, top_k);
-    for (unsigned i = 0; i < top_k; i++) {
-      auto v = queue.top();
-      next_indices_sub[i] = v.index / params_->config.model.vocab_size;
-      next_tokens_sub[i] = v.index % params_->config.model.vocab_size;
-      next_scores_sub[i] = v.score;
-      queue.pop();
+    for (size_t i = 0; i < top_k; i++) {
+      next_indices_sub[i] = select_top_idx_[i] / params_->config.model.vocab_size;
+      next_tokens_sub[i] = select_top_idx_[i] % params_->config.model.vocab_size;
+      next_scores_sub[i] = token_scores_sub[select_top_idx_[i]];
     }
   }
 
@@ -162,70 +195,55 @@ void GreedySearch_Cpu::SelectTop() {
     }
 
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+    auto const token = ArgMax<float>(scores);
     SetNextToken(batch_id, token);
   }
 
+  if (!done_)
+    AppendNextTokensToSequences();
+}
+
+void GreedySearch_Cpu::CommitToken(int32_t token) {
+  // Speculative decoding already decided this token, so commit it exactly like SelectTop's tail
+  // (SetNextToken handles EOS/done accounting, AppendNextTokensToSequences appends + checks
+  // max_length) but skip the argmax since the id is known. batch_size is always 1 here.
+  SetNextToken(0, token);
   if (!done_)
     AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
+  const int vocab_size = params_->config.model.vocab_size;
+  SampledCategorical dist;  // reused across the batch loop
+
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    // Find the top K scores
-    std::vector<int> indices(scores.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    std::vector<float> top_k_scores(k);
-    for (int i = 0; i < k; i++)
-      top_k_scores[i] = scores[indices[i]];
-    // Sample a token from the top K
-    Softmax(top_k_scores, temperature);
-    std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
-    SetNextToken(batch_id, indices[dis(gen_)]);
+    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
+    ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();
 }
 
+// Top-P (nucleus) sampling; nucleus selection shared with speculative decoding via ComputeSampledCategorical.
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
+  const int vocab_size = params_->config.model.vocab_size;
+  SampledCategorical dist;  // reused across the batch loop
+
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
 
-    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-
-    // 1. Apply temperature and softmax to get probabilities
-    Softmax(scores, temperature);
-
-    // 2. Sort indices by probability
-    std::vector<int32_t> indices(scores.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(),
-              [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-    // 3. Find nucleus and mute probabilities of tokens outside it
-    float cumulative_prob = 0.0f;
-    for (size_t i = 0; i < indices.size(); ++i) {
-      cumulative_prob += scores[indices[i]];
-      if (cumulative_prob >= p) {
-        for (size_t j = i + 1; j < indices.size(); ++j) {
-          scores[indices[j]] = 0.0f;
-        }
-        break;
-      }
-    }
-
-    // 4. Sample
-    std::discrete_distribution<> dist(scores.begin(), scores.end());
-    int32_t token = dist(gen_);
-
-    SetNextToken(batch_id, token);
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
+    // top_k=0 -> pure nucleus path.
+    ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();
@@ -233,59 +251,18 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   assert(temperature > 0.0f);
-
-  // --- Buffers allocated once to avoid re-allocations in the batch loop ---
-  std::vector<int32_t> indices(params_->config.model.vocab_size);
-
-  // Buffer for the top-k logits
-  std::vector<float> top_k_logits;
-  top_k_logits.reserve(k);
-
-  // Buffer for probabilities used in Top-P filtering
-  std::vector<float> temp_probs;
-  temp_probs.reserve(k);
+  const int vocab_size = params_->config.model.vocab_size;
+  SampledCategorical dist;  // reused across the batch loop
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
 
-    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-
-    std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
-                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-    // 2. Populate top K logits, applying temperature.
-    top_k_logits.clear();
-    for (int i = 0; i < k; ++i) {
-      top_k_logits.push_back(scores[indices[i]] / temperature);
-    }
-
-    // 3. Top-p (nucleus) filtering.
-    temp_probs.assign(top_k_logits.begin(), top_k_logits.end());
-    Softmax(temp_probs, 1.0f);  // Temperature is already baked into top_k_logits
-
-    float cumulative_prob = 0.0f;
-    int cutoff_index = k;  // Default to keeping all top-k tokens
-    for (int i = 0; i < k; ++i) {
-      cumulative_prob += temp_probs[i];
-      if (cumulative_prob >= p) {
-        cutoff_index = i + 1;
-        break;
-      }
-    }
-
-    // 4. Resize logits to the nucleus, re-normalize, and sample.
-    top_k_logits.resize(cutoff_index);
-    Softmax(top_k_logits, 1.0f);
-
-    std::discrete_distribution<> dist(top_k_logits.begin(), top_k_logits.end());
-    int32_t sampled_k_index = dist(gen_);
-
-    // The final token is the one from the original vocab indices.
-    int32_t token = indices[sampled_k_index];
-    SetNextToken(batch_id, token);
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
+    ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
+    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
+    SetNextToken(batch_id, dist.indices[dis(gen_)]);
   }
   if (!done_)
     AppendNextTokensToSequences();
@@ -450,8 +427,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    for (auto token_id : params_->config.model.eos_token_id)
-      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
+    ApplyMinLengthToLogits(beam_token_scores, sequences_.GetSequenceLength(), min_length,
+                           params_->config.model.eos_token_id);
   }
 }
 
@@ -463,19 +440,45 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
     std::span<const int32_t> const sequence = sequences_.GetSequence(i).CopyDeviceToCpu();
+    ApplyRepetitionPenaltyToLogits(beam_token_scores, sequence, penalty, repetition_penalty_visited_);
+  }
+}
 
-    // Find unique word IDs in sequence.
-    std::unordered_set<int32_t> unique_word_ids;
-    for (const auto& word_id : sequence) {
-      unique_word_ids.insert(word_id);
-    }
+void Search_Cpu::ApplyNoRepeatNgram(int ngram_size) {
+  if (ngram_size <= 0)
+    return;
 
-    for (const int32_t word_id : unique_word_ids) {
-      float const score = beam_token_scores[word_id];
+  const int sequence_length = sequences_.GetSequenceLength();
+  // Need at least one complete n-gram in history before anything can be banned.
+  if (sequence_length < ngram_size)
+    return;
 
-      // If score < 0, then repetition penalty > 1.0 has to multiplied to reduce the previous token probability,
-      // This assumes that scores are either positive (like ctrl) or negative (like GPT-2), but not a mixture.
-      beam_token_scores[word_id] = (score < 0 ? score * penalty : score / penalty);
+  const int prefix_length = ngram_size - 1;
+  const int batch_beam_size = params_->BatchBeamSize();
+  for (int i = 0; i < batch_beam_size; i++) {
+    std::span<float> const beam_token_scores = GetScores(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
+
+    // The prefix we are about to extend: the trailing (ngram_size - 1) tokens.
+    std::span<const int32_t> const target_prefix = sequence.subspan(sequence_length - prefix_length, prefix_length);
+
+    // Scan every historical n-gram. Its first (ngram_size - 1) tokens form a prefix
+    // and its last token is what followed. If the prefix matches the trailing prefix,
+    // ban that following token so the same n-gram cannot repeat.
+    const int last_start = sequence_length - ngram_size;
+    for (int start = 0; start <= last_start; start++) {
+      bool matches = true;
+      for (int j = 0; j < prefix_length; j++) {
+        if (sequence[start + j] != target_prefix[j]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        const int32_t banned_token = sequence[start + prefix_length];
+        if (banned_token >= 0 && banned_token < params_->config.model.vocab_size)
+          beam_token_scores[banned_token] = std::numeric_limits<float>::lowest();
+      }
     }
   }
 }

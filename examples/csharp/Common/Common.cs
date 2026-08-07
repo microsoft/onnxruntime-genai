@@ -427,7 +427,8 @@ namespace CommonUtils
                     {
                         { "type", tool.Function.Parameters.GetValueOrDefault("type", "object") },
                         { "properties", tool.Function.Parameters.GetValueOrDefault("properties", new Dictionary<string, object>{}) },
-                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) }
+                        { "required", tool.Function.Parameters.GetValueOrDefault("required", new List<string>{}) },
+                        { "additionalProperties", false }
                     };
                     properties.Add("parameters", parameters);
                 }
@@ -877,7 +878,7 @@ namespace CommonUtils
             {
                 Arity = ArgumentArity.ExactlyOne,
                 DefaultValueFactory = (_) => "",
-                Description = "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json"
+                Description = "Path to file containing list of OpenAI-compatible tool definitions. Ex: test/models/tool-definitions/weather.json"
             };
             tools_file.Validators.Add(result =>
             {

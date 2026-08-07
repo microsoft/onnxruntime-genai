@@ -9,6 +9,10 @@ export CMAKE_ARGS="-DONNX_GEN_PB_TYPE_STUBS=OFF -DONNX_WERROR=OFF"
 
 for PYTHON_EXE in "${PYTHON_EXES[@]}"
 do
+  if [ ! -x "${PYTHON_EXE}" ]; then
+    echo "Skipping ${PYTHON_EXE}: not found in this base image"
+    continue
+  fi
   ${PYTHON_EXE} -m pip install -r requirements.txt
 done
 

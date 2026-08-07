@@ -11,7 +11,6 @@
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
         "USE_CUDA": "OFF",
-        "USE_ROCM": "OFF",
         "USE_GUIDANCE": "ON"
       },
       "environment": {

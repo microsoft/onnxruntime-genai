@@ -1,0 +1,27 @@
+{
+  "processor": {
+    "name": "gemma4_image_processor",
+    "transforms": [
+      {
+        "operation": {
+          "name": "decode_image",
+          "type": "DecodeImage",
+          "attrs": {
+            "color_space": "RGB"
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "gemma4_image_transform",
+          "type": "Gemma4ImageTransform",
+          "attrs": {
+            "patch_size": 16,
+            "max_soft_tokens": 280,
+            "pooling_kernel_size": 3
+          }
+        }
+      }
+    ]
+  }
+}

@@ -6,6 +6,7 @@
 #include <array>
 #include <assert.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -31,8 +32,11 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
+#include "decoding_strategy.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "speculative_stats.h"
+#include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
@@ -40,9 +44,11 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 namespace Generators {
 struct Model;
 struct State;
+struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -72,12 +78,18 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  const Config& config;                  // The model outlives the GeneratorParams
-  Config::Search search{config.search};  // Copy of the search parameters from the config
+  // Co-owns the model so the aliased Config below cannot be freed while this
+  // params object is alive. Null for the benchmark-only Config constructor.
+  std::shared_ptr<const Model> model_;
+  const Config& config;                                 // Aliases model-owned Config; kept alive by model_
+  Config::Search search{config.search};                 // Copy of the search parameters from the config
+  Config::Speculative speculative{config.speculative};  // Runtime copy; overrides config default
 
   // Query the params to get the value set for a param
   double GetSearchNumber(std::string_view name) const;
   bool GetSearchBool(std::string_view name) const;
+  void SetSpeculativeNumber(std::string_view name, double value);
+  double GetSpeculativeNumber(std::string_view name) const;
 
   int max_batch_size{0};
   bool use_graph_capture{};
@@ -97,7 +109,14 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 };
 
 struct Generator : LeakChecked<Generator> {
+  enum class Action {
+    standard,   // Default, set in any other case
+    generated,  // Set after GenerateNextToken
+    rewound,    // Set after RewindToLength
+  };
+
   Generator(const Model& model, const GeneratorParams& params);
+  ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
@@ -106,8 +125,10 @@ struct Generator : LeakChecked<Generator> {
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
+  void PrepareForSetLogits();
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
+  void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
@@ -123,23 +144,67 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
+  // Returns zero-filled stats when the model is not speculative.
+  SpeculativeStats GetSpeculativeStats() const;
+
+  // True when sampling reduces to greedy/argmax selection (do_sample off, top_k == 1, or
+  // temperature == 0). Computed once at construction so callers don't re-derive it.
+  bool IsGreedySampling() const;
+
  private:
+#if defined(_MSC_VER)
+  [[msvc::no_unique_address]]
+#else
+  [[no_unique_address]]
+#endif
+  GenerationTelemetry generation_telemetry_;
+  void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
-  enum Action { standard,   // Default, set in any other case
-                generated,  // Set after GenerateNextToken
-                rewound };  // Set after RewindToLength
-  Action last_action_{standard};
+  Action last_action_{Action::standard};
+
+  // Pre-computed per-token decisions: avoid repeated checks each token
+  // Non-null when the model is a transducer (RNNT, TDT); points into state_.
+  TransducerState* transducer_state_{nullptr};
+  int phi3_rope_threshold_{};  // 0 means no ROPE rewind needed
+  enum class SamplingMethod { kGreedy,
+                              kTopK,
+                              kTopP,
+                              kTopKTopP };
+  SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  void InitializeSamplingMethod(const GeneratorParams& params);
+  void InitializePhi3RopeThreshold(const GeneratorParams& params);
+
+  std::unique_ptr<DecodingStrategy> strategy_;
+  friend struct StandardDecodingStrategy;
+  friend struct TransducerDecodingStrategy;
+  friend struct SpeculativeDecodingStrategy;
 };
+
+// Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
+// add-on) are unloaded on teardown.
+struct LibraryHandle;
 
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
 
+  // Get-or-create the DeviceInterface for a device type. The interface is owned by this
+  // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
+  // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
+  DeviceInterface* GetDeviceInterface(DeviceType type);
+
   struct Allocator {
-    std::unique_ptr<Ort::Allocator> allocator_;
+    // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
+    // Ort::Allocator::Create) "wraps the internal allocator from the OrtSession and becomes invalid when the session
+    // does" -- see
+    // https://github.com/microsoft/onnxruntime/blob/3c8c46029735a89c8d1ea0aa6c1812db5b78ad72/include/onnxruntime/core/session/onnxruntime_c_api.h#L2852-L2862
+    // Members are destroyed in reverse declaration order, so session_ must be declared BEFORE allocator_ so that
+    // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
+    std::unique_ptr<Ort::Allocator> allocator_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
@@ -154,6 +219,19 @@ struct OrtGlobals {
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
+
+  DeviceInterface* LoadCudaInterface(DeviceType type);
+
+  std::mutex device_interfaces_mutex_;
+  // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
+  // module-owned interface (DML). Rebuilt each env cycle.
+  std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
+  // In-process interfaces owned directly by genai (CPU / WebGPU / QNN / OpenVINO / RyzenAI).
+  std::vector<std::unique_ptr<DeviceInterface>> owned_interfaces_;
+  // The genai CUDA add-on library (onnxruntime-genai-cuda). Holds the loaded library so that
+  // unloading it (on teardown) runs the add-on's static destructors. The interface pointer it
+  // provides is non-owning and lives in device_interfaces_.
+  std::unique_ptr<LibraryHandle> cuda_library_;
 };
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
@@ -162,6 +240,13 @@ OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+
+// Constructs a Config from `config_path`. For a model package, a variant is selected
+// (auto-detected when `ep` is null/empty). For a flat directory `ep` must be null/empty.
+std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path,
+                                     const char* ep = nullptr,
+                                     std::string_view json_overlay = {});
+
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
