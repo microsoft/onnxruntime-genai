@@ -22,9 +22,6 @@ namespace AMDGPU {
 const char* device_label = "amdgpu";
 const char* label_cpu = "cpu";
 
-// Registration name the EP is discovered under, used to look up its advertised memory-info.
-constexpr const char* kExecutionProviderName = "AMDGPUExecutionProvider";
-
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size, Ort::Allocator* allocator, const OrtMemoryInfo* memory_info)
       : owned_{true}, ort_allocator_{allocator}, ort_memory_info_{memory_info} {
@@ -206,7 +203,7 @@ struct InterfaceImpl : DeviceInterface {
   // Read the id of the EP device the model will run on, so the allocators bind to it rather than
   // assuming device 0. Resolves to 0 on a single-GPU machine.
   int GetDeviceId(const ProviderOptions* user_options) override {
-    auto ep_devices = FindRegisteredEpDevices(kExecutionProviderName);
+    auto ep_devices = FindRegisteredEpDevices(kAMDGPUExecutionProviderName);
     if (user_options)
       ep_devices = ApplyDeviceFiltering(*user_options, ep_devices);
     if (!ep_devices.empty()) {
@@ -224,7 +221,7 @@ struct InterfaceImpl : DeviceInterface {
     if (ort_pinned_allocator_)
       return;
     try {
-      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kExecutionProviderName)) {
+      for (const OrtEpDevice* ep_device : FindRegisteredEpDevices(kAMDGPUExecutionProviderName)) {
         const OrtMemoryInfo* mi =
             Ort::api->EpDevice_MemoryInfo(ep_device, OrtDeviceMemoryType_HOST_ACCESSIBLE);
         if (!mi)

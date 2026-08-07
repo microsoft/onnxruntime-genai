@@ -7,6 +7,9 @@
 
 namespace Generators {
 
+// Name the EP library is registered under, and that its OrtEpDevice is discovered by.
+constexpr const char* kAMDGPUExecutionProviderName = "AMDGPUExecutionProvider";
+
 DeviceInterface* GetAMDGPUInterface();
 
 // Inputs-only interface backed by the host-accessible allocator. Decode inputs allocated
