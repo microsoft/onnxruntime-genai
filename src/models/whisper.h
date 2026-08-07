@@ -1,5 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "audio_features.h"
 #include "model.h"
 #include "input_ids.h"
@@ -9,7 +14,17 @@
 
 namespace Generators {
 
-void ValidateWhisperAudioFeaturesShape(const std::vector<int64_t>& shape, int expected_num_frames);
+inline void ValidateWhisperAudioFeaturesShape(const std::vector<int64_t>& shape, int expected_num_frames) {
+  if (shape.size() != 3) {
+    throw std::runtime_error("audio_features must have rank 3 [batch, mels, frames], got rank " + std::to_string(shape.size()));
+  }
+
+  const int num_frames = static_cast<int>(shape[2]);
+  if (num_frames != expected_num_frames) {
+    throw std::runtime_error("Whisper uses num_frames = " + std::to_string(expected_num_frames) +
+                             ". The provided inputs have num_frames = " + std::to_string(num_frames));
+  }
+}
 
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);

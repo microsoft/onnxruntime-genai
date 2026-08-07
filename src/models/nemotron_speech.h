@@ -4,13 +4,31 @@
 // Nemotron Speech Streaming ASR model support.
 #pragma once
 
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "model.h"
 #include "audio_features.h"
 #include "transducer_state.h"
 
 namespace Generators {
 
-void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels);
+inline void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
+  if (mel_shape.size() != 3) {
+    throw std::runtime_error("mel input must have rank 3 [batch, mels, frames], got rank " + std::to_string(mel_shape.size()));
+  }
+
+  if (mel_shape[0] != 1) {
+    throw std::runtime_error("mel input batch dimension must be 1, got " + std::to_string(mel_shape[0]));
+  }
+
+  if (mel_shape[1] != expected_num_mels) {
+    throw std::runtime_error("mel input mels dimension (" + std::to_string(mel_shape[1]) +
+                             ") does not match expected num_mels (" + std::to_string(expected_num_mels) + ")");
+  }
+}
 
 struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)

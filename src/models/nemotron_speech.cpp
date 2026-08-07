@@ -34,21 +34,6 @@ int NemotronArgMaxImpl(const OrtValue& logits_value, int blank_id, float blank_p
 }
 }  // namespace
 
-void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
-  if (mel_shape.size() != 3) {
-    throw std::runtime_error("mel input must have rank 3 [batch, mels, frames], got rank " + std::to_string(mel_shape.size()));
-  }
-
-  if (mel_shape[0] != 1) {
-    throw std::runtime_error("mel input batch dimension must be 1, got " + std::to_string(mel_shape[0]));
-  }
-
-  if (mel_shape[1] != expected_num_mels) {
-    throw std::runtime_error("mel input mels dimension (" + std::to_string(mel_shape[1]) +
-                             ") does not match expected num_mels (" + std::to_string(expected_num_mels) + ")");
-  }
-}
-
 int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty) {
   const auto type = logits.GetTensorTypeAndShapeInfo()->GetElementType();
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {

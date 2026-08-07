@@ -30,7 +30,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,8 +41,30 @@
 
 namespace Generators {
 
-void ValidateParakeetEncoderOutputShape(const std::vector<int64_t>& enc_shape, int64_t hidden_dim);
-void ValidateParakeetDecoderOutputShape(const std::vector<int64_t>& dec_output_shape, int64_t dec_dim);
+inline void ValidateParakeetEncoderOutputShape(const std::vector<int64_t>& enc_shape, int64_t hidden_dim) {
+  if (enc_shape.size() != 3) {
+    throw std::runtime_error("Encoder output must have rank 3 [batch, channels, time], got rank " + std::to_string(enc_shape.size()));
+  }
+
+  if (enc_shape[1] != hidden_dim) {
+    throw std::runtime_error("Encoder output channel dimension (" + std::to_string(enc_shape[1]) +
+                             ") does not match config hidden_dim (" + std::to_string(hidden_dim) + ")");
+  }
+}
+
+inline void ValidateParakeetDecoderOutputShape(const std::vector<int64_t>& dec_output_shape, int64_t dec_dim) {
+  if (dec_output_shape.size() != 3) {
+    throw std::runtime_error("Decoder output must have rank 3 [batch, decoder_lstm_dim, time], got rank " +
+                             std::to_string(dec_output_shape.size()));
+  }
+
+  if (dec_output_shape[0] != 1 || dec_output_shape[1] != dec_dim || dec_output_shape[2] != 1) {
+    throw std::runtime_error("Decoder output must have shape [1, " + std::to_string(dec_dim) +
+                             ", 1], got [" + std::to_string(dec_output_shape[0]) + ", " +
+                             std::to_string(dec_output_shape[1]) + ", " +
+                             std::to_string(dec_output_shape[2]) + "]");
+  }
+}
 
 struct ParakeetTdtConfig {
   // Encoder dimensions
