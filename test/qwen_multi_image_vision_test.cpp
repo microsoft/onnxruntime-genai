@@ -1,132 +1,63 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <array>
-#include <filesystem>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
-#define OGA_USE_SPAN 1
-#include "ort_genai.h"
-#include "test_utils.h"
+#include "models/multi_modal.h"
 
+namespace Generators::test {
 namespace {
 
-std::string GetQwen3VlModelPath() {
-  return std::string(MODEL_PATH) + "qwen3-vl";
-}
-
-std::vector<std::string> GetQwenVisionImagePaths() {
-  return {
-      std::string(MODEL_PATH) + "../images/australia.jpg",
-      std::string(MODEL_PATH) + "../images/landscape.jpg",
-  };
-}
-
-std::string BuildMultiImagePrompt(size_t image_count) {
-  std::string prompt;
-  for (size_t i = 0; i < image_count; ++i) {
-    prompt += "<|vision_start|><|image_pad|><|vision_end|>";
+template <typename Fn>
+std::string CaptureThrowMessage(Fn&& fn) {
+  try {
+    fn();
+  } catch (const std::exception& e) {
+    return e.what();
   }
-  prompt += "Describe these images";
-  return prompt;
-}
-
-struct QwenVisionHarness {
-  std::unique_ptr<OgaModel> model;
-  std::unique_ptr<OgaMultiModalProcessor> processor;
-  std::unique_ptr<OgaGeneratorParams> params;
-  std::unique_ptr<OgaGenerator> generator;
-  std::unique_ptr<OgaNamedTensors> inputs;
-
-  static QwenVisionHarness Create() {
-    const std::string model_path = GetQwen3VlModelPath();
-    if (!std::filesystem::exists(std::filesystem::path(model_path) / "genai_config.json")) {
-      throw std::runtime_error("qwen3-vl test model not found");
-    }
-
-    const auto image_paths_storage = GetQwenVisionImagePaths();
-    for (const auto& image_path : image_paths_storage) {
-      if (!std::filesystem::exists(image_path)) {
-        throw std::runtime_error("Qwen vision test image not found: " + image_path);
-      }
-    }
-
-    std::vector<const char*> image_paths;
-    image_paths.reserve(image_paths_storage.size());
-    for (const auto& image_path : image_paths_storage) {
-      image_paths.push_back(image_path.c_str());
-    }
-
-    QwenVisionHarness harness;
-    harness.model = OgaModel::Create(model_path.c_str());
-    harness.processor = OgaMultiModalProcessor::Create(*harness.model);
-    auto images = OgaImages::Load(image_paths);
-    const std::string prompt = BuildMultiImagePrompt(image_paths.size());
-    harness.inputs = harness.processor->ProcessImages(prompt.c_str(), images.get());
-    harness.params = OgaGeneratorParams::Create(*harness.model);
-    harness.generator = OgaGenerator::Create(*harness.model, *harness.params);
-    return harness;
-  }
-};
-
-void SkipIfModelUnavailable() {
-  const std::string model_path = GetQwen3VlModelPath();
-  if (!std::filesystem::exists(std::filesystem::path(model_path) / "genai_config.json")) {
-    GTEST_SKIP() << "qwen3-vl test model not found at " << model_path;
-  }
-
-  for (const auto& image_path : GetQwenVisionImagePaths()) {
-    if (!std::filesystem::exists(image_path)) {
-      GTEST_SKIP() << "Qwen vision test image not found at " << image_path;
-    }
-  }
+  return {};
 }
 
 }  // namespace
 
 TEST(QwenVisionMultiImageTest, RejectsInsufficientGridElementsViaGeneratorInputs) {
-  SkipIfModelUnavailable();
-
-  auto harness = QwenVisionHarness::Create();
-
-  std::vector<int64_t> malformed_grid{1, 32, 32, 1};
-  auto malformed_tensor = OgaTensor::Create(
-      malformed_grid.data(),
-      std::array<int64_t, 2>{2, 2},
-      OgaElementType_int64);
-  harness.inputs->Set("image_grid_thw", *malformed_tensor);
-
-  EXPECT_THROW(harness.generator->SetInputs(*harness.inputs), std::runtime_error);
+  const std::vector<int64_t> shape{2, 3};
+  const std::string message = CaptureThrowMessage([&] {
+    ValidateImageGridThwLayoutAndCount(shape, 4, 2, "image_grid_thw");
+  });
+  EXPECT_NE(message.find("need at least 3 values per image"), std::string::npos) << message;
 }
 
 TEST(QwenVisionMultiImageTest, RejectsRank1GridTensorViaGeneratorInputs) {
-  SkipIfModelUnavailable();
-
-  auto harness = QwenVisionHarness::Create();
-
-  std::vector<int64_t> malformed_grid{1, 32};
-  auto malformed_tensor = OgaTensor::Create(
-      malformed_grid.data(),
-      std::array<int64_t, 1>{2},
-      OgaElementType_int64);
-  harness.inputs->Set("image_grid_thw", *malformed_tensor);
-
-  EXPECT_THROW(harness.generator->SetInputs(*harness.inputs), std::runtime_error);
+  const std::vector<int64_t> shape{6};
+  const std::string message = CaptureThrowMessage([&] {
+    ValidateImageGridThwLayoutAndCount(shape, 6, 2, "image_grid_thw");
+  });
+  EXPECT_NE(message.find("must have rank 2"), std::string::npos) << message;
 }
 
-TEST(QwenVisionMultiImageTest, ValidGridShapeDoesNotTriggerGridBoundsValidation) {
-  SkipIfModelUnavailable();
-
-  auto harness = QwenVisionHarness::Create();
-
-  try {
-    harness.generator->SetInputs(*harness.inputs);
-  } catch (const std::runtime_error& e) {
-    const std::string error = e.what();
-    EXPECT_EQ(error.find("image_grid_thw has"), std::string::npos);
-    EXPECT_EQ(error.find("needs at least 3 values per image"), std::string::npos);
-  }
+TEST(QwenVisionMultiImageTest, RejectsGridWithUnexpectedSecondDimension) {
+  const std::vector<int64_t> shape{2, 2};
+  const std::string message = CaptureThrowMessage([&] {
+    ValidateImageGridThwLayoutAndCount(shape, 4, 2, "image_grid_thw");
+  });
+  EXPECT_NE(message.find("second dimension must be 3"), std::string::npos) << message;
 }
+
+TEST(QwenVisionMultiImageTest, RejectsNegativeImageCount) {
+  const std::vector<int64_t> shape{2, 3};
+  const std::string message = CaptureThrowMessage([&] {
+    ValidateImageGridThwLayoutAndCount(shape, 6, -1, "image_grid_thw");
+  });
+  EXPECT_NE(message.find("num_images must be non-negative"), std::string::npos) << message;
+}
+
+TEST(QwenVisionMultiImageTest, AcceptsValidGridShapeViaGeneratorInputs) {
+  const std::vector<int64_t> shape{2, 3};
+  EXPECT_NO_THROW(ValidateImageGridThwLayoutAndCount(shape, 6, 2, "image_grid_thw"));
+}
+
+}  // namespace Generators::test

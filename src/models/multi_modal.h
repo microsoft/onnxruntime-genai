@@ -84,6 +84,11 @@ struct PixtralVisionState : VisionState {
   std::vector<int64_t> image_widths_;
 };
 
+void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
+                                        size_t elem_count,
+                                        int64_t num_images,
+                                        const char* tensor_name);
+
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
