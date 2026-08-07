@@ -339,14 +339,20 @@ class Model:
         moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
+        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
         # (expert_weight_bits, QMoE quant_type):
-        #   "int4"  -> (4, "int")  INT4 QMoE (default)
-        #   "int8"  -> (8, "int")  INT8 QMoE
-        #   "mxfp4" -> (4, "fp4")  MXFP4 QMoE (CUDA-only)
+        #   "int4"  -> (4, "int")    INT4 QMoE (default)
+        #   "int8"  -> (8, "int")    INT8 QMoE
+        #   "mxfp4" -> (4, "fp4")    MXFP4 QMoE (CUDA-only)
+        #   "nvfp4" -> (4, "nvfp4")  NVFP4 QMoE (CUDA-only)
         moe_descriptor = resolve_dtype(self.quant_config.moe.type)
         expert_weight_bits = moe_descriptor.bits
-        qmoe_quant_type = "fp4" if moe_descriptor.kind == "mx" else "int"
+        # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
+        # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        if moe_descriptor.kind == "mx":
+            qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+        else:
+            qmoe_quant_type = "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -366,7 +372,7 @@ class Model:
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8) or "fp4" (MXFP4).
+            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
         }
 
         # LM head-specific variables
@@ -387,7 +393,7 @@ class Model:
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
         self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
-        # QMoE block size (MXFP4 is pinned to a block size of 32 inside MoEConfig).
+        # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig).
         self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
             "accuracy_level": weights_cfg.accuracy_level,
@@ -3913,6 +3919,19 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
+    def make_fp8e4m3_initializer(self, scales_uint8, name):
+        """Register a FLOAT8E4M3FN initializer from raw e4m3 code bytes (uint8).
+
+        NVFP4 block scales are stored as FP8 e4m3 bytes. Build the IR tensor directly
+        from the raw uint8 bytes and tag it FLOAT8E4M3FN (the encoding the CUDA QMoE
+        NVFP4 kernel expects).
+        """
+        arr = scales_uint8.detach().cpu().numpy().astype(np.uint8) if isinstance(scales_uint8, torch.Tensor) else np.asarray(scales_uint8, dtype=np.uint8)
+        ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=ir.DataType.FLOAT8E4M3FN, name=name)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
+        value.const_value = ir_tensor
+        self.model.graph.register_initializer(value)
+
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).
 
@@ -3988,9 +4007,10 @@ class Model:
                 kwargs.get("zero_points3", ""),
             ])
 
-        is_fp4 = self.moe_attrs.get("quant_type") == "fp4"
+        quant_type = self.moe_attrs.get("quant_type")
+        is_fp4 = quant_type in ("fp4", "nvfp4")
         if is_fp4:
-            # The FP4 (MXFP4) QMoE op consumes per-expert float32 global scales at
+            # The FP4 (MXFP4/NVFP4) QMoE op consumes per-expert float32 global scales at
             # fixed input positions 15 (fc1) and 16 (fc2). Positions 11-14 are the
             # optional zero_points (11-13) and router_weights (14). The zero_points
             # block above already appended inputs up to index 13 for non-TRT-RTX EPs
@@ -4011,8 +4031,8 @@ class Model:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
         if is_fp4:
-            # Select the MXFP4 kernel path; integer QMoE leaves quant_type at its default.
-            extra_kwargs["quant_type"] = "fp4"
+            # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
+            extra_kwargs["quant_type"] = quant_type
 
         # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
         # (see make_qmoe_weights, which produces the matching bytes):
