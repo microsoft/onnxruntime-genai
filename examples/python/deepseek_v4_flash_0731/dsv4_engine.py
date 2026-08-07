@@ -1055,6 +1055,8 @@ class _Worker:
             stop[0] = "eos"
         vote = torch.zeros(K + 3, dtype=torch.float32, device="cuda")
         gathered = torch.zeros((self.world, K + 3), dtype=torch.float32, device="cuda")
+        pos_idx = torch.arange(K + 1, device="cuda")
+        mism_tail = torch.ones(1, dtype=torch.bool, device="cuda")
         self._prime_ring(past)
 
         while len(produced[0]) < limit and stop[0] not in ("eos", "abort"):
@@ -1107,8 +1109,16 @@ class _Worker:
                 print(f"[spec {steps}] draft={cand[0].tolist()} target={preds.tolist()}",
                       file=sys.stderr, flush=True)
             match = (cand[0, 1:L + 1] == preds[:L])
-            j = int((~match).float().argmax()) if not bool(match.all()) else L
-            new = torch.cat([cand[0, 1:j + 1], preds[j:j + 1]])
+            # The sentinel makes argmax return L when every draft matched, so the
+            # accepted length stays on device: reading it here would cost a sync and
+            # the collective below overwrites it with rank 0's value anyway.
+            mism = torch.cat([~match, mism_tail])
+            j_dev = mism.float().argmax()
+            # Fixed-length payload, so the slice no longer needs a host-side j.
+            # Below j the accepted token is the draft; at j it is the target's own
+            # prediction; past j is don't-care and the length field masks it.
+            new = torch.where(pos_idx[:L + 1] < j_dev,
+                              torch.cat([cand[0, 1:L + 1], cand[0, :1]]), preds[:L + 1])
             # Per-slot hit rate, independent of the prefix rule: it separates "the
             # drafter is weak everywhere" from "it is fine but dies with depth".
             pos_hit[:L] += match.float()
@@ -1116,28 +1126,30 @@ class _Worker:
 
             # One collective per step, so the ranks cannot pick different lengths.
             vote.zero_()
-            vote[0] = j
+            vote[0] = j_dev
             vote[1] = 1.0 if (self.rank == 0 and self._abort_pending(chan)) else 0.0
-            vote[2:2 + j + 1] = new.float()
+            vote[2:2 + L + 1] = new.float()
             dist.all_gather_into_tensor(gathered, vote)
             g = gathered[0]
-            if bool(g[1]):
+            # One D2H for the whole vote instead of one per field.
+            gh = g[:2 + L + 1].tolist()
+            if bool(gh[1]):
                 stop[0] = "abort"
                 break
-            j = int(g[0])
-            new = g[2:2 + j + 1].to(torch.int64)
+            j = int(gh[0])
+            new_ids = [int(v) for v in gh[2:2 + j + 1]]
 
             self._reslide(j + 1, L + 1)
             self._push_main(self.mh_last[:, :j + 1])
             past += j + 1
-            for t in new.tolist():
+            for t in new_ids:
                 produced[0].append(int(t))
                 if int(t) in eos:
                     stop[0] = "eos"
                     break
                 if len(produced[0]) >= limit:
                     break
-            tok = new[-1].view(1, 1)
+            tok = g[2 + j].to(torch.int64).view(1, 1)
             drafted += L
             accepted += j
             steps += 1
