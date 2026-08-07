@@ -4,6 +4,7 @@
 #include "options.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <iostream>
@@ -46,6 +47,15 @@ namespace {
     << "        --prompt_file).\n"
     << "      Note: --prompt, --prompt_file, and --use_random_tokens are mutually exclusive;\n"
     << "        --use_random_tokens requires --prompt_length.\n"
+    << "    Multimodal options (vision-language / audio-language models):\n"
+    << "      -im,--image_path <comma-separated paths>\n"
+    << "        One or more image files to include in the prompt. Enables multimodal mode.\n"
+    << "      -au,--audio_path <comma-separated paths>\n"
+    << "        One or more audio files to include in the prompt. Enables multimodal mode.\n"
+    << "      Note: In multimodal mode the inputs are built with the model's multimodal\n"
+    << "        processor. --prompt/--prompt_file supply the prompt text (including any\n"
+    << "        model-specific media tags); --prompt_length and --use_random_tokens are not\n"
+    << "        supported.\n"
     << "    -g,--generation_length <number>\n"
     << "      Number of tokens to generate. Default: " << defaults.num_tokens_to_generate << "\n"
     << "    -r,--repetitions <number>\n"
@@ -95,6 +105,20 @@ std::string ReadFileContent(std::string_view file_path) {
 
   std::istreambuf_iterator<char> input_begin{input_stream}, input_end{};
   return std::string{input_begin, input_end};
+}
+
+std::vector<std::string> SplitCommaSeparated(std::string_view s) {
+  std::vector<std::string> values;
+  size_t start = 0;
+  while (start <= s.size()) {
+    const size_t end = std::min(s.find(',', start), s.size());
+    auto value = s.substr(start, end - start);
+    if (!value.empty()) {
+      values.emplace_back(value);
+    }
+    start = end + 1;
+  }
+  return values;
 }
 
 void ValidateExecutionProvider(const std::string& provider) {
@@ -149,6 +173,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         if (prompt_num_tokens_or_content.has_value())
           throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
         prompt_num_tokens_or_content = ReadFileContent(next_arg(i));
+      } else if (arg == "-im" || arg == "--image_path") {
+        opts.image_paths = SplitCommaSeparated(next_arg(i));
+      } else if (arg == "-au" || arg == "--audio_path") {
+        opts.audio_paths = SplitCommaSeparated(next_arg(i));
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-r" || arg == "--repetitions") {
@@ -184,6 +212,21 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         throw std::runtime_error(!prompt_num_tokens_or_content.has_value()
                                      ? "--use_random_tokens requires -l/--prompt_length."
                                      : "--use_random_tokens cannot be used with --prompt or --prompt_file.");
+      }
+    }
+
+    if (opts.IsMultiModal()) {
+      if (opts.use_random_tokens) {
+        throw std::runtime_error("--use_random_tokens cannot be used with --image_path or --audio_path.");
+      }
+      if (prompt_num_tokens_or_content.has_value() &&
+          std::holds_alternative<size_t>(*prompt_num_tokens_or_content)) {
+        throw std::runtime_error(
+            "--prompt_length cannot be used with --image_path or --audio_path. "
+            "Use --prompt or --prompt_file instead.");
+      }
+      if (opts.batch_size != 1) {
+        throw std::runtime_error("--batch_size must be 1 when using --image_path or --audio_path.");
       }
     }
 
