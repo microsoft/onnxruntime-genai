@@ -86,11 +86,11 @@ SileroVad::SileroVad(Model& model)
   // Create session options via CreateSessionOptionsFromConfig (public on Model).
   // Falls back to decoder session options if VAD-specific ones aren't provided.
   session_options_ = OrtSessionOptions::Create();
-  model.CreateSessionOptionsFromConfig(
-      vad_config.session_options.has_value()
-          ? vad_config.session_options.value()
-          : model.config_->model.decoder.session_options,
-      *session_options_, false, true);
+  const auto& vad_session_options = vad_config.session_options.has_value()
+                                        ? vad_config.session_options.value()
+                                        : model.config_->model.decoder.session_options;
+  model.CreateSessionOptionsFromConfig(vad_session_options, *session_options_);
+  model.AppendSessionProviders(vad_session_options, *session_options_, false, true);
 
   // Load session through Model::CreateSession
   std::string filename = vad_config.filename;
