@@ -148,16 +148,28 @@ class _Worker:
             so.enable_profiling = True
             so.profile_file_prefix = f"/tmp/dsv4_prof_rank{rank}"
         path = os.path.join(model_dir, f"rank_{rank}", "model.onnx")
-        # Speculation runs the target over a block of candidates, so the decode shape
-        # changes from step to step and the session must not be in CUDA graph mode at
-        # all -- with `enable_cuda_graph` on, a run that is not given an explicit
-        # graph id is captured and then replayed against whatever it recorded.
-        # Capture is worth nothing here anyway: the step is GPU-bound, not
-        # launch-bound (12.163 ms captured vs 12.156 ms not).
+        # Speculation runs the target over a block of candidates.  That block is a
+        # fixed `cap + 1` positions whenever the per-step planner is off
+        # (`DSV4_SPEC_CONF` unset or 0), which is the shipping configuration, so the
+        # verify shape is constant and the step *can* be captured.  It only stops
+        # being constant once the planner picks a length per step; capture is dropped
+        # in that case.  Prefill is a different shape every chunk, so it keeps running
+        # under the reserved skip id -- with `enable_cuda_graph` on, the thing to avoid
+        # is a run that is not given an explicit graph id, not a run of another shape.
+        #
+        # An earlier note here claimed capture was worthless because the step was
+        # GPU-bound (12.163 ms captured vs 12.156 ms not).  That A/B was taken at S=1
+        # and before the fp8 MoE weights removed ~3.4 ms of GPU work per step; the
+        # verify step now idles 36% of its wall in ~2.5k sub-5us launch gaps.
         mtp_path = os.path.join(model_dir, f"rank_{rank}", "mtp.onnx")
         self.has_mtp = (os.path.exists(mtp_path)
                         and os.environ.get("DSV4_NO_MTP") != "1")
-        cuda_graph = cuda_graph and not self.has_mtp
+        # The planner makes the verify length vary per step, which no single captured
+        # graph can serve.
+        spec_static = float(os.environ.get("DSV4_SPEC_CONF", "0")) <= 0
+        if self.has_mtp and not (spec_static
+                                 and os.environ.get("DSV4_NO_TARGET_GRAPH") != "1"):
+            cuda_graph = False
         # A decode step launches ~23k kernels but keeps the GPU busy only ~28% of the
         # step, so the wall clock is set by launch dispatch rather than by any kernel.
         # Capturing the step collapses those launches into one graph replay.
@@ -363,11 +375,16 @@ class _Worker:
         fresh `torch.full` every step would hand ORT a new address each time.
         """
         torch, ort = self.torch, self.ort
-        self.g_ids = torch.zeros((self.batch, 1), dtype=torch.int64, device="cuda")
+        # With a drafter the captured step is the verify run over `cap + 1` candidate
+        # positions; without one it is the ordinary single-token decode.
+        self.cap_len = 1
+        if self.has_mtp:
+            self.cap_len = self._spec_plan_params(self.mtp_block)[0] + 1
+        self.g_ids = torch.zeros((self.batch, self.cap_len), dtype=torch.int64, device="cuda")
         self.g_past = torch.zeros((self.batch,), dtype=torch.int64, device="cuda")
-        self.g_logits = self._logits_buf(1, self.batch)
+        self.g_logits = self._logits_buf(self.cap_len, self.batch)
         if self.mtp_dim:
-            self.g_mh = self._mh_buf(1, self.batch)
+            self.g_mh = self._mh_buf(self.cap_len, self.batch)
 
         # Prefill is not capturable -- every chunk is a different shape -- so it runs
         # under the reserved id that tells the EP to skip capture entirely.
@@ -507,8 +524,10 @@ class _Worker:
         position's logits, which is what verifying a speculated block needs.
         """
         torch = self.torch
-        if row is None and self._graph_io is not None and ids.shape[1] == 1 and not full:
-            return self._step_captured(ids, past_t)
+        # The probe needs a per-run output bound to it, which a replay cannot do.
+        if (row is None and self._graph_io is not None and self._probe is None
+                and ids.shape[1] == self.cap_len):
+            return self._step_captured(ids, past_t, full)
         src, dst = self.cache[self.cur], self.cache[1 - self.cur]
         sl = slice(None) if row is None else slice(row, row + 1)
         rows = ids.shape[0]
@@ -582,7 +601,7 @@ class _Worker:
                 self.cache[1 - self.cur][j][b].copy_(self.cache[self.cur][j][b])
         return logits[0].clone()
 
-    def _step_captured(self, ids, past_t):
+    def _step_captured(self, ids, past_t, full=False):
         """One decode step through the captured graph for the current parity."""
         torch = self.torch
         parity = self.cur
@@ -593,7 +612,10 @@ class _Worker:
         torch.cuda.current_stream().synchronize()
         self.sess.run_with_iobinding(self._graph_io[parity], self._ro[parity])
         self.cur = 1 - parity
-        return self.g_logits[:, -1]
+        if self.mtp_dim:
+            # The verify step feeds these positions back into the drafter's ring.
+            self.mh_last = self.g_mh
+        return self.g_logits if full else self.g_logits[:, -1]
 
     def _prefill(self, prompts, max_new_tokens):
         """Zero the caches, fill every row, and size the decode budget."""
