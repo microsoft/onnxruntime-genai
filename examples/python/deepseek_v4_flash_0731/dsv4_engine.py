@@ -69,6 +69,16 @@ _MH_PAD = 8
 # tuning knob rather than a property of the checkpoint.  Override with
 # DSV4_SPEC_COST="12.163,18.6,..." after re-running spec_verify_cost.py on a change
 # that moves the curve -- the MoE token-tiling work is expected to flatten it.
+#
+# STALE, and the planner that reads it is now a net loss.  Since it21 captured the
+# verify step in a CUDA graph the curve is nearly flat: sweeping DSV4_SPEC_BLOCK 1..5
+# on the it22 build gives step times 17.234 / 18.644 / 19.220 / 20.088 / 20.121 ms, i.e.
+# marginal costs of +1.410 / +0.575 / +0.868 / +0.033 against this table's ~2.0 ms per
+# position.  Shortening the block to save verify time therefore saves almost nothing and
+# gives up a lot of tokens, and setting DSV4_SPEC_CONF > 0 to do it adaptively also makes
+# the shape dynamic, which disables the graph and costs 15.8% outright.  Full block
+# (L = 5, the checkpoint's dspark_block_size) wins by 30% over L = 4.  Leave the planner
+# off; re-measure this table before trusting it for anything.
 _VERIFY_MS = (0.0, 12.163, 18.600, 20.740, 22.566, 24.620, 26.674, 28.626, 30.578)
 
 DEFAULT_PORT = 19555
