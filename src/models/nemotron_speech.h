@@ -30,29 +30,6 @@ inline void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape,
   }
 }
 
-inline void ValidateNemotronEncoderOutputShape(const std::vector<int64_t>& encoder_shape,
-                                               int64_t expected_hidden_dim) {
-  if (encoder_shape.size() != 3) {
-    throw std::runtime_error("Encoder output must have rank 3 [batch, time, channels], got rank " +
-                             std::to_string(encoder_shape.size()));
-  }
-
-  if (encoder_shape[0] != 1) {
-    throw std::runtime_error("Encoder output batch dimension must be 1, got " +
-                             std::to_string(encoder_shape[0]));
-  }
-
-  if (encoder_shape[1] < 0) {
-    throw std::runtime_error("Encoder output time dimension must be non-negative, got " +
-                             std::to_string(encoder_shape[1]));
-  }
-
-  if (encoder_shape[2] != expected_hidden_dim) {
-    throw std::runtime_error("Encoder output channels dimension (" + std::to_string(encoder_shape[2]) +
-                             ") does not match expected hidden_dim (" + std::to_string(expected_hidden_dim) + ")");
-  }
-}
-
 struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
   int num_encoder_layers{};

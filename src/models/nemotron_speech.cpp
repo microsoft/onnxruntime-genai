@@ -577,7 +577,9 @@ void NemotronSpeechState::StepToken() {
 
   auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
-  ValidateNemotronEncoderOutputShape(enc_shape, nemotron_config_.hidden_dim);
+  if (enc_shape.size() != 3) {
+    throw std::runtime_error("Encoder output must have rank 3 [batch, time, channels], got rank " + std::to_string(enc_shape.size()));
+  }
   auto enc_type = enc_info->GetElementType();
   int64_t time_steps = std::min(enc_shape[1], encoded_len_);
   int64_t hidden_dim = enc_shape[2];
