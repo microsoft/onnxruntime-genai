@@ -1,5 +1,13 @@
 #pragma once
 
+#include <array>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "../generators.h"
+#include "model.h"
+
 namespace Generators {
 
 struct PositionInputs {
