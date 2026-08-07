@@ -6,6 +6,7 @@
 #include "../generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
+#include "step_plan.h"
 
 /**
  * @file request.h
@@ -14,6 +15,12 @@
  */
 
 namespace Generators {
+
+struct RequestStepResult {
+  int32_t token{};
+  bool token_appended{};
+  bool done{};
+};
 
 /**
  * @class Request
@@ -103,6 +110,20 @@ struct Request : std::enable_shared_from_this<Request>,
    * scheduled request's token selection before it synchronizes with the device once.
    */
   void GenerateNextTokens(DeviceSpan<float> logits);
+
+  void ValidateEngineCompatibility() const;
+  void SaveStateForTransaction();
+  void SaveStateForExternalSamplingTransaction();
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult StageGenerationForTransaction(
+      const RequestStepPlan& plan);
+  void RestoreStateForTransaction();
+  void QueueStateRestoreForTransaction();
+  void CompleteStateRestoreForTransaction();
+  void CommitStateForTransaction();
+  void CommitStep(const RequestStepPlan& plan,
+                  const RequestStepResult& result) noexcept;
 
   /**
    * @brief Completes the generation started by GenerateNextTokens().
@@ -225,6 +246,10 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
+
+  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void SelectNextToken();
+  RequestStepResult StageGeneration(int64_t sequence_length_before);
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };

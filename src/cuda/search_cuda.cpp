@@ -88,6 +88,75 @@ void Search_Cuda::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
 }
 
+void Search_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  if (!transaction_eos_seen_)
+    transaction_eos_seen_ = CudaMallocArray<bool>(eos_seen_.size());
+
+  if (checkpoint_local_state) {
+    if (!transaction_sequence_lengths_)
+      transaction_sequence_lengths_ = CudaMallocArray<int32_t>(sequence_lengths_.size());
+    CUDA_CHECK(cudaMemcpyAsync(transaction_sequence_lengths_.get(), sequence_lengths_.Span().data(),
+                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sequence_lengths_ = checkpoint_local_state;
+  CUDA_CHECK(cudaMemcpyAsync(transaction_eos_seen_.get(), eos_seen_.data(),
+                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  transaction_done_ = *done_cpu_;
+}
+
+void Search_Cuda::RestoreStateForTransactionImpl() {
+  if (transaction_saved_sequence_lengths_) {
+    CUDA_CHECK(cudaMemcpyAsync(sequence_lengths_.Span().data(), transaction_sequence_lengths_.get(),
+                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  CUDA_CHECK(cudaMemcpyAsync(eos_seen_.data(), transaction_eos_seen_.get(),
+                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  transaction_saved_sequence_lengths_ = false;
+}
+
+void Search_Cuda::SynchronizeStateForTransactionImpl() {
+  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+}
+
+void Search_Cuda::CompleteStateRestoreForTransactionImpl() {
+  *done_cpu_ = transaction_done_;
+  done_pending_ = false;
+}
+
+void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cuda::SaveStateForTransactionImpl(checkpoint_local_state);
+  if (checkpoint_local_state) {
+    EnsureSamplingData();
+    if (!transaction_next_tokens_)
+      transaction_next_tokens_ = CudaMallocArray<int32_t>(next_tokens_.size());
+    if (!transaction_curand_states_)
+      transaction_curand_states_ = CudaMallocArray<curandState>(params_->search.batch_size);
+
+    CUDA_CHECK(cudaMemcpyAsync(transaction_next_tokens_.get(), next_tokens_.data(),
+                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+    CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), samplingdata_->curand_states,
+                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sampling_state_ = checkpoint_local_state;
+}
+
+void GreedySearch_Cuda::RestoreStateForTransactionImpl() {
+  Search_Cuda::RestoreStateForTransactionImpl();
+  if (transaction_saved_sampling_state_) {
+    CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), transaction_next_tokens_.get(),
+                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+    CUDA_CHECK(cudaMemcpyAsync(samplingdata_->curand_states, transaction_curand_states_.get(),
+                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sampling_state_ = false;
+}
+
+void GreedySearch_Cuda::CompleteStateRestoreForTransactionImpl() {
+  Search_Cuda::CompleteStateRestoreForTransactionImpl();
+  completion_pending_ = false;
+  external_host_copy_ = false;
+}
+
 DeviceSpan<int32_t> GreedySearch_Cuda::GetNextTokens() {
   return next_tokens_buffer_;
 }
