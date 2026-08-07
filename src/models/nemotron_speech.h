@@ -10,6 +10,8 @@
 
 namespace Generators {
 
+void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels);
+
 struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
   int num_encoder_layers{};

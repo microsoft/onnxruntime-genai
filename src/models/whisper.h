@@ -9,6 +9,8 @@
 
 namespace Generators {
 
+void ValidateWhisperAudioFeaturesShape(const std::vector<int64_t>& shape, int expected_num_frames);
+
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 

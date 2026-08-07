@@ -39,6 +39,9 @@
 
 namespace Generators {
 
+void ValidateParakeetEncoderOutputShape(const std::vector<int64_t>& enc_shape, int64_t hidden_dim);
+void ValidateParakeetDecoderOutputShape(const std::vector<int64_t>& dec_output_shape, int64_t dec_dim);
+
 struct ParakeetTdtConfig {
   // Encoder dimensions
   int hidden_dim{};

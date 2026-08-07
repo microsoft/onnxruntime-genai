@@ -34,6 +34,21 @@ int NemotronArgMaxImpl(const OrtValue& logits_value, int blank_id, float blank_p
 }
 }  // namespace
 
+void ValidateNemotronMelInputShape(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
+  if (mel_shape.size() != 3) {
+    throw std::runtime_error("mel input must have rank 3 [batch, mels, frames], got rank " + std::to_string(mel_shape.size()));
+  }
+
+  if (mel_shape[0] != 1) {
+    throw std::runtime_error("mel input batch dimension must be 1, got " + std::to_string(mel_shape[0]));
+  }
+
+  if (mel_shape[1] != expected_num_mels) {
+    throw std::runtime_error("mel input mels dimension (" + std::to_string(mel_shape[1]) +
+                             ") does not match expected num_mels (" + std::to_string(expected_num_mels) + ")");
+  }
+}
+
 int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty) {
   const auto type = logits.GetTensorTypeAndShapeInfo()->GetElementType();
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
@@ -526,10 +541,8 @@ void NemotronSpeechState::RunEncoder() {
 
   OrtValue* mel_tensor = current_mel_->ort_tensor_.get();
   auto mel_shape = mel_tensor->GetTensorTypeAndShapeInfo()->GetShape();
-  if (mel_shape.size() < 2) {
-    throw std::runtime_error("mel input must have rank >= 2, got rank " + std::to_string(mel_shape.size()));
-  }
-  int64_t total_mel_frames = mel_shape[1];
+  ValidateNemotronMelInputShape(mel_shape, nemotron_config_.num_mels);
+  int64_t total_mel_frames = mel_shape[2];
 
   encoder_state_->SetMelInput(mel_tensor, total_mel_frames);
   encoder_state_->UpdateCacheInputs();

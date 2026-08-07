@@ -5,6 +5,18 @@
 
 namespace Generators {
 
+void ValidateWhisperAudioFeaturesShape(const std::vector<int64_t>& shape, int expected_num_frames) {
+  if (shape.size() != 3) {
+    throw std::runtime_error("audio_features must have rank 3 [batch, mels, frames], got rank " + std::to_string(shape.size()));
+  }
+
+  const int num_frames = static_cast<int>(shape[2]);
+  if (num_frames != expected_num_frames) {
+    throw std::runtime_error("Whisper uses num_frames = " + std::to_string(expected_num_frames) +
+                             ". The provided inputs have num_frames = " + std::to_string(num_frames));
+  }
+}
+
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
@@ -30,17 +42,8 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  // Validate audio_features shape before indexing [2].
   const auto& shape = audio_features_->GetShape();
-  if (shape.size() != 3) {
-    throw std::runtime_error("audio_features must have rank 3 [batch, mels, frames], got rank " + std::to_string(shape.size()));
-  }
-
-  // Verify that the frame size is expected
-  const int num_frames = static_cast<int>(shape[2]);
-  if (num_frames != GetNumFrames()) {
-    throw std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
-  }
+  ValidateWhisperAudioFeaturesShape(shape, GetNumFrames());
 
   // Add encoder hidden states
   auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
