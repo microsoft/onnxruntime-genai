@@ -316,6 +316,17 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
+    using GetInterfaceVersionFn = uint32_t (*)();
+    auto get_interface_version = reinterpret_cast<GetInterfaceVersionFn>(cuda_library_->GetSymbol("GetInterfaceVersion"));
+    if (!get_interface_version)
+      throw std::runtime_error(
+          "CUDA add-on library does not export GetInterfaceVersion; install a matching onnxruntime-genai-cuda package");
+    const uint32_t interface_version = get_interface_version();
+    if (interface_version != kDeviceInterfaceVersion)
+      throw std::runtime_error(
+          "CUDA add-on interface version mismatch: expected " + std::to_string(kDeviceInterfaceVersion) +
+          ", got " + std::to_string(interface_version) + "; install a matching onnxruntime-genai-cuda package");
+
     Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
     auto get_interface = reinterpret_cast<decltype(&GetInterface)>(cuda_library_->GetSymbol("GetInterface"));
     if (!get_interface)

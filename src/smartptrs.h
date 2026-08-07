@@ -138,6 +138,10 @@ struct StateSlotDesc {
   bool operator==(const StateSlotDesc&) const = default;
 };
 
+// Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
+// report this exact version before the host can safely call through the C++ interface.
+inline constexpr uint32_t kDeviceInterfaceVersion = 1;
+
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 

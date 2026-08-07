@@ -213,20 +213,23 @@ bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
 
   // The state buffers are stable across steps when inputs alias outputs (which graph capture
   // requires), but re-derive the descriptors and compare so a reallocation cannot go unnoticed.
-  std::vector<StateSlotDesc> descs;
-  descs.reserve(presents_.size());
-  for (auto& present : presents_) {
+  bool descriptors_changed = slot_descs_cpu_.size() != presents_.size();
+  slot_descs_cpu_.resize(presents_.size());
+  for (size_t i = 0; i < presents_.size(); ++i) {
+    auto& present = presents_[i];
     auto window = ByteWrapTensor(device, *present);
     auto bytes = window.Span();
-    descs.push_back({reinterpret_cast<uint8_t*>(bytes.data()),
-                     static_cast<uint64_t>(bytes.size()) / static_cast<uint64_t>(state_window_)});
+    const StateSlotDesc desc{reinterpret_cast<uint8_t*>(bytes.data()),
+                             static_cast<uint64_t>(bytes.size()) / static_cast<uint64_t>(state_window_)};
+    descriptors_changed |= slot_descs_cpu_[i] != desc;
+    slot_descs_cpu_[i] = desc;
   }
 
-  if (slot_descs_cpu_ != descs) {
-    if (slot_descs_.size() != descs.size()) slot_descs_ = device.Allocate<StateSlotDesc>(descs.size());
-    std::copy(descs.begin(), descs.end(), slot_descs_.CpuSpan().begin());
+  if (descriptors_changed) {
+    if (slot_descs_.size() != slot_descs_cpu_.size())
+      slot_descs_ = device.Allocate<StateSlotDesc>(slot_descs_cpu_.size());
+    std::copy(slot_descs_cpu_.begin(), slot_descs_cpu_.end(), slot_descs_.CpuSpan().begin());
     slot_descs_.CopyCpuToDevice();
-    slot_descs_cpu_ = std::move(descs);
   }
 
   return device.CopyStateSlots(slot_descs_.Span().data(), static_cast<int>(slot_descs_.size()),

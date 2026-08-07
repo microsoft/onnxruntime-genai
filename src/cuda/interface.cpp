@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstdarg>
 #include <cstring>
+#include <mutex>
 #include <random>
 #include <system_error>
 
@@ -408,6 +409,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   bool ArgMax(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size, int32_t* out_tokens) override {
+    std::scoped_lock lock{topk_mutex_};
     if (!RunArgMax(logits, logits_type, num_rows, vocab_size))
       return false;
 
@@ -428,6 +430,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
                     DeviceSpan<int32_t> out_tokens) override {
+    std::scoped_lock lock{topk_mutex_};
     if (out_tokens.size() < static_cast<size_t>(num_rows) ||
         !RunArgMax(logits, logits_type, num_rows, vocab_size))
       return false;
@@ -446,6 +449,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   bool Top2(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
             int32_t* out_tokens, float* out_scores) override {
+    std::scoped_lock lock{topk_mutex_};
     if (num_rows <= 0 || vocab_size <= 1) return false;
 
     cudaStream_t stream = GetStream();
@@ -492,6 +496,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   bool TopKScores(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
                   int k, int32_t* out_tokens, float* out_scores) override {
+    std::scoped_lock lock{topk_mutex_};
     if (num_rows <= 0 || vocab_size <= 1 || k <= 0) return false;
     k = std::min(k, vocab_size);
 
@@ -591,6 +596,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   // Cached working set for the on-device ArgMax (Top-K, k=1) path.
+  std::mutex topk_mutex_;
   std::unique_ptr<cuda::TopkData> topk_data_;
   int topk_batch_{0};
   int topk_vocab_{0};
@@ -686,6 +692,10 @@ void operator delete(void* p, size_t /*size*/) noexcept {
 #endif
 
 extern "C" {
+uint32_t GetInterfaceVersion() {
+  return Generators::kDeviceInterfaceVersion;
+}
+
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType, const OrtApi* ort_api) {
   Generators::gp_genai = p_genai;
   // Ensure Ort::api is initialized in this shared library (onnxruntime-genai-cuda add-on) immediately. Delaying the
