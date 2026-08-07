@@ -229,11 +229,31 @@ void GreedySearch_Cuda::CompleteGeneration() {
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+  MarkDoneAtMaxLength();
+}
+
+void GreedySearch_Cuda::AppendTokensToSequences(DeviceSpan<int32_t>& tokens) {
+  cuda::Launch_AppendNextTokensToSequences(tokens.Span(), sequences_.GetSequences().Span(),
+                                           params_->BatchBeamSize(), sequences_.GetSequenceLength(),
+                                           sequences_.max_length_, GetStream());
+  sequences_.AfterAppendNextTokens(tokens, params_->BatchBeamSize());
+}
+
+void GreedySearch_Cuda::MarkDoneAtMaxLength() {
+  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
+}
+
+void GreedySearch_Cuda::CommitToken(int32_t token) {
+  // The caller already selected this generated token, so skip sampling but retain generated-token
+  // EOS, padding, and max-length behavior. Speculative decoding only calls this with batch_size 1.
+  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+  external_host_copy_ = false;
+  LaunchNextTokensTail();
+  CompleteGeneration();
 }
 
 bool BeamSearch_Cuda::IsDone() const {
@@ -278,18 +298,13 @@ std::span<float> Search_Cuda::GetScores() {
 
 // Set user input tokens (batch_beam_size, sequence_length)
 void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
+  // Caller-provided prompt/continuation tokens are appended as input. Unlike CommitToken, they do
+  // not run generated-token EOS/padding handling, and done state is reset when capacity remains.
   ResetDone();
-
-  auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
-
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
+  AppendTokensToSequences(next_tokens);
+  MarkDoneAtMaxLength();
+  if (*done_cpu_)
     return;
-  }
 
   ResetDone();
 }
