@@ -130,7 +130,7 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
 
   const auto model_dir = WriteModelWithLayerTypes(
       "valid",
-      "[\"full_attention\", \"conv\", \"full_attention\", \"conv\"]");
+      "[\"conv\", \"full_attention\", \"conv\", \"full_attention\"]");
 
   EXPECT_NO_THROW({
     CreateGeneratorForModel(model_dir);
