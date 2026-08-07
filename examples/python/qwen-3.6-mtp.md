@@ -136,6 +136,12 @@ under [future work](#limitations-and-future-work).)
 Qwen3.6 MTP is the **unified single-graph, next-N** case: one shared single-stream KV cache,
 serial base → MTP, a flat (non-tree) speculation chain, and partial rollback on rejection.
 
+MTP follows the same user-visible decoding contract as the regular generator and upstream
+draft-model speculative decoding: each `generate_next_token()` call exposes exactly one token.
+A speculative round can commit several tokens internally; the generator queues them and drains
+that queue on later calls before running another round. `is_done()` becomes true only after both
+generation and this output queue are complete.
+
 The loop maintains an invariant: *on entry to each iteration the cache holds positions
 `0 .. L-1`; `t` is the token predicted for position `L` (not yet in the cache); and `h` is the
 hidden state of position `L-1` that produced `t`.*
@@ -199,6 +205,19 @@ hidden-state handoff on-device — the C++ `State::GetOutput` returns the on-dev
 head — so there is no per-step host round-trip. Use it via `og.MtpGenerator(main_model,
 mtp_model, params)` with `append_tokens` / `generate_next_token` / `is_done` / `get_sequence` /
 `get_stats`. The pure-Python loop below is an equivalent reference (`--reference`).
+
+MTP uses the common speculative-decoding primitives for sparse draft probabilities, sampling,
+acceptance, correction sampling, and the `SpeculativeStats` result schema. Its hidden-state
+handoff and MTP-head cache advancement remain specialized because ordinary draft-model
+speculation has neither requirement. This keeps the fused device path intact without duplicating
+the shared sampling and reporting logic.
+
+`get_stats()` returns the common keys used by `Generator.get_speculative_stats()`, including
+`rounds`, draft-token counts, correction/bonus counts, queued/emitted/buffered tokens, and draft
+and target forward counts. The legacy `forwards`, `accepts`, and `trials` keys remain aliases for
+`target_forward_passes`, `draft_tokens_accepted`, and `draft_tokens_evaluated`. Timing and derived
+speedup fields are currently zero and `formula_supported` is false because MTP does not yet record
+the common timing baseline.
 
 `get_output("hidden_states")` needs no special handling: `State::Run` auto-registers any graph
 output not otherwise managed by GenAI, so once the main model is exported with
@@ -306,7 +325,5 @@ Two CUDA-graph caveats matter for MTP:
 * **INT4.** This example uses fp16 for fast iteration. The same export/runtime path works for the
   INT4 (QMoE) model; only the build precision changes. INT4 also raises the per-token baseline
   that speculation amortizes against.
-* **Sampling.** The loop shown is greedy. Speculative sampling (accept/reject with the draft and
-  target distributions) would extend it to `do_sample=true`.
-* **Multi-token / tree drafts.** The head drafts one token; a small EAGLE-style tree (multiple
-  draft tokens verified together) could raise the tokens-per-forward ceiling.
+* **Tree drafts.** Multi-token flat-chain drafting and speculative sampling are supported. A small
+  EAGLE-style tree could further raise the tokens-per-forward ceiling.

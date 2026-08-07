@@ -75,8 +75,8 @@ class ReferenceMtpGenerator:
 
         logits = np.asarray(gen.get_output("logits"))
         hidden = np.asarray(gen.get_output("hidden_states"))
-        token = int(logits[0, -1].argmax(-1))            # token predicted for position `length`
-        h = hidden[0, -1].astype(np.float16)             # hidden state that produced `token`
+        token = int(logits[0, -1].argmax(-1))  # token predicted for position `length`
+        h = hidden[0, -1].astype(np.float16)  # hidden state that produced `token`
 
         out_tokens = []
         forwards = 1
@@ -97,9 +97,9 @@ class ReferenceMtpGenerator:
             gen.snapshot_state()
             gen.append_tokens(np.array([token, draft], dtype=np.int32))
             forwards += 1
-            v_logits = np.asarray(gen.get_output("logits"))      # [1, 2, V]
+            v_logits = np.asarray(gen.get_output("logits"))  # [1, 2, V]
             v_hidden = np.asarray(gen.get_output("hidden_states"))  # [1, 2, H]
-            main_next = int(v_logits[0, 0].argmax(-1))           # main model's real token after `token`
+            main_next = int(v_logits[0, 0].argmax(-1))  # main model's real token after `token`
 
             trials += 1
             if draft == main_next:
@@ -151,7 +151,9 @@ def run_builtin(main_model, mtp_model, tokenizer, prompt_tokens, args):
     tokens = gen.get_sequence().tolist()[n_prompt:]
     s = gen.get_stats()
     stats = {
-        "forwards": s["forwards"], "accepts": s["accepts"], "trials": s["trials"],
+        "forwards": s["forwards"],
+        "accepts": s["accepts"],
+        "trials": s["trials"],
         "accept_rate": s["accepts"] / max(s["trials"], 1),
         "tokens_per_forward": len(tokens) / max(s["forwards"], 1),
     }
@@ -196,14 +198,24 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Qwen3.6 MTP self-speculative decoding")
-    parser.add_argument("-m", "--main_model_path", required=True,
-                        help="Path to the main model folder (exported with include_hidden_states=true)")
-    parser.add_argument("-d", "--mtp_model_path", required=True,
-                        help="Path to the MTP head model folder (mtp.onnx + a genai_config.json declaring its hidden_states input)")
-    parser.add_argument("-n", "--max_new_tokens", type=int, default=128,
-                        help="Number of tokens to generate per prompt")
+    parser.add_argument(
+        "-m",
+        "--main_model_path",
+        required=True,
+        help="Path to the main model folder (exported with include_hidden_states=true)",
+    )
+    parser.add_argument(
+        "-d",
+        "--mtp_model_path",
+        required=True,
+        help="Path to the MTP head model folder (mtp.onnx + a genai_config.json declaring its hidden_states input)",
+    )
+    parser.add_argument("-n", "--max_new_tokens", type=int, default=128, help="Number of tokens to generate per prompt")
     parser.add_argument("--max_length", type=int, default=4096, help="Max sequence length")
     parser.add_argument("-p", "--prompts", nargs="*", default=None, help="Prompt(s) to run")
-    parser.add_argument("--reference", action="store_true",
-                        help="Use the pure-Python ReferenceMtpGenerator instead of the built-in og.MtpGenerator")
+    parser.add_argument(
+        "--reference",
+        action="store_true",
+        help="Use the pure-Python ReferenceMtpGenerator instead of the built-in og.MtpGenerator",
+    )
     main(parser.parse_args())

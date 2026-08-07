@@ -664,6 +664,11 @@ struct OgaMtpGenerator : OgaAbstract {
   size_t GetForwardCount() const { return OgaMtpGenerator_GetForwardCount(this); }
   size_t GetAcceptCount() const { return OgaMtpGenerator_GetAcceptCount(this); }
   size_t GetTrialCount() const { return OgaMtpGenerator_GetTrialCount(this); }
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaMtpGenerator_GetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
+  }
 
   static void operator delete(void* p) { OgaDestroyMtpGenerator(reinterpret_cast<OgaMtpGenerator*>(p)); }
 };

@@ -577,6 +577,8 @@ OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGener
 OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator);
 /** \brief Number of draft attempts (speculative stats). */
 OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator);
+/** \brief Returns speculative-decoding statistics using the shared OgaSpeculativeStats schema. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(const OgaMtpGenerator* generator, OgaSpeculativeStats** out);
 /** \brief Destroys the given MTP generator. */
 OGA_EXPORT void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* generator);
 

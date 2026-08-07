@@ -2,11 +2,13 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <random>
 #include <vector>
 
 #include "sampling_distribution.h"
+#include "speculative_stats.h"
 
 namespace Generators {
 
@@ -32,22 +34,24 @@ struct MtpGenerator {
   // Seed the prompt (runs the main model's prefill).
   void AppendTokens(cpu_span<const int32_t> input_ids);
 
-  // Produce the next token via the draft/verify loop. On an accepted draft this commits two
-  // tokens (and harvests a free third prediction from the verify pass); on a rejected draft it
-  // commits one and rolls back the speculative forward.
+  // Produce exactly one user-visible token. A speculative round may commit several tokens
+  // internally; later calls drain those buffered tokens before another round runs.
   void GenerateNextToken();
 
   bool IsDone() const;
 
   // The full committed token sequence (batch index 0).
-  const std::vector<int32_t>& GetSequence() const { return sequence_; }
+  const std::vector<int32_t>& GetSequence() const { return emitted_sequence_; }
 
   // Speculative-decoding statistics.
-  size_t Forwards() const { return forwards_; }
-  size_t Accepts() const { return accepts_; }
-  size_t Trials() const { return trials_; }
+  SpeculativeStats GetSpeculativeStats() const;
+  size_t Forwards() const { return stats_.target_forward_passes; }
+  size_t Accepts() const { return stats_.draft_tokens_accepted; }
+  size_t Trials() const { return stats_.draft_tokens_evaluated; }
 
  private:
+  void RunRound();
+
   // Run the MTP head on a single (hidden_state, token) pair. When `need_draft` is true, returns the
   // head's greedy drafted next token; when false, only advances the head's KV cache (skipping the
   // 248K-vocab argmax + its stream sync) and returns 0. The KV-advance-only mode is used after an
@@ -138,7 +142,9 @@ struct MtpGenerator {
   std::vector<std::shared_ptr<Tensor>> refeed_multi_;
   std::unique_ptr<OrtValue> logits_fp32_;  // reusable fp32 cast of the main model's raw logits
 
-  std::vector<int32_t> sequence_;  // committed tokens (batch 0)
+  std::vector<int32_t> sequence_;          // internally committed tokens (may include lookahead)
+  std::vector<int32_t> emitted_sequence_;  // prompt + tokens exposed through GenerateNextToken
+  std::deque<int32_t> pending_tokens_;     // internally committed tokens waiting to be exposed
   int hidden_size_{};
   int vocab_size_{};
   int max_length_{};
@@ -211,9 +217,7 @@ struct MtpGenerator {
   size_t pending_refeed_head_len_{0};   // head KV length to rewind to before the fused forward
   std::vector<int32_t> merged_tokens_;  // [d0..d_{a-1}, next_token_] for the fused forward
 
-  size_t forwards_{};
-  size_t accepts_{};
-  size_t trials_{};
+  SpeculativeStats stats_{};
 };
 
 }  // namespace Generators

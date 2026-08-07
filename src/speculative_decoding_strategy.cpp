@@ -344,11 +344,11 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     throw std::runtime_error(
         "Speculative draft returned " + std::to_string(proposal.tokens.size()) +
         " tokens, expected K=" + std::to_string(K) + ".");
-  const bool greedy_accept = proposal.probs.empty();
-  if (!greedy_accept && static_cast<int>(proposal.probs.size()) != K)
+  const bool greedy_accept = proposal.distributions.empty();
+  if (!greedy_accept && static_cast<int>(proposal.distributions.size()) != K)
     throw std::runtime_error(
-        "Speculative draft returned " + std::to_string(proposal.probs.size()) +
-        " prob rows, expected K=" + std::to_string(K) + " (or 0 for greedy-match).");
+        "Speculative draft returned " + std::to_string(proposal.distributions.size()) +
+        " distribution rows, expected K=" + std::to_string(K) + " (or 0 for greedy-match).");
 
   // Guidance - run a dedicated grammar-masked round instead of the batched path below (still uses
   // the draft proposal from above). Handles greedy and sampling.
@@ -517,11 +517,6 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   int n_evaluated = 0;
   int32_t final_token = -1;
 
-  // Sampling-only scratch, lazily sized. Densification expands one truncated row into a full vocab
-  // vector; correction_buf holds the built correction distribution. Greedy touches neither.
-  std::vector<float> dense_row;
-  std::vector<float> correction_buf;
-
   for (int i = 0; i < K; i++) {
     n_evaluated++;
     bool accepted = false;
@@ -531,7 +526,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       accepted = (target.greedy_token == proposal.tokens[i]);
     } else {
       const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
-      const float p_d = proposal.probs[i][proposal.tokens[i]];
+      const auto& draft = proposal.distributions[i];
+      const float p_d = GetTargetTokenProbability(draft, proposal.tokens[i]);
       accepted = (uni(rng_) < ComputeAcceptProb(p_t, p_d));
     }
 
@@ -541,15 +537,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       if (greedy_accept) {
         final_token = target.greedy_token;
       } else {
-        std::vector<float>& dense_t =
-            DensifyTargetTokenSelection(target, vocab_size, dense_row);
-        if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-        BuildCorrectionDistribution(
-            {dense_t.data(), static_cast<size_t>(vocab_size)},
-            {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-            {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-        final_token = dist(rng_);
+        const auto& draft = proposal.distributions[i];
+        final_token = SampleCorrectionToken(target.indices, target.probs,
+                                            draft.indices, draft.probs, rng_);
       }
       stats_.correction_tokens++;
       break;
@@ -560,10 +550,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
     if (greedy_accept) {
       final_token = target_selections[static_cast<size_t>(K - 1)].greedy_token;
     } else {
-      std::vector<float>& dense_last = DensifyTargetTokenSelection(
-          target_selections[static_cast<size_t>(K - 1)], vocab_size, dense_row);
-      std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
-      final_token = dist(rng_);
+      const auto& last = target_selections[static_cast<size_t>(K - 1)];
+      final_token = SampleSparseToken(last.indices, last.probs, rng_);
     }
     stats_.bonus_tokens++;
   }
@@ -814,11 +802,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   // Reusable buffer for grammar masking before shared penalty processing.
   auto mask_buf = params.p_device->Allocate<float>(static_cast<size_t>(vocab_size));
 
-  const bool sampling = !proposal.probs.empty();
+  const bool sampling = !proposal.distributions.empty();
   const auto& search = params.search;
   std::uniform_real_distribution<float> uni(0.f, 1.f);
-  std::vector<float> correction_buf;  // reject path: max(0, p_target - p_draft), then normalized
-  std::vector<float> dense_target;    // reject path: dense target distribution from sparse selection
   TargetTokenSelection target_selection;
   SampledCategorical sampled_target;
 
@@ -891,8 +877,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       // Sampling - speculative sampling on the masked distributions. Accept with min(1, p_t/p_d), else
       // draw the correction from the leftover max(0, p_t - p_d).
       const int32_t dtok = proposal.tokens[i];
+      const auto& draft = proposal.distributions[i];
       const float accept_p = ComputeAcceptProb(GetTargetTokenProbability(target_selection, dtok),
-                                               proposal.probs[i][static_cast<size_t>(dtok)]);
+                                               GetTargetTokenProbability(draft, dtok));
       if (uni(rng_) < accept_p) {
         committed.push_back(dtok);
         verify_prefix++;
@@ -905,14 +892,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         for (int32_t fwd : CommitGuidanceToken(proc, dtok)) pending_forced.push_back(fwd);
       } else {
         rejected = true;
-        if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-        std::vector<float>& p_t =
-            DensifyTargetTokenSelection(target_selection, vocab_size, dense_target);
-        BuildCorrectionDistribution({p_t.data(), static_cast<size_t>(vocab_size)},
-                                    {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-                                    {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-        const int32_t ctok = static_cast<int32_t>(dist(rng_));
+        const int32_t ctok = SampleCorrectionToken(
+            target_selection.indices, target_selection.probs,
+            draft.indices, draft.probs, rng_);
         committed.push_back(ctok);
         stats_.correction_tokens++;
         if (!IsEosToken(eos_ids, ctok))

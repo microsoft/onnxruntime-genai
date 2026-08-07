@@ -239,6 +239,24 @@ struct PyGeneratorParams {
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
+pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
+  pybind11::dict d;
+  for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+                          "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
+                          "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
+                          "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+                          "target_forward_passes"})
+    d[key] = stats.GetCount(key);
+  d["formula_supported"] = stats.GetBool("formula_supported");
+  for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+                          "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
+                          "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+                          "avg_target_ms_per_round", "target_baseline_ms_per_token",
+                          "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
+    d[key] = stats.GetNumber(key);
+  return d;
+}
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -319,21 +337,7 @@ struct PyGenerator {
 
   pybind11::dict GetSpeculativeStats() {
     auto stats = generator_->GetSpeculativeStats();
-    pybind11::dict d;
-    for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
-                            "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
-                            "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
-                            "tokens_discarded", "tokens_buffered", "draft_forward_passes",
-                            "target_forward_passes"})
-      d[key] = stats->GetCount(key);
-    d["formula_supported"] = stats->GetBool("formula_supported");
-    for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
-                            "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
-                            "mean_emitted_tokens_per_round", "expected_tokens_per_round",
-                            "avg_target_ms_per_round", "target_baseline_ms_per_token",
-                            "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
-      d[key] = stats->GetNumber(key);
-    return d;
+    return ToSpeculativeStatsDict(*stats);
   }
 
  private:
@@ -361,10 +365,11 @@ struct PyMtpGenerator {
   }
 
   pybind11::dict GetStats() {
-    pybind11::dict d;
-    d["forwards"] = generator_->GetForwardCount();
-    d["accepts"] = generator_->GetAcceptCount();
-    d["trials"] = generator_->GetTrialCount();
+    auto stats = generator_->GetSpeculativeStats();
+    pybind11::dict d = ToSpeculativeStatsDict(*stats);
+    d["forwards"] = d["target_forward_passes"];
+    d["accepts"] = d["draft_tokens_accepted"];
+    d["trials"] = d["draft_tokens_evaluated"];
     return d;
   }
 

@@ -31,45 +31,6 @@ int32_t ArgmaxRow(const float* row, int vocab_size) {
   return best;
 }
 
-// Probability that a truncated target distribution (sparse: kept ids + renormalized probs) assigns
-// to `token`; 0 if the token fell outside the kept nucleus.
-float SparseProbability(const std::vector<int32_t>& idx, const std::vector<float>& prob, int32_t token) {
-  for (size_t i = 0; i < idx.size(); ++i)
-    if (idx[i] == token) return prob[i];
-  return 0.0f;
-}
-
-// Draw a token from a sparse truncated distribution (kept ids + renormalized probs). Cheap: the
-// kept set is only ~top_k tokens, so this avoids any full-vocab (150K+) work on the hot path.
-int32_t SampleSparse(const std::vector<int32_t>& idx, const std::vector<float>& prob, std::mt19937& rng) {
-  std::discrete_distribution<int> dist(prob.begin(), prob.end());
-  return idx[static_cast<size_t>(dist(rng))];
-}
-
-// Sample the speculative-sampling correction token from the normalized residual
-// norm(max(0, p - q)), where p (target) and q (draft) are truncated sparse distributions.
-// The residual is nonzero only on supp(p): outside it p==0, so max(0, 0 - q) == 0. This lets the
-// (frequent) reject path stay O(top_k) instead of densifying both distributions to full vocab and
-// constructing a full-vocab std::discrete_distribution (a ~150K-entry CDF) on the host.
-int32_t SampleCorrectionSparse(const std::vector<int32_t>& p_idx, const std::vector<float>& p_prob,
-                               const std::vector<int32_t>& q_idx, const std::vector<float>& q_prob,
-                               std::mt19937& rng) {
-  std::vector<float> resid(p_idx.size());
-  float sum = 0.0f;
-  for (size_t i = 0; i < p_idx.size(); ++i) {
-    const float diff = p_prob[i] - SparseProbability(q_idx, q_prob, p_idx[i]);
-    resid[i] = diff > 0.0f ? diff : 0.0f;
-    sum += resid[i];
-  }
-  if (sum > 0.0f) {
-    std::discrete_distribution<int> dist(resid.begin(), resid.end());
-    return p_idx[static_cast<size_t>(dist(rng))];
-  }
-  // Residual collapsed (q >= p on all of supp(p)): fall back to sampling p directly, matching the
-  // original dense BuildCorrectionDistribution's sum==0 fallback to the target distribution.
-  return SampleSparse(p_idx, p_prob, rng);
-}
-
 // Env-gated (ORT_MTP_PROFILE_HOST=1) per-phase host-wall accumulator for the multi-sample step.
 // Attributes each N>1 sampling step's wall time to draft / verify+topk / accept+refeed / finalize
 // (bonus or reject re-run). The phases already synchronize (TopKScores syncs), so wall time per
@@ -295,6 +256,7 @@ int32_t MtpGenerator::DraftHeadStep(int32_t token, bool need_draft) {
   // chained step, and return the greedy draft for the token after `token`.
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  stats_.draft_forward_passes++;
   ++head_len_;
 
   int32_t draft = 0;
@@ -344,6 +306,7 @@ void MtpGenerator::CaptureDraftToDevice(DeviceSpan<int32_t> draft) {
 void MtpGenerator::DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draft) {
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  stats_.draft_forward_passes++;
   ++head_len_;
   CaptureDraftToDevice(draft);
   CaptureHeadFeedbackHidden();
@@ -351,6 +314,7 @@ void MtpGenerator::DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draf
 
 void MtpGenerator::DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<int32_t> draft) {
   mtp_->AppendTokens(token);
+  stats_.draft_forward_passes++;
   ++head_len_;
   CaptureDraftToDevice(draft);
   CaptureHeadFeedbackHidden();
@@ -394,6 +358,7 @@ int32_t MtpGenerator::DraftHeadStepMulti(const int32_t* tokens, int count) {
   // `count` tokens to the head KV; only the last row's logits are needed (the draft for the token
   // after tokens[count-1]) -- the earlier rows exist purely to re-materialize the accepted drafts.
   mtp_->AppendTokens(cpu_span<const int32_t>(tokens, static_cast<size_t>(count)));
+  stats_.draft_forward_passes++;
   head_len_ += static_cast<size_t>(count);
 
   // ArgMax synchronizes the head's logits producer before the feedback D2D copy below.
@@ -411,6 +376,7 @@ int32_t MtpGenerator::DraftHeadStepMulti(const int32_t* tokens, int count) {
 
 void MtpGenerator::DraftHeadStepMultiToDevice(const int32_t* tokens, int count, DeviceSpan<int32_t> draft) {
   mtp_->AppendTokens(cpu_span<const int32_t>(tokens, static_cast<size_t>(count)));
+  stats_.draft_forward_passes++;
   head_len_ += static_cast<size_t>(count);
   CaptureDraftToDevice(draft);
   CaptureHeadFeedbackHidden();
@@ -423,6 +389,7 @@ int32_t MtpGenerator::DraftHeadStepSample(int32_t token, int k) {
   // min(1, p(d)/q(d)) acceptance test with a cheap sparse probability lookup.
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  stats_.draft_forward_passes++;
   ++head_len_;
 
   auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
@@ -436,7 +403,7 @@ int32_t MtpGenerator::DraftHeadStepSample(int32_t token, int k) {
     draft_idx_[k] = sampled_scratch_.indices;
     draft_prob_[k] = sampled_scratch_.probs;
   }
-  int32_t draft = SampleSparse(draft_idx_[k], draft_prob_[k], rng_);
+  int32_t draft = SampleSparseToken(draft_idx_[k], draft_prob_[k], rng_);
 
   CaptureHeadFeedbackHidden();
   return draft;
@@ -593,6 +560,7 @@ int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token, bool n
   mtp_->SetHiddenStates(hidden_slice_);
   std::array<int32_t, 1> tok{token};
   mtp_->AppendTokens(cpu_span<const int32_t>(tok));
+  stats_.draft_forward_passes++;
   if (!need_draft) {
     // KV-advance only (e.g. after an accepted draft): skip the full-vocab argmax + stream sync.
     return 0;
@@ -619,6 +587,7 @@ int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   mtp_->SetHiddenStates(hidden_slice2_);
   std::array<int32_t, 2> toks{tok0, tok1};
   mtp_->AppendTokens(cpu_span<const int32_t>(toks));
+  stats_.draft_forward_passes++;
   auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
   int32_t draft = 0;
   if (mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1, vocab_size_, &draft))
@@ -646,7 +615,8 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     main_->AppendTokens(input_ids);
   }
   length_ = input_ids.size();
-  for (auto t : input_ids) sequence_.push_back(t);
+  sequence_.assign(input_ids.begin(), input_ids.end());
+  emitted_sequence_ = sequence_;
 
   OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
   const int last = static_cast<int>(tail) - 1;
@@ -674,7 +644,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
       idx = sampled_scratch_.indices;
       prob = sampled_scratch_.probs;
     }
-    next_token_ = SampleSparse(idx, prob, rng_);
+    next_token_ = SampleSparseToken(idx, prob, rng_);
   } else {
     ArgmaxMainRows(last, 1, &next_token_);  // token predicted for position length_
   }
@@ -685,6 +655,23 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
 
 void MtpGenerator::GenerateNextToken() {
   if (!primed_) throw std::runtime_error("MtpGenerator: AppendTokens must be called before GenerateNextToken");
+  if (pending_tokens_.empty() && !done_) {
+    const size_t previous_size = sequence_.size();
+    RunRound();
+    pending_tokens_.insert(pending_tokens_.end(),
+                           sequence_.begin() + static_cast<ptrdiff_t>(previous_size),
+                           sequence_.end());
+    stats_.tokens_queued += sequence_.size() - previous_size;
+  }
+
+  if (!pending_tokens_.empty()) {
+    emitted_sequence_.push_back(pending_tokens_.front());
+    pending_tokens_.pop_front();
+    stats_.tokens_emitted++;
+  }
+}
+
+void MtpGenerator::RunRound() {
   if (done_) return;
 
   // Commit the token predicted for position length_.
@@ -704,6 +691,10 @@ void MtpGenerator::GenerateNextToken() {
 }
 
 void MtpGenerator::GenerateStepSingle(int32_t t) {
+  stats_.rounds++;
+  stats_.completed_rounds++;
+  stats_.draft_tokens_proposed++;
+
   // 1. Draft the next token for t. After an accepted step the draft was already computed ahead
   //    (fused into that step's KV-advance as one 2-token MTP forward), so reuse it; otherwise the
   //    MTP head is at the right point and we issue a fresh single-token draft.
@@ -719,18 +710,19 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
   main_->SnapshotState();
   std::array<int32_t, 2> verify{t, d};
   main_->AppendTokens(cpu_span<const int32_t>(verify));
-  ++forwards_;
+  stats_.target_forward_passes++;
 
   // Argmax both verify rows on-device in one launch: row 0 = main's real token after t,
   // row 1 = the free prediction harvested when the draft is accepted.
   int32_t verify_argmax[2];
   ArgmaxMainRows(0, 2, verify_argmax);
   const int32_t m = verify_argmax[0];
-  ++trials_;
+  stats_.draft_tokens_evaluated++;
 
   if (d == m) {
     // 2a. Accept: t and d are both correct. Commit d and harvest the free prediction at row 1.
-    ++accepts_;
+    stats_.draft_tokens_accepted++;
+    stats_.bonus_tokens++;
     sequence_.push_back(d);
     if (contains(main_model_.config_->model.eos_token_id, d) ||
         sequence_.size() >= static_cast<size_t>(max_length_)) {
@@ -752,7 +744,8 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
     main_->RewindToLength(length_);
     std::array<int32_t, 1> rerun{t};
     main_->AppendTokens(cpu_span<const int32_t>(rerun));
-    ++forwards_;
+    stats_.target_forward_passes++;
+    stats_.correction_tokens++;
     OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
     ArgmaxMainRows(0, 1, &next_token_);
     ExtractHiddenPosition(hidden, 0);
@@ -762,6 +755,9 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
 
 void MtpGenerator::GenerateStepMulti(int32_t t) {
   const int N = std::min(num_speculative_tokens_, static_cast<int>(max_length_ - length_ - 1));
+  stats_.rounds++;
+  stats_.completed_rounds++;
+  stats_.draft_tokens_proposed += static_cast<size_t>(N);
   const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
   const bool prof = g_host_prof.on;
   auto tp0 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
@@ -847,7 +843,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
-  ++forwards_;
+  stats_.target_forward_passes++;
   // Drain the verify forward before timing the argmax, otherwise the first ArgMax call (which
   // synchronizes) absorbs the whole forward's GPU time into the argmax bucket.
   if (prof) HostPhaseProfiler::sync(*main_model_.p_device_);
@@ -864,8 +860,13 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // --- Longest accepted prefix (greedy match against the main model). ---
   int a = 0;
   while (a < N && drafts_[a] == verify_argmax_[a]) ++a;
-  trials_ += (a < N) ? static_cast<size_t>(a + 1) : static_cast<size_t>(N);  // conditional trials
-  accepts_ += static_cast<size_t>(a);
+  stats_.draft_tokens_evaluated +=
+      (a < N) ? static_cast<size_t>(a + 1) : static_cast<size_t>(N);
+  stats_.draft_tokens_accepted += static_cast<size_t>(a);
+  if (a == N)
+    stats_.bonus_tokens++;
+  else
+    stats_.correction_tokens++;
 
   // Commit the a accepted drafts (t was already committed by the caller). Stop at eos/max_length.
   for (int k = 0; k < a; ++k) {
@@ -932,7 +933,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     main_->CropToAccepted(length_ + static_cast<size_t>(a), static_cast<size_t>(a) - 1);
     std::array<int32_t, 1> last{drafts_[a - 1]};  // committed token at position L+a
     main_->AppendTokens(cpu_span<const int32_t>(last));
-    ++forwards_;
+    stats_.target_forward_passes++;
     if (prof) ++g_host_prof.main_fwds;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     ArgmaxMainRows(0, 1, &next_token_);         // decode-consistent bonus (M=1 last row)
@@ -948,7 +949,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     verify_tokens_[0] = t;
     for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
     main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
-    ++forwards_;
+    stats_.target_forward_passes++;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
@@ -981,6 +982,9 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
 
 void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   const int N = std::min(num_speculative_tokens_, static_cast<int>(max_length_ - length_ - 1));
+  stats_.rounds++;
+  stats_.completed_rounds++;
+  stats_.draft_tokens_proposed += static_cast<size_t>(N);
   const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
   const bool prof = g_host_prof.on;
   auto tp0 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
@@ -1008,7 +1012,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
-  ++forwards_;
+  stats_.target_forward_passes++;
   OrtValue* vhidden = main_->state_->GetOutput(hs_name.c_str());
 
   // Build each verify row's truncated target distribution p_k. Row k is the target's prediction for
@@ -1043,22 +1047,27 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   bool rejected = false;
   for (; a < N; ++a) {
     const int32_t d = drafts_[a];
-    const float p_t = SparseProbability(target_idx_[a], target_prob_[a], d);
-    const float p_d = SparseProbability(draft_idx_[a], draft_prob_[a], d);
+    const float p_t = GetSparseTokenProbability(target_idx_[a], target_prob_[a], d);
+    const float p_d = GetSparseTokenProbability(draft_idx_[a], draft_prob_[a], d);
     if (uni(rng_) < ComputeAcceptProb(p_t, p_d))
       continue;  // accept d_a
     // Reject at position a: sample the correction from the normalized residual max(0, p_a - q_a).
     // The residual lives only on the target's sparse support, so draw it over ~top_k entries
     // instead of densifying both distributions to full vocab and building a full-vocab
     // std::discrete_distribution on this (frequent) reject path.
-    correction = SampleCorrectionSparse(target_idx_[a], target_prob_[a],
-                                        draft_idx_[a], draft_prob_[a], rng_);
+    correction = SampleCorrectionToken(target_idx_[a], target_prob_[a],
+                                       draft_idx_[a], draft_prob_[a], rng_);
     rejected = true;
     break;
   }
 
-  trials_ += rejected ? static_cast<size_t>(a + 1) : static_cast<size_t>(N);
-  accepts_ += static_cast<size_t>(a);
+  stats_.draft_tokens_evaluated +=
+      rejected ? static_cast<size_t>(a + 1) : static_cast<size_t>(N);
+  stats_.draft_tokens_accepted += static_cast<size_t>(a);
+  if (rejected)
+    stats_.correction_tokens++;
+  else
+    stats_.bonus_tokens++;
 
   // Commit the a accepted drafts (t was already committed by the caller). Stop at eos/max_length.
   for (int k = 0; k < a; ++k) {
@@ -1088,6 +1097,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
           .CopyFrom(src.subspan(static_cast<size_t>(k) * row_bytes, row_bytes));
     mtp_->SetHiddenStates(refeed_multi_[a]);
     mtp_->AppendTokens(cpu_span<const int32_t>(drafts_.data(), a));  // d0..d_{a-1} with main hiddens
+    stats_.draft_forward_passes++;
     head_len_ = head_start + 1 + static_cast<size_t>(a);
   }
   auto tp3 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
@@ -1096,7 +1106,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     // Every draft accepted: the batched verify already committed [t, d0..d_{N-1}] correctly, so the
     // main KV / recurrent state is exactly at L + (N+1). Draw the bonus token from the target's
     // next-position distribution p_N (verify row N), sampled directly from its sparse support.
-    next_token_ = SampleSparse(target_idx_[N], target_prob_[N], rng_);
+    next_token_ = SampleSparseToken(target_idx_[N], target_prob_[N], rng_);
     CopyHiddenRow(vhidden, N, *hidden_slice_);  // hidden that predicted the bonus token
     length_ += static_cast<size_t>(N) + 1;
   } else if (main_->CanCropRecurrentState()) {
@@ -1124,7 +1134,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     verify_tokens_[0] = t;
     for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
     main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
-    ++forwards_;
+    stats_.target_forward_passes++;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     next_token_ = correction;
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the correction token
@@ -1145,7 +1155,24 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
 }
 
 bool MtpGenerator::IsDone() const {
-  return done_;
+  return done_ && pending_tokens_.empty();
+}
+
+SpeculativeStats MtpGenerator::GetSpeculativeStats() const {
+  SpeculativeStats stats = stats_;
+  stats.tokens_buffered = pending_tokens_.size();
+  if (stats.draft_tokens_evaluated > 0) {
+    stats.acceptance_rate =
+        static_cast<float>(stats.draft_tokens_accepted) /
+        static_cast<float>(stats.draft_tokens_evaluated);
+  }
+  if (stats.rounds > 0) {
+    stats.avg_draft_tokens_per_round =
+        static_cast<float>(stats.draft_tokens_proposed) / static_cast<float>(stats.rounds);
+    stats.mean_emitted_tokens_per_round =
+        static_cast<float>(stats.tokens_emitted) / static_cast<float>(stats.rounds);
+  }
+  return stats;
 }
 
 }  // namespace Generators

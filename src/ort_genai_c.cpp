@@ -529,6 +529,17 @@ size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generat
   return generator->Trials();
 }
 
+OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(
+    const OgaMtpGenerator* generator, OgaSpeculativeStats** out) {
+  OGA_TRY
+  if (!out)
+    throw std::invalid_argument("out must not be null.");
+  *out = ReturnUnique<OgaSpeculativeStats>(
+      std::make_unique<Generators::SpeculativeStats>(generator->GetSpeculativeStats()));
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete p; }
 
 bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {

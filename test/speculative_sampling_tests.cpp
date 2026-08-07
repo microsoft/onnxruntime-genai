@@ -85,6 +85,28 @@ TEST(SpeculativeSamplingTest, CorrectionDistributionFallsBackToTargetWhenIdentic
   EXPECT_FLOAT_EQ(out[2], 0.2f);
 }
 
+TEST(SpeculativeSamplingTest, SparseProbabilityReturnsZeroOutsideSupport) {
+  std::array<int32_t, 2> indices{2, 7};
+  std::array<float, 2> probs{0.25f, 0.75f};
+
+  EXPECT_FLOAT_EQ(GetSparseTokenProbability(indices, probs, 7), 0.75f);
+  EXPECT_FLOAT_EQ(GetSparseTokenProbability(indices, probs, 3), 0.0f);
+}
+
+TEST(SpeculativeSamplingTest, SparseCorrectionSamplesOnlyPositiveResidual) {
+  std::array<int32_t, 3> target_indices{1, 4, 8};
+  std::array<float, 3> target_probs{0.2f, 0.5f, 0.3f};
+  std::array<int32_t, 2> draft_indices{1, 8};
+  std::array<float, 2> draft_probs{0.4f, 0.6f};
+  std::mt19937 rng{1234};
+
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_EQ(SampleCorrectionToken(target_indices, target_probs,
+                                    draft_indices, draft_probs, rng),
+              4);
+  }
+}
+
 // ComputeSampledCategorical (shared with standard decode via search.cpp)
 
 namespace {
