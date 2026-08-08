@@ -5,6 +5,8 @@
 
 #include <numeric>
 
+#include "sequence_positions.h"
+
 namespace Generators {
 
 namespace {
