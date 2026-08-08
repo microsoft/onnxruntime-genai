@@ -448,7 +448,11 @@ nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_ima
 
   // Combine all image tags, audio tags, and text into one user content
   std::string image_tags = "", audio_tags = "", content = "";
-  if (model_type == "phi3v") {
+  if (model_type == "nemotron_parse") {
+    // Nemotron Parse consumes document-task control tokens directly.
+    content_json = nlohmann::ordered_json(prompt);
+
+  } else if (model_type == "phi3v") {
     // Phi-3 vision, Phi-3.5 vision
     for (int i = 0; i < num_images; i++) {
       image_tags += "<|image_" + std::to_string(i + 1) + "|>\\n";

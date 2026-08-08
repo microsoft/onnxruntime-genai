@@ -342,7 +342,12 @@ namespace CommonUtils
         {
             string content;
             // Combine all image tags, audio tags, and text into one user content
-            if (model_type == "phi3v")
+            if (model_type == "nemotron_parse")
+            {
+                // Nemotron Parse consumes document-task control tokens directly.
+                content = prompt;
+            }
+            else if (model_type == "phi3v")
             {
                 // Phi-3 vision, Phi-3.5 vision
                 var image_tags = "";
