@@ -268,6 +268,13 @@ class _Worker:
             mm = self.mtp.get_modelmeta().custom_metadata_map
             self.mtp_block = int(mm["dsv4_mtp_block_size"])
             self.mtp_window = int(mm["dsv4_window"])
+            # A verify of a K-token block commits at most K + 1 tokens, and every one
+            # of them has to fit in the pinned `main_hidden` slab or its main state is
+            # silently dropped from the ring.  Nothing downstream would fault.
+            if _MH_PAD < self.mtp_block + 1 or self.mtp_window % _MH_PAD:
+                raise ProtocolError(
+                    f"_MH_PAD={_MH_PAD} cannot serve block {self.mtp_block} over a "
+                    f"{self.mtp_window}-row window")
             self.mtp_cache_in = [i.name for i in self.mtp.get_inputs()
                                  if i.name.startswith("past_kv_")]
             self.mtp_cache_out = ["present" + n[4:] for n in self.mtp_cache_in]

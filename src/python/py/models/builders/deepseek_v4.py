@@ -250,7 +250,15 @@ class DeepSeekV4FlashModel(Model):
         self.graph_kind = extra_options.get("dsv4_graph", "target")
         if self.graph_kind not in ("target", "mtp"):
             raise ValueError(f"dsv4_graph must be 'target' or 'mtp', got {self.graph_kind!r}")
-        self.dspark_block = int(getattr(c, "dspark_block_size", 0) or 0)
+        # The block width is a runtime width, not a trained one: the drafter fills a
+        # block of `K` positions in one pass from "anchor + K-1 noise", and no weight
+        # is shaped by `K` (the transformer sees K query rows, the Markov head loops
+        # K times over the same two tensors).  `dspark_block_size` is only the width
+        # the checkpoint was trained at, and vLLM's speculator rejects widths *below*
+        # it while recommending 7 (`vllm/config/speculative.py:1009`).  Override it
+        # here rather than editing the checkpoint config.
+        self.dspark_block = int(extra_options.get("dsv4_mtp_block", 0) or 0) or \
+            int(getattr(c, "dspark_block_size", 0) or 0)
         self.noise_token = int(getattr(c, "dspark_noise_token_id", 0) or 0)
         self.markov_rank = int(getattr(c, "dspark_markov_rank", 0) or 0)
         # `num_nextn_predict_layers` says 1, but the checkpoint carries three full
