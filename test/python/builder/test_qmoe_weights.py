@@ -74,17 +74,24 @@ def _stub_missing_builder_dependencies():
         tqdm_module.tqdm = lambda iterable=None, *args, **kwargs: iterable
         sys.modules["tqdm"] = tqdm_module
 
-    if not _module_available("transformers"):
+    if _module_available("transformers"):
+        import transformers  # noqa: PLC0415
+    else:
         transformers = types.ModuleType("transformers")
-        for class_name in (
-            "AutoConfig",
-            "AutoModelForCausalLM",
-            "AutoModelForSpeechSeq2Seq",
-            "AutoTokenizer",
-            "GenerationConfig",
-        ):
+
+    for class_name in (
+        "AutoConfig",
+        "AutoModelForCausalLM",
+        "AutoModelForSpeechSeq2Seq",
+        "AutoTokenizer",
+        "GenerationConfig",
+        "Qwen2ForCausalLM",
+        "Qwen2_5_VLForConditionalGeneration",
+        "Qwen3VLForConditionalGeneration",
+    ):
+        if not hasattr(transformers, class_name):
             setattr(transformers, class_name, type(class_name, (), {}))
-        sys.modules["transformers"] = transformers
+    sys.modules["transformers"] = transformers
 
 
 _stub_missing_builder_dependencies()
@@ -111,6 +118,8 @@ cuda_quantizer_module = sys.modules["models.builders.cuda_quantizer"]
 qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
+qwen_module = _load_builder_module("qwen")
+Qwen35MoeTextModel = qwen_module.Qwen35MoeTextModel
 
 
 def _load_builder_cli_module(monkeypatch):
@@ -554,3 +563,45 @@ def test_cutlass_prepacked_scales_are_positive_with_full_range_symmetric_quantiz
     assert tuple(qweight.shape) == (256, 128)  # [K, N/2] for INT4
     assert tuple(scales.shape) == (256, 2)  # [N, K/block]
     assert (scales > 0).all()
+
+
+class _SharedExpertGraphRecorder:
+    make_shared_expert = Qwen35MoeTextModel.make_shared_expert
+    io_dtype = object()
+    shared_expert_intermediate_size = 16
+    hidden_size = 8
+
+    def __init__(self):
+        self.matmul_calls = []
+        self.sigmoid_calls = []
+        self.mul_calls = []
+
+    def make_matmul(self, weight, name, input_path):
+        self.matmul_calls.append((name, input_path, weight))
+        return name
+
+    def make_sigmoid(self, name, input_path, dtype, shape):
+        self.sigmoid_calls.append((name, input_path, dtype, shape))
+
+    def make_mul(self, name, inputs, dtype, shape):
+        self.mul_calls.append((name, inputs, dtype, shape))
+
+
+def test_qwen35_shared_expert_uses_unique_gate_up_and_output_nodes():
+    model = _SharedExpertGraphRecorder()
+    shared_expert = types.SimpleNamespace(gate_proj="gate", up_proj="up", down_proj="down")
+
+    output = model.make_shared_expert(0, shared_expert, "shared_gate", "root")
+
+    basename = "/model/layers.0/shared_expert"
+    assert [call[0] for call in model.mul_calls] == [
+        f"{basename}/gate_proj/Mul",
+        f"{basename}/gate_up/Mul",
+        f"{basename}/Mul",
+    ]
+    assert model.matmul_calls[2][1] == f"{basename}/gate_up/Mul/output_0"
+    assert model.mul_calls[-1][1] == [
+        f"{basename}/down_proj/MatMul/output_0",
+        f"{basename}_gate/Sigmoid/output_0",
+    ]
+    assert output == f"{basename}/Mul/output_0"
