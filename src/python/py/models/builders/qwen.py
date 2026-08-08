@@ -9,18 +9,18 @@
 import json
 import os
 import re
+
 import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import (
     AutoConfig,
-    Qwen2ForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
+    Qwen2ForCausalLM,
     Qwen3VLForConditionalGeneration,
 )
 
 from .base import Model
-from .quant_config import resolve_dtype
 
 
 class QwenModel(Model):
@@ -1208,6 +1208,7 @@ class Qwen35TextModel(Model):
             )
         # Absolute layer ids when the file covers every layer, else full-attention order.
         by_layer_id = len(k_scales) == self.num_layers
+        scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
 
         def make_scale(per_layer, index, layer_id):
             scale = np.asarray(per_layer[index], dtype=np.float32).reshape(-1)
@@ -1217,7 +1218,7 @@ class Qwen35TextModel(Model):
                 )
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
-            return scale
+            return scale.reshape(scale_shape)
 
         for order, layer_id in enumerate(kv_layers):
             index = layer_id if by_layer_id else order
@@ -2779,10 +2780,13 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         cached = getattr(self, "_nvfp4_weight_map_cache", "unset")
         if cached != "unset":
             return cached
-        import json
 
         index_path = self._nvfp4_snapshot_dir() / "model.safetensors.index.json"
-        self._nvfp4_weight_map_cache = json.load(open(index_path))["weight_map"] if index_path.exists() else None
+        if index_path.exists():
+            with open(index_path, encoding="utf-8") as index_file:
+                self._nvfp4_weight_map_cache = json.load(index_file)["weight_map"]
+        else:
+            self._nvfp4_weight_map_cache = None
         return self._nvfp4_weight_map_cache
 
     def _load_nvfp4_tensor(self, tensor_name):
@@ -2883,4 +2887,3 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                       dtype=self.io_dtype,
                       shape=["batch_size", "sequence_length", self.hidden_size])
         return f"{gated_mul_name}/output_0"
-
