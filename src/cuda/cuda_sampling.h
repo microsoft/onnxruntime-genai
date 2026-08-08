@@ -38,7 +38,18 @@ struct SamplingData : public TopkData {
 // Main entry point for the sampling process.
 // This function orchestrates the Top-K selection followed by Top-P sampling.
 void GetSample(SamplingData* sampling_data, cudaStream_t stream, int32_t* d_next_token, const float* d_scores,
-               int vocab_size, int batch_size, int k, float p, float temperature);
+               int vocab_size, int batch_size, int k, float p, float temperature,
+               curandState* external_curand_states = nullptr, const int* curand_state_indices = nullptr);
+
+void LaunchInitCurandState(unsigned long long random_seed, curandState* state, cudaStream_t stream);
+void LaunchGatherSamplingRows(const float* const* rows, float* packed_scores, int batch_size, int vocab_size,
+                              cudaStream_t stream);
+void LaunchScatterSamplingTokens(const int32_t* packed_tokens, const int* output_indices,
+                                 int32_t* next_tokens, int batch_size, cudaStream_t stream);
+void LaunchGatherCurandStates(const curandState* states, const int* state_indices,
+                              curandState* checkpoint, int count, cudaStream_t stream);
+void LaunchScatterCurandStates(const curandState* checkpoint, const int* state_indices,
+                               curandState* states, int count, cudaStream_t stream);
 
 // A general-purpose block-wise softmax implementation, needed by beam search.
 template <bool is_log_softmax>
@@ -47,10 +58,12 @@ void DispatchBlockwiseSoftmaxForward(cudaStream_t stream, float* output, const f
 
 // The following are for macro benchmark.
 void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
-                             int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride);
+                             int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride,
+                             curandState* curand_states = nullptr, const int* curand_state_indices = nullptr);
 
 void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
-                                  int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride);
+                                  int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride,
+                                  curandState* curand_states = nullptr, const int* curand_state_indices = nullptr);
 
 }  // namespace cuda
 }  // namespace Generators

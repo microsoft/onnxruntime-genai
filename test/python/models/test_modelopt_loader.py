@@ -17,11 +17,13 @@ one full-attention layer, plus globals) and verifies that ModeloptModel:
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 
 import numpy as np
+import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 
 def _load_quantized_model_module():
@@ -133,6 +135,7 @@ def test_modelopt_loader_tree_and_dequant():
             "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
         )
 
+        assert isinstance(model, QM.QuantizedModel)
         mods = model.modules()
         assert mods[0] is model.embedding and mods[-1] is model.lm_head
         assert len(model.layers) == 2
@@ -163,8 +166,64 @@ def test_modelopt_loader_tree_and_dequant():
         assert l0.mlp.experts is None
         # Router / shared-expert-gate are present as plain tensors.
         assert l0.mlp.gate.weight is not None and l0.mlp.shared_expert_gate.weight is not None
+        # All safetensors handles are released once loading finishes.
+        assert not model._open_handles
     print("OK: ModeloptModel builds the tree and dequantizes FP8/NVFP4 correctly.")
+
+
+def _load(d):
+    return QM.QuantModel.from_pretrained(
+        "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
+    )
+
+
+def test_modelopt_loader_rejects_bad_checkpoints():
+    # No index file and an ambiguous number of shards -> deterministic error, not StopIteration.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        os.remove(os.path.join(d, "model.safetensors.index.json"))
+        shutil.copyfile(os.path.join(d, "model.safetensors"), os.path.join(d, "model-2.safetensors"))
+        with pytest.raises(ValueError, match="exactly one .safetensors file"):
+            _load(d)
+
+    # NVFP4 tensor with a global scale but no FP8 block scales -> explicit error.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        del tensors["lm_head.weight_scale"]
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
+        with pytest.raises(ValueError, match="no 'weight_scale'"):
+            _load(d)
+
+    # A layer with neither linear_attn nor self_attn -> named error, not a later AttributeError.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        del tensors["model.language_model.layers.1.self_attn.q_proj.weight"]
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
+        with pytest.raises(ValueError, match="attention variant cannot be determined"):
+            _load(d)
+    print("OK: ModeloptModel rejects ambiguous and incomplete checkpoints.")
+
+
+def test_modelopt_loader_accepts_raw_uint8_block_scales():
+    """Some exporters store the E4M3 block scales as raw uint8 bytes."""
+    with tempfile.TemporaryDirectory() as d:
+        refs = _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        tensors["lm_head.weight_scale"] = tensors["lm_head.weight_scale"].view(torch.uint8)
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
+        torch.testing.assert_close(_load(d).lm_head.weight, refs["lm_head"])
+    print("OK: ModeloptModel decodes uint8-stored E4M3 block scales.")
 
 
 if __name__ == "__main__":
     test_modelopt_loader_tree_and_dequant()
+    test_modelopt_loader_rejects_bad_checkpoints()
+    test_modelopt_loader_accepts_raw_uint8_block_scales()

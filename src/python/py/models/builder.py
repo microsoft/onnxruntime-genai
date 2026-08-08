@@ -24,6 +24,7 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
+    GraniteMoeHybridModel,
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
@@ -470,6 +471,8 @@ def create_model(
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GraniteMoeHybridForCausalLM":
+        onnx_model = GraniteMoeHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":

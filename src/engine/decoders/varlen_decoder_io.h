@@ -58,6 +58,7 @@ struct VarlenDecoderIO : DecoderIO {
   VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
+                  const ExecutionContext* execution_context = nullptr,
                   VarlenGraphBuffers* graph_buffers = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
@@ -70,6 +71,7 @@ struct VarlenDecoderIO : DecoderIO {
   // Non-null when this step is being captured or replayed, in which case the tensors below are
   // borrowed from the holder instead of being allocated fresh.
   VarlenGraphBuffers* graph_buffers_{};
+  const ExecutionContext* execution_context_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};

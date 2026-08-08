@@ -535,6 +535,8 @@ struct SlidingWindow_Element : JSON::Element {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else if (name == "slide_inputs") {
       v_->slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_->cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1212,6 +1214,13 @@ struct Model_Element : JSON::Element {
     if (name == "decoder") {
       return decoder_;
     }
+    if (name == "draft") {
+      if (!v_.draft)
+        v_.draft.emplace();
+      if (!draft_)
+        draft_ = std::make_unique<Decoder_Element>(*v_.draft);
+      return *draft_;
+    }
     if (name == "vision") {
       return vision_;
     }
@@ -1234,6 +1243,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
+  std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
@@ -1243,12 +1253,16 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
 };
 
+// Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
+// JSON::Parse_Value only re-throws with the offending field's path prepended when it sees a
+// std::runtime_error, and the public C API boundary reports std::runtime_error, so every config
+// parsing error must use that single type to keep messages (and behavior) consistent.
 int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 2. Check if the value is outside the representable range of an integer.
@@ -1259,14 +1273,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is out of int32 range ["
        << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 3. Reject fractional values — these fields must be integral.
   if (x != std::trunc(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is not an integer";
-    throw std::invalid_argument(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 4. Perform the cast.
@@ -1327,6 +1341,30 @@ struct Search_Element : JSON::Element {
 
  private:
   Config::Search& v_;
+};
+
+struct Speculative_Element : JSON::Element {
+  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+
+  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  static constexpr int kMinK = 1;
+  static constexpr int kMaxK = 16;
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_draft_tokens") {
+      int k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (k < kMinK || k > kMaxK)
+        throw std::runtime_error(
+            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+      v_.max_draft_tokens = k;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Speculative& v_;
 };
 
 struct DynamicBatching_Element : JSON::Element {
@@ -1413,6 +1451,14 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   try {
     Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {
     JSON::TranslateException(name);
   }
@@ -1651,6 +1697,7 @@ struct Root_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
+    if (name == "speculative") return speculative_element_;
     if (name == "engine") return engine_element_;
     throw JSON::unknown_value_error{};
   }
@@ -1658,6 +1705,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Speculative_Element speculative_element_{config_.speculative};
   Engine_Element engine_element_{config_.engine};
 };
 
@@ -1821,6 +1869,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  if (model.draft) {
+    for (const auto& provider_option : model.draft->session_options.provider_options) {
+      model.draft->session_options.providers.push_back(provider_option.name);
+    }
   }
 
   if (model.encoder.session_options.has_value()) {

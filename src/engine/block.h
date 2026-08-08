@@ -28,6 +28,8 @@ struct Block {
 
   void AddSlot();
 
+  void AddSlots(size_t slots);
+
   std::vector<size_t> SlotIds() const;
 
  private:

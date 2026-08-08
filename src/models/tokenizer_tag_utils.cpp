@@ -18,15 +18,15 @@ std::optional<int32_t> ResolveFallbackTokenId(const std::string& model_type,
   // ------------|----------------|-----------------|--------
   // qwen2/qwen3| bot_token_id   | <tool_call>     | 151657
   // qwen2/qwen3| eot_token_id   | </tool_call>    | 151658
-  // qwen2/qwen3| bor_token_id   | <think>         | 151667
-  // qwen2/qwen3| eor_token_id   | </think>        | 151668
+  // qwen3      | bor_token_id   | <think>         | 151667
+  // qwen3      | eor_token_id   | </think>        | 151668
   // phi3        | bot_token_id   | <|tool_call|>   | 200025
   // phi3        | eot_token_id   | <|/tool_call|>  | 200026
 
   using D = Config::Defaults;
   // clang-format off
   static const std::unordered_map<std::string, std::unordered_map<std::string_view, int32_t>> fallback_map = {
-      {"qwen2", {{D::BotTokenIdName, 151657}, {D::EotTokenIdName, 151658}, {D::BorTokenIdName, 151667}, {D::EorTokenIdName, 151668}}},
+      {"qwen2", {{D::BotTokenIdName, 151657}, {D::EotTokenIdName, 151658}}},
       {"qwen3", {{D::BotTokenIdName, 151657}, {D::EotTokenIdName, 151658}, {D::BorTokenIdName, 151667}, {D::EorTokenIdName, 151668}}},
       {"phi3",  {{D::BotTokenIdName, 200025}, {D::EotTokenIdName, 200026}}},
   };
