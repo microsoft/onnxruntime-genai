@@ -198,8 +198,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.request_id = request.get();
     entry.sequence_length_before = snapshot.current_sequence_length;
     entry.unprocessed_token_count = ScheduledTokenCount(
-      static_cast<size_t>(remaining_token_count), request->SearchOptions().chunk_size,
-      /*allow_chunking=*/true);
+        static_cast<size_t>(remaining_token_count), request->SearchOptions().chunk_size,
+        /*allow_chunking=*/true);
     entry.target_cache_slots = RequiredSlots(
         static_cast<size_t>(snapshot.processed_sequence_length),
         entry.unprocessed_token_count);
