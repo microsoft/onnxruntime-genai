@@ -70,19 +70,18 @@ State::State(const GeneratorParams& params, const Model& model)
   }
 }
 
-std::string State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
   const int graph_key = graph_capture_length * 2 + graph_capture_variant;
   auto it = graph_ids_.find(graph_key);
   if (it != graph_ids_.end()) {
-    return it->second;
+    return it->second.text;
   }
   // Distinct random annotation id per captured length (ORT captures one graph per id).
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_int_distribution<> dis(1, INT_MAX);
-  std::string id = std::to_string(dis(gen));
-  graph_ids_[graph_key] = id;
-  return id;
+  const int id_value = dis(gen);
+  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
 }
 
 void State::DumpInputs() {
@@ -252,7 +251,7 @@ State::~State() {
     // Speculative decoding (MTP) may capture more than one input length, each with its
     // own annotation id, so release every id that was handed out.
     for (const auto& length_and_id : graph_ids_) {
-      int id_value = std::stoi(length_and_id.second);
+      const int id_value = length_and_id.second.value;
       if (id_value <= 0) {
         continue;
       }

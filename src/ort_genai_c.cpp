@@ -540,7 +540,7 @@ OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete p; }
+void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete static_cast<Generators::MtpGenerator*>(p); }
 
 bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();

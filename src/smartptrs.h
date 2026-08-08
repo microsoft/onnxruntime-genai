@@ -143,7 +143,13 @@ struct StateSlotDesc {
   uint8_t* base;
   uint64_t slot_bytes;
 
-  bool operator==(const StateSlotDesc&) const = default;
+  bool operator==(const StateSlotDesc& other) const {
+    return base == other.base && slot_bytes == other.slot_bytes;
+  }
+
+  bool operator!=(const StateSlotDesc& other) const {
+    return !(*this == other);
+  }
 };
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must

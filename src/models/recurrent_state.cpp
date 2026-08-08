@@ -191,6 +191,10 @@ void RecurrentState::CropToPosition(size_t position) {
         "RecurrentState::CropToPosition(" + std::to_string(position) + ") is outside the state window of " +
         std::to_string(state_window_) + " for a forward of length " + std::to_string(forward_length_) +
         "; rebuild the model with a larger recurrent_state_window");
+  if (signed_slot >= state_window_)
+    throw std::runtime_error(
+        "RecurrentState::CropToPosition(" + std::to_string(position) + ") is past the last position of a forward of length " +
+        std::to_string(forward_length_));
   const size_t slot = static_cast<size_t>(signed_slot);
   if (slot + 1 == static_cast<size_t>(state_window_)) return;  // Already the committed slot.
 

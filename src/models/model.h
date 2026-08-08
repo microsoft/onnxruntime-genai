@@ -91,8 +91,12 @@ struct State {
   // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
   // Each distinct length gets its own annotation id so ORT captures/replays an independent graph
   // bound to that shape's (static) buffers.
-  std::string GraphIdForLength(int graph_capture_length, int graph_capture_variant);
-  std::unordered_map<int, std::string> graph_ids_{};
+  struct GraphId {
+    int value{};       // integer form, so the destructor never has to re-parse (std::stoi throws)
+    std::string text;  // string form passed to the "gpu_graph_id" run option
+  };
+  const std::string& GraphIdForLength(int graph_capture_length, int graph_capture_variant);
+  std::unordered_map<int, GraphId> graph_ids_{};
   // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.
