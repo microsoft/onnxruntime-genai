@@ -7,12 +7,16 @@
 # Portions of this file consist of AI generated content.
 
 import json
+import math
 import os
 import re
+from pathlib import Path
 
 import numpy as np
 import onnx_ir as ir
 import torch
+from huggingface_hub import snapshot_download
+from safetensors import safe_open
 from transformers import (
     AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -455,9 +459,7 @@ class Qwen25VLTextModel(Model):
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
-        self.make_gather(
-            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
-        )
+        self.make_gather(seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0)
 
         # Calculate Total Tokens = B * S
         mul_len_node = f"{basename}/TotalLen/Mul"
@@ -469,7 +471,10 @@ class Qwen25VLTextModel(Model):
         range_node = f"{basename}/Range"
         range_out = f"{range_node}/output_0"
         self.make_range(
-            range_node, ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], ir.DataType.INT64, ["total_token_count"]
+            range_node,
+            ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            ["total_token_count"],
         )
         range_out = f"{range_node}/output_0"
 
@@ -701,7 +706,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
         # but the C++ runtime expects "qwen3_vl" (with underscore).
         # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
+        self.model_type = "Qwen3_VLForConditionalGeneration"
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
@@ -1014,7 +1019,7 @@ class Qwen35TextModel(Model):
         # initializer for all layers (see get_kv_cache_scale_inputs). Only the full-attention
         # layers own a KV cache; the linear-attention conv/recurrent states are unaffected.
         # Requires ORT built with onnxruntime_USE_FP8_KV_CACHE=ON (default) and SM89+ at runtime.
-        self.fp8_kv_cache = bool(extra_options.get("fp8_kv_cache", False))
+        self.fp8_kv_cache = str(extra_options.get("fp8_kv_cache", "false")).lower() in ("1", "true", "yes")
         self._legacy_fp8_kv_cache = self.fp8_kv_cache and not extra_options.get("kv_cache_scale_file", None)
         self._kv_cache_scale_created = False
         if self.fp8_kv_cache and extra_options.get("kv_cache_quant_type", "none") == "none":
@@ -1156,9 +1161,7 @@ class Qwen35TextModel(Model):
         # the exported graph (and the external-data layout) identical to the released RC model.
         if self._legacy_fp8_kv_cache:
             if not self._kv_cache_scale_created:
-                self.make_initializer(
-                    torch.tensor([1.0], dtype=torch.float32), "kv_cache_scale", to=ir.DataType.FLOAT
-                )
+                self.make_initializer(torch.tensor([1.0], dtype=torch.float32), "kv_cache_scale", to=ir.DataType.FLOAT)
                 self._kv_cache_scale_created = True
             return "kv_cache_scale", "kv_cache_scale"
         return super().get_kv_cache_scale_inputs(**kwargs)
@@ -1190,8 +1193,7 @@ class Qwen35TextModel(Model):
         scale_file = self.extra_options.get("kv_cache_scale_file", None)
         if scale_file is None:
             raise ValueError(
-                "Quantized KV cache requires calibrated scales; provide them via "
-                "extra_options['kv_cache_scale_file']."
+                "Quantized KV cache requires calibrated scales; provide them via extra_options['kv_cache_scale_file']."
             )
 
         with open(scale_file, encoding="utf-8") as file:
@@ -1213,9 +1215,7 @@ class Qwen35TextModel(Model):
         def make_scale(per_layer, index, layer_id):
             scale = np.asarray(per_layer[index], dtype=np.float32).reshape(-1)
             if scale.size != scale_size:
-                raise ValueError(
-                    f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}"
-                )
+                raise ValueError(f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}")
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
             return scale.reshape(scale_shape)
@@ -1966,9 +1966,7 @@ class Qwen35TextModel(Model):
         self.make_cast(a_cast_name, f"{a_name}/output_0", ir.DataType.FLOAT, gate_shape)
 
         a_plus_dt_name = f"{basename}/decay/Add"
-        self.make_add(
-            a_plus_dt_name, [f"{a_cast_name}/output_0", dt_bias_init], ir.DataType.FLOAT, gate_shape
-        )
+        self.make_add(a_plus_dt_name, [f"{a_cast_name}/output_0", dt_bias_init], ir.DataType.FLOAT, gate_shape)
         a_plus_dt_output = f"{a_plus_dt_name}/output_0"
 
         softplus_name = f"{basename}/decay/Softplus"
@@ -2155,12 +2153,17 @@ class Qwen35TextModel(Model):
         # output = norm * silu(z) in fp32
         gated_fp32_name = f"{basename}/gated_fp32/Mul"
         self.make_mul(
-            gated_fp32_name, [f"{norm_cast_name}/output_0", z_silu_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim]
+            gated_fp32_name,
+            [f"{norm_cast_name}/output_0", z_silu_output],
+            ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", v_dim],
         )
 
         # Cast back to io_dtype
         gated_name = f"{basename}/gated/Cast"
-        self.make_cast(gated_name, f"{gated_fp32_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_cast(
+            gated_name, f"{gated_fp32_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", v_dim]
+        )
         gated_output = f"{gated_name}/output_0"
 
         return gated_output
@@ -2238,7 +2241,11 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # to fp16 and re-quantizing to int4/int8. Both the self-attention q/k/v/o projections
         # and the GatedDeltaNet (linear-attention) ``in_proj_qkv`` / ``in_proj_z`` / ``out_proj``
         # projections are emitted as the weight-only ``MatMulBlockQuantizedFp8Weight`` contrib op.
-        self.use_original_fp8_weights = bool(extra_options.get("use_original_fp8_weights", False))
+        self.use_original_fp8_weights = str(extra_options.get("use_original_fp8_weights", "false")).lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
         # Emit the GatedDeltaNet projections as ``MatMulBlockQuantizedFp8Weight`` instead of
         # widening the checkpoint's FP8 weights to fp16. These are the largest remaining fp16
@@ -2266,16 +2273,16 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # ``nodes_to_exclude`` so they stay fp16 rather than being re-quantized to int4.
         # Used to isolate a single attention layer's FP8 quantization error.
         _fp8_excl = extra_options.get("fp8_attn_exclude_layers", "")
-        self.fp8_attn_exclude_layers = {
-            int(x) for x in str(_fp8_excl).replace(",", " ").split() if x.strip() != ""
-        }
+        self.fp8_attn_exclude_layers = {int(x) for x in str(_fp8_excl).replace(",", " ").split() if x.strip() != ""}
 
         # Diagnostic: quantize FP8 attention activations with the checkpoint's static,
         # calibrated per-tensor ``input_scale`` (ModelOpt W8A8 / vLLM scheme) instead of the
         # default dynamic per-token absmax scale. Used to test whether matching vLLM's
         # calibrated activation scale removes the greedy repetition loops.
-        self.fp8_attn_static_input_scale = bool(
-            extra_options.get("fp8_attn_static_input_scale", False)
+        self.fp8_attn_static_input_scale = str(extra_options.get("fp8_attn_static_input_scale", "false")).lower() in (
+            "1",
+            "true",
+            "yes",
         )
         # Q/K/V projections consume the same activation and, in ModelOpt checkpoints,
         # commonly share one calibrated input scale. Reuse their static quantization
@@ -2296,9 +2303,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # and are added to ``nodes_to_exclude`` so they stay fp16. Used to isolate the shared-expert
         # (MatMulBlockQuantizedFp4Weight) contribution from the routed experts (QMoE).
         _fp4_excl = extra_options.get("nvfp4_dense_exclude_layers", "")
-        self.nvfp4_dense_exclude_layers = {
-            int(x) for x in str(_fp4_excl).replace(",", " ").split() if x.strip() != ""
-        }
+        self.nvfp4_dense_exclude_layers = {int(x) for x in str(_fp4_excl).replace(",", " ").split() if x.strip() != ""}
         self.nvfp4_lmhead_fp16 = str(extra_options.get("nvfp4_lmhead_fp16", "false")).lower() in ("1", "true", "yes")
 
         # Keep the checkpoint's original NVFP4 (E2M1) *dense* weights instead of dequantizing
@@ -2307,15 +2312,15 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # the ModelOpt tensors (E2M1 codes + E4M3 block scale + fp32 global scale). NOTE: the
         # NVFP4 *routed MoE experts* are controlled separately by ``moe_quant_type=nvfp4``
         # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
-        self.use_original_nvfp4_weights = bool(extra_options.get("use_original_nvfp4_weights", False))
+        self.use_original_nvfp4_weights = str(extra_options.get("use_original_nvfp4_weights", "false")).lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
         # The base builder derives the GenAI model.type by stripping the suffix
         # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = (
-            "Qwen3_5_Moe_textForCausalLM"
-            if self.is_text_only
-            else "Qwen3_5_MoeForConditionalGeneration"
-        )
+        self.model_type = "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
@@ -2327,7 +2332,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
-        self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
+        self.shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", self.moe_intermediate_size
+        )
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
@@ -2443,9 +2450,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             # Weight-only (W8A16) for the GatedDeltaNet projections; see __init__.
             return None
         try:
-            return float(self._load_nvfp4_tensor(f"{key_prefix}.input_scale").float().reshape(-1)[0])
-        except Exception:
+            scale = self._load_nvfp4_tensor(f"{key_prefix}.input_scale")
+        except (KeyError, RuntimeError):
             return None
+        return self._modelopt_positive_scalar(scale, f"{key_prefix}.input_scale")
 
     def _make_fp8_activation_scale_initializer(self, basename, scale_val):
         """Create (or reuse) the fp32 scalar ``a_scale`` initializer for an FP8 attention matmul.
@@ -2483,6 +2491,37 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         if scale.ndim == 1 and scale.numel() == out_features * block_count:
             return scale.view(out_features, block_count).contiguous()
         return None
+
+    @staticmethod
+    def _modelopt_e4m3_bytes(tensor, tensor_name, expected_shape):
+        if tensor.dtype not in {torch.uint8, torch.float8_e4m3fn}:
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' must contain E4M3 bytes as uint8 or float8_e4m3fn, "
+                f"got {tensor.dtype}."
+            )
+        if tuple(tensor.shape) != tuple(expected_shape):
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' has shape {tuple(tensor.shape)}, expected {tuple(expected_shape)}."
+            )
+        return tensor.view(torch.uint8).contiguous()
+
+    @staticmethod
+    def _modelopt_positive_scalar(tensor, tensor_name):
+        if tensor.numel() != 1:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be a scalar, got shape {tuple(tensor.shape)}.")
+        value = float(tensor.float().item())
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be finite and positive, got {value}.")
+        return value
+
+    def _load_modelopt_nvfp4_codes(self, tensor_name):
+        packed = self._load_nvfp4_tensor(tensor_name)
+        if packed.dtype != torch.uint8 or packed.ndim != 2 or packed.shape[1] % 8 != 0:
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' must be packed uint8 [N, K/2] with K divisible by 16, "
+                f"got dtype={packed.dtype} shape={tuple(packed.shape)}."
+            )
+        return self.repack_modelopt_nvfp4_weight_codes(packed)
 
     def _make_fp8_attention_matmul(self, basename, root_input, **kwargs):
         if not self.use_original_fp8_weights:
@@ -2595,9 +2634,17 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # fall back to the standard path.
         if weight.dtype != torch.uint8:
             return None
+        if weight.ndim != 2 or weight.shape[1] % 8 != 0:
+            raise ValueError(
+                f"ModelOpt tensor '{key_prefix}.weight' must have shape [N, K/2] with K divisible by 16, "
+                f"got {tuple(weight.shape)}."
+            )
 
-        out_features = int(weight.shape[0])       # N
+        out_features = int(weight.shape[0])  # N
         block_size = 16
+        scale_shape = (out_features, int(weight.shape[1]) // 8)
+        scale_bytes = self._modelopt_e4m3_bytes(weight_scale, f"{key_prefix}.weight_scale", scale_shape)
+        global_scale = self._modelopt_positive_scalar(weight_scale_2, f"{key_prefix}.weight_scale_2")
 
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
@@ -2607,10 +2654,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_initializer(weight.to(torch.uint8), weight_name)
 
         scale_name = f"{prefix}.nvfp4_weight_scale"
-        self.make_initializer(weight_scale.view(torch.uint8), scale_name)
+        self.make_initializer(scale_bytes, scale_name)
 
         global_scale_name = f"{prefix}.nvfp4_weight_scale_2"
-        self.make_initializer(weight_scale_2.float().reshape(1), global_scale_name)
+        self.make_initializer(torch.tensor([global_scale], dtype=torch.float32), global_scale_name)
 
         # ``N`` and ``K`` are derived by the op from the weight shape (N = B.shape[0],
         # K = 2 * B.shape[1]), so only ``block_size`` is passed as an attribute.
@@ -2670,8 +2717,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         router_reshape_name = f"{basename}/router/Reshape"
         self.make_reshape(
             router_reshape_name,
-            [f"{router_matmul_name}/output_0",
-             f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
+            [f"{router_matmul_name}/output_0", f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
             dtype=self.io_dtype,
             shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
         )
@@ -2697,19 +2743,27 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
             self.make_nvfp4_moe_initializers(
                 layer_id,
-                gate_up_proj_weight, gate_up_proj_scales, gate_up_proj_global_scales,
-                down_proj_weight, down_proj_scales, down_proj_global_scales,
+                gate_up_proj_weight,
+                gate_up_proj_scales,
+                gate_up_proj_global_scales,
+                down_proj_weight,
+                down_proj_scales,
+                down_proj_global_scales,
             )
         elif op_type == "MoE":
             raw_gate_up = mlp.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
-            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+                raw_gate_up
+            )
             self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
             self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
         else:
             raw_gate_up = mlp.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
-            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+                raw_gate_up
+            )
             gate_up_qw_list, gate_up_sc_list = [], []
             down_qw_list, down_sc_list = [], []
             for i in range(self.moe_attrs["num_experts"]):
@@ -2763,16 +2817,16 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         cached = getattr(self, "_nvfp4_snapshot_dir_cache", None)
         if cached is not None:
             return cached
-        from pathlib import Path
 
         model_path = Path(self.model_name_or_path)
         if model_path.is_dir():
             self._nvfp4_snapshot_dir_cache = model_path
             return model_path
-        from huggingface_hub import snapshot_download
 
         self._nvfp4_snapshot_dir_cache = Path(
-            snapshot_download(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, local_files_only=True)
+            snapshot_download(
+                self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, local_files_only=True
+            )
         )
         return self._nvfp4_snapshot_dir_cache
 
@@ -2791,15 +2845,17 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
     def _load_nvfp4_tensor(self, tensor_name):
         """Read a raw tensor from the source safetensors (bypasses transformers)."""
-        from safetensors import safe_open
-
         snapshot_dir = self._nvfp4_snapshot_dir()
         weight_map = self._nvfp4_weight_map()
         handles = getattr(self, "_nvfp4_handles", None)
         if handles is None:
             handles = self._nvfp4_handles = {}
             self._nvfp4_handle_keys = {}
-        files = [snapshot_dir / weight_map[tensor_name]] if weight_map is not None else sorted(snapshot_dir.glob("*.safetensors"))
+        files = (
+            [snapshot_dir / weight_map[tensor_name]]
+            if weight_map is not None
+            else sorted(snapshot_dir.glob("*.safetensors"))
+        )
         for f in files:
             key = str(f)
             handle = handles.get(key)
@@ -2810,10 +2866,30 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 return handle.get_tensor(tensor_name)
         raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
 
+    def _close_nvfp4_handles(self):
+        handles = getattr(self, "_nvfp4_handles", None)
+        if not handles:
+            return
+        for handle in handles.values():
+            handle.__exit__(None, None, None)
+        handles.clear()
+        self._nvfp4_handle_keys.clear()
+
+    def make_model(self, input_path):
+        try:
+            super().make_model(input_path)
+        finally:
+            self._close_nvfp4_handles()
+
     def make_nvfp4_moe_initializers(
-        self, layer_id,
-        gate_up_weight_name, gate_up_scales_name, gate_up_global_name,
-        down_weight_name, down_scales_name, down_global_name,
+        self,
+        layer_id,
+        gate_up_weight_name,
+        gate_up_scales_name,
+        gate_up_global_name,
+        down_weight_name,
+        down_scales_name,
+        down_global_name,
     ):
         """Emit QMoE NVFP4 initializers for all routed experts of one layer.
 
@@ -2828,21 +2904,56 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         gate_up_qw, gate_up_sc, gate_up_g = [], [], []
         down_qw, down_sc, down_g = [], [], []
         for e in range(num_experts):
-            g_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight"))
-            u_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.up_proj.weight"))
+            gate_prefix = f"{prefix}.{e}.gate_proj"
+            up_prefix = f"{prefix}.{e}.up_proj"
+            down_prefix = f"{prefix}.{e}.down_proj"
+            g_codes = self._load_modelopt_nvfp4_codes(f"{gate_prefix}.weight")
+            u_codes = self._load_modelopt_nvfp4_codes(f"{up_prefix}.weight")
+            if g_codes.shape != u_codes.shape:
+                raise ValueError(
+                    f"ModelOpt expert {e} gate/up weights must have matching shapes, "
+                    f"got {tuple(g_codes.shape)} and {tuple(u_codes.shape)}."
+                )
             inter = g_codes.shape[0]
             fused_codes = torch.stack([g_codes, u_codes], dim=1).reshape(2 * inter, -1)  # [2*inter, K]
-            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))               # [K, inter]
+            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
 
-            g_sc = self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight_scale").view(torch.uint8)
-            u_sc = self._load_nvfp4_tensor(f"{prefix}.{e}.up_proj.weight_scale").view(torch.uint8)
-            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))   # [2*inter, K/16] e4m3 bytes
-            gate_up_g.append(float(self._load_nvfp4_tensor(f"{prefix}.{e}.gate_proj.weight_scale_2").float().reshape(-1)[0]))
+            scale_shape = (inter, g_codes.shape[1] // 16)
+            g_sc = self._modelopt_e4m3_bytes(
+                self._load_nvfp4_tensor(f"{gate_prefix}.weight_scale"), f"{gate_prefix}.weight_scale", scale_shape
+            )
+            u_sc = self._modelopt_e4m3_bytes(
+                self._load_nvfp4_tensor(f"{up_prefix}.weight_scale"), f"{up_prefix}.weight_scale", scale_shape
+            )
+            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
+            gate_global = self._modelopt_positive_scalar(
+                self._load_nvfp4_tensor(f"{gate_prefix}.weight_scale_2"), f"{gate_prefix}.weight_scale_2"
+            )
+            up_global = self._modelopt_positive_scalar(
+                self._load_nvfp4_tensor(f"{up_prefix}.weight_scale_2"), f"{up_prefix}.weight_scale_2"
+            )
+            if gate_global != up_global:
+                raise ValueError(
+                    f"ModelOpt expert {e} gate/up global scales must match for fused QMoE, "
+                    f"got {gate_global} and {up_global}."
+                )
+            gate_up_g.append(gate_global)
 
-            d_codes = self.repack_modelopt_nvfp4_weight_codes(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight"))
-            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))                       # [inter, hidden/2]
-            down_sc.append(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight_scale").view(torch.uint8))
-            down_g.append(float(self._load_nvfp4_tensor(f"{prefix}.{e}.down_proj.weight_scale_2").float().reshape(-1)[0]))
+            d_codes = self._load_modelopt_nvfp4_codes(f"{down_prefix}.weight")
+            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))  # [inter, hidden/2]
+            down_scale_shape = (d_codes.shape[0], d_codes.shape[1] // 16)
+            down_sc.append(
+                self._modelopt_e4m3_bytes(
+                    self._load_nvfp4_tensor(f"{down_prefix}.weight_scale"),
+                    f"{down_prefix}.weight_scale",
+                    down_scale_shape,
+                )
+            )
+            down_g.append(
+                self._modelopt_positive_scalar(
+                    self._load_nvfp4_tensor(f"{down_prefix}.weight_scale_2"), f"{down_prefix}.weight_scale_2"
+                )
+            )
 
         self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
         self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_weight_name)
@@ -2858,32 +2969,44 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         up_matmul = self.make_matmul(shared_expert.up_proj, f"{basename}/up_proj/MatMul", root_input)
 
         silu_sigmoid_name = f"{basename}/gate_proj/Sigmoid"
-        self.make_sigmoid(silu_sigmoid_name, f"{gate_matmul}/output_0", self.io_dtype,
-                          shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        self.make_sigmoid(
+            silu_sigmoid_name,
+            f"{gate_matmul}/output_0",
+            self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
         silu_mul_name = f"{basename}/gate_proj/Mul"
-        self.make_mul(silu_mul_name,
-                      [f"{gate_matmul}/output_0", f"{silu_sigmoid_name}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        self.make_mul(
+            silu_mul_name,
+            [f"{gate_matmul}/output_0", f"{silu_sigmoid_name}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
         gate_up_mul_name = f"{basename}/gate_up/Mul"
-        self.make_mul(gate_up_mul_name,
-                      [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        self.make_mul(
+            gate_up_mul_name,
+            [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
-        down_matmul = self.make_matmul(shared_expert.down_proj, f"{basename}/down_proj/MatMul",
-                                       f"{gate_up_mul_name}/output_0")
+        down_matmul = self.make_matmul(
+            shared_expert.down_proj, f"{basename}/down_proj/MatMul", f"{gate_up_mul_name}/output_0"
+        )
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
-        self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
-                          shape=["batch_size", "sequence_length", 1])
+        self.make_sigmoid(
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+        )
 
         gated_mul_name = f"{basename}/gate/Mul"
-        self.make_mul(gated_mul_name,
-                      [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_mul(
+            gated_mul_name,
+            [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
         return f"{gated_mul_name}/output_0"

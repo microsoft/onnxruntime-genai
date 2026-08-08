@@ -167,9 +167,7 @@ def _load_builder_cli_module(monkeypatch):
 
 def _parse_extra_options(builder, extra_options, precision="int4", execution_provider="cuda"):
     # Parser validation in these tests should not depend on remote/model IO.
-    builder.get_hf_details = lambda *args, **kwargs: {
-        "hf_config": types.SimpleNamespace(tie_word_embeddings=True)
-    }
+    builder.get_hf_details = lambda *args, **kwargs: {"hf_config": types.SimpleNamespace(tie_word_embeddings=True)}
     return builder.parse_extra_options(
         "dummy-model",
         "",
@@ -203,6 +201,47 @@ def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
     with pytest.raises(ValueError, match="moe_quant_type=mxfp4 requires building with precision=int4"):
         _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "fp8_kv_cache",
+        "fuse_linear_attn_gates",
+        "use_original_fp8_weights",
+        "fp8_linear_attn",
+        "fp8_linear_attn_static_input_scale",
+        "fp8_attn_static_input_scale",
+        "share_fp8_attn_qkv_activation",
+        "use_original_nvfp4_weights",
+        "nvfp4_lmhead_fp16",
+    ],
+)
+@pytest.mark.parametrize("value,expected", [("true", True), ("false", False)])
+def test_qwen_boolean_extra_options_are_parsed(monkeypatch, option, value, expected):
+    builder = _load_builder_cli_module(monkeypatch)
+
+    options = _parse_extra_options(builder, [f"{option}={value}"])
+
+    assert options[option] is expected
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["fp8_kv_cache", "fuse_linear_attn_gates", "use_original_fp8_weights", "use_original_nvfp4_weights"],
+)
+def test_qwen_cuda_only_options_reject_other_execution_providers(monkeypatch, option):
+    builder = _load_builder_cli_module(monkeypatch)
+
+    with pytest.raises(ValueError, match="only supported on the CUDA EP"):
+        _parse_extra_options(builder, [f"{option}=true"], execution_provider="cpu")
+
+
+def test_fp8_kv_cache_rejects_conflicting_quant_type(monkeypatch):
+    builder = _load_builder_cli_module(monkeypatch)
+
+    with pytest.raises(ValueError, match="shorthand for kv_cache_quant_type=fp8_per_tensor"):
+        _parse_extra_options(builder, ["fp8_kv_cache=true", "kv_cache_quant_type=int8_per_tensor"])
 
 
 def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():

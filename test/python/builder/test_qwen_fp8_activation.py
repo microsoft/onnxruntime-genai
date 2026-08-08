@@ -1,10 +1,15 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import sys
+from pathlib import Path
 from types import MethodType
 
 import onnx_ir as ir
+import pytest
 import torch
+
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 
 from models.builders.qwen import Qwen35MoeTextModel
 
@@ -54,6 +59,21 @@ def test_static_input_scale_is_none_when_checkpoint_has_no_scale():
     model, _ = _make_model({})
 
     assert model._fp8_attention_input_scale("q") is None
+
+
+@pytest.mark.parametrize("scale", [0.0, -0.125, float("inf"), float("nan")])
+def test_static_input_scale_rejects_non_positive_or_non_finite_values(scale):
+    model, _ = _make_model({"q": scale})
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        model._fp8_attention_input_scale("q")
+
+
+def test_static_input_scale_rejects_non_scalar_tensor():
+    model, _ = _make_model({"q": [0.125, 0.25]})
+
+    with pytest.raises(ValueError, match="must be a scalar"):
+        model._fp8_attention_input_scale("q")
 
 
 def test_scale_initializer_is_shared_for_matching_qkv_scales():

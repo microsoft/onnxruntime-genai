@@ -24,8 +24,8 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
-    GraniteMoeHybridModel,
     GraniteModel,
+    GraniteMoeHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
@@ -46,8 +46,8 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
-    Qwen35TextModel,
     Qwen35MoeTextModel,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
@@ -117,7 +117,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -168,6 +168,15 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "fp8_kv_cache",
+        "fuse_linear_attn_gates",
+        "use_original_fp8_weights",
+        "fp8_linear_attn",
+        "fp8_linear_attn_static_input_scale",
+        "fp8_attn_static_input_scale",
+        "share_fp8_attn_qkv_activation",
+        "use_original_nvfp4_weights",
+        "nvfp4_lmhead_fp16",
     ]
 
     for key in bools:
@@ -181,14 +190,10 @@ def check_extra_options(
 
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
-            key
-            for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head")
-            if extra_options.get(key, False)
+            key for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head") if extra_options.get(key, False)
         ]
         if incompatible_options:
-            raise ValueError(
-                "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
-            )
+            raise ValueError("use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + ".")
 
         for key in ("paged_block_size", "max_batch_size"):
             if key not in extra_options:
@@ -282,7 +287,9 @@ def check_extra_options(
 
     if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
-        raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
+        raise NotImplementedError(
+            "int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default)."
+        )
 
     if "kv_cache_quant_type" in extra_options:
         quant_type = extra_options["kv_cache_quant_type"].lower()
@@ -297,6 +304,26 @@ def check_extra_options(
                 f"Got execution_provider='{execution_provider}'."
             )
         extra_options["kv_cache_quant_type"] = quant_type
+
+    if extra_options.get("fp8_kv_cache", False):
+        quant_type = extra_options.get("kv_cache_quant_type", "none")
+        if quant_type not in {"none", "fp8_per_tensor"}:
+            raise ValueError(
+                "fp8_kv_cache is shorthand for kv_cache_quant_type=fp8_per_tensor and cannot be combined with "
+                f"kv_cache_quant_type={quant_type}."
+            )
+
+    cuda_only_options = (
+        "fp8_kv_cache",
+        "fuse_linear_attn_gates",
+        "use_original_fp8_weights",
+        "use_original_nvfp4_weights",
+    )
+    enabled_cuda_only_options = [key for key in cuda_only_options if extra_options.get(key, False)]
+    if enabled_cuda_only_options and execution_provider != "cuda":
+        raise ValueError(
+            f"{', '.join(enabled_cuda_only_options)} are only supported on the CUDA EP, got ep='{execution_provider}'."
+        )
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
@@ -355,15 +382,7 @@ def parse_extra_options(
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(
-        model_name,
-        input_path,
-        output_dir,
-        precision,
-        execution_provider,
-        cache_dir,
-        kv_pairs
-    )
+    check_extra_options(model_name, input_path, output_dir, precision, execution_provider, cache_dir, kv_pairs)
     return kv_pairs
 
 
@@ -373,7 +392,9 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = (
+        precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    )
 
     if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
@@ -426,8 +447,10 @@ def create_model(
     # Load Hugging Face details
     try:
         hf_details = extra_options.pop("hf_details")
-    except KeyError:
-        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+    except KeyError as error:
+        raise Exception(
+            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
+        ) from error
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -449,10 +472,14 @@ def create_model(
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -460,8 +487,12 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
@@ -498,32 +529,57 @@ def create_model(
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
+    elif (
+        config.architectures[0] == "PhiMoEForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        print(
+            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
+        )
+        print(
+            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
+        )
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
@@ -531,7 +587,9 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
@@ -545,7 +603,9 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
@@ -757,6 +817,27 @@ def get_args():
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
                         Same build/precision/EP requirements as mxfp4.
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
+                use_original_nvfp4_weights = Preserve ModelOpt NVFP4 dense weights in Qwen3.6. Default is false.
+                    When true, shared-expert projections and lm_head use MatMulBlockQuantizedFp4Weight directly from the checkpoint.
+                    Requires CUDA and an ONNX Runtime build with the NVFP4 contrib operator.
+                nvfp4_dense_exclude_layers = Comma- or space-separated Qwen3.6 layer indices whose shared experts stay in fp16.
+                    Default is empty. Only applies when use_original_nvfp4_weights=true.
+                nvfp4_lmhead_fp16 = Keep the Qwen3.6 language-modeling head in fp16 instead of NVFP4. Default is false.
+                use_original_fp8_weights = Preserve ModelOpt FP8 attention weights in Qwen3.6. Default is false.
+                    When true, attention projections use MatMulBlockQuantizedFp8Weight directly from the checkpoint.
+                    Requires CUDA and an ONNX Runtime build with the FP8 contrib operator.
+                fp8_attn_static_input_scale = Apply calibrated static FP8 activation scales to Qwen3.6 attention. Default is false.
+                fp8_attn_exclude_layers = Comma- or space-separated Qwen3.6 layer indices whose attention projections stay in fp16.
+                    Default is empty. Only applies when use_original_fp8_weights=true.
+                fp8_linear_attn = Preserve ModelOpt FP8 GatedDeltaNet projection weights in Qwen3.6. Default is true.
+                    Only applies when use_original_fp8_weights=true.
+                fp8_linear_attn_static_input_scale = Apply calibrated static FP8 activation scales to GatedDeltaNet projections.
+                    Default is false. Only applies when fp8_linear_attn=true and fp8_attn_static_input_scale=true.
+                share_fp8_attn_qkv_activation = Share equal static FP8 activation-scale initializers across Q/K/V. Default is true.
+                fp8_kv_cache = Use the legacy Qwen3.6 FP8 KV-cache shorthand. Default is false.
+                    Equivalent to kv_cache_quant_type=fp8_per_tensor. Without kv_cache_scale_file, uses one shared unit scale.
+                fuse_linear_attn_gates = Fuse Qwen3.6 LinearAttention gate glue into contrib operators.
+                    Default is true on CUDA and false on other execution providers.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 kv_cache_quant_type = Quantization scheme for the KV cache. Default is 'none' (no quantization).

@@ -1,9 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import sys
+from pathlib import Path
 from types import MethodType
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 
 from models.builders.qwen import Qwen35MoeTextModel
 
