@@ -36,7 +36,7 @@ steps:
       }
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.1
       }
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -121,7 +121,7 @@ steps:
       python -m pip install onnxruntime==1.28.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.1
       fi
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
