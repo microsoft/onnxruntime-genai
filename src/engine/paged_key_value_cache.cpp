@@ -227,6 +227,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
   };
   const auto select = [&](size_t request_index,
                           const CacheGrowth& growth) {
+    // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
+    // pending with their committed block tables untouched and can be reconsidered next Step().
     planned_blocks += growth.new_blocks;
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
@@ -244,6 +246,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     return it == block_tables_.end() ? nullptr : &*it;
   };
   for (size_t i = 0; i < committed_request_count; ++i) {
+    // Cache residents are considered before new admissions. This preserves their block-table
+    // identity and prevents waiting requests from consuming capacity needed to advance them.
     const auto& entry = plan.requests[i];
     const auto& table = block_tables_[i];
     if (entry.newly_admitted || entry.request_id != table.request_id) {
@@ -265,6 +269,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
   }
 
   for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
+    // Assigned requests are admitted in pool order until either the batch-size limit or free-block
+    // budget is reached. Capacity-deferred requests stay Assigned and require no rollback.
     const auto& candidate = plan.requests[i];
     if (!candidate.newly_admitted || find_table(candidate.request_id)) {
       throw std::runtime_error("New step plan request already belongs to the paged cache.");

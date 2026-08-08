@@ -96,6 +96,9 @@ std::shared_ptr<Request> Engine::StepStatic() {
 
 std::shared_ptr<Request> Engine::StepDynamic() {
   while (scheduler_->HasPendingRequests()) {
+    // A dynamic step is a transaction with six phases:
+    // plan -> reserve cache -> checkpoint request state -> execute -> stage sampled tokens -> commit.
+    // Nothing becomes externally visible until the final commit succeeds.
     step_plan_.transaction_id = next_transaction_id_++;
     auto planning_result = scheduler_->PlanStep(step_plan_);
     if (planning_result.capacity_deferred) {
@@ -130,6 +133,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
 
     std::unique_ptr<CacheStepReservation> reservation;
     try {
+      // Reserve every block needed by the complete plan up front. The reservation can be used to
+      // build model inputs, but it does not alter committed block tables until Commit().
       reservation = cache_manager_->ReserveStep(step_plan_);
     } catch (...) {
       ++transaction_metrics_.reservation_failures;
@@ -148,6 +153,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
 
     bool request_transaction_active = false;
     const auto rollback_transaction = [&]() {
+      // Request/search state and paged-cache state are checkpointed separately. Both must be
+      // restored so a retry observes exactly the state that existed before this Step() call.
       std::exception_ptr rollback_error;
       if (request_transaction_active) {
         try {
@@ -194,6 +201,9 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
+      // Sampling mutates each request's Search state. Checkpoint it before the model run so failures
+      // in execution or post-processing can discard the whole batch rather than partially advancing
+      // whichever requests happened to finish first.
       scheduled_requests.BeginTransaction();
       request_transaction_active = true;
       model_executor_->Decode(scheduled_requests, context);
@@ -227,6 +237,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
+      // Turn the final logits row for each packed request into a staged next-token result. Request
+      // counters, host token mirrors, and completion status still remain unchanged in this phase.
       scheduled_requests.GenerateNextTokensForTransaction(
           step_plan_, step_results_);
       staged_ready_requests_.clear();
@@ -252,6 +264,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
+      // Commit order is deliberate: make staged search state durable, publish cache growth, then
+      // advance the lightweight Request bookkeeping that readers observe.
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
@@ -268,6 +282,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
+    // Step() returns one ready request at a time. Keep the rest queued so draining this committed
+    // batch does not trigger another model execution.
     ready_requests_.swap(staged_ready_requests_);
     ready_request_index_ = 0;
     ++transaction_metrics_.committed_steps;
