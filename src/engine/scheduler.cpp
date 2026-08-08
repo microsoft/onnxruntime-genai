@@ -169,6 +169,8 @@ void DynamicBatchScheduler::ReapCompletedRequests() {
 }
 
 StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
+  // Completed requests release their blocks before admission, making that capacity available to
+  // requests waiting in Assigned state during this same planning pass.
   ReapCompletedRequests();
 
   plan.requests.clear();
@@ -205,6 +207,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   };
 
   const auto allocated_requests = cache_manager_->AllocatedRequests();
+  // Existing cache residents come first and retain block-table order. New requests follow them as
+  // admission candidates; the cache planner may compact this list to the subset that fits.
   for (const auto& request : allocated_requests) {
     add_request(request, false);
   }
@@ -221,6 +225,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     return result;
   }
 
+  // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
+  // describe that packed layout and identify the last logits row for each request, which is the row
+  // used to sample its next token.
   size_t packed_token_offset = 0;
   plan.graph_capture_eligible = true;
   for (auto& entry : plan.requests) {
