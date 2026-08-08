@@ -17,7 +17,7 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 33> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_moe", "lfm2_vl_text", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
+    static constexpr std::array<std::string_view, 34> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3n_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_moe", "lfm2_vl_text", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
@@ -35,7 +35,7 @@ struct ModelType {
 
   inline static bool IsMMM(const std::string& model_type) {
     // Multi-modal model (MMM)
-    static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
+    static constexpr std::array<std::string_view, 3> MMM = {"gemma3n", "gemma4", "phi4mm"};
     return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
   }
 
