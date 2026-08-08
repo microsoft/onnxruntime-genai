@@ -2301,14 +2301,17 @@ class Model:
     def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
+        # Allow callers to override the target dtype of the cos/sin caches
+        # (e.g. models that force RoPE computation to float32 regardless of `io_dtype`)
+        dtype = kwargs.get("dtype", self.io_dtype)
 
         if self.rope_attrs["create_caches"]:
             # Create cos/sin caches if not already created
             cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
 
             # Remove any dims of size 1 and cast to target dtype
-            cos_cache = cos_cache.squeeze().to(to_torch_dtype(self.io_dtype))
-            sin_cache = sin_cache.squeeze().to(to_torch_dtype(self.io_dtype))
+            cos_cache = cos_cache.squeeze().to(to_torch_dtype(dtype))
+            sin_cache = sin_cache.squeeze().to(to_torch_dtype(dtype))
 
             # Slice cos/sin caches from (M, H) to (M, H/2) if hidden dim = head size (i.e. if cos/sin caches haven't been halved yet)
             hidden_dim = cos_cache.shape[-1]
