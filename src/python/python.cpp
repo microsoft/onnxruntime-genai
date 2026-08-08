@@ -239,6 +239,24 @@ struct PyGeneratorParams {
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
+pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
+  pybind11::dict d;
+  for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+                          "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
+                          "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
+                          "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+                          "target_forward_passes"})
+    d[key] = stats.GetCount(key);
+  d["formula_supported"] = stats.GetBool("formula_supported");
+  for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+                          "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
+                          "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+                          "avg_target_ms_per_round", "target_baseline_ms_per_token",
+                          "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
+    d[key] = stats.GetNumber(key);
+  return d;
+}
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -296,6 +314,15 @@ struct PyGenerator {
     generator_->RewindTo(new_length);
   }
 
+  void SnapshotState() {
+    generator_->SnapshotState();
+  }
+
+  void SetHiddenStates(pybind11::array& hidden_states) {
+    hidden_states_holder_ = ToOgaTensor(hidden_states, /*copy*/ true);
+    generator_->SetHiddenStates(*hidden_states_holder_);
+  }
+
   bool IsDone() {
     return generator_->IsDone();
   }
@@ -310,25 +337,44 @@ struct PyGenerator {
 
   pybind11::dict GetSpeculativeStats() {
     auto stats = generator_->GetSpeculativeStats();
-    pybind11::dict d;
-    for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
-                            "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
-                            "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
-                            "tokens_discarded", "tokens_buffered", "draft_forward_passes",
-                            "target_forward_passes"})
-      d[key] = stats->GetCount(key);
-    d["formula_supported"] = stats->GetBool("formula_supported");
-    for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
-                            "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
-                            "mean_emitted_tokens_per_round", "expected_tokens_per_round",
-                            "avg_target_ms_per_round", "target_baseline_ms_per_token",
-                            "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
-      d[key] = stats->GetNumber(key);
-    return d;
+    return ToSpeculativeStatsDict(*stats);
   }
 
  private:
   std::unique_ptr<OgaGenerator> generator_;
+  std::unique_ptr<OgaTensor> hidden_states_holder_;  // Keeps the staged hidden_states alive across the next step
+};
+
+struct PyMtpGenerator {
+  PyMtpGenerator(const OgaModel& main_model, const OgaModel& mtp_model, PyGeneratorParams& params) {
+    generator_ = OgaMtpGenerator::Create(main_model, mtp_model, *params.params_);
+  }
+
+  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+    if (tokens.ndim() != 1)
+      throw std::runtime_error("input_ids must be a 1D array");
+    generator_->AppendTokens(tokens.data(), tokens.size());
+  }
+
+  void GenerateNextToken() { generator_->GenerateNextToken(); }
+  bool IsDone() const { return generator_->IsDone(); }
+
+  pybind11::array_t<int32_t> GetSequence() {
+    return pybind11::array_t<int32_t>({static_cast<pybind11::ssize_t>(generator_->GetSequenceCount())},
+                                      generator_->GetSequenceData());
+  }
+
+  pybind11::dict GetStats() {
+    auto stats = generator_->GetSpeculativeStats();
+    pybind11::dict d = ToSpeculativeStatsDict(*stats);
+    d["forwards"] = d["target_forward_passes"];
+    d["accepts"] = d["draft_tokens_accepted"];
+    d["trials"] = d["draft_tokens_evaluated"];
+    return d;
+  }
+
+ private:
+  std::unique_ptr<OgaMtpGenerator> generator_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -545,11 +591,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindTo)
+      .def("snapshot_state", &PyGenerator::SnapshotState)
+      .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
       .def("set_runtime_option", &PyGenerator::SetRuntimeOption)
       .def("get_speculative_stats", &PyGenerator::GetSpeculativeStats);
+
+  pybind11::class_<PyMtpGenerator>(m, "MtpGenerator")
+      .def(pybind11::init<const OgaModel&, const OgaModel&, PyGeneratorParams&>())
+      .def("append_tokens", &PyMtpGenerator::AppendTokens)
+      .def("generate_next_token", &PyMtpGenerator::GenerateNextToken)
+      .def("is_done", &PyMtpGenerator::IsDone)
+      .def("get_sequence", &PyMtpGenerator::GetSequence)
+      .def("get_stats", &PyMtpGenerator::GetStats);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {

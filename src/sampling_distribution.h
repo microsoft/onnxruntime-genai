@@ -59,13 +59,36 @@ inline void ApplyRepetitionPenaltyToLogits(std::span<float> logits, std::span<co
   }
 }
 
+inline void ApplyNoRepeatNgramToLogits(std::span<float> logits, std::span<const int32_t> prefix,
+                                       int ngram_size) {
+  if (ngram_size <= 0 || prefix.size() < static_cast<size_t>(ngram_size))
+    return;
+
+  const size_t ngram_prefix_length = static_cast<size_t>(ngram_size - 1);
+  const auto target_prefix = prefix.last(ngram_prefix_length);
+  const size_t last_start = prefix.size() - static_cast<size_t>(ngram_size);
+  for (size_t start = 0; start <= last_start; ++start) {
+    if (std::equal(target_prefix.begin(), target_prefix.end(), prefix.begin() + start)) {
+      const int32_t banned_token = prefix[start + ngram_prefix_length];
+      if (banned_token >= 0 && banned_token < static_cast<int32_t>(logits.size()))
+        logits[static_cast<size_t>(banned_token)] = std::numeric_limits<float>::lowest();
+    }
+  }
+}
+
 struct LogitsPenaltyProcessor {
   LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
                          std::span<const int32_t> eos_token_ids)
+      : LogitsPenaltyProcessor(vocab_size, repetition_penalty, min_length,
+                               /*no_repeat_ngram_size=*/0, eos_token_ids) {}
+
+  LogitsPenaltyProcessor(int vocab_size, float repetition_penalty, int min_length,
+                         int no_repeat_ngram_size, std::span<const int32_t> eos_token_ids)
       : repetition_penalty_{repetition_penalty},
         min_length_{min_length},
+        no_repeat_ngram_size_{no_repeat_ngram_size},
         eos_token_ids_{eos_token_ids},
-        active_{repetition_penalty != 1.0f || min_length > 0} {
+        active_{repetition_penalty != 1.0f || min_length > 0 || no_repeat_ngram_size > 0} {
     if (active_)
       logits_buffer_.resize(static_cast<size_t>(vocab_size));
   }
@@ -80,12 +103,14 @@ struct LogitsPenaltyProcessor {
     std::copy(logits.begin(), logits.end(), logits_buffer_.begin());
     ApplyMinLengthToLogits(logits_buffer_, current_length, min_length_, eos_token_ids_);
     ApplyRepetitionPenaltyToLogits(logits_buffer_, prefix, repetition_penalty_, repetition_visited_);
+    ApplyNoRepeatNgramToLogits(logits_buffer_, prefix, no_repeat_ngram_size_);
     return logits_buffer_;
   }
 
  private:
   float repetition_penalty_;
   int min_length_;
+  int no_repeat_ngram_size_;
   std::span<const int32_t> eos_token_ids_;
   bool active_;
   std::vector<bool> repetition_visited_;

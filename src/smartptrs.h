@@ -137,6 +137,25 @@ enum struct DeviceType {
   MAX
 };
 
+// One windowed state tensor for DeviceInterface::CopyStateSlots: `base` is the start of the whole
+// [W, ...] buffer and `slot_bytes` is the size of one window slot.
+struct StateSlotDesc {
+  uint8_t* base;
+  uint64_t slot_bytes;
+
+  bool operator==(const StateSlotDesc& other) const {
+    return base == other.base && slot_bytes == other.slot_bytes;
+  }
+
+  bool operator!=(const StateSlotDesc& other) const {
+    return !(*this == other);
+  }
+};
+
+// Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
+// report this exact version before the host can safely call through the C++ interface.
+inline constexpr uint32_t kDeviceInterfaceVersion = 1;
+
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
@@ -189,6 +208,34 @@ struct DeviceInterface {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+
+  // On-device greedy argmax (top-1) over each of `num_rows` consecutive `vocab_size`-element rows of
+  // device `logits` (fp16 or fp32). Writes the resulting token ids to the host buffer `out_tokens`
+  // (length `num_rows`). Uses the device's high-performance Top-K kernel so the full logits never
+  // leave the GPU -- only the small token ids are copied back. Returns false on devices without an
+  // implementation, in which case the caller falls back to a host-side argmax.
+  // NOTE: keep this at the end of the struct to avoid shifting the vtable layout (ABI stability).
+  virtual bool ArgMax(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/, int /*vocab_size*/, int32_t* /*out_tokens*/) { return false; }
+  virtual bool Top2(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/, int /*vocab_size*/,
+                    int32_t* /*out_tokens*/, float* /*out_scores*/) { return false; }
+  // Compute the per-row top-`k` token ids and their RAW fp32 logit scores (sorted descending),
+  // copying only the small k*num_rows results to the host. Used by speculative sampling to build a
+  // truncated categorical without a full-vocab device->host copy. Returns false on unsupported
+  // devices (caller falls back to a host-side path). Keep last for vtable/ABI stability.
+  virtual bool TopKScores(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                          int /*vocab_size*/, int /*k*/, int32_t* /*out_tokens*/, float* /*out_scores*/) { return false; }
+  // Device-output variant used when a greedy token feeds another device-resident forward before
+  // the host needs to inspect it. Keep last for vtable/ABI stability.
+  virtual bool ArgMaxDevice(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                            int /*vocab_size*/, DeviceSpan<int32_t> /*out_tokens*/) { return false; }
+  // Promote one window slot to another for every descriptor in `descs_device` (device memory,
+  // `count` entries). A hybrid model has 2 state tensors per layer, so the per-tensor memcpy loop
+  // this replaces issues 60+ cudaMemcpyAsync calls on every partial-accept MTP step; each costs a
+  // few microseconds of *host* time, which shows up directly as GPU idle. One kernel launch does
+  // the same work. Returns false on devices without an implementation.
+  // Keep last for vtable/ABI stability.
+  virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
+                              int /*dst_slot*/) { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

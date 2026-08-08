@@ -3,12 +3,29 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
+#include <random>
 #include <vector>
 #include "span.h"
 #include "sampling_distribution.h"
 
 namespace Generators {
+
+// Inputs: probability vector probs (e.g. draft softmax), top_k, top_p, temperature
+// Output: full-vocab sampling distribution with zeros outside the kept set
+inline std::vector<float> SamplingDistributionFromProbs(std::span<const float> probs,
+                                                        int top_k, float top_p,
+                                                        float temperature) {
+  std::vector<float> scores(probs.size());
+  for (size_t i = 0; i < probs.size(); i++) {
+    scores[i] = std::log(std::max(probs[i], std::numeric_limits<float>::min()));
+  }
+  SampledCategorical c;
+  ComputeSampledCategorical({scores.data(), scores.size()}, top_k, top_p, temperature, c);
+  return ScatterToFullVocab(c, static_cast<int>(probs.size()));
+}
 
 // Processed target row used by every speculative verifier. Greedy selection stores only the
 // selected token; sampling stores the sparse categorical produced after penalties and truncation.
@@ -17,6 +34,43 @@ struct TargetTokenSelection {
   std::vector<int32_t> indices;
   std::vector<float> probs;
 };
+
+inline float GetSparseTokenProbability(std::span<const int32_t> indices,
+                                       std::span<const float> probs,
+                                       int32_t token) {
+  for (size_t i = 0; i < indices.size(); i++) {
+    if (indices[i] == token)
+      return probs[i];
+  }
+  return 0.0f;
+}
+
+inline int32_t SampleSparseToken(std::span<const int32_t> indices,
+                                 std::span<const float> probs,
+                                 std::mt19937& rng) {
+  std::discrete_distribution<int> distribution(probs.begin(), probs.end());
+  return indices[static_cast<size_t>(distribution(rng))];
+}
+
+inline int32_t SampleCorrectionToken(std::span<const int32_t> target_indices,
+                                     std::span<const float> target_probs,
+                                     std::span<const int32_t> draft_indices,
+                                     std::span<const float> draft_probs,
+                                     std::mt19937& rng) {
+  std::vector<float> residual(target_indices.size());
+  float sum = 0.0f;
+  for (size_t i = 0; i < target_indices.size(); ++i) {
+    const float diff = target_probs[i] -
+                       GetSparseTokenProbability(draft_indices, draft_probs, target_indices[i]);
+    residual[i] = diff > 0.0f ? diff : 0.0f;
+    sum += residual[i];
+  }
+  if (sum > 0.0f) {
+    std::discrete_distribution<int> distribution(residual.begin(), residual.end());
+    return target_indices[static_cast<size_t>(distribution(rng))];
+  }
+  return SampleSparseToken(target_indices, target_probs, rng);
+}
 
 inline void ComputeTargetTokenSelection(std::span<const float> logits, int current_length,
                                         std::span<const int32_t> prefix, bool greedy,
@@ -41,11 +95,7 @@ inline void ComputeTargetTokenSelection(std::span<const float> logits, int curre
 }
 
 inline float GetTargetTokenProbability(const TargetTokenSelection& selection, int32_t token) {
-  for (size_t i = 0; i < selection.indices.size(); i++) {
-    if (selection.indices[i] == token)
-      return selection.probs[i];
-  }
-  return 0.0f;
+  return GetSparseTokenProbability(selection.indices, selection.probs, token);
 }
 
 inline std::vector<float>& DensifyTargetTokenSelection(const TargetTokenSelection& selection,
