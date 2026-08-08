@@ -387,6 +387,27 @@ class QuantConfig:
         for node in extra_options.get("nodes_to_exclude", []) or []:
             overrides.append(Override(match={"name": node}, exclude=True))
 
+        # Optional structured per-node overrides supplied as JSON via `quant_config`.
+        # Accepts an inline JSON string or a file path. The JSON may be either a bare list
+        # of override dicts (``[{"match": {...}, "type": "int8"}, ...]``) or an object with
+        # an ``"overrides"`` key. These augment the flat placement/exclusion overrides above,
+        # letting callers set arbitrary per-node bit-widths (e.g. all dense MatMuls -> int8)
+        # while the MoE / block-size / method knobs still come from the flat extra_options.
+        quant_config_json = extra_options.get("quant_config")
+        if quant_config_json:
+            if isinstance(quant_config_json, str):
+                stripped = quant_config_json.strip()
+                if stripped.startswith("[") or stripped.startswith("{"):
+                    loaded = json.loads(stripped)
+                else:
+                    with open(stripped, encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+            else:
+                loaded = quant_config_json
+            override_dicts = loaded.get("overrides", []) if isinstance(loaded, dict) else loaded
+            for override_dict in override_dicts:
+                overrides.append(Override.from_dict(override_dict))
+
         is_symmetric = extra_options.get("is_symmetric", True)
         weights = WeightsConfig(
             type=weights_type,

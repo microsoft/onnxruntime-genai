@@ -311,3 +311,42 @@ def test_extra_options_runtime_and_prepack_knobs():
     assert cfg.runtime.matmulnbits_weights_prepacked == 2
     assert cfg.moe.weights_prepacked == 1
     assert cfg.moe.block_size == 64
+
+
+def test_extra_options_quant_config_json_string_overrides():
+    cfg = QuantConfig.from_extra_options(
+        {"quant_config": '[{"match": {"name": "/lm_head/MatMul"}, "type": "int8"}]'},
+        precision="int4",
+    )
+    assert cfg.weights.overrides == [Override(match={"name": "/lm_head/MatMul"}, type="int8")]
+
+
+def test_extra_options_quant_config_object_form_and_flat_merge():
+    cfg = QuantConfig.from_extra_options(
+        {
+            "algo_config": "rtn_last",
+            "nodes_to_exclude": ["/model/embed_tokens/Gather"],
+            "quant_config": {"overrides": [{"match": {"name": "/model/layers.0/attn/o_proj/MatMul"}, "type": "int8"}]},
+        },
+        precision="int4",
+    )
+    assert cfg.weights.overrides == [
+        Override(match={"preset": "last_matmul"}, type="int8"),
+        Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True),
+        Override(match={"name": "/model/layers.0/attn/o_proj/MatMul"}, type="int8"),
+    ]
+
+
+def test_extra_options_quant_config_from_file(tmp_path):
+    path = tmp_path / "quant_config.json"
+    path.write_text(json.dumps({"overrides": [{"match": {"name": "/lm_head/MatMul"}, "exclude": True}]}))
+    cfg = QuantConfig.from_extra_options({"quant_config": str(path)}, precision="int4")
+    assert cfg.weights.overrides == [Override(match={"name": "/lm_head/MatMul"}, exclude=True)]
+
+
+def test_extra_options_quant_config_rejects_unknown_field():
+    with pytest.raises(ValueError, match="unknown override field"):
+        QuantConfig.from_extra_options(
+            {"quant_config": '[{"match": {"name": "/lm_head/MatMul"}, "bits": 8}]'},
+            precision="int4",
+        )
