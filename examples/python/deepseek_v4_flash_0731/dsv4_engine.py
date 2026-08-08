@@ -101,6 +101,31 @@ _GRAPH_WARMUP = 3
 _PROGRESS_EVERY = 16
 
 
+def _truncated_distribution(torch, rows, top_k, top_p, temperature):
+    """Return token ids and normalized probabilities after top-k/top-p filtering."""
+    top = torch.topk(rows, top_k, dim=-1)
+    probs = torch.softmax(top.values.float() / temperature, dim=-1)
+    if top_p < 1.0:
+        remove = (probs.cumsum(dim=-1) - probs) >= top_p
+        probs.masked_fill_(remove, 0.0)
+        probs /= probs.sum(dim=-1, keepdim=True)
+    return top.indices, probs
+
+
+def _sample_rows(torch, probs, rng):
+    """One categorical draw per row, by inverse CDF.
+
+    `torch.multinomial` renormalizes and validates on every call, which is a
+    measurable share of the step at these tiny row widths (k = 32).  Scaling the
+    uniform by the CDF's last column instead makes the draw correct for
+    unnormalized rows too, so a caller can skip its own renormalization.
+    """
+    cdf = probs.cumsum(dim=-1)
+    u = torch.rand(probs.shape[0], 1, device=probs.device, generator=rng)
+    pick = torch.searchsorted(cdf, u * cdf[:, -1:])
+    return pick.clamp_(max=probs.shape[-1] - 1)
+
+
 class ProtocolError(RuntimeError):
     pass
 
@@ -669,7 +694,7 @@ class _Worker:
             "decode_tok_s": (steps * n) / t_decode if steps and t_decode else 0.0,
         }
 
-    def generate(self, prompts, max_new_tokens, eos_token_ids, chan):
+    def generate(self, prompts, max_new_tokens, eos_token_ids, chan, sampling=None):
         """Decode a batch of prompts.  The ranks agree on every token they emit.
 
         Every row steps on every iteration, finished ones included. The step costs
@@ -677,10 +702,15 @@ class _Worker:
         and holding the batch shape fixed is what lets the step stay a replayable
         graph.
         """
+        sampling = sampling or {}
         if self.mtp is not None and self.dist_ready and self.batch == 1:
-            return self._generate_spec(prompts, max_new_tokens, eos_token_ids, chan)
+            return self._generate_spec(prompts, max_new_tokens, eos_token_ids, chan,
+                                       sampling=sampling)
         if self.dist_ready and os.environ.get("DSV4_HOST_TOKEN_SYNC") != "1":
-            return self._generate_device(prompts, max_new_tokens, eos_token_ids, chan)
+            return self._generate_device(prompts, max_new_tokens, eos_token_ids, chan,
+                                         sampling=sampling)
+        if sampling.get("do_sample"):
+            raise ProtocolError("sampling requires device-side rank agreement")
         return self._generate_host(prompts, max_new_tokens, eos_token_ids, chan)
 
     # -- decode: agreement on the device ------------------------------------ #
@@ -715,7 +745,7 @@ class _Worker:
                         "gap": float(h[s, :, B + b].min())})
         return out
 
-    def _generate_device(self, prompts, max_new_tokens, eos_token_ids, chan):
+    def _generate_device(self, prompts, max_new_tokens, eos_token_ids, chan, sampling=None):
         """Decode with the token decided by an on-device all-gather.
 
         The host never sees a token before the step that consumes it is launched.
@@ -728,6 +758,15 @@ class _Worker:
         exactly as many replays as before.
         """
         torch, dist = self.torch, self.dist
+        sampling = sampling or {}
+        do_sample = bool(sampling.get("do_sample"))
+        top_k = int(sampling.get("top_k", 0))
+        top_p = float(sampling.get("top_p", 1.0))
+        temperature = float(sampling.get("temperature", 1.0))
+        rng = None
+        if do_sample and self.rank == 0:
+            rng = torch.Generator(device="cuda")
+            rng.manual_seed(int(sampling.get("random_seed", 0)))
         logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
         n, B, W = len(prompts), self.batch, self.world
         eos = set(eos_token_ids)
@@ -788,9 +827,16 @@ class _Worker:
                         break
                 if step % _PROGRESS_EVERY == 0:
                     chan.send({"event": "progress", "rank": self.rank, "step": step})
-                top = torch.topk(logits, 2, dim=-1)
-                send[:B].copy_(top.indices[:, 0])
-                torch.sub(top.values[:, 0], top.values[:, 1], out=send[B:2 * B])
+                if do_sample and self.rank == 0:
+                    indices, probs = _truncated_distribution(
+                        torch, logits, top_k, top_p, temperature)
+                    picked = torch.multinomial(probs, 1, generator=rng)
+                    send[:B].copy_(indices.gather(1, picked).squeeze(1))
+                    send[B:2 * B].zero_()
+                else:
+                    top = torch.topk(logits, 2, dim=-1)
+                    send[:B].copy_(top.indices[:, 0])
+                    torch.sub(top.values[:, 0], top.values[:, 1], out=send[B:2 * B])
                 if poll and self._abort_pending(chan):
                     send[2 * B] = 1.0
                 # The one collective of the step.  Unconditional on every rank, and
@@ -823,7 +869,8 @@ class _Worker:
         out = self._reply(produced, stop, finite, lens, n, t_prefill, t_decode, steps)
         # Only rank 0's copy is read, and it is the same on every rank anyway.
         if self.rank == 0:
-            out["disagreements"] = (self._disagreements(hist, last + 1)
+            out["disagreements"] = ([] if do_sample else
+                                    self._disagreements(hist, last + 1)
                                     if max_steps and last >= 0 else [])
         return out
 
@@ -1031,7 +1078,7 @@ class _Worker:
         dist.broadcast(pick, src=0)
         return int(pick)
 
-    def _generate_spec(self, prompts, max_new_tokens, eos_token_ids, chan):
+    def _generate_spec(self, prompts, max_new_tokens, eos_token_ids, chan, sampling=None):
         """Draft a block with DSpark, verify it with the target, keep the prefix.
 
         The target's own prediction at the first rejected position is always kept, so
@@ -1044,6 +1091,16 @@ class _Worker:
         from the accepted position overwrites exactly the rejected entries.
         """
         torch, dist = self.torch, self.dist
+        sampling = sampling or {}
+        do_sample = bool(sampling.get("do_sample"))
+        top_k = int(sampling.get("top_k", 0))
+        top_p = float(sampling.get("top_p", 1.0))
+        temperature = float(sampling.get("temperature", 1.0))
+        rng = None
+        if do_sample and self.rank == 0:
+            rng = torch.Generator(device="cuda")
+            rng.manual_seed(int(sampling.get("random_seed", 0)))
+
         if self.batch != 1:
             raise ProtocolError("speculative decode is batch 1 only")
         logits, lens, limits, t_prefill, finite = self._prefill(prompts, max_new_tokens)
@@ -1059,7 +1116,17 @@ class _Worker:
         debug = int(os.environ.get("DSV4_SPEC_DEBUG", "0"))
 
         past = lens[0]
-        tok = torch.argmax(logits[0]).view(1, 1)
+        if do_sample and self.rank == 0:
+            # `logits[0]` is a bare vocab vector; the helper and the gather below
+            # both want the row dimension the verify path already has.
+            first_idx, first_prob = _truncated_distribution(
+                torch, logits[:1], top_k, top_p, temperature)
+            first_pick = torch.multinomial(first_prob, 1, generator=rng)
+            tok = first_idx.gather(1, first_pick).view(1, 1)
+        else:
+            tok = torch.argmax(logits[0]).view(1, 1)
+        if do_sample:
+            dist.broadcast(tok, src=0)
         produced[0].append(int(tok))
         if produced[0][0] in eos:
             stop[0] = "eos"
@@ -1067,6 +1134,9 @@ class _Worker:
         gathered = torch.zeros((self.world, K + 3), dtype=torch.float32, device="cuda")
         pos_idx = torch.arange(K + 1, device="cuda")
         mism_tail = torch.ones(1, dtype=torch.bool, device="cuda")
+        # Placeholders for the ranks that do no verification work while sampling.
+        zero_j = torch.zeros((), device="cuda")
+        zero_new = torch.zeros(K + 1, dtype=torch.int64, device="cuda")
         self._prime_ring(past)
 
         while len(produced[0]) < limit and stop[0] not in ("eos", "abort"):
@@ -1113,26 +1183,61 @@ class _Worker:
             L = cap if conf_t <= 0 else self._plan_block(
                 conf, cap, conf_t, cost, 1000 * t_draft / max(steps, 1))
             full = self._step(cand[:, :L + 1], past_t, full=True)
-            preds = torch.argmax(full[0], dim=-1)
+            # Sampled verification never looks at the target's argmax, and a rank
+            # whose vote loses the collective needs neither, so the full-vocab
+            # argmax is only computed where it is actually read.
+            preds = None if do_sample else torch.argmax(full[0], dim=-1)
             t_verify += time.time() - t2
-            if debug and self.rank == 0 and steps < debug:
+            if debug and self.rank == 0 and steps < debug and preds is not None:
                 print(f"[spec {steps}] draft={cand[0].tolist()} target={preds.tolist()}",
                       file=sys.stderr, flush=True)
-            match = (cand[0, 1:L + 1] == preds[:L])
-            # The sentinel makes argmax return L when every draft matched, so the
-            # accepted length stays on device: reading it here would cost a sync and
-            # the collective below overwrites it with rank 0's value anyway.
-            mism = torch.cat([~match, mism_tail])
-            j_dev = mism.float().argmax()
-            # Fixed-length payload, so the slice no longer needs a host-side j.
-            # Below j the accepted token is the draft; at j it is the target's own
-            # prediction; past j is don't-care and the length field masks it.
-            new = torch.where(pos_idx[:L + 1] < j_dev,
-                              torch.cat([cand[0, 1:L + 1], cand[0, :1]]), preds[:L + 1])
-            # Per-slot hit rate, independent of the prefix rule: it separates "the
-            # drafter is weak everywhere" from "it is fine but dies with depth".
-            pos_hit[:L] += match.float()
-            pos_n[:L] += 1
+            drafts = cand[0, 1:L + 1]
+            if do_sample and self.rank == 0:
+                target_idx, target_prob = _truncated_distribution(
+                    torch, full[0], top_k, top_p, temperature)
+                # A draft is accepted with probability p_target(draft); a draft that
+                # fell outside the nucleus has probability 0 and always rejects.
+                draft_slot = target_idx[:L].eq(drafts[:, None])
+                draft_prob = (target_prob[:L] * draft_slot).sum(dim=-1)
+                match = torch.rand(L, device="cuda", generator=rng) < draft_prob
+                mism = torch.cat([~match, mism_tail])
+                j_dev = mism.float().argmax()
+
+                # Rejection redraws from the target with the rejected draft removed;
+                # the trailing bonus row draws from the target unchanged.  Both are
+                # one batched draw, and `_sample_rows` tolerates unnormalized rows.
+                correction_prob = target_prob[:L].masked_fill(draft_slot, 0.0)
+                correction_prob = torch.where(
+                    correction_prob.sum(dim=-1, keepdim=True) > 0,
+                    correction_prob, target_prob[:L])
+                choice = _sample_rows(
+                    torch, torch.cat([correction_prob, target_prob[L:]]), rng)
+                sampled = target_idx.gather(1, choice).squeeze(1)
+                new = torch.where(pos_idx[:L + 1] < j_dev,
+                                  torch.cat([drafts, cand[0, :1]]), sampled)
+                pos_hit[:L] += match.float()
+                pos_n[:L] += 1
+            elif do_sample:
+                # Rank 0's vote wins unconditionally, so the other ranks skip the
+                # verification math entirely and contribute a placeholder.
+                j_dev = zero_j
+                new = zero_new[:L + 1]
+            else:
+                match = (drafts == preds[:L])
+                # The sentinel makes argmax return L when every draft matched, so the
+                # accepted length stays on device: reading it here would cost a sync and
+                # the collective below overwrites it with rank 0's value anyway.
+                mism = torch.cat([~match, mism_tail])
+                j_dev = mism.float().argmax()
+                # Fixed-length payload, so the slice no longer needs a host-side j.
+                # Below j the accepted token is the draft; at j it is the target's own
+                # prediction; past j is don't-care and the length field masks it.
+                new = torch.where(pos_idx[:L + 1] < j_dev,
+                                  torch.cat([drafts, cand[0, :1]]), preds[:L + 1])
+                # Per-slot hit rate, independent of the prefix rule: it separates "the
+                # drafter is weak everywhere" from "it is fine but dies with depth".
+                pos_hit[:L] += match.float()
+                pos_n[:L] += 1
 
             # One collective per step, so the ranks cannot pick different lengths.
             vote.zero_()
@@ -1336,7 +1441,8 @@ def _worker_main(a):
             continue
         try:
             reply = w.generate(req["prompts"], req["max_new_tokens"],
-                               req.get("eos_token_ids") or [], chan)
+                               req.get("eos_token_ids") or [], chan,
+                               req.get("sampling"))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1530,9 +1636,12 @@ class DSV4Engine:
 
     # -- inference ---------------------------------------------------------- #
 
-    def generate(self, prompt_ids, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
-        """Greedily continue one prompt.  Returns rank 0's reply dict."""
-        out = self.generate_batch([prompt_ids], max_new_tokens, eos_token_ids, timeout)
+    def generate(self, prompt_ids, max_new_tokens=64, eos_token_ids=(1,), timeout=600,
+                 do_sample=False, top_p=1.0, top_k=0, temperature=1.0, random_seed=0):
+        """Continue one prompt.  Returns rank 0's reply dict."""
+        out = self.generate_batch([prompt_ids], max_new_tokens, eos_token_ids, timeout,
+                                  do_sample=do_sample, top_p=top_p, top_k=top_k,
+                                  temperature=temperature, random_seed=random_seed)
         out["tokens"] = out["tokens"][0]
         out["stop_reason"] = out["stop_reason"][0]
         out["prompt_len"] = out["prompt_lens"][0]
@@ -1560,8 +1669,10 @@ class DSV4Engine:
                 raise ProtocolError(m["error"])
         return msgs[0]
 
-    def generate_batch(self, prompts, max_new_tokens=64, eos_token_ids=(1,), timeout=600):
-        """Greedily continue a batch of prompts.  Returns rank 0's reply dict.
+    def generate_batch(self, prompts, max_new_tokens=64, eos_token_ids=(1,), timeout=600,
+                       do_sample=False, top_p=1.0, top_k=0, temperature=1.0,
+                       random_seed=0):
+        """Continue a batch of prompts.  Returns rank 0's reply dict.
 
         The ranks agree on every token they emit, because their logits agree to
         the last bit almost always but not quite always, and one divergence would
@@ -1577,6 +1688,13 @@ class DSV4Engine:
         if len(prompts) > self.batch:
             raise ValueError(f"{len(prompts)} prompts for an engine built with "
                              f"batch={self.batch}")
+        if do_sample:
+            if top_k < 2:
+                raise ValueError("sampling requires top_k >= 2")
+            if not 0.0 < top_p <= 1.0:
+                raise ValueError("top_p must be in (0, 1]")
+            if temperature <= 0.0:
+                raise ValueError("temperature must be positive")
         prompts = [[int(t) for t in p] for p in prompts]
         for p in prompts:
             if self.max_seq_len and len(p) >= self.max_seq_len:
@@ -1585,7 +1703,10 @@ class DSV4Engine:
         for chan in self.chans:
             chan.send({"cmd": "generate", "prompts": prompts,
                        "max_new_tokens": max_new_tokens,
-                       "eos_token_ids": list(eos_token_ids)})
+                       "eos_token_ids": list(eos_token_ids),
+                       "sampling": {"do_sample": bool(do_sample), "top_p": float(top_p),
+                                    "top_k": int(top_k), "temperature": float(temperature),
+                                    "random_seed": int(random_seed)}})
 
         disagreements = []
         while True:
