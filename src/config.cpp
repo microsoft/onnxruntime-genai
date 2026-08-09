@@ -1216,7 +1216,7 @@ struct Model_Element : JSON::Element {
     }
     if (name == "draft") {
       if (!v_.draft)
-        v_.draft.emplace();
+        v_.draft = Config::Model::Decoder{};
       if (!draft_)
         draft_ = std::make_unique<Decoder_Element>(*v_.draft);
       return *draft_;
