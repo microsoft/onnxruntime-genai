@@ -202,6 +202,15 @@ class DeepSeekV4FlashModel(Model):
         # dev/docs/memory/dsv4_perf_it13_sibling_gemm_fusion.md.
         self.proj_fusion = extra_options.get("dsv4_proj_fused", "0") not in ("0", 0, False)
 
+        # The shared expert is the one pair whose consumer can read the fused tensor: with
+        # `up` omitted, `DSV4SwiGLU` slices the `[.., 2 * mil]` projection itself.  That
+        # makes this fusion *remove* a node per layer instead of relocating one, which is
+        # the shape it13 established as the only one that pays -- 322 fp8 nodes -> 279,
+        # target verify 14.83 -> 14.55 ms, decode 252.5 -> 256.6 tok/s.  It needs an ORT
+        # whose DSV4SwiGLU schema takes one input.
+        self.swiglu_proj_fusion = (
+            extra_options.get("dsv4_swiglu_proj_fused", "1") not in ("0", 0, False))
+
         # The vocabulary projection is the one weight that was left replicated: every rank
         # holds all 4096 x 129280 of it and computes the same logits from the same
         # activation.  At decode that is a pure weight-streaming GEMV -- 1.06 GB at 4.8 TB/s,
@@ -517,7 +526,7 @@ class DeepSeekV4FlashModel(Model):
                        [x, self.init(w, f"{key}/q"), self.init(scale, f"{key}/s")],
                        name, io, shape, domain="com.microsoft", block_size=FP8_BLOCK)
 
-    def proj_fused(self, name, x, keys, sizes, shapes, shard_axis=None):
+    def proj_fused(self, name, x, keys, sizes, shapes, shard_axis=None, split=True):
         """One ``x @ concat(W).T`` in place of several, split back afterwards.
 
         At M == 1 a projection is 1-4 MB, far less than the bytes H200 needs in
@@ -531,11 +540,23 @@ class DeepSeekV4FlashModel(Model):
         The checkpoint's fp8 scales are already expanded to one row per output
         channel, so both the weights and the scales concatenate on axis 0 with
         no alignment constraint on N.
+
+        ``split=False`` hands back the concatenated tensor for a consumer that
+        can slice it itself, which is the only shape of this fusion that pays --
+        see the class comment on ``proj_fusion``.
         """
         io = self.io_dtype
         qs = [self.sd.qweight(k) if hasattr(self.sd, "qweight") else None for k in keys]
+        fused_shape = list(shapes[0][:-1]) + [sum(sizes)]
         if any(q is None for q in qs):
             # Unquantized parity checkpoint: no fp8 layout to concatenate.
+            if not split:
+                ws = [self.sd[k] for k in keys]
+                if shard_axis is not None:
+                    ws = [self.shard(w, shard_axis) for w in ws]
+                w = torch.cat(ws, 0)
+                return self.op("MatMul", [x, self.init(w.T, f"{name}/T", to=io)],
+                               f"{name}/fused", io, fused_shape)
             return [self.proj(f"{name}/{i}", x, k, s, shard_axis=shard_axis)
                     for i, (k, s) in enumerate(zip(keys, shapes))]
 
@@ -551,8 +572,10 @@ class DeepSeekV4FlashModel(Model):
                         [x,
                          self.init(torch.cat(ws, 0), f"{name}/q"),
                          self.init(torch.cat(ss, 0), f"{name}/s")],
-                        f"{name}/fused", io, list(shapes[0][:-1]) + [sum(sizes)],
+                        f"{name}/fused", io, fused_shape,
                         domain="com.microsoft", block_size=FP8_BLOCK)
+        if not split:
+            return fused
 
         outs = [f"{name}/split_{i}" for i in range(len(keys))]
         self.make_node("Split", inputs=[fused, self.const("INT64", list(sizes))],
@@ -1861,7 +1884,13 @@ class DeepSeekV4FlashModel(Model):
         F = ir.DataType.FLOAT
         io, dim, mil = self.io_dtype, self.dim, self.moe_inter_local
 
-        if self.proj_fusion:
+        if self.swiglu_proj_fusion and self.swiglu_fused:
+            sgu = self.proj_fused(f"{name}/sgu", xflat,
+                                  [f"{p}.sw1.weight", f"{p}.sw3.weight"],
+                                  [mil, mil], [[None, mil], [None, mil]],
+                                  shard_axis=0, split=False)
+            sg, su = sgu, None
+        elif self.proj_fusion:
             sg, su = self.proj_fused(f"{name}/sgu", xflat,
                                      [f"{p}.sw1.weight", f"{p}.sw3.weight"],
                                      [mil, mil], [[None, mil], [None, mil]], shard_axis=0)
@@ -1871,8 +1900,10 @@ class DeepSeekV4FlashModel(Model):
         if self.swiglu_fused:
             # The activation stays in the io dtype end to end: the operator widens to
             # float internally, so the two casts around it -- and the six elementwise
-            # passes between them -- leave the graph.
-            sactb = self.op("DSV4SwiGLU", [sg, su], f"{name}/sact", io, [None, mil],
+            # passes between them -- leave the graph.  With one fused projection it also
+            # slices the halves itself, so the fusion costs no `Split`.
+            sactb = self.op("DSV4SwiGLU", [sg] if su is None else [sg, su], f"{name}/sact",
+                            io, [None, mil],
                             domain="com.microsoft", limit=float(self.swiglu_limit or 0.0))
         else:
             sact = self._swiglu(f"{name}/sact",
