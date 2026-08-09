@@ -126,6 +126,30 @@ def _sample_rows(torch, probs, rng):
     return pick.clamp_(max=probs.shape[-1] - 1)
 
 
+def _speculative_sample(torch, target_idx, target_prob, draft_idx, draft_prob,
+                        drafts, rng):
+    """Accept sparse draft samples and draw exact rejection corrections."""
+    draft_slot = target_idx.eq(drafts[:, None])
+    target_draft_prob = (target_prob * draft_slot).sum(dim=-1)
+    sampled_slot = draft_idx.eq(drafts[:, None])
+    sampled_draft_prob = (draft_prob * sampled_slot).sum(dim=-1)
+    accept_prob = (target_draft_prob / sampled_draft_prob.clamp_min(1e-30)).clamp_max_(1.0)
+    accepted = torch.rand(drafts.shape[0], device=drafts.device,
+                          generator=rng) < accept_prob
+
+    # Positive p-q mass can only occur on p's support. Gather q there rather
+    # than materializing either full-vocabulary distribution.
+    same_token = target_idx[:, :, None].eq(draft_idx[:, None, :])
+    q_on_target = (same_token * draft_prob[:, None, :]).sum(dim=-1)
+    correction_prob = (target_prob - q_on_target).clamp_min_(0.0)
+    correction_prob = torch.where(
+        correction_prob.sum(dim=-1, keepdim=True) > 0,
+        correction_prob, target_prob)
+    correction = target_idx.gather(
+        1, _sample_rows(torch, correction_prob, rng)).squeeze(1)
+    return accepted, correction
+
+
 class ProtocolError(RuntimeError):
     pass
 
@@ -253,6 +277,17 @@ class _Worker:
                 mso.log_severity_level = int(os.environ.get("DSV4_MTP_LOG", "3"))
                 mso.add_free_dimension_override_by_name("batch_size", batch)
                 mso.add_free_dimension_override_by_name("main_len", _MH_PAD)
+            custom_ops_override = os.environ.get("ORT_GENAI_CUDA_CUSTOM_OPS")
+            custom_ops_lib = custom_ops_override or os.path.join(
+                os.path.dirname(ort.__file__), "../onnxruntime_genai/libonnxruntime-genai-cuda.so")
+            custom_ops_lib = os.path.abspath(custom_ops_lib)
+            if custom_ops_override and not os.path.exists(custom_ops_lib):
+                raise ProtocolError(f"ORT_GENAI_CUDA_CUSTOM_OPS not found: {custom_ops_lib}")
+            try:
+                mso.register_custom_ops_library(custom_ops_lib)
+            except Exception:
+                if custom_ops_override:
+                    raise
             mprov = (("CUDAExecutionProvider",
                       {"enable_cuda_graph": "1",
                        "arena_extend_strategy": "kSameAsRequested"})
@@ -268,6 +303,7 @@ class _Worker:
             mm = self.mtp.get_modelmeta().custom_metadata_map
             self.mtp_block = int(mm["dsv4_mtp_block_size"])
             self.mtp_window = int(mm["dsv4_window"])
+            self.mtp_sample_top_k = int(mm.get("dsv4_mtp_sample_top_k", "0"))
             # A verify of a K-token block commits at most K + 1 tokens, and every one
             # of them has to fit in the pinned `main_hidden` slab or its main state is
             # silently dropped from the ring.  Nothing downstream would fault.
@@ -944,6 +980,12 @@ class _Worker:
         self.d_past = torch.zeros((B,), dtype=torch.int64, device="cuda")
         self.d_out = torch.zeros((B, K + 1), dtype=torch.int64, device="cuda")
         self.d_conf = torch.zeros((B, K), dtype=torch.float32, device="cuda")
+        self.draft_rng = None
+        if self.mtp_sample_top_k:
+            Q = self.mtp_sample_top_k
+            self.d_uniform = torch.zeros((B, K), dtype=torch.float32, device="cuda")
+            self.d_draft_idx = torch.zeros((B, K, Q), dtype=torch.int64, device="cuda")
+            self.d_draft_prob = torch.zeros((B, K, Q), dtype=torch.float32, device="cuda")
         self.d_mh = torch.zeros((B, _MH_PAD, self.mtp_dim), dtype=torch.bfloat16,
                                 device="cuda")
         self._mtp_skip = ort.RunOptions()
@@ -954,13 +996,18 @@ class _Worker:
             ro.add_run_config_entry("gpu_graph_id", str(parity + 1))
             io = self.mtp.io_binding()
             src = dst = self.mtp_cache[parity]
+            draft_inputs = ([("draft_uniform", self.d_uniform)]
+                            if self.mtp_sample_top_k else [])
             for name, t in ([("main_hidden", self.d_mh), ("input_ids", self.d_tok),
-                             ("past_lens", self.d_past)]
+                             ("past_lens", self.d_past)] + draft_inputs
                             + list(zip(self.mtp_cache_in, src))):
                 io.bind_input(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape),
                               t.data_ptr())
+            draft_outputs = ([("draft_indices", self.d_draft_idx),
+                              ("draft_probs", self.d_draft_prob)]
+                             if self.mtp_sample_top_k else [])
             for name, t in ([("output_ids", self.d_out), ("confidence", self.d_conf)]
-                            + list(zip(self.mtp_cache_out, dst))):
+                            + draft_outputs + list(zip(self.mtp_cache_out, dst))):
                 io.bind_output(name, "cuda", 0, _ELEM[str(t.dtype)], tuple(t.shape),
                                t.data_ptr())
             self._mtp_ro.append(ro)
@@ -1025,6 +1072,8 @@ class _Worker:
         parity = self.mtp_cur
         self.d_mh.copy_(mh)
         self.d_past.fill_(max(past_lens, 0))
+        if self.draft_rng is not None:
+            self.d_uniform.uniform_(generator=self.draft_rng)
         # The writes above are queued on torch's stream, the replay runs on ORT's.
         torch.cuda.current_stream().synchronize()
         self.mtp.run_with_iobinding(self._mtp_io[parity], self._mtp_ro[parity])
@@ -1040,7 +1089,9 @@ class _Worker:
         self.d_tok.copy_(tok)
         self._run_draft(self.mh_hist[:, self.mtp_window - _MH_PAD:], past - _MH_PAD)
         self.mh_valid = 0
-        return self.d_out, self.d_conf
+        draft_dist = ((self.d_draft_idx, self.d_draft_prob)
+                  if self.mtp_sample_top_k else (None, None))
+        return self.d_out, self.d_conf, *draft_dist
 
     def _reslide(self, keep, ran):
         """Re-cut the compressor windows from `ran` positions consumed to `keep` kept.
@@ -1129,6 +1180,10 @@ class _Worker:
         if do_sample and self.rank == 0:
             rng = torch.Generator(device="cuda")
             rng.manual_seed(int(sampling.get("random_seed", 0)))
+        self.draft_rng = None
+        if do_sample and self.mtp_sample_top_k:
+            self.draft_rng = torch.Generator(device="cuda")
+            self.draft_rng.manual_seed(int(sampling.get("random_seed", 0)))
 
         if self.batch != 1:
             raise ProtocolError("speculative decode is batch 1 only")
@@ -1170,7 +1225,7 @@ class _Worker:
 
         while len(produced[0]) < limit and stop[0] not in ("eos", "abort"):
             t1 = time.time()
-            cand, conf = self._draft(tok, past)
+            cand, conf, draft_idx, draft_prob = self._draft(tok, past)
             t_draft += time.time() - t1
             past_t = torch.full((1,), past, dtype=torch.int64, device="cuda")
             if debug and steps < debug:
@@ -1224,24 +1279,27 @@ class _Worker:
             if do_sample and self.rank == 0:
                 target_idx, target_prob = _truncated_distribution(
                     torch, full[0], top_k, top_p, temperature)
-                # A draft is accepted with probability p_target(draft); a draft that
-                # fell outside the nucleus has probability 0 and always rejects.
-                draft_slot = target_idx[:L].eq(drafts[:, None])
-                draft_prob = (target_prob[:L] * draft_slot).sum(dim=-1)
-                match = torch.rand(L, device="cuda", generator=rng) < draft_prob
+                if draft_idx is not None:
+                    match, correction = _speculative_sample(
+                        torch, target_idx[:L], target_prob[:L], draft_idx[0, :L],
+                        draft_prob[0, :L], drafts, rng)
+                else:
+                    draft_slot = target_idx[:L].eq(drafts[:, None])
+                    target_draft_prob = (target_prob[:L] * draft_slot).sum(dim=-1)
+                    match = (torch.rand(L, device="cuda", generator=rng)
+                             < target_draft_prob)
+                    correction_prob = target_prob[:L].masked_fill(draft_slot, 0.0)
+                    correction_prob = torch.where(
+                        correction_prob.sum(dim=-1, keepdim=True) > 0,
+                        correction_prob, target_prob[:L])
+                    correction = target_idx[:L].gather(
+                        1, _sample_rows(torch, correction_prob, rng)).squeeze(1)
                 mism = torch.cat([~match, mism_tail])
                 j_dev = mism.float().argmax()
 
-                # Rejection redraws from the target with the rejected draft removed;
-                # the trailing bonus row draws from the target unchanged.  Both are
-                # one batched draw, and `_sample_rows` tolerates unnormalized rows.
-                correction_prob = target_prob[:L].masked_fill(draft_slot, 0.0)
-                correction_prob = torch.where(
-                    correction_prob.sum(dim=-1, keepdim=True) > 0,
-                    correction_prob, target_prob[:L])
-                choice = _sample_rows(
-                    torch, torch.cat([correction_prob, target_prob[L:]]), rng)
-                sampled = target_idx.gather(1, choice).squeeze(1)
+                bonus = target_idx[L:].gather(
+                    1, _sample_rows(torch, target_prob[L:], rng)).squeeze(1)
+                sampled = torch.cat([correction, bonus])
                 new = torch.where(pos_idx[:L + 1] < j_dev,
                                   torch.cat([drafts, cand[0, :1]]), sampled)
                 pos_hit[:L] += match.float()

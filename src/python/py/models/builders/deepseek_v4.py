@@ -225,6 +225,18 @@ class DeepSeekV4FlashModel(Model):
         self.head_dtype = _hd[extra_options.get("dsv4_head_dtype", "io")]
         self.markov_dtype = _hd[extra_options.get("dsv4_markov_dtype",
                                                   extra_options.get("dsv4_head_dtype", "io"))]
+        self.mtp_sample_top_k = int(extra_options.get("dsv4_mtp_sample_top_k", 0) or 0)
+        if self.mtp_sample_top_k < 0:
+            raise ValueError("dsv4_mtp_sample_top_k must be non-negative")
+        self.mtp_sample_top_p = float(extra_options.get("dsv4_mtp_sample_top_p", 1.0))
+        self.mtp_sample_temperature = float(
+            extra_options.get("dsv4_mtp_sample_temperature", 1.0))
+        if not 0.0 < self.mtp_sample_top_p <= 1.0:
+            raise ValueError("dsv4_mtp_sample_top_p must be in (0, 1]")
+        if self.mtp_sample_temperature <= 0.0:
+            raise ValueError("dsv4_mtp_sample_temperature must be positive")
+        if self.mtp_sample_top_k:
+            self.graph.opset_imports["com.microsoft.genai"] = 1
 
         # Two knobs that drain the float32 island the reference implementation leaves
         # in the decode path.  Each cast there is a full kernel launch on a [1, dim]
@@ -2088,6 +2100,9 @@ class DeepSeekV4FlashModel(Model):
         self.model.metadata_props.update({
             "dsv4_mtp_stages": str(self.n_mtp),
             "dsv4_mtp_block_size": str(K),
+            "dsv4_mtp_sample_top_k": str(self.mtp_sample_top_k),
+            "dsv4_mtp_sample_top_p": str(self.mtp_sample_top_p),
+            "dsv4_mtp_sample_temperature": str(self.mtp_sample_temperature),
             "dsv4_mtp_noise_token": str(self.noise_token),
             "dsv4_window": str(W),
             "dsv4_mtp_cache_block_size": str(cache_block),
@@ -2101,6 +2116,19 @@ class DeepSeekV4FlashModel(Model):
         self.output_names = {"output_ids": "output_ids", "confidence": "confidence"}
         self.output_types = {"output_ids": ir.DataType.INT64, "confidence": ir.DataType.FLOAT}
         self.output_shapes = {"output_ids": [B, K + 1], "confidence": [B, K]}
+        if self.mtp_sample_top_k:
+            Q = self.mtp_sample_top_k
+            if Q > self.vocab_size:
+                raise ValueError(f"dsv4_mtp_sample_top_k={Q} exceeds vocab size {self.vocab_size}")
+            self.input_names["draft_uniform"] = "draft_uniform"
+            self.input_types["draft_uniform"] = ir.DataType.FLOAT
+            self.input_shapes["draft_uniform"] = [B, K]
+            self.output_names.update({"draft_indices": "draft_indices",
+                                      "draft_probs": "draft_probs"})
+            self.output_types.update({"draft_indices": ir.DataType.INT64,
+                                      "draft_probs": ir.DataType.FLOAT})
+            self.output_shapes.update({"draft_indices": [B, K, Q],
+                                       "draft_probs": [B, K, Q]})
         self.cache_spec = []
         for s in range(self.n_mtp):
             lid = self.num_layers + s
@@ -2368,7 +2396,7 @@ class DeepSeekV4FlashModel(Model):
         w2 = self.init(self.sd[f"{mp}.markov_w2.weight"].T, f"{mp}.markov_w2/T", to=md)
 
         cur = self.op("Squeeze", ["input_ids", self.const("INT64", [1])], "/mtp/tok0", I, [B])
-        ids, embeds = [cur], []
+        ids, embeds, draft_indices, draft_probs = [cur], [], [], []
         for i in range(K):
             e = self.op("Gather", [w1, cur], f"/mtp/mk{i}/embed", md, [B, R], axis=0)
             # The confidence head consumes the embedding in the activation type.
@@ -2378,12 +2406,36 @@ class DeepSeekV4FlashModel(Model):
             li = self.op("Add", [self.op("Gather", [logits, self.const("INT64", i)],
                                          f"/mtp/mk{i}/slice", F, [B, V], axis=1), bf],
                          f"/mtp/mk{i}/logits", F, [B, V])
-            cur = self.op("ArgMax", [li], f"/mtp/mk{i}/argmax", I, [B], axis=-1, keepdims=0)
+            if self.mtp_sample_top_k:
+                Q = self.mtp_sample_top_k
+                uniform = self.op("Gather", ["draft_uniform", self.const("INT64", i)],
+                                  f"/mtp/mk{i}/uniform", F, [B], axis=1)
+                cur, indices, probs = (f"/mtp/mk{i}/sample", f"/mtp/mk{i}/indices",
+                                       f"/mtp/mk{i}/probs")
+                self.make_node(
+                    "FusedTopKSample", inputs=[li, uniform], outputs=[cur, indices, probs],
+                    name=f"/mtp/mk{i}/sample", domain="com.microsoft.genai", top_k=Q,
+                    top_p=self.mtp_sample_top_p, temperature=self.mtp_sample_temperature)
+                self.make_value(cur, I, shape=[B])
+                self.make_value(indices, I, shape=[B, Q])
+                self.make_value(probs, F, shape=[B, Q])
+                draft_indices.append(self.unsq(f"/mtp/mk{i}/indices_u", indices, [1],
+                                               I, [B, 1, Q]))
+                draft_probs.append(self.unsq(f"/mtp/mk{i}/probs_u", probs, [1],
+                                             F, [B, 1, Q]))
+            else:
+                cur = self.op("ArgMax", [li], f"/mtp/mk{i}/argmax", I, [B], axis=-1,
+                              keepdims=0)
             ids.append(cur)
 
         self.make_node("Concat", inputs=[self.unsq(f"/mtp/id{i}", t, [1], I, [B, 1])
                                          for i, t in enumerate(ids)],
                        outputs=["output_ids"], name="/mtp/output_ids", axis=1)
+        if self.mtp_sample_top_k:
+            self.make_node("Concat", inputs=draft_indices, outputs=["draft_indices"],
+                           name="/mtp/draft_indices", axis=1)
+            self.make_node("Concat", inputs=draft_probs, outputs=["draft_probs"],
+                           name="/mtp/draft_probs", axis=1)
 
         me = self.op("Concat", [self.unsq(f"/mtp/me{i}", e, [1], io, [B, 1, R])
                                 for i, e in enumerate(embeds)],

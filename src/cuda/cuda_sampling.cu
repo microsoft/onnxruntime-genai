@@ -90,7 +90,10 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
 template <int kBlockSize>
 __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores, const int* indices, int k,
                                     float p, float temperature, int stride, curandState* curand_states,
-                                    const int* curand_state_indices) {
+                                    const int* curand_state_indices, const float* uniforms = nullptr,
+                                    int64_t* next_token_out_i64 = nullptr,
+                                    int64_t* sparse_indices_out = nullptr,
+                                    float* sparse_probs_out = nullptr) {
   const int batch_idx = blockIdx.x;
   const float* batch_scores = scores + batch_idx * stride;
   const int* batch_indices = indices + batch_idx * stride;
@@ -195,6 +198,11 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
 
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     filtered_logits[i] = (block_sum_exp > 0.0f) ? (expf(filtered_logits[i] - block_max_val) / block_sum_exp) : 0.0f;
+    if (sparse_probs_out) {
+      const int output_index = batch_idx * k + i;
+      sparse_probs_out[output_index] = filtered_logits[i];
+      sparse_indices_out[output_index] = static_cast<int64_t>(batch_indices[i]);
+    }
   }
   __syncthreads();
 
@@ -216,10 +224,14 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   __shared__ float threshold_smem;
 
   if (threadIdx.x == 0) {
-    // Use min to prevent multiplying down the random value, which could introduce bias.
-    // This robustly handles the case where curand_uniform is exactly 1.0.
-    const int state_index = curand_state_indices ? curand_state_indices[batch_idx] : batch_idx;
-    threshold_smem = min(curand_uniform(&curand_states[state_index]), 0.9999999f);
+    if (uniforms) {
+      threshold_smem = min(max(uniforms[batch_idx], 0.0f), 0.9999999f);
+    } else {
+      // Use min to prevent multiplying down the random value, which could introduce bias.
+      // This robustly handles the case where curand_uniform is exactly 1.0.
+      const int state_index = curand_state_indices ? curand_state_indices[batch_idx] : batch_idx;
+      threshold_smem = min(curand_uniform(&curand_states[state_index]), 0.9999999f);
+    }
     selected_index_smem = k - 1;
   }
   __syncthreads();
@@ -234,7 +246,9 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    next_token_out[batch_idx] = batch_indices[selected_index_smem];
+    const int selected_token = batch_indices[selected_index_smem];
+    if (next_token_out) next_token_out[batch_idx] = selected_token;
+    if (next_token_out_i64) next_token_out_i64[batch_idx] = static_cast<int64_t>(selected_token);
   }
 }
 
@@ -361,6 +375,19 @@ void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const floa
   FusedSamplingKernel<block_size><<<grid, block, shared_mem_bytes, stream>>>(
       next_token_out, scores, indices, k, p, temperature, stride,
       curand_states ? curand_states : data->curand_states, curand_state_indices);
+}
+
+void LaunchFusedSampleKernelWithOutput(SamplingData* data, cudaStream_t stream, const float* scores,
+                                       const int* indices, const float* uniforms, int64_t* next_token_out,
+                                       int64_t* sparse_indices_out, float* sparse_probs_out, int k,
+                                       int batch_size, float p, float temperature, int stride) {
+  assert(k <= kFusedSamplingMaxK);
+  constexpr int block_size = 256;
+  constexpr size_t shared_mem_bytes = 2 * block_size * sizeof(float);
+  FusedSamplingKernel<block_size><<<batch_size, block_size, shared_mem_bytes, stream>>>(
+      nullptr, scores, indices, k, p, temperature, stride, nullptr, nullptr, uniforms,
+      next_token_out, sparse_indices_out, sparse_probs_out);
+  CUDA_CHECK_LAUNCH();
 }
 
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, const float* scores_in,

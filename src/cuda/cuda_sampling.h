@@ -57,6 +57,11 @@ void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const floa
                              int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride,
                              curandState* curand_states = nullptr, const int* curand_state_indices = nullptr);
 
+void LaunchFusedSampleKernelWithOutput(SamplingData* data, cudaStream_t stream, const float* scores,
+                                       const int* indices, const float* uniforms, int64_t* next_token_out,
+                                       int64_t* sparse_indices_out, float* sparse_probs_out, int k,
+                                       int batch_size, float p, float temperature, int stride);
+
 void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
                                   int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride,
                                   curandState* curand_states = nullptr, const int* curand_state_indices = nullptr);
