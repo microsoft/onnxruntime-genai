@@ -352,6 +352,10 @@ class _Worker:
         self._logits = {}
         self._graph_io = None
         self._ro_skip = None
+        self._indexer_graph_max_past = (
+            int(os.environ.get("DSV4_INDEXER_GRAPH_MAX_PAST", "0")) if cuda_graph else 0)
+        if self._indexer_graph_max_past < 0:
+            raise ProtocolError("DSV4_INDEXER_GRAPH_MAX_PAST must be non-negative")
         # Second communicator, established later by `init_dist`; until then the
         # rank falls back to routing every token through the engine process.
         self.dist = None
@@ -459,14 +463,27 @@ class _Worker:
             for _ in range(_GRAPH_WARMUP):
                 self.sess.run_with_iobinding(self._graph_io[parity], self._ro_skip)
 
+        env_name = "ORT_LIGHTNING_INDEXER_CAPTURE_MAX_PAST"
+        old_bound = os.environ.get(env_name)
+        if self._indexer_graph_max_past:
+            os.environ[env_name] = str(self._indexer_graph_max_past)
+
         # Then record both graphs, so that the first real decode step replays rather
         # than paying for a capture.  The EP wants `min_num_runs_before_cuda_graph
         # _capture_` ordinary runs per id before it records, so drive each id until
         # it stops executing and starts replaying.
-        for parity in range(2):
-            for _ in range(_GRAPH_WARMUP):
-                self.sess.run_with_iobinding(self._graph_io[parity], self._ro[parity])
-        self.torch.cuda.synchronize()
+        try:
+            for parity in range(2):
+                for _ in range(_GRAPH_WARMUP):
+                    self.sess.run_with_iobinding(self._graph_io[parity],
+                                                 self._ro[parity])
+            self.torch.cuda.synchronize()
+        finally:
+            if self._indexer_graph_max_past:
+                if old_bound is None:
+                    os.environ.pop(env_name, None)
+                else:
+                    os.environ[env_name] = old_bound
 
     # -- paged cache ------------------------------------------------------- #
 
@@ -664,6 +681,15 @@ class _Worker:
         torch = self.torch
         if len(prompts) > self.batch:
             raise ProtocolError("%d prompts for a batch-%d worker" % (len(prompts), self.batch))
+        lens = [len(p) for p in prompts]
+        limits = [max(0, min(max_new_tokens, self.max_seq_len - n if self.max_seq_len
+                             else max_new_tokens)) for n in lens]
+        needed = max((n + limit for n, limit in zip(lens, limits)), default=0)
+        if self._indexer_graph_max_past and needed > self._indexer_graph_max_past:
+            raise ProtocolError(
+                f"request needs {needed} tokens but the target graph was captured for "
+                f"DSV4_INDEXER_GRAPH_MAX_PAST={self._indexer_graph_max_past}")
+
         for buf in self.cache:
             for t in buf:
                 t.zero_()
@@ -671,10 +697,6 @@ class _Worker:
         self._abort = False
         if self.mtp is not None:
             self._init_mtp_state()
-
-        lens = [len(p) for p in prompts]
-        limits = [max(0, min(max_new_tokens, self.max_seq_len - n if self.max_seq_len
-                             else max_new_tokens)) for n in lens]
 
         t0 = time.time()
         rows = [self._prefill_row(b, p) for b, p in enumerate(prompts)]
