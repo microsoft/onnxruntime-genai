@@ -254,11 +254,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
   // Update the decoder inputs with the next tokens
   decoder_input_ids_.Update(next_tokens);
-  const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
-
-  auto rnn_states_prev_data = rnn_states_prev_->GetDeviceSpan<int32_t>();
-  auto rnn_states_data = rnn_states_->GetDeviceSpan<int32_t>();
-  rnn_states_prev_data.CopyFrom(rnn_states_data);
+  UpdateRnnStates(next_indices);
 
   auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
   *data += 1;
@@ -271,6 +267,44 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
+}
+
+void MarianState::UpdateRnnStates(DeviceSpan<int32_t> next_indices) {
+  if (next_indices.empty()) {
+    rnn_states_prev_->GetByteSpan().CopyFrom(rnn_states_->GetByteSpan());
+    return;
+  }
+
+  const size_t batch_beam_size = params_->BatchBeamSize();
+  auto indices = next_indices.CopyDeviceToCpu();
+  if (indices.size() != batch_beam_size) {
+    throw std::runtime_error("MarianState::UpdateRnnStates: beam index count does not match batch_size * num_beams");
+  }
+
+  auto source = rnn_states_->GetByteSpan();
+  auto destination = rnn_states_prev_->GetByteSpan();
+  constexpr size_t rnn_state_slots = 3;
+  if (source.size() != destination.size() || source.size() % (rnn_state_slots * batch_beam_size) != 0) {
+    throw std::runtime_error("MarianState::UpdateRnnStates: recurrent state buffers have incompatible sizes");
+  }
+  const size_t bytes_per_beam = source.size() / (rnn_state_slots * batch_beam_size);
+
+  for (size_t slot = 0; slot < rnn_state_slots; ++slot) {
+    for (size_t destination_beam = 0; destination_beam < batch_beam_size; ++destination_beam) {
+      const int32_t source_beam = indices[destination_beam];
+      if (source_beam < 0 || static_cast<size_t>(source_beam) >= batch_beam_size) {
+        throw std::runtime_error("MarianState::UpdateRnnStates: beam index is out of range");
+      }
+
+      auto source_state = source.subspan(
+          (slot * batch_beam_size + static_cast<size_t>(source_beam)) * bytes_per_beam,
+          bytes_per_beam);
+      auto destination_state = destination.subspan(
+          (slot * batch_beam_size + destination_beam) * bytes_per_beam,
+          bytes_per_beam);
+      destination_state.CopyFrom(source_state);
+    }
+  }
 }
 
 }  // namespace Generators

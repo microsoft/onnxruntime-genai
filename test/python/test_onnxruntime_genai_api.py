@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import shutil
-import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -187,6 +186,23 @@ def test_greedy_search(test_data_path, relative_model_path):
     for i in range(batch_size):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
     assert int(generator.token_count()) == len(generator.get_sequence(0))
+
+
+def test_marian_batch_sequence_values(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "marian-batch-values")
+    model = og.Model(model_path)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(batch_size=2)
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([[5, 32000], [7, 8]], dtype=np.int32))
+    generated_start = generator.token_count()
+    generator.generate_next_token()
+
+    assert generated_start == 2
+    assert generator.get_sequence(0)[generated_start] == 2
+    assert generator.get_sequence(1)[generated_start] == 3
 
 
 @pytest.mark.parametrize(
@@ -1191,6 +1207,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
 #
 # Graph capture requires expensive recompilation and model generation, so we only
 # build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
+
 
 @pytest.mark.graph_capture
 @pytest.mark.parametrize("device", devices)

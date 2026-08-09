@@ -651,6 +651,26 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
 void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
                                            const std::shared_ptr<Tensor>& video_grid_thw,
                                            const std::shared_ptr<Tensor>& second_per_grid_ts) {
+  // Typical Qwen2-VL grids are far below this threshold (usually <= 10^3); this limit is
+  // intentionally conservative and blocks pathological dimensions that can explode vision_len.
+  const auto validate_grid_tensor = [&](const std::shared_ptr<Tensor>& grid_tensor, const char* tensor_name) {
+    if (!grid_tensor) {
+      return;
+    }
+
+    if (grid_tensor->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      throw std::runtime_error(std::string(tensor_name) + " must be int64.");
+    }
+
+    ValidateQwen2VLGridTensorValues(grid_tensor->GetData<int64_t>(), grid_tensor->GetElementCount(), tensor_name);
+  };
+
+  validate_grid_tensor(image_grid_thw, "image_grid_thw");
+  validate_grid_tensor(video_grid_thw, "video_grid_thw");
+  if (second_per_grid_ts && second_per_grid_ts->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error("second_per_grid_ts must be float32.");
+  }
+
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
   second_per_grid_ts_ = second_per_grid_ts;
@@ -817,7 +837,9 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
       // 2. Fill Vision Part
       st_idx = max_pos_for_batch + 1;
+      ValidateQwen2VLVisionLengthFitsSequence(llm_grid_t, llm_grid_h, llm_grid_w, ed, seq_len);
       int64_t vision_len = llm_grid_t * llm_grid_h * llm_grid_w;
+
       for (int64_t s = 0; s < vision_len; ++s) {
         int64_t gt = s / (llm_grid_h * llm_grid_w);
         int64_t gh = (s / llm_grid_w) % llm_grid_h;
