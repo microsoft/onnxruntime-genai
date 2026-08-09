@@ -100,6 +100,19 @@ _GRAPH_WARMUP = 3
 # step no longer talks to it.
 _PROGRESS_EVERY = 16
 
+# ORT settings this model needs that ORT cannot default on its own.  Applied to
+# the rank workers with setdefault, so an explicit setting still wins.
+#   ORT_DSV4_FP4_DEEPGEMM  the fused fp8 DeepGEMM MoE path is opt-in upstream;
+#     its every precondition is DSV4-specific and its weight conversion is
+#     verified bit-exact at load, so on this model it is simply faster.
+#   ORT_CUSTOM_AR_MAX_BYTES  unbounded by default, which also routes prefill's
+#     multi-megabyte reductions through the custom kernel; that costs
+#     speculative acceptance.  The cap keeps the custom path to decode.
+_ORT_ENV_DEFAULTS = {
+    "ORT_DSV4_FP4_DEEPGEMM": "1",
+    "ORT_CUSTOM_AR_MAX_BYTES": "500000",
+}
+
 
 def _truncated_distribution(torch, rows, top_k, top_p, temperature):
     """Return token ids and normalized probabilities after top-k/top-p filtering."""
@@ -1617,6 +1630,8 @@ class DSV4Engine:
                    LOCAL_RANK=str(rank),
                    LOCAL_WORLD_SIZE=str(self.world), RANK0_IP="127.0.0.1",
                    RANK0_PORT=str(self.port), DSV4_FD=str(child_sock.fileno()))
+        for key, value in _ORT_ENV_DEFAULTS.items():
+            env.setdefault(key, value)
         log = open(os.path.join(self.log_dir, f"dsv4_rank{rank}.log"), "w")
         proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "--worker",
