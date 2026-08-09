@@ -63,6 +63,14 @@ def _make_fp8(out_f, in_f, rng):
     return w, s, ref
 
 
+def test_modelopt_nvfp4_dequant_helper_matches_reference():
+    weight, block_scale, global_scale, reference = _make_nvfp4(8, 32, np.random.default_rng(0))
+
+    actual = QM.ModeloptModel._dequant_nvfp4(weight, block_scale, global_scale, name="lm_head")
+
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
 def _build_synthetic_checkpoint(d):
     rng = np.random.default_rng(0)
     hidden, inter, vocab = 32, 16, 40
