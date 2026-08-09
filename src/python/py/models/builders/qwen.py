@@ -2400,43 +2400,24 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self._resolve_mtp_head_quantization(extra_options)
 
     def _resolve_mtp_head_quantization(self, extra_options):
-        """Resolve the MTP head's weight precision from ``mtp_head_fp16`` / ``mtp_head_quant_type``.
+        """Resolve the MTP head's weight precision from ``mtp_head_quant_type``.
 
         Updates ``self._mtp_onnx_dtype`` / ``self._mtp_io_dtype`` / ``self._mtp_extra_options``
         in place. Split out of ``__init__`` so it can be exercised directly by unit tests.
         """
-        # MTP head precision selection. The checkpoint stores the mtp.* weights in
-        # bf16, so by default (neither option set) the head inherits the main model's
-        # precision. Two overrides trade off draft cost vs. acceptance rate:
-        #   * mtp_head_fp16 : dense fp16 MoE head. Highest acceptance, but the dense
-        #     fp16 MoE op is GPU-compute-bound and dominates the speculative step.
-        #   * mtp_head_quant_type : head quantization scheme (int4/int8/mxfp4/nvfp4),
-        #     same style as `moe_quant_type`. e.g. int8 is ~2x cheaper to draft than the
-        #     dense fp16 head (weight-only int8 vs dense fp16 GEMM) while keeping most of
-        #     the acceptance, since the tiny single-layer head tolerates int8 well.
-        # The two are mutually exclusive.
+        # MTP head precision selection. The checkpoint stores the mtp.* weights in bf16, so by
+        # default the head inherits the main model's precision. `mtp_head_quant_type` overrides
+        # that with a head quantization scheme (int4/int8/mxfp4/nvfp4), same style as
+        # `moe_quant_type`: int8 is ~2x cheaper to draft than a dense fp16 head while keeping
+        # most of the acceptance, since the tiny single-layer head tolerates int8 well.
         supported_mtp_head_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
 
-        _mtp_head_fp16 = str(extra_options.get("mtp_head_fp16", "false")).lower() in ("1", "true", "yes")
         _mtp_head_quant_type = extra_options.get("mtp_head_quant_type")
-        # Backward compatibility: `mtp_head_int8` is deprecated in favor of `mtp_head_quant_type=int8`.
-        if str(extra_options.get("mtp_head_int8", "false")).lower() in ("1", "true", "yes"):
-            print("WARNING: 'mtp_head_int8' is deprecated. Use 'mtp_head_quant_type=int8' instead.")
-            if _mtp_head_quant_type is None:
-                _mtp_head_quant_type = "int8"
-        if _mtp_head_quant_type is not None and _mtp_head_quant_type not in supported_mtp_head_quant_types:
-            raise ValueError(
-                f"mtp_head_quant_type must be one of {sorted(supported_mtp_head_quant_types)}, got '{_mtp_head_quant_type}'."
-            )
-        if _mtp_head_fp16 and _mtp_head_quant_type is not None:
-            raise ValueError("mtp_head_fp16 and mtp_head_quant_type are mutually exclusive.")
-        if _mtp_head_fp16:
-            self._mtp_onnx_dtype = ir.DataType.FLOAT16
-            self._mtp_io_dtype = ir.DataType.FLOAT16
-            for _k in ("moe_quant_type", "use_8bits_moe",
-                       "int4_block_size", "int4_algo_config", "int4_is_symmetric"):
-                self._mtp_extra_options.pop(_k, None)
-        elif _mtp_head_quant_type is not None:
+        if _mtp_head_quant_type is not None:
+            if _mtp_head_quant_type not in supported_mtp_head_quant_types:
+                raise ValueError(
+                    f"mtp_head_quant_type must be one of {sorted(supported_mtp_head_quant_types)}, got '{_mtp_head_quant_type}'."
+                )
             # `mtp_head_quant_type` selects the head's quantization scheme END-TO-END:
             # the routed QMoE experts *and* the head's dense MatMuls (mtp.fc, the attention
             # q/k/v/o projections, the shared expert and the draft lm_head). Before this was
@@ -2479,21 +2460,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 self._mtp_extra_options.setdefault("int4_block_size", 32)
                 self._mtp_extra_options.setdefault("int4_algo_config", "rtn_last")
             self._mtp_extra_options["moe_quant_type"] = _mtp_head_quant_type
-            # OPTIONAL: build the head's lm_head at int4 instead of following the rest of the
-            # head (an int8 head, or `int4_algo_config=rtn_last`, otherwise puts the lm_head at
-            # int8). The head's lm_head only produces DRAFT logits; speculative rejection
-            # sampling corrects the output to the target distribution regardless, so an int4
-            # draft lm_head cannot change OUTPUT accuracy -- it only affects draft acceptance.
-            # Empirically it preserves acceptance and gives a small N>1 sampling-decode speedup
-            # (~5%): the M=1 lm_head GEMV over the large vocab is memory-bound but dominated by
-            # the FP16 activation reads and the vocab-sized output write rather than the weight
-            # bytes, so halving weight precision only trims a little. The int4 head lm_head
-            # differs from the main model's, so the save-time dedup simply skips it (it only
-            # shares byte-identical tensors).
-            if str(extra_options.get("mtp_head_int4_lmhead", "false")).lower() in ("1", "true", "yes"):
-                # `matmul_mixed_precision` is merged on top of whatever `int4_algo_config`
-                # implies, so this wins over the `last_matmul:int8` of the `*_last` aliases.
-                self._mtp_extra_options["matmul_mixed_precision"] = "last_matmul:int4"
 
     def _gemmfloat8_output_dtype_attr(self):
         if self.io_dtype == ir.DataType.FLOAT16:
@@ -3298,14 +3264,6 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
 
-        # Optionally emit the head's own post-final-norm hidden state as an extra graph
-        # output (`hidden_states_out`). This is what a multi-token (num_speculative_tokens>1)
-        # self-speculative loop feeds back as the `hidden_states` input of the next chained
-        # draft step (the module is recurrent: h_out = norm(layer(fc(embed, h_in))), same as
-        # vLLM's Qwen3.5 MTP). The output name differs from the `hidden_states` INPUT to avoid an
-        # ONNX name collision. Harmless when unused (genai's ExtraOutputs just ignores it).
-        self._emit_hidden_output = str(extra_options.get("mtp_emit_hidden", "false")).lower() in ("1", "true", "yes")
-
     def make_model(self, input_path):
         # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
         self.make_inputs_and_outputs()
@@ -3338,15 +3296,19 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         mtp_norm_output = self.layernorm_attrs["output_0"]
         self.make_lm_head(_LinearWeight(self._lm_head_weight))
 
-        if self._emit_hidden_output:
-            hs_out = "hidden_states_out"
-            self.make_node(
-                "Identity", inputs=[mtp_norm_output], outputs=[hs_out],
-                name="/model/mtp/hidden_states_out/Identity",
-            )
-            hs_val = self.make_value(hs_out, self.io_dtype,
-                                     shape=["batch_size", "sequence_length", self.hidden_size])
-            self.model.graph.outputs.append(hs_val)
+        # A multi-token (num_speculative_tokens>1) loop feeds this back as the next chained
+        # draft's `hidden_states` input, since the module is recurrent:
+        # h_out = norm(layer(fc(embed, h_in))), same as vLLM's Qwen3.5 MTP. The name differs from
+        # the `hidden_states` INPUT to avoid an ONNX name collision, and it is harmless at N=1
+        # (genai's ExtraOutputs ignores unused outputs).
+        hs_out = "hidden_states_out"
+        self.make_node(
+            "Identity", inputs=[mtp_norm_output], outputs=[hs_out],
+            name="/model/mtp/hidden_states_out/Identity",
+        )
+        hs_val = self.make_value(hs_out, self.io_dtype,
+                                 shape=["batch_size", "sequence_length", self.hidden_size])
+        self.model.graph.outputs.append(hs_val)
 
         self.make_postprocessing_nodes()
 

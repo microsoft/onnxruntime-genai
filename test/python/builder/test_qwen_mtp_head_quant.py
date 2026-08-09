@@ -65,31 +65,6 @@ def test_quantized_main_model_does_not_get_int4_defaults():
     assert "int4_algo_config" not in model._mtp_extra_options
 
 
-def test_int4_lmhead_override_is_applied_as_mixed_precision():
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": "int8", "mtp_head_int4_lmhead": "true"})
-
-    assert model._mtp_extra_options["matmul_mixed_precision"] == "last_matmul:int4"
-
-
-def test_deprecated_mtp_head_int8_still_builds_an_int8_head():
-    model = _resolve({"enable_mtp": True, "mtp_head_int8": "true"})
-
-    assert model._mtp_onnx_dtype == ir.DataType.INT8
-    assert model._mtp_extra_options["moe_quant_type"] == "int8"
-
-
-def test_head_fp16_keeps_the_head_unquantized():
-    model = _resolve({"enable_mtp": True, "mtp_head_fp16": "true", "moe_quant_type": "nvfp4"})
-
-    assert model._mtp_onnx_dtype == ir.DataType.FLOAT16
-    assert "moe_quant_type" not in model._mtp_extra_options
-
-
-def test_head_fp16_and_head_quant_type_are_mutually_exclusive():
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        _resolve({"enable_mtp": True, "mtp_head_fp16": "true", "mtp_head_quant_type": "int8"})
-
-
 def test_unknown_head_quant_type_is_rejected():
     with pytest.raises(ValueError, match="mtp_head_quant_type must be one of"):
         _resolve({"enable_mtp": True, "mtp_head_quant_type": "fp8"})
