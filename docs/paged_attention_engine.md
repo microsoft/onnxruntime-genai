@@ -8,6 +8,8 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
+The current dynamic path manages paged KV decoder state together with per-request search and sampler state. It does not bind or transactionally checkpoint hybrid recurrent, convolutional, or other mutable model state. Future support for such state must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+
 The main implementation is under `src/engine/`:
 
 | Responsibility | Main files |
@@ -87,8 +89,9 @@ The important request states are:
 
 ```text
 Unassigned -> Assigned -> InProgress -> Completed
-     ^                                      |
-     +------------- Remove() ---------------+
+     ^           |            |            |
+     +-----------+------------+------------+
+                  Remove()
 ```
 
 ### `Unassigned`
@@ -109,7 +112,9 @@ The request has completed at least one committed engine transaction and belongs 
 
 The search has reached an end condition, such as an EOS token or maximum length. The request can be returned to the caller immediately, but its cache blocks are normally reclaimed by `DynamicBatchScheduler::ReapCompletedRequests()` at the beginning of the next planning pass.
 
-Calling `Remove()` asks the engine to remove the request. On the dynamic path, the scheduler immediately removes its paged-cache allocation and erases it from the scheduler pool.
+`Remove()` is legal from `Assigned`, `InProgress`, and `Completed`, and returns the request to `Unassigned`. On the dynamic path, removal immediately erases scheduler membership and releases committed paged-cache ownership.
+
+This removal does not purge an entry already placed in `Engine::ready_requests_`. Because `Engine::Step()` drains that queue before scheduling new work, a removed request that was already ready can still be returned by a later `Step()` call.
 
 ## The request length counters
 
@@ -157,6 +162,7 @@ This distinction is important:
 
 - One call to `Step()` does not always mean one model invocation.
 - Draining a previously committed batch does not change model or cache state.
+- `Engine::RemoveRequest()` does not purge requests already in the ready queue; `Step()` drains those entries before scheduling new work.
 - `HasPendingRequests()` is true while either the ready queue or scheduler contains work.
 
 If the engine has previously encountered a fatal transaction or execution failure, `Step()` rethrows the stored error instead of attempting more work.

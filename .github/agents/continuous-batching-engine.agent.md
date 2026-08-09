@@ -51,7 +51,9 @@ Reason about every dynamic Engine step as a transaction:
 8. On a recoverable failure, restore every request to the last committed boundary and release every reservation.
 9. Mark the Engine unhealthy when rollback or commit cannot prove a consistent state.
 
-Never approve a change that can leave request progress, sampler state, cache slots, block ownership, recurrent state, host token mirrors, or caller-visible events at different logical token boundaries.
+Never approve a change that can leave request progress, sampler state, cache slots, block ownership, host token mirrors, or caller-visible events at different logical token boundaries.
+
+The current dynamic Engine does not bind or checkpoint recurrent, convolutional, hybrid, or other mutable model state. If a future Engine path owns such state, it must participate in the same transaction boundary as request, sampler, and cache state.
 
 Maintain these invariants:
 
