@@ -171,12 +171,7 @@ def check_extra_options(
         "fp8_kv_cache",
         "fuse_linear_attn_gates",
         "use_original_fp8_weights",
-        "fp8_linear_attn",
-        "fp8_linear_attn_static_input_scale",
-        "fp8_attn_static_input_scale",
-        "share_fp8_attn_qkv_activation",
         "use_original_nvfp4_weights",
-        "nvfp4_lmhead_fp16",
     ]
 
     for key in bools:
@@ -820,20 +815,10 @@ def get_args():
                 use_original_nvfp4_weights = Preserve ModelOpt NVFP4 dense weights in Qwen3.6. Default is false.
                     When true, shared-expert projections and lm_head use MatMulBlockQuantizedFp4Weight directly from the checkpoint.
                     Requires CUDA and an ONNX Runtime build with the NVFP4 contrib operator.
-                nvfp4_dense_exclude_layers = Comma- or space-separated Qwen3.6 layer indices whose shared experts stay in fp16.
-                    Default is empty. Only applies when use_original_nvfp4_weights=true.
-                nvfp4_lmhead_fp16 = Keep the Qwen3.6 language-modeling head in fp16 instead of NVFP4. Default is false.
                 use_original_fp8_weights = Preserve ModelOpt FP8 attention weights in Qwen3.6. Default is false.
-                    When true, attention projections use MatMulBlockQuantizedFp8Weight directly from the checkpoint.
+                    When true, self-attention uses the checkpoint's calibrated W8A8 scales and GatedDeltaNet uses
+                    weight-only W8A16 MatMulBlockQuantizedFp8Weight directly from the checkpoint.
                     Requires CUDA and an ONNX Runtime build with the FP8 contrib operator.
-                fp8_attn_static_input_scale = Apply calibrated static FP8 activation scales to Qwen3.6 attention. Default is false.
-                fp8_attn_exclude_layers = Comma- or space-separated Qwen3.6 layer indices whose attention projections stay in fp16.
-                    Default is empty. Only applies when use_original_fp8_weights=true.
-                fp8_linear_attn = Preserve ModelOpt FP8 GatedDeltaNet projection weights in Qwen3.6. Default is true.
-                    Only applies when use_original_fp8_weights=true.
-                fp8_linear_attn_static_input_scale = Apply calibrated static FP8 activation scales to GatedDeltaNet projections.
-                    Default is false. Only applies when fp8_linear_attn=true and fp8_attn_static_input_scale=true.
-                share_fp8_attn_qkv_activation = Share equal static FP8 activation-scale initializers across Q/K/V. Default is true.
                 fp8_kv_cache = Use the legacy Qwen3.6 FP8 KV-cache shorthand. Default is false.
                     Equivalent to kv_cache_quant_type=fp8_per_tensor. Without kv_cache_scale_file, uses one shared unit scale.
                 fuse_linear_attn_gates = Fuse Qwen3.6 LinearAttention gate glue into contrib operators.

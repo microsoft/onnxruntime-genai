@@ -209,12 +209,7 @@ def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
         "fp8_kv_cache",
         "fuse_linear_attn_gates",
         "use_original_fp8_weights",
-        "fp8_linear_attn",
-        "fp8_linear_attn_static_input_scale",
-        "fp8_attn_static_input_scale",
-        "share_fp8_attn_qkv_activation",
         "use_original_nvfp4_weights",
-        "nvfp4_lmhead_fp16",
     ],
 )
 @pytest.mark.parametrize("value,expected", [("true", True), ("false", False)])

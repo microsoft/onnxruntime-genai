@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 from models.builders.qwen import Qwen35MoeTextModel
 
 
-def _make_model(scales, use_static_scale=True, share=True):
+def _make_model(scales):
     """Build a minimal Qwen35MoeTextModel stub that records emitted initializers.
 
     ``MatMulBlockQuantizedFp8Weight`` takes the FP16/BF16 activation directly plus an
@@ -23,15 +23,16 @@ def _make_model(scales, use_static_scale=True, share=True):
     """
     model = object.__new__(Qwen35MoeTextModel)
     model.io_dtype = ir.DataType.FLOAT16
-    model.fp8_attn_static_input_scale = use_static_scale
-    model.share_fp8_attn_qkv_activation = share
     model._fp8_attention_activation_cache = {}
-    model._fp8_weight_key_for_matmul = MethodType(
-        lambda self, basename: basename if basename in scales else None, model
-    )
-    model._load_nvfp4_tensor = MethodType(
-        lambda self, key: torch.tensor(scales[key.removesuffix(".input_scale")]), model
-    )
+    model._fp8_weight_key_for_matmul = MethodType(lambda self, basename: basename, model)
+
+    def load_scale(self, key):
+        basename = key.removesuffix(".input_scale")
+        if basename not in scales:
+            raise RuntimeError(f"missing {key}")
+        return torch.tensor(scales[basename])
+
+    model._load_nvfp4_tensor = MethodType(load_scale, model)
 
     initializers = []
 
@@ -49,16 +50,11 @@ def test_static_input_scale_is_read_from_checkpoint():
     assert model._fp8_attention_input_scale("q") == 0.125
 
 
-def test_static_input_scale_is_none_when_disabled():
-    model, _ = _make_model({"q": 0.125}, use_static_scale=False)
-
-    assert model._fp8_attention_input_scale("q") is None
-
-
-def test_static_input_scale_is_none_when_checkpoint_has_no_scale():
+def test_static_input_scale_rejects_missing_checkpoint_scale():
     model, _ = _make_model({})
 
-    assert model._fp8_attention_input_scale("q") is None
+    with pytest.raises(RuntimeError, match="missing q.input_scale"):
+        model._fp8_attention_input_scale("q")
 
 
 @pytest.mark.parametrize("scale", [0.0, -0.125, float("inf"), float("nan")])
@@ -97,14 +93,4 @@ def test_scale_initializer_is_not_shared_when_scale_differs():
     o_name = model._make_fp8_activation_scale_initializer("/o", 0.25)
 
     assert o_name != q_name
-    assert len(initializers) == 2
-
-
-def test_scale_initializer_is_per_module_when_sharing_disabled():
-    model, initializers = _make_model({"q": 0.125, "k": 0.125}, share=False)
-
-    q_name = model._make_fp8_activation_scale_initializer("/q", 0.125)
-    k_name = model._make_fp8_activation_scale_initializer("/k", 0.125)
-
-    assert q_name != k_name
     assert len(initializers) == 2

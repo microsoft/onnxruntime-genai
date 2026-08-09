@@ -67,6 +67,35 @@ def test_make_model_closes_nvfp4_handles_when_graph_build_fails(monkeypatch):
     assert closed == [True]
 
 
+def test_native_fp8_rejects_non_fp8_weight():
+    model = object.__new__(Qwen35MoeTextModel)
+    model.use_original_fp8_weights = True
+    model._fp8_weight_key_for_matmul = lambda basename: "attention"
+    tensors = {
+        "attention.weight": torch.ones((4, 4), dtype=torch.bfloat16),
+        "attention.weight_scale": torch.tensor(1.0),
+    }
+    model._load_nvfp4_tensor = lambda name: tensors[name]
+
+    with pytest.raises(ValueError, match="must be float8_e4m3fn"):
+        model._make_fp8_attention_matmul("/attention/MatMul", "input")
+
+
+def test_native_nvfp4_rejects_non_nvfp4_weight():
+    model = object.__new__(Qwen35MoeTextModel)
+    model.use_original_nvfp4_weights = True
+    model._nvfp4_dense_key_for_matmul = lambda basename: "lm_head"
+    tensors = {
+        "lm_head.weight": torch.ones((4, 4), dtype=torch.bfloat16),
+        "lm_head.weight_scale": torch.ones((4, 1), dtype=torch.float8_e4m3fn),
+        "lm_head.weight_scale_2": torch.tensor(1.0),
+    }
+    model._load_nvfp4_tensor = lambda name: tensors[name]
+
+    with pytest.raises(ValueError, match="packed uint8 NVFP4 codes"):
+        model._make_matmul_nvfp4("/lm_head/MatMul", "input")
+
+
 def test_nvfp4_qmoe_rejects_mismatched_gate_up_global_scales():
     model = object.__new__(Qwen35MoeTextModel)
     model.moe_attrs = {"num_experts": 1}
