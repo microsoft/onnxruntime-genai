@@ -114,6 +114,7 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     device_draft_chain_ = cuda_device_draft_chain && std::atoi(env) != 0;
   }
   validate_device_draft_chain_ = std::getenv("ORT_MTP_VALIDATE_DEVICE_DRAFT_CHAIN") != nullptr;
+  log_top2_margins_ = std::getenv("ORT_MTP_LOG_TOP2_MARGINS") != nullptr;
   // Opt-in: commit a partial accept straight out of the verify forward's windowed recurrent state
   // instead of replaying the accepted prefix. Requires a model exported with
   // recurrent_state_window > 1. Read once -- the greedy step consults it on the
@@ -424,6 +425,10 @@ const float* MtpGenerator::MainLogitsRowsCpu(int first_row, int num_rows) {
 }
 
 bool MtpGenerator::TopKScoresRows(const void* logits, int onnx_type, int num_rows, DeviceInterface& dev) {
+  // Mirror ComputeSampledCategorical's `apply_topk = top_k > 1` gate: top_k of 0 or 1 means "no
+  // top-k truncation" (pure nucleus / full softmax), which the device top-k cannot express -- it
+  // would silently collapse the distribution to k entries. Fall back to the host path instead.
+  if (top_k_ <= 1) return false;
   topk_k_ = std::min(top_k_, vocab_size_);
   const size_t need = static_cast<size_t>(num_rows) * topk_k_;
   topk_tok_scratch_.resize(need);
@@ -502,7 +507,7 @@ void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
     return;
   }
 
-  if (std::getenv("ORT_MTP_LOG_TOP2_MARGINS") != nullptr) {
+  if (log_top2_margins_) {
     std::vector<int32_t> top2_tokens(static_cast<size_t>(num_rows) * 2);
     std::vector<float> top2_scores(static_cast<size_t>(num_rows) * 2);
     const uint8_t* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
