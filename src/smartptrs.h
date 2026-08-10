@@ -142,6 +142,10 @@ struct DeviceInterface {
   // supports it. Null default -> callers keep the current device-memory path.
   virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
 
+  // Inputs-only interface backed by that allocator, so the decode inputs are updated in place.
+  // Null default -> callers keep the current device-memory path.
+  virtual DeviceInterface* GetHostAccessibleDevice() { return nullptr; }
+
   // Called once after the device allocator is created, so a device that offers additional
   // allocators (e.g. host-accessible memory) can set them up. The default sets up nothing.
   // `device_id` is the id the device allocator was created on.

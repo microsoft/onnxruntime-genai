@@ -12,9 +12,4 @@ constexpr const char* kAMDGPUExecutionProviderName = "AMDGPUExecutionProvider";
 
 DeviceInterface* GetAMDGPUInterface();
 
-// Inputs-only interface backed by the host-accessible allocator. Decode inputs allocated
-// here are CPU-writable and GPU-readable, so per-step updates happen in place with no
-// roundtrip. KV and scoring keep the default interface. Null if no host-accessible allocator.
-DeviceInterface* GetAMDGPUPinnedInputsInterface();
-
 }  // namespace Generators

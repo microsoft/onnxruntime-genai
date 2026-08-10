@@ -242,6 +242,9 @@ struct InterfaceImpl : DeviceInterface {
     return ort_pinned_allocator_;
   }
 
+  // Defined below, once PinnedInputsImpl is complete.
+  DeviceInterface* GetHostAccessibleDevice() override;
+
   Ort::Allocator* PinnedAllocator() const { return ort_pinned_allocator_; }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -323,13 +326,16 @@ DeviceInterface* GetAMDGPUInterface() {
   return g_amdgpu_device.get();
 }
 
-DeviceInterface* GetAMDGPUPinnedInputsInterface() {
-  auto* base = static_cast<AMDGPU::InterfaceImpl*>(GetAMDGPUInterface());
-  if (!base->GetHostAccessibleAllocator())
-    return nullptr;  // no pinned allocator, caller falls back to the device interface
+namespace AMDGPU {
+
+DeviceInterface* InterfaceImpl::GetHostAccessibleDevice() {
+  if (!ort_pinned_allocator_)
+    return nullptr;
   if (!g_amdgpu_pinned_inputs)
-    g_amdgpu_pinned_inputs = std::make_unique<AMDGPU::PinnedInputsImpl>(*base);
+    g_amdgpu_pinned_inputs = std::make_unique<PinnedInputsImpl>(*this);
   return g_amdgpu_pinned_inputs.get();
 }
+
+}  // namespace AMDGPU
 
 }  // namespace Generators

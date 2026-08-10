@@ -35,7 +35,6 @@
 #include "videochat_flash_processor.h"
 #include "mistral3_image_processor.h"
 #include "../dml/interface.h"
-#include "../amdgpu/interface.h"
 #include "../openvino/interface.h"
 #include "../qnn/interface.h"
 #include "../ryzenai/interface.h"
@@ -596,7 +595,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
-  DeviceInterface* p_host_accessible_inputs = GetAMDGPUPinnedInputsInterface();
+  DeviceInterface* p_host_accessible_inputs = p_device_->GetHostAccessibleDevice();
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
