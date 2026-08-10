@@ -170,6 +170,7 @@ def check_extra_options(
         "use_paged_attention",
         "fp8_kv_cache",
         "fuse_linear_attn_gates",
+        "fuse_shared_expert_gate",
         "use_original_fp8_weights",
         "use_original_nvfp4_weights",
         "enable_mtp",
@@ -327,6 +328,7 @@ def check_extra_options(
     cuda_only_options = (
         "fp8_kv_cache",
         "fuse_linear_attn_gates",
+        "fuse_shared_expert_gate",
         "use_original_fp8_weights",
         "use_original_nvfp4_weights",
     )
@@ -847,6 +849,9 @@ def get_args():
                     Equivalent to kv_cache_quant_type=fp8_per_tensor. Without kv_cache_scale_file, uses one shared unit scale.
                 fuse_linear_attn_gates = Fuse Qwen3.6 LinearAttention gate glue into contrib operators.
                     Default is true on CUDA and false on other execution providers.
+                fuse_shared_expert_gate = Fuse Qwen3.6 shared-expert scaling and routed-expert addition.
+                    Accepts true or false. Default is true on CUDA and false elsewhere. Emits com.microsoft.GatedAdd
+                    and requires an ONNX Runtime build that provides its CUDA kernel. Set false to retain Mul + Add.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 kv_cache_quant_type = Quantization scheme for the KV cache. Default is 'none' (no quantization).

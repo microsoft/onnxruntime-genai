@@ -363,8 +363,14 @@ The relevant extra options are:
 * `use_original_fp8_weights=true|false` (default `false`) — emit self-attention `q/k/v/o` projections as W8A8 `MatMulBlockQuantizedFp8Weight` nodes using the checkpoint's calibrated per-tensor activation scales. GatedDeltaNet `in_proj_qkv` / `in_proj_z` / `out_proj` projections use the same operator in weight-only W8A16 mode. Equal Q/K/V activation scales share one initializer.
 * `fp8_kv_cache=true|false` (default `false`) — shorthand for `kv_cache_quant_type=fp8_per_tensor`. Without `kv_cache_scale_file`, it preserves the legacy shared unit scale; with a calibration file it uses calibrated per-layer scales. See [kv_cache_calibration.py](kv_cache_calibration.py) for producing the scale file.
 * `fuse_linear_attn_gates=true|false` (default `true` on CUDA and `false` elsewhere) — collapse the float32 gate glue around `LinearAttention` into the fused `com.microsoft::LinearAttentionGate` and `com.microsoft::GatedRMSNorm` ops. Set to `false` for execution providers that lack those kernels.
+* `fuse_shared_expert_gate=true|false` (default `true` on CUDA and `false` elsewhere) — replace each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`. Set to `false` to retain the standard ONNX graph or when using an ONNX Runtime build without the CUDA kernel.
 
 These options require an ONNX Runtime build that provides the corresponding contrib ops.
+
+```bash
+# Keep the portable Mul + Add graph when exporting from source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda --extra_options moe_quant_type=nvfp4 fuse_shared_expert_gate=false
+```
 
 #### Enable MTP Head (Qwen3.6)
 
