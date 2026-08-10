@@ -13,8 +13,6 @@ import torch
 from transformers import (
     AutoConfig,
     Qwen2ForCausalLM,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
 )
 
 from .base import Model
@@ -39,268 +37,67 @@ class Qwen25VLTextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # The HF model (Qwen2RMSNorm) *always* computes LayerNorm in float32.
-        # By inheriting from `base.Model`, all `layernorm_attrs["cast"]` flags
-        # are `False`. This causes parity loss and type mismatch error.
-        #
-        # SOLUTION: Manually set all `cast` flags to `True`. This forces the
-        # builder to cast bf16 inputs -> fp32, compute LN, and cast fp32
-        # outputs -> bf16, matching the HF model and fixing both errors.
-        #
-        print("Forcing LayerNorm computation to float32 (and enabling all casts) for Qwen2.5-VL parity.")
+        # Compute LayerNorms in FP32 for better accuracy
         self.layernorm_attrs["cast"]["use_fp32"] = True
         self.layernorm_attrs["cast"]["root_input"] = True
         self.layernorm_attrs["cast"]["skip_input"] = True
         self.layernorm_attrs["cast"]["output_0"] = True
         self.layernorm_attrs["cast"]["output_3"] = True
 
-        # Qwen2's RoPE *always* computes in float32.
-        # We must replicate this behavior.
-        print("Forcing RoPE computation to float32 for Qwen2.5-VL parity.")
-        self.rope_attrs["cast_to_fp32"] = True
+        # Compute RoPE in FP32 for better accuracy
+        self.rope_attrs["cast"]["use_fp32"] = True
+        self.rope_attrs["cast"]["root_input"] = True
+        self.rope_attrs["cast"]["output_0"] = True
 
-        # Check rope type since huggingface model supports yarn but that is not recommended as mentioned in model card. Example:
-        #    "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
-        rope_params = self.get_rope_parameters(config)
-        if rope_params and "type" in rope_params:
-            assert rope_params["type"] in ["mrope", "default"]
-
-        # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
-        self.attention_attrs["use_rope_in_attn"] = False
-
+    def is_packed_matmul_supported(self):
         # We need separate Q, K, V tensors to apply MRoPE manually.
-        # Packed MatMul provides a single output which would require splitting.
-        self.attention_attrs["use_packed_matmul"] = False
+        return False
 
-        self.input_names["position_ids"] = "position_ids"
-
-        self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
-        if not self.mrope_sections:
-            raise ValueError("MRoPE sections not found in text_config rope_parameters/rope_scaling mrope_section")
-
-        # The HF logic is `mrope_section * 2`, not `[s * 2 for s in mrope_section]`.
-        # This results in [16, 24, 24, 16, 24, 24]
-        self.mrope_splits = self.mrope_sections * 2
-
-        if sum(self.mrope_splits) != self.head_size:
-            # The sum (128) should now correctly match self.head_size (128)
-            raise ValueError(
-                f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})"
-            )
-
-        # Force GroupQueryAttention since make_attention() below only implements GQA.
-        self.attention_attrs["op_type"] = "GroupQueryAttention"
-
-        if not self.is_gqa_supported():
-            print(f"Warning: {self.ep} does not support GQA for {self.io_dtype}, so GQA might fallback to CPU!")
-
-        # MRotaryEmbedding (com.microsoft) layout: 0 = Sectioned (contiguous T/H/W chunks).
-        # Qwen3-VL overrides this to 1 (Interleaved).
-        self.mrope_layout = 0
+    def is_fused_rope_supported(self):
+        # Qwen 2.5 VL applies MRoPE manually before attention, not fused in the op
+        return False
 
     def make_inputs_and_outputs(self):
         # Qwen2.5-VL uses 3D position_ids
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
-
-        # Call the base Model's make_inputs_and_outputs (skipping MistralModel's)
         super().make_inputs_and_outputs()
-
-    def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, num_heads, basename):
-        # Applies MRoPE (multi-modal rotary position embeddings) to `q_or_k_path` using the
-        # MRotaryEmbedding (com.microsoft) contrib op.
-        #
-        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts the 3D
-        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
-        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
-        # internally combines the three streams per-column according to the `mrope_section`
-        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
-        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
-        #
-        #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
-        #                  \                    |                    /
-        #                   +-------------------+-------------------+
-        #                                        |
-        #                          MRotaryEmbedding (com.microsoft)
-        #                                        |
-        #                                 output (B, S, N*H)
-        force_fp32 = self.rope_attrs.get("cast_to_fp32", False)
-        compute_dtype = ir.DataType.FLOAT if force_fp32 else self.io_dtype
-
-        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(
-            cos_cache_name="cos_cache_fp32" if force_fp32 else "cos_cache",
-            sin_cache_name="sin_cache_fp32" if force_fp32 else "sin_cache",
-            dtype=compute_dtype,
-        )
-
-        # MRotaryEmbedding requires all of input/cos_cache/sin_cache to share the same dtype.
-        # Qwen2.5-VL/Qwen3-VL always compute RoPE in float32, so cast the input up if needed.
-        rope_input = q_or_k_path
-        if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
-            cast_in_name = f"{basename}/Input/Cast"
-            self.make_cast(cast_in_name, q_or_k_path, compute_dtype, q_or_k_shape)
-            rope_input = f"{cast_in_name}/output_0"
-
-        rope_name = f"{basename}/MRotaryEmbedding"
-        rope_output = f"{rope_name}/output_0"
-        self.make_node(
-            "MRotaryEmbedding",
-            [rope_input, self.input_names["position_ids"], cos_cache_name, sin_cache_name],
-            [rope_output],
-            name=rope_name,
-            domain="com.microsoft",
-            num_heads=num_heads,
-            rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
-            interleaved=self.rope_attrs["interleaved"],
-            mrope_section=self.mrope_sections,
-            mrope_layout=self.mrope_layout,
-        )
-        self.make_value(rope_output, compute_dtype, q_or_k_shape)
-
-        if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
-            cast_out_name = f"{basename}/Output/Cast"
-            self.make_cast(cast_out_name, rope_output, self.io_dtype, q_or_k_shape)
-            return f"{cast_out_name}/output_0"
-
-        return rope_output
-
-    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
-        # Make nodes for the Attention subgraph (with MRoPE)
-        #
-        #        q_path    k_path    v_path
-        #          |        |        |
-        #          |        |        +-----------------+
-        #          |        |                          |
-        # (apply_mrope_rotation for Q)                 |
-        #          |                                   |
-        #        Q_Rot                                 |
-        #          |     (apply_mrope_rotation for K)  |
-        #          |                 |                 |
-        #          |               K_Rot               |
-        #          |                 |                 |
-        #          +--------+--------+                 |
-        #                   |                          |
-        #           GroupQueryAttention <--------------+
-        #                   |
-
-        # 1. Calculate shapes for MRoPE rotation
-        q_shape = [
-            "batch_size",
-            "sequence_length",
-            self.num_attn_heads * self.head_size,
-        ]
-        k_shape = [
-            "batch_size",
-            "sequence_length",
-            self.num_kv_heads * self.head_size,
-        ]
-
-        # 2. Apply MRoPE via the MRotaryEmbedding (com.microsoft) contrib op
-        self.attention_attrs["q_path"] = self.apply_mrope_rotation(
-            layer_id,
-            self.attention_attrs["q_path"],
-            q_shape,
-            self.num_attn_heads,
-            basename=f"/model/layers.{layer_id}/attn/q_mrope",
-        )
-
-        self.attention_attrs["k_path"] = self.apply_mrope_rotation(
-            layer_id,
-            self.attention_attrs["k_path"],
-            k_shape,
-            self.num_kv_heads,
-            basename=f"/model/layers.{layer_id}/attn/k_mrope",
-        )
-
-        # 3. Call GroupQueryAttention op
-        past_k = f"past_key_values.{layer_id}.key"
-        past_v = f"past_key_values.{layer_id}.value"
-        present_k = f"present.{layer_id}.key"
-        present_v = f"present.{layer_id}.value"
-
-        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
-        self.make_attention_op(
-            attn_name,
-            layer_id=layer_id,
-            q_path=self.attention_attrs["q_path"],
-            k_path=self.attention_attrs["k_path"],
-            v_path=self.attention_attrs["v_path"],
-            past_k=past_k,
-            past_v=past_v,
-            present_k=present_k,
-            present_v=present_v,
-            # Pass empty strings for fused caches since we applied RoPE manually
-            cos_cache="",
-            sin_cache="",
-            **kwargs,
-        )
-
-    def load_weights(self, input_path):
-        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
-        # which loads weights directly via QuantModel
-        if self.quant_type is not None or input_path.endswith(".gguf"):
-            return super().load_weights(input_path)
-
-        # For non-quantized models, load the Hugging Face model
-        print("Loading Qwen2_5_VLForConditionalGeneration model...")
-        return Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            self.model_name_or_path,
-            cache_dir=self.cache_dir,
-            token=self.hf_token,
-            trust_remote_code=self.hf_remote,
-        )
 
 
 class Qwen3VLTextModel(Qwen25VLTextModel):
-    """
-    Qwen3-VL text model builder. Inherits from Qwen25VLTextModel.
-
-    Key differences from Qwen2.5-VL:
-    - Uses interleaved MRoPE layout [THWTHWTHW...TT] instead of chunked [TTT...HHH...WWW]
-    - Adds QK normalization (q_norm, k_norm) from Qwen3 base architecture
-    - Default mrope_section is [24, 20, 20] (vs [16, 24, 24] in Qwen2.5-VL)
-    - Vision encoder uses DeepStack for multi-layer feature injection (handled by vision ONNX model)
-    """
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
-        # but the C++ runtime expects "qwen3_vl" (with underscore).
-        # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
+        # Avoid duplicate Cast nodes that form a SkipLayerNorm --> Cast --> Cast --> SkipLayerNorm pattern
+        # self.layernorm_attrs["cast"]["skip_input"] = False
+        self.layernorm_attrs["cast"]["output_3"] = False
+
+        # Qwen3-VL uses QK norms whose outputs will have already been casted to FP32
+        self.rope_attrs["cast"]["root_input"] = False
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
 
-        # Qwen3-VL uses the Interleaved MRotaryEmbedding layout (see class docstring).
-        self.mrope_layout = 1
+        # Qwen3-VL uses the Interleaved MRotaryEmbedding layout.
+        self.rope_attrs["mrope_layout"] = 1
 
-    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
-        # Qwen3-VL adds QK normalization before MRoPE rotation
-        # The parent class (Qwen25VLTextModel) skips make_qk_norm since Qwen2.5-VL doesn't use it.
-        # We must call it here before proceeding with MRoPE.
-        if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
-            self.make_qk_norm(layer_id, attention)
+    def make_qk_norm(self, layer_id, attention):
+        # Before: SimplifiedLayerNorm --> Cast from FP32 to io_dtype --> Reshape --> Cast from io_dtype to FP32 --> MRotaryEmbedding
+        # After:  SimplifiedLayerNorm --> Reshape --> MRotaryEmbedding
+        # This allows both LayerNorm and MRoPE to be computed in FP32. Reshape is not affected by the dtype.
 
-        # Delegate to parent for MRoPE rotation + GQA
-        super().make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+        self.layernorm_attrs["cast"]["output_0"] = False
+        super().make_qk_norm(layer_id, attention)
 
-    def load_weights(self, input_path):
-        # For quantized models (e.g., Quark, AWQ, GPTQ) or GGUF, use base class logic
-        # which loads weights directly via QuantModel
-        if self.quant_type is not None or input_path.endswith(".gguf"):
-            return super().load_weights(input_path)
+        # Update dtypes for QK-norm reshapes to stay as FP32 and not cast to self.io_dtype
+        self.values[self.attention_attrs["q_path"]].dtype = ir.DataType.FLOAT
+        self.values[self.attention_attrs["k_path"]].dtype = ir.DataType.FLOAT
 
-        print("Loading Qwen3VLForConditionalGeneration model...")
-        return Qwen3VLForConditionalGeneration.from_pretrained(
-            self.model_name_or_path,
-            cache_dir=self.cache_dir,
-            token=self.hf_token,
-            trust_remote_code=self.hf_remote,
-        )
+        self.layernorm_attrs["cast"]["output_0"] = True
 
 
+# TODO: figure out why anything is needed in this class
+# Nothing should be necessary technically
 class VideoChatFlashQwenModel(QwenModel):
     """
     Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
@@ -408,12 +205,12 @@ class Qwen35TextModel(Model):
         self.input_names["position_ids"] = "position_ids"
 
         # mRoPE config
-        self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
-        if not self.mrope_sections:
+        self.rope_attrs["mrope_section"] = self.rope_attrs.get("mrope", {}).get("sections", [])
+        if not self.rope_attrs["mrope_section"]:
             raise ValueError("MRoPE sections not found in text_config rope_parameters/rope_scaling mrope_section")
-        if len(self.mrope_sections) != 3:
+        if len(self.rope_attrs["mrope_section"]) != 3:
             raise ValueError(
-                f"Expected 3 MRoPE sections [T, H, W], got {len(self.mrope_sections)}: {self.mrope_sections}"
+                f"Expected 3 MRoPE sections [T, H, W], got {len(self.rope_attrs['mrope_section'])}: {self.rope_attrs['mrope_section']}"
             )
         self.mrope_rotary_dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
 
@@ -747,7 +544,7 @@ class Qwen35TextModel(Model):
         # Build interleaving masks
         dim_assignments = [0] * rdim_half
         for dim_idx, offset in enumerate((1, 2), start=1):
-            length = self.mrope_sections[dim_idx] * 3
+            length = self.rope_attrs["mrope"]["sections"][dim_idx] * 3
             for i in range(offset, length, 3):
                 if i < rdim_half:
                     dim_assignments[i] = dim_idx
@@ -1458,7 +1255,7 @@ class Qwen35TextModel(Model):
         del self.output_names["present.value"]
 
 
-class Qwen35MoeTextModel(Qwen35TextModel):
+class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
     Extends ``Qwen35TextModel`` with Mixture-of-Experts MLP layers.

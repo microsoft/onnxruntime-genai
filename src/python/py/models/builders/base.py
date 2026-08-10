@@ -30,6 +30,12 @@ from transformers import (
     AutoModelForSpeechSeq2Seq,
     AutoTokenizer,
     GenerationConfig,
+    Gemma3ForConditionalGeneration,
+    Mistral3ForConditionalGeneration,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
 )
 
 from .cuda_quantizer import CudaQuantizer
@@ -264,6 +270,7 @@ class Model:
             else 10000
         )
         self.rope_attrs = {
+            "op_type": "RotaryEmbedding",                    # Rotary embedding op to use
             "create_caches": True,                           # Create cos/sin caches for rotary embeddings
             "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,             # Cache length to use when creating cos/sin caches for rotary embeddings
@@ -276,6 +283,13 @@ class Model:
             "position_scale": position_scale,                # Scale value when calculating `t` in rotary embeddings
             "mscale": 1,                                     # Magnitude scaling factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
             "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
+            "mrope_layout": 0,                               # M-RoPE layout: 0 = sectioned (contiguous T/H/W chunks), 1 = interleaved, 2 = blocked
+            "mrope_section": [],                             # M-RoPE sections: list of section sizes for the rotary embeddings
+            "cast": {                   # Casting RoPE-specific variables
+                "use_fp32": False,      # Use float32 precision to compute RoPE
+                "root_input": False,    # Cast root_input
+                "output_0": False,      # Cast output_0
+            },
         }
         if rope_params is not None:
             self.make_rope_init(config)
@@ -497,6 +511,7 @@ class Model:
         rope_params = self.get_rope_parameters(config)
         if not isinstance(rope_params, Mapping):
             return
+
         if "beta_fast" in rope_params:
             # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
             factor = rope_params["factor"] if "factor" in rope_params else 0
@@ -528,9 +543,8 @@ class Model:
 
         elif "mrope_section" in rope_params:
             # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
-            self.rope_attrs["mrope"] = {
-                "sections": rope_params["mrope_section"],  # Sections for MRoPE
-            }
+            self.rope_attrs["op_type"] = "MRotaryEmbedding"
+            self.rope_attrs["mrope_section"] = rope_params["mrope_section"]  # Sections for MRoPE
 
             # Some models (e.g. Qwen3-VL) store rope_theta inside the rope parameters
             # instead of as a top-level config attribute. Override the default theta
@@ -567,7 +581,18 @@ class Model:
         }
         return (self.ep, self.io_dtype) in valid_packed_attn_configurations
 
+    def is_packed_matmul_supported(self):
+        # Packed MatMul with LoRA/QLoRA is not currently supported
+        # use_packed_matmul can be overrided by upstream quantization choice
+        # (e.g., when q_proj, k_proj, v_proj have different quantization settings)
+        return (
+            self.ep not in ["dml"]
+            and not self.matmul_attrs["use_lora"]
+            and not self.extra_options.get("disable_qkv_fusion", False)
+        )
+
     def is_fused_rope_supported(self):
+        # DML EP requires separate RoPE op, so fused RoPE is not supported on DML.
         return self.ep not in ["dml"]
 
     def is_fused_qk_norm_gqa_supported(self):
@@ -621,14 +646,7 @@ class Model:
             print("GroupQueryAttention (GQA) is used in this model.")
 
             # Some EPs don't support packed Q/K/V for GQA yet
-            # Packed MatMul with LoRA/QLoRA is not currently supported
-            # use_packed_matmul can be overrided by upstream quantization choice
-            # (e.g., when q_proj, k_proj, v_proj have different quantization settings)
-            self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml"]
-                and not self.matmul_attrs["use_lora"]
-                and not self.extra_options.get("disable_qkv_fusion", False)
-            )
+            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
             self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
@@ -2295,9 +2313,7 @@ class Model:
     def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
-        # Allow callers to override the target dtype of the cos/sin caches
-        # (e.g. models that force RoPE computation to float32 regardless of `io_dtype`)
-        dtype = kwargs.get("dtype", self.io_dtype)
+        dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
 
         if self.rope_attrs["create_caches"]:
             # Create cos/sin caches if not already created
@@ -2330,12 +2346,72 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
-    def make_rotary_embedding(self, name, root_input, **kwargs):
+    def make_rotary_embedding_casts(self, name, root_input, original_output, old_dtype, new_dtype):
+        input_0 = root_input
+        output_0 = original_output
+        root_input_shape = self.values[root_input].shape
+
+        if self.rope_attrs["cast"]["root_input"] and self.values[root_input].dtype != new_dtype:
+            # Input cast
+            root_input_cast_name = f"{name}/root_input/Cast"
+            root_input_cast_output = f"{root_input_cast_name}/output_0"
+            self.make_node(
+                "Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype
+            )
+            self.make_value(root_input_cast_output, new_dtype, shape=root_input_shape)
+            input_0 = root_input_cast_output
+
+        if self.rope_attrs["cast"]["output_0"]:
+            # Output cast
+            output_0_cast_name = f"{name}/output_0/Cast"
+            output_0_cast_output = f"{output_0_cast_name}/output_0"
+            self.make_node(
+                "Cast", inputs=[output_0_cast_output], outputs=[original_output], name=output_0_cast_name, to=old_dtype
+            )
+            self.make_value(original_output, old_dtype, shape=root_input_shape)
+            output_0 = output_0_cast_output
+
+        return (input_0, output_0)
+
+    def make_rotary_embedding_op(self, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
+        op_type = self.rope_attrs["op_type"]
+        dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
 
-        inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
-        output = f"{name}/output_0"
+        original_output = f"{name}/output_0"
+        if self.rope_attrs["cast"]["use_fp32"] and self.io_dtype != ir.DataType.FLOAT:
+            (root_input, original_output) = self.make_rotary_embedding_casts(name, root_input, original_output, self.io_dtype, ir.DataType.FLOAT)
+
+        if op_type == "RotaryEmbedding":
+            self.make_rotary_embedding(
+                name,
+                root_input,
+                original_output,
+                dtype=dtype,
+                cos_cache_name=cos_cache_name,
+                sin_cache_name=sin_cache_name,
+                num_heads=num_heads,
+                **kwargs,
+            )
+        elif op_type == "MRotaryEmbedding":
+            self.make_mrotary_embedding(
+                name,
+                root_input,
+                original_output,
+                dtype=dtype,
+                cos_cache_name=cos_cache_name,
+                sin_cache_name=sin_cache_name,
+                num_heads=num_heads,
+                **kwargs,
+            )
+        else:
+            raise NotImplementedError(f"The {op_type} op is not currently supported.")
+
+    def make_rotary_embedding(self, name, root_input, output, **kwargs):
+        num_heads = kwargs.pop("num_heads")
+        inputs = [root_input, kwargs.pop("position_ids"), kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
+
         self.make_node(
             "RotaryEmbedding",
             inputs=inputs,
@@ -2343,12 +2419,45 @@ class Model:
             name=name,
             domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
-            num_heads=(
-                0 if self.rope_attrs["partial_rotary_factor"] == 1.0 else num_heads
-            ),  # default is 0 in RotaryEmbedding kernel
+            num_heads=0 if self.rope_attrs["partial_rotary_factor"] == 1.0 else num_heads,  # default is 0 in RotaryEmbedding kernel
             rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * num_heads])
+        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
+
+    def make_mrotary_embedding(self, name, root_input, output, **kwargs):
+        # Applies MRoPE (multi-modal rotary position embeddings) to `root_input` using the
+        # MRotaryEmbedding (com.microsoft) contrib op.
+        #
+        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts a 3D
+        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
+        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
+        # internally combines the three streams per-column according to the `mrope_section`
+        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
+        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
+        #
+        #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
+        #                  \                    |                    /
+        #                   +-------------------+-------------------+
+        #                                        |
+        #                          MRotaryEmbedding (com.microsoft)
+        #                                        |
+        #                                 output (B, S, N*H)
+        num_heads = kwargs.pop("num_heads")
+        inputs = [root_input, kwargs.pop("position_ids"), kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
+
+        self.make_node(
+            "MRotaryEmbedding",
+            inputs=inputs,
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            interleaved=self.rope_attrs["interleaved"],
+            rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
+            num_heads=num_heads,
+            mrope_section=self.rope_attrs["mrope_section"],
+            mrope_layout=self.rope_attrs["mrope_layout"],
+        )
+        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3443,15 +3552,15 @@ class Model:
             if self.attention_attrs["use_rope_in_attn"]:
                 cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
             else:
-                q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-                self.make_rotary_embedding(
+                q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/{self.rope_attrs['op_type']}"
+                self.make_rotary_embedding_op(
                     q_rotary_name,
                     root_input=self.attention_attrs["q_path"],
                     position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
                 )
                 self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
-                k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-                self.make_rotary_embedding(
+                k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/{self.rope_attrs['op_type']}"
+                self.make_rotary_embedding_op(
                     k_rotary_name,
                     root_input=self.attention_attrs["k_path"],
                     position_ids=kwargs.get("position_ids", self.input_names["position_ids"]),
@@ -4551,6 +4660,17 @@ class Model:
             # Get auto class to load PyTorch model based on model type
             auto_class_map = {
                 "ForCausalLM": AutoModelForCausalLM,
+                "gemma3_vl_text": Gemma3ForConditionalGeneration,
+                "mistral3_text": Mistral3ForConditionalGeneration,
+                "Mistral3": Mistral3ForConditionalGeneration,
+                "qwen2_5_vl_text": Qwen2_5_VLForConditionalGeneration,
+                "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
+                "qwen3_vl_text": Qwen3VLForConditionalGeneration,
+                "Qwen3VL": Qwen3VLForConditionalGeneration,
+                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
+                "qwen3_5": Qwen3_5ForConditionalGeneration,
+                "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
+                "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
                 "Whisper": AutoModelForSpeechSeq2Seq,
             }
             auto_class = AutoModelForCausalLM
