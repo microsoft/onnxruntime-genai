@@ -119,6 +119,10 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     }
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
+    // The batch is represented as three coordinated arrays:
+    //   input_ids                  = all pending tokens concatenated
+    //   cumulative_sequence_lengths = boundaries of each request in that flat token array
+    //   past_sequence_lengths       = the absolute KV-cache write position for each request
     // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
     // number of tokens already in the cache and therefore the base position for this step.
     const int64_t processed_sequence_length = request->ProcessedSequenceLength();
