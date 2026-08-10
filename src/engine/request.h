@@ -145,7 +145,11 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Checks if the request is in prefill mode.
-   * @return True if no tokens have been processed yet, false otherwise.
+   * @return True while the tokens the application supplied have not all been through the model.
+   *
+   * Stays true across every chunk of a chunked prefill, so callers that treat prefill steps
+   * differently from decode steps (graph capture, for one) never mistake a trailing one token
+   * prefill chunk for a decode step.
    */
   bool IsPrefill() const;
 
@@ -174,13 +178,12 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Chooses the tokens this request contributes to the step that is about to run.
-   * @param allow_chunking Whether the caller can serve a prompt across several steps.
    *
-   * Called once per step, before anything reads UnprocessedTokens(). With chunking enabled and a
-   * `search.chunk_size` configured, a prompt longer than the chunk size is processed over several
-   * steps, which bounds the number of tokens a single model run carries.
+   * Called once per step, before anything reads UnprocessedTokens(). With a `search.chunk_size`
+   * configured, a prompt longer than the chunk size is processed over several steps, which bounds
+   * the number of tokens a single model run carries.
    */
-  void ScheduleTokens(bool allow_chunking);
+  void ScheduleTokens();
 
   /**
    * @brief True when this step's tokens run to the end of the sequence.
@@ -268,6 +271,9 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<int32_t> tokens_host_;
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
+  // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
+  // request is still prefilling while processed_sequence_length_ has not caught up with it.
+  int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;

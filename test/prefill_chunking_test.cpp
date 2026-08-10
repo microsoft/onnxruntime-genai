@@ -35,8 +35,8 @@ struct RequestSimulator {
 
   size_t Unprocessed() const { return static_cast<size_t>(sequence_length - processed_length); }
 
-  void ScheduleTokens(std::optional<size_t> chunk_size, bool allow_chunking) {
-    scheduled = ScheduledTokenCount(Unprocessed(), chunk_size, allow_chunking);
+  void ScheduleTokens(std::optional<size_t> chunk_size) {
+    scheduled = ScheduledTokenCount(Unprocessed(), chunk_size);
   }
 
   bool IsChunkComplete() const {
@@ -47,14 +47,13 @@ struct RequestSimulator {
 };
 
 // Runs `num_steps` engine steps over a prompt and returns what the model was told on each one.
-std::vector<Step> RunSteps(int64_t prompt_length, std::optional<size_t> chunk_size, int num_steps,
-                           bool allow_chunking = true) {
+std::vector<Step> RunSteps(int64_t prompt_length, std::optional<size_t> chunk_size, int num_steps) {
   RequestSimulator request;
   request.AddTokens(prompt_length);
 
   std::vector<Step> steps;
   for (int i = 0; i < num_steps; ++i) {
-    request.ScheduleTokens(chunk_size, allow_chunking);
+    request.ScheduleTokens(chunk_size);
     steps.emplace_back(request.processed_length, request.scheduled);
 
     const bool selects_token = request.IsChunkComplete();
@@ -67,12 +66,6 @@ std::vector<Step> RunSteps(int64_t prompt_length, std::optional<size_t> chunk_si
 }
 
 }  // namespace
-
-TEST(PrefillChunkingTest, WholePromptWhenChunkingIsDisabled) {
-  // The static batch path never chunks, whatever search.chunk_size says.
-  EXPECT_EQ(RunSteps(512, 128, 3, /*allow_chunking=*/false),
-            (std::vector<Step>{{0, 512}, {512, 1}, {513, 1}}));
-}
 
 TEST(PrefillChunkingTest, WholePromptWhenNoChunkSizeIsConfigured) {
   EXPECT_EQ(RunSteps(512, std::nullopt, 3), (std::vector<Step>{{0, 512}, {512, 1}, {513, 1}}));

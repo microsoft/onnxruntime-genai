@@ -54,6 +54,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
   processed_sequence_length_ = 0;
   search_->AppendTokens(device_tokens);
+  prompt_sequence_length_ = CurrentSequenceLength();
   seen_sequence_length_ = CurrentSequenceLength();
   tokens_host_.reserve(params_->search.max_length);
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
@@ -97,6 +98,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
+    prompt_sequence_length_ = CurrentSequenceLength();
     tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
@@ -126,9 +128,9 @@ size_t Request::ScheduledTokenCount() const {
   return std::min(scheduled_token_count_, unprocessed);
 }
 
-void Request::ScheduleTokens(bool allow_chunking) {
+void Request::ScheduleTokens() {
   const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
-  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size, allow_chunking);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size);
 }
 
 bool Request::IsChunkComplete() const {
@@ -169,7 +171,7 @@ bool Request::IsDone() const {
 }
 
 bool Request::IsPrefill() const {
-  return processed_sequence_length_ == 0;
+  return processed_sequence_length_ < prompt_sequence_length_;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {

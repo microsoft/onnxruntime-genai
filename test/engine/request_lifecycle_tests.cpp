@@ -220,7 +220,8 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   EXPECT_EQ(committed.status, RequestStatus::InProgress);
   EXPECT_EQ(committed.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(committed.processed_sequence_length, 2);
-  EXPECT_FALSE(committed.is_prefill);
+  // Two of the three prompt tokens are in the cache, so the request is still prefilling.
+  EXPECT_TRUE(committed.is_prefill);
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 

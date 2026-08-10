@@ -34,12 +34,11 @@ std::optional<BatchedSamplingParams> ResolveSampleArgs(const Config::Search& sea
 ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
                                      std::shared_ptr<Model> model,
                                      BatchedSampler* batched_sampler,
-                                     BatchedSamplingPlan* sampling_plan,
-                                     bool allow_chunked_prefill)
+                                     BatchedSamplingPlan* sampling_plan)
     : requests_{requests}, model_{model}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
   // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
   for (auto& request : requests_) {
-    request->ScheduleTokens(allow_chunked_prefill);
+    request->ScheduleTokens();
   }
 }
 
