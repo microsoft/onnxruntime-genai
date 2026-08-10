@@ -214,9 +214,7 @@ TEST(TopKTests, ParityTests) {
   }
 }
 
-// Test that TopK kernels handle all-NaN inputs without crashing or producing OOB indices.
-// This guards against the bug where NaN comparisons always return false, leaving the
-// index at its sentinel value (INT_MAX or -1), which would cause an illegal memory access.
+// Verify that TopK kernels handle all-NaN inputs without producing invalid indices.
 void RunNaNSafetyTest(const TopKTestParams& params) {
   std::cout << "\n--- Running NaN Safety Test with batch_size=" << params.batch_size
             << ", vocab_size=" << params.vocab_size << ", k=" << params.k << " ---\n";
