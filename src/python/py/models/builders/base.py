@@ -463,7 +463,7 @@ class Model:
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
+            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
@@ -480,10 +480,11 @@ class Model:
             del self.output_names["logits"]
 
     def hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
-        """Return a standard 3D shape or a packed 2D paged-attention shape."""
+        """Return a standard 3D shape or a 2D paged-attention shape."""
         last_dim = self.hidden_size if last_dim is None else last_dim
         if self.use_paged_attention:
-            return ["num_tokens", last_dim]
+            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
+            return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
     def get_rope_parameters(self, config):
@@ -4414,7 +4415,41 @@ class Model:
         # Sequence dimension for shape annotations ("sequence_length" normally, 1 when pruned)
         seq_dim = "sequence_length"
 
-        if self.prune_lm_head:
+        if self.use_paged_attention:
+            # Select the final packed token from every sequence before applying the LM head:
+            #
+            # cumulative_sequence_lengths --> Slice[1:] --> Sub(1) --+
+            # hidden_states -----------------------------------------> Gather(axis=0)
+            #
+            # This reduces the expensive LM-head projection from num_tokens rows to batch_size rows.
+            seq_dim = "batch_size"
+            indices_basename = f"{basename}/last_token_indices"
+            slice_name = f"{indices_basename}/Slice"
+            slice_inputs = [
+                self.input_names["cumulative_sequence_lengths"],
+                "/model/constants/INT64/[1]",
+                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+                "/model/constants/INT64/[0]",
+            ]
+            self.make_slice(slice_name, slice_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            sub_name = f"{indices_basename}/Sub"
+            sub_inputs = [f"{slice_name}/output_0", "/model/constants/INT32/1"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            gather_name = f"{basename}/last_hidden_state/Gather"
+            gather_inputs = [root_input, f"{sub_name}/output_0"]
+            self.make_gather(
+                gather_name,
+                gather_inputs,
+                dtype=self.io_dtype,
+                shape=["batch_size", self.hidden_size],
+                axis=0,
+            )
+            root_input = f"{gather_name}/output_0"
+            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
+
+        elif self.prune_lm_head:
             # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
             # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
             # during prefill, reducing compute by ~S×.

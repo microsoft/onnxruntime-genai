@@ -720,9 +720,11 @@ def get_args():
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
                     [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
                     `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
-                    `past_sequence_lengths` metadata inputs. An `engine` section (block_size, gpu_utilization_factor,
-                    max_batch_size) is added to genai_config.json. Currently only supported for the CUDA execution
-                    provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
+                    `past_sequence_lengths` metadata inputs. Before the LM head, selects the final packed hidden state
+                    for each sequence so the model outputs [batch_size, vocab_size] logits instead of projecting
+                    every prefill token. An `engine` section (block_size, gpu_utilization_factor, max_batch_size) is
+                    added to genai_config.json. Currently only supported for the CUDA execution provider with fp16 or
+                    bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
