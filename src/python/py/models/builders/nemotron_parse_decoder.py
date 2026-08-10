@@ -82,21 +82,15 @@ class NemotronParseDecoderComponent(Model):
             component_options,
         )
 
-        self.model_type = "nemotron_parse"
-        self.filename = component_options["filename"]
         self.graph.name = f"nemotron_parse_decoder_{phase}"
         if phase == "decode":
             self.graph.opset_imports[""] = 24
 
-        self.output_names = {"logits": "logits"}
-        self.output_types = {"logits": self.io_dtype}
-        self.output_shapes = {
-            "logits": [
-                "batch_size",
-                1 if phase == "prefill" else self.sequence_length,
-                self.vocab_size,
-            ]
-        }
+        self.output_shapes["logits"] = [
+            "batch_size",
+            1 if phase == "prefill" else self.sequence_length,
+            self.vocab_size,
+        ]
 
     def is_gqa_supported(self):
         # This component emits the checkpoint's primitive mBART attention graph.
