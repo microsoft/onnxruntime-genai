@@ -17,7 +17,8 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_NIGHTLY_FEED: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  binaryDir: 'build/cpu/win-x64'
+  buildRoot: 'build/cpu/win-x64'
+  binaryDir: 'build/cpu/win-x64/Release'
   WEBGPU_EP_PACKAGE_NAME: 'Microsoft.ML.OnnxRuntime.EP.WebGpu'
   WEBGPU_EP_PACKAGE_VERSION: '0.2.0-dev.20260610+50c95100'
   # Published ONNX Runtime used at test time (GenAI is built against the cmake-default ORT).
@@ -76,14 +77,25 @@ jobs:
           & $exePath -y --default-toolchain=1.86.0
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
-          cmake --preset windows_x64_cpu_release -DTEST_PHI2=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON -DTEST_QWEN_2_5=True
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_x64_cpu_release --parallel
-          cmake --build --preset windows_x64_cpu_release --target PyPackageBuild
+          python -m pip install -r requirements-dev.txt
+          python build.py `
+            --config Release `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_guidance `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              TEST_PHI2=True `
+              TEST_QWEN_2_5=True `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG'
 
       - name: Build the C Examples
         run: |
