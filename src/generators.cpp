@@ -861,7 +861,6 @@ void Generator::GenerateNextToken() {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
-
     ComputeLogits(next_tokens);
   }
   if (guidance_logits_processor_) {
