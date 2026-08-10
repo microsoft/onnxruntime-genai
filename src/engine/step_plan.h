@@ -53,7 +53,7 @@ struct RequestStepPlan {
   size_t packed_token_offset{};         // First row for this request in the flat varlen input.
   size_t logits_row_index{};            // Last packed row; its logits produce this request's next token.
   size_t target_cache_slots{};          // Committed KV slots required after the model run succeeds.
-  size_t whole_sequence_cache_slots{};  // KV slots for the whole sequence; admission is decided on this.
+  size_t whole_sequence_cache_slots{};  // KV slots the whole sequence needs; admitted and reserved on this.
   bool is_prefill{};
   bool newly_admitted{};
 };

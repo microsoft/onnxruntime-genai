@@ -206,15 +206,10 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     size_t proposed_blocks{};
     size_t new_blocks{};
   };
-  const auto growth_for_slots = [&](size_t target_slots,
-                                    const PagedCacheBlockTable* table) {
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
-    const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
-    const size_t additional_slots =
-        target_slots > committed_capacity ? target_slots - committed_capacity : 0;
-    const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
-    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
-  };
+  // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
+  // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
+  // first chunk and then losing the rest of the pool to another request would stall it part way
+  // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
     const size_t committed_slots = table ? table->committed_slots : 0;
@@ -222,15 +217,14 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
       throw std::runtime_error("Step plan target precedes the committed cache boundary.");
     }
 
-    return growth_for_slots(entry.target_cache_slots, table);
-  };
-  // A chunked prefill only asks for one chunk at a time, so serviceability has to be judged on the
-  // whole sequence. Otherwise a prompt that can never fit would be admitted on its first chunk and
-  // then stall part way through, holding the blocks it already took.
-  const auto whole_sequence_growth = [&](const RequestStepPlan& entry,
-                                         const PagedCacheBlockTable* table) {
-    return growth_for_slots(
-        std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots), table);
+    const size_t reserved_slots =
+        std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
+    const size_t additional_slots =
+        reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
+    const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
   };
   const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
     return growth.proposed_blocks > block_pool_->Capacity() ||
@@ -267,7 +261,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     }
 
     const auto growth = calculate_growth(entry, &table);
-    if (permanently_unserviceable(whole_sequence_growth(entry, &table))) {
+    if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = entry.request_id;
       }
@@ -288,23 +282,21 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
       throw std::runtime_error("New step plan request already belongs to the paged cache.");
     }
 
-    const auto admission_growth = whole_sequence_growth(candidate, nullptr);
-    if (permanently_unserviceable(admission_growth)) {
+    const auto growth = calculate_growth(candidate, nullptr);
+    if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;
       }
       continue;
     }
 
-    // Admit only once the whole prompt fits: Add() reserves the blocks for the entire sequence, and
-    // a request that starts its prefill has to be able to finish it.
     if (committed_request_count + selected_new_requests >= max_batch_size_ ||
-        planned_blocks + admission_growth.new_blocks > available_blocks) {
+        planned_blocks + growth.new_blocks > available_blocks) {
       capacity_deferred = true;
       continue;
     }
 
-    select(i, admission_growth);
+    select(i, growth);
     ++selected_new_requests;
   }
   plan.requests.resize(selected_requests);
