@@ -266,6 +266,31 @@ class NemotronParseBuilderTests(TestCase):
                 prefill_sequence_length=8,
             )
 
+    def test_decoder_component_preserves_base_output_policy(self):
+        builder = _make_builder(io_dtype=nemotron_parse.ir.DataType.BFLOAT16)
+
+        prefill = builder._make_decoder_component("prefill")
+        decode = builder._make_decoder_component("decode")
+
+        self.assertEqual(prefill.filename, "decoder_prefill.onnx")
+        self.assertEqual(decode.filename, "decoder.onnx")
+        self.assertEqual(
+            prefill.output_types["logits"],
+            nemotron_parse.ir.DataType.FLOAT,
+        )
+        self.assertEqual(
+            decode.output_types["logits"],
+            nemotron_parse.ir.DataType.FLOAT,
+        )
+        self.assertEqual(
+            prefill.output_shapes["logits"],
+            ["batch_size", 1, builder.config.decoder.vocab_size],
+        )
+        self.assertEqual(
+            decode.output_shapes["logits"],
+            ["batch_size", 1, builder.config.decoder.vocab_size],
+        )
+
     def test_rejects_unknown_export_component(self):
         with self.assertRaisesRegex(
             ValueError, "only encoder and/or decoder"
