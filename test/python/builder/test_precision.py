@@ -216,6 +216,19 @@ def _run_check_extra_options(
     )
 
 
+def test_fuse_shared_expert_gate_is_normalized_on_cuda(monkeypatch):
+    options = {"fuse_shared_expert_gate": "true"}
+
+    _run_check_extra_options(monkeypatch, options, execution_provider="cuda")
+
+    assert options["fuse_shared_expert_gate"] is True
+
+
+def test_fuse_shared_expert_gate_rejects_non_cuda_ep(monkeypatch):
+    with pytest.raises(ValueError, match="fuse_shared_expert_gate is only supported on the CUDA EP"):
+        _run_check_extra_options(monkeypatch, {"fuse_shared_expert_gate": "true"})
+
+
 # ---------------------------------------------------------------------------
 # MTP options are normalized and enforce the main-model output contract.
 # ---------------------------------------------------------------------------
@@ -501,9 +514,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
         (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(
-    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
-):
+def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.prune_lm_head = prune_lm_head
@@ -526,9 +537,7 @@ def test_paged_attention_lm_head_pruning(
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(
-        model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"])
-    )
+    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)

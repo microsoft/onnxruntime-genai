@@ -358,7 +358,12 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf
 
 When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. If the checkpoint declares `kv_cache_quant_algo=FP8`, the KV cache is exported as FP8 as well. CUDA linear-attention gate fusion is enabled automatically.
 
-The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops.
+The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. On CUDA, `fuse_shared_expert_gate` defaults to `true`, replacing each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`. Set it to `false` to retain the portable ONNX graph or when using an ONNX Runtime build without the CUDA kernel.
+
+```bash
+# Keep the portable Mul + Add graph when exporting from source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda --extra_options fuse_shared_expert_gate=false
+```
 
 #### Enable MTP Head (Qwen3.6)
 

@@ -168,6 +168,7 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "fuse_shared_expert_gate",
         "enable_mtp",
     ]
 
@@ -320,6 +321,12 @@ def check_extra_options(
                 f"Got execution_provider='{execution_provider}'."
             )
         extra_options["kv_cache_quant_type"] = quant_type
+
+    if extra_options.get("fuse_shared_expert_gate", False) and execution_provider != "cuda":
+        raise ValueError(
+            "fuse_shared_expert_gate is only supported on the CUDA EP, "
+            f"got execution_provider='{execution_provider}'."
+        )
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
