@@ -68,8 +68,9 @@ def test_windowed_kv_cache_can_be_turned_off(extra_options):
     assert resolve_windowed_kv_cache_eps(extra_options) == set()
 
 
-def test_windowed_kv_cache_eps_are_not_shared_between_models():
-    # The caller mutates nothing, but two models must not alias the same set.
+def test_windowed_kv_cache_eps_are_not_shared_between_callers():
+    # Each call must hand back its own set, or two models built in one process would alias
+    # (and mutate) the module constant.
     first = resolve_windowed_kv_cache_eps({})
     first.discard("cuda")
     assert "cuda" in resolve_windowed_kv_cache_eps({})
@@ -84,7 +85,7 @@ def _make_gqa_model(ep, window_size):
     model = Model.__new__(Model)
     model.ep = ep
     model.extra_options = {}
-    model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+    model.eps_with_windowed_kv_cache = resolve_windowed_kv_cache_eps({})
     model.kv_cache_quant_type = "none"
     model.num_attn_heads = 8
     model.num_kv_heads = 2
@@ -180,7 +181,7 @@ _CACHE_SHAPE = ["batch_size", 2, "past_sequence_length", 16]
 def _make_shape_model(ep, local_layers=()):
     model = Model.__new__(Model)
     model.ep = ep
-    model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+    model.eps_with_windowed_kv_cache = resolve_windowed_kv_cache_eps({})
     if local_layers is not None:
         model.is_local = lambda layer_id: layer_id in local_layers
     return model
@@ -264,7 +265,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     model.vocab_size = 32
     model.window_size = window_size
     model.eps_with_windowed_kv_cache = (
-        {"trt-rtx", "cuda", "cpu"} if eps_with_windowed_kv_cache is None else eps_with_windowed_kv_cache
+        resolve_windowed_kv_cache_eps({}) if eps_with_windowed_kv_cache is None else eps_with_windowed_kv_cache
     )
     model.window_kv_cache_slack = 0  # let runtime apply EP defaults
     # Alternating attention: even layers are sliding-window layers.

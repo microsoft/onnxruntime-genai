@@ -39,6 +39,9 @@ from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 # inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
 EPS_WITH_WINDOWED_KV_CACHE = {"trt-rtx", "cuda", "cpu"}
 
+# Subset whose GroupQueryAttention kernel does the eviction, so the node needs sliding_window_cache=1.
+EPS_WITH_GQA_SLIDING_WINDOW_CACHE = {"cuda", "cpu"}
+
 
 def resolve_windowed_kv_cache_eps(extra_options):
     """EPs allowed to give the sliding-window layers a cache shorter than max_length.
@@ -3200,7 +3203,11 @@ class Model:
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in self.eps_with_windowed_kv_cache and self.ep != "trt-rtx":
+        if (
+            self.window_size is not None
+            and self.window_size > 0
+            and self.ep in self.eps_with_windowed_kv_cache & EPS_WITH_GQA_SLIDING_WINDOW_CACHE
+        ):
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
             attributes["sliding_window_cache"] = 1

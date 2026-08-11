@@ -739,6 +739,11 @@ def get_args():
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
                     Must be a positive integer no greater than 256.
+                windowed_kv_cache = Give the sliding-window layers a KV cache shorter than max_length. Default is true.
+                    Applies to models with alternating attention on the cuda, cpu and trt-rtx execution providers.
+                    Set to false to allocate every layer's cache at max_length, which produces a baseline model
+                    that is directly comparable with a windowed build. Ignored when use_paged_attention is set,
+                    since the paged KV cache has no windowed mode.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.

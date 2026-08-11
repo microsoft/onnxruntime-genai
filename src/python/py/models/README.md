@@ -290,6 +290,18 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true
 ```
 
+#### Build a Full-Length KV Cache Baseline
+
+For models with alternating attention, the builder gives the sliding-window layers a KV cache shorter than `max_length` on the execution providers that can evict entries themselves (`cuda` and `cpu` evict inside `GroupQueryAttention`, `trt-rtx` evicts inside the EP). Set `windowed_kv_cache=false` to allocate every layer's cache at `max_length` instead, which produces a baseline model that is directly comparable with a windowed build. The sliding window is still masked either way; only the cache layout changes. This option is ignored when `use_paged_attention=true`, since the paged KV cache has no windowed mode.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options windowed_kv_cache=false
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options windowed_kv_cache=false
+```
+
 #### Enable Shared Embeddings
 
 This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are only valid for models with tied embeddings; setting `shared_embeddings=true` for a model with `tie_word_embeddings=false` will raise a `ValueError`. Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`.
