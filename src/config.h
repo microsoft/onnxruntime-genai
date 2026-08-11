@@ -476,6 +476,7 @@ struct Config {
       std::optional<size_t> num_blocks;             // Total number of blocks per layer.
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
+      size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 

@@ -35,10 +35,41 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
                                      std::shared_ptr<Model> model,
                                      BatchedSampler* batched_sampler,
                                      BatchedSamplingPlan* sampling_plan)
-    : requests_{requests}, model_{model}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+    : requests_{std::move(requests)}, model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
   // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
   for (auto& request : requests_) {
     request->ScheduleTokens();
+  }
+}
+
+ScheduledRequests::ScheduledRequests(const StepPlan& plan,
+                                     std::shared_ptr<Model> model,
+                                     BatchedSampler* batched_sampler,
+                                     BatchedSamplingPlan* sampling_plan)
+    : model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+  requests_.reserve(plan.requests.size());
+  std::vector<const void*> request_ids;
+  request_ids.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    if (!entry.request || entry.request_id != entry.request.get() ||
+        std::find(request_ids.begin(), request_ids.end(), entry.request_id) !=
+            request_ids.end()) {
+      throw std::runtime_error("The dynamic step plan contains an invalid request.");
+    }
+    const int64_t remaining =
+        entry.request->CurrentSequenceLength() -
+        entry.request->ProcessedSequenceLength();
+    if (remaining <= 0 || entry.unprocessed_token_count == 0 ||
+        entry.unprocessed_token_count > static_cast<size_t>(remaining)) {
+      throw std::runtime_error(
+          "The dynamic step token count must be positive and no greater than the remaining tokens.");
+    }
+    request_ids.push_back(entry.request_id);
+  }
+  for (const auto& entry : plan.requests) {
+    entry.request->BindScheduledTokenCount(
+        entry.unprocessed_token_count);
+    requests_.push_back(entry.request);
   }
 }
 

@@ -179,11 +179,15 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Chooses the tokens this request contributes to the step that is about to run.
    *
-   * Called once per step, before anything reads UnprocessedTokens(). With a `search.chunk_size`
-   * configured, a prompt longer than the chunk size is processed over several steps, which bounds
-   * the number of tokens a single model run carries.
+   * Used by static batching before anything reads UnprocessedTokens(). Dynamic batching binds the
+   * authoritative count from RequestStepPlan instead.
    */
   void ScheduleTokens();
+
+  /**
+   * @brief Binds the token count selected by a dynamic RequestStepPlan.
+   */
+  void BindScheduledTokenCount(size_t token_count);
 
   /**
    * @brief True when this step's tokens run to the end of the sequence.

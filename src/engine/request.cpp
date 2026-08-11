@@ -133,6 +133,16 @@ void Request::ScheduleTokens() {
   scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size);
 }
 
+void Request::BindScheduledTokenCount(size_t token_count) {
+  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_;
+  if (remaining <= 0 || token_count == 0 ||
+      token_count > static_cast<size_t>(remaining)) {
+    throw std::runtime_error(
+        "The dynamic step token count must be positive and no greater than the remaining tokens.");
+  }
+  scheduled_token_count_ = token_count;
+}
+
 bool Request::IsChunkComplete() const {
   return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
 }
