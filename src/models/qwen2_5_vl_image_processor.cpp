@@ -52,7 +52,8 @@ std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
-                   Ort::Allocator& allocator, int64_t spatial_merge_size) {
+                   Ort::Allocator& allocator, int64_t spatial_merge_size,
+                   bool use_muse_patch_token) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
@@ -87,6 +88,53 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
   // Generate input_ids with vision tokens
   std::string text = prompt;
+
+  if (use_muse_patch_token) {
+    constexpr char patch_token[] = "<|patch|>";
+    const std::regex patch_regex{R"(<\|patch\|>)"};
+    if (text.empty()) {
+      for (int64_t i = 0; i < num_images; ++i) {
+        text += patch_token;
+      }
+    }
+    const auto patch_tokens = std::distance(
+        std::sregex_iterator(text.begin(), text.end(), patch_regex),
+        std::sregex_iterator());
+
+    if (num_images != patch_tokens) {
+      throw std::runtime_error("Prompt contained " + std::to_string(patch_tokens) +
+                               " patch tokens but received " + std::to_string(num_images) + " images.");
+    }
+
+    if (num_images > 0 && image_grid_thw_data) {
+      std::string modified_text;
+      size_t last_pos = 0;
+      size_t image_idx = 0;
+      for (auto match = std::sregex_iterator(text.begin(), text.end(), patch_regex);
+           match != std::sregex_iterator(); ++match, ++image_idx) {
+        modified_text += text.substr(last_pos, match->position() - last_pos);
+        const int64_t* grid = image_grid_thw_data + image_idx * 3;
+        const int64_t num_patches =
+            (grid[0] * grid[1] * grid[2]) / (spatial_merge_size * spatial_merge_size);
+        for (int64_t i = 0; i < num_patches; ++i) {
+          modified_text += patch_token;
+        }
+        last_pos = match->position() + match->length();
+      }
+      modified_text += text.substr(last_pos);
+      text = std::move(modified_text);
+    }
+
+    const std::vector<int32_t> input_ids = tokenizer.Encode(text.c_str());
+    std::unique_ptr<OrtValue> input_ids_value = OrtValue::CreateTensor<int32_t>(
+        allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
+    std::copy(input_ids.begin(), input_ids.end(), input_ids_value->GetTensorMutableData<int32_t>());
+
+    std::unique_ptr<OrtValue> num_img_tokens = OrtValue::CreateTensor<int64_t>(
+        allocator, std::vector<int64_t>{1});
+    num_img_tokens->GetTensorMutableData<int64_t>()[0] = total_image_tokens;
+    return {std::move(input_ids_value), std::move(num_img_tokens)};
+  }
 
   // If prompt is empty, add vision markers for each image
   if (text.empty()) {
@@ -169,7 +217,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
-      patch_size_{config.model.vision.patch_size} {
+      patch_size_{config.model.vision.patch_size},
+      use_muse_patch_token_{config.model.type == "muse_glimmer"} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -192,7 +241,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images || images->num_images_ == 0) {
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_);
+    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_, use_muse_patch_token_);
     named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
     return named_tensors;
@@ -333,7 +382,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   }
 
   auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
-                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_);
+                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_, use_muse_patch_token_);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   // Use patched pixel_values if we computed it, otherwise use processor output
