@@ -149,8 +149,8 @@ def test_pinned_model_identity(paged_model_path):
         actual = digest.hexdigest()
         assert actual == expected, (
             f"'{_MODEL_ID}' {filename} sha256 {actual} != pinned {expected}. The artifact at the "
-            f"pinned v{models.pinned_version(_MODEL_ID)} differs from the catalog; bump "
-            f"PINNED_VERSIONS and PINNED_IDENTITY together if this is an intentional re-export."
+            f"pinned v{models.pinned_version(_MODEL_ID)} differs from the catalog; update "
+            f"PINNED_IDENTITY in test/python/integration/models.py if this is an intentional re-export."
         )
 
 
