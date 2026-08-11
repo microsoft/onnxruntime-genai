@@ -320,8 +320,6 @@ def test_genai_config_omits_sliding_window_without_a_window(monkeypatch, tmp_pat
 
 @pytest.mark.parametrize("ep", ["cuda", "trt-rtx", "cpu"])
 def test_genai_config_omits_sliding_window_when_opted_out(monkeypatch, tmp_path, ep):
-    config = _write_genai_config(
-        monkeypatch, tmp_path, ep, window_size=128, eps_with_windowed_kv_cache=set()
-    )
+    config = _write_genai_config(monkeypatch, tmp_path, ep, window_size=128, eps_with_windowed_kv_cache=set())
 
     assert "sliding_window" not in config["model"]["decoder"]
