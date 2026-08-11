@@ -13,7 +13,9 @@ CI populates ``<root>`` by azcopy-syncing the prefixes returned by
 ``--model-root`` (or ``ORTGENAI_MODEL_ROOT``) at a similarly shaped local
 folder, or do their own one-off azcopy.
 
-The resolver picks the highest available ``vN`` directory automatically.
+The resolver picks the ``v<N>`` directory pinned in ``models.PINNED_VERSIONS``
+for the logical id, or the highest available ``v<N>`` when the id is not
+pinned.
 """
 
 from __future__ import annotations
@@ -51,7 +53,9 @@ def get_path_for(
     """Resolve ``(logical_id, device)`` to an ORT GenAI model directory.
 
     Skips the test if the model doesn't declare support for that device.
-    Fails the test if the directory is missing under ``model_root`` - that
+    Resolves the pinned ``v<N>`` from ``models.PINNED_VERSIONS`` when the id
+    is pinned, otherwise the newest ``v<N>`` present. Fails the test if the
+    directory (or the pinned version) is missing under ``model_root`` - that
     indicates a stale azcopy filter or a missing upload, both worth
     surfacing loudly.
     """
@@ -63,9 +67,18 @@ def get_path_for(
         pytest.skip("No model source configured. Set ORTGENAI_MODEL_ROOT or pass --model-root.")
 
     base = Path(root) / models.storage_subpath(logical_id, device)
-    chosen = _newest_version_dir(base)
-    if chosen is None:
-        pytest.fail(f"Model '{logical_id}' (device={device}) has no v<N> directory under {base}.")
+    pinned = models.pinned_version(logical_id)
+    if pinned is not None:
+        chosen = base / f"v{pinned}"
+        if not chosen.is_dir():
+            pytest.fail(
+                f"Model '{logical_id}' (device={device}) is pinned to v{pinned}, but {chosen} "
+                f"is missing. Upload the pinned artifact or update PINNED_VERSIONS in models.py."
+            )
+    else:
+        chosen = _newest_version_dir(base)
+        if chosen is None:
+            pytest.fail(f"Model '{logical_id}' (device={device}) has no v<N> directory under {base}.")
     if not (chosen / "genai_config.json").exists():
         pytest.fail(f"Model '{logical_id}' (device={device}) has no genai_config.json at {chosen}.")
     return chosen

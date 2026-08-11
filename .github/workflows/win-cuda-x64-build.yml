@@ -165,6 +165,10 @@ jobs:
           python -m pip install -r test\python\cuda\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
+      - name: Run the synthetic Engine Python tests
+        run: |
+          python -m pytest -sv test/python/test_onnxruntime_genai_engine.py
+
       - name: Run the Java tests
         run: |
           ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800

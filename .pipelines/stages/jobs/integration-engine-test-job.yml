@@ -1,0 +1,86 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+  values:
+  - 'cuda'
+- name: os
+  type: string
+  default: 'linux'
+  values:
+  - 'linux'
+- name: model
+  type: string
+- name: storage_model
+  type: string
+  default: 'qwen2.5-0.5b-instruct'
+- name: py_dot_ver
+  type: string
+  default: '3.12'
+
+jobs:
+- job: engine_${{ parameters.ep }}_${{ replace(replace(parameters.model, '.', '_'), '-', '_') }}
+  displayName: '${{ parameters.ep }} · ${{ parameters.model }}'
+  pool: 'onnxruntime-ado-ubuntu-A10-NV32'
+
+  timeoutInMinutes: 60
+  workspace:
+    clean: all
+
+  variables:
+  - name: artifactName
+    value: 'integration-wheel-${{ parameters.os }}-${{ parameters.arch }}'
+  - name: modelRoot
+    value: '$(Agent.TempDirectory)/ortgenai-models'
+  - name: wheelDir
+    value: '$(Build.BinariesDirectory)/wheel'
+  - name: cuda_docker_image
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20250714.2
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: false
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: ${{ parameters.py_dot_ver }}
+      addToPath: true
+      architecture: ${{ parameters.arch }}
+
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download integration wheel'
+    inputs:
+      artifactName: $(artifactName)
+      targetPath: '$(wheelDir)'
+
+  - task: AzureCLI@2
+    displayName: 'Download staged paged-attention model'
+    inputs:
+      azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      inlineScript: |
+        set -e -x
+        destination="$(modelRoot)/${{ parameters.model }}/onnx/${{ parameters.ep }}/v1"
+        mkdir -p "$destination"
+        export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+        azcopy copy \
+          "https://foundrylocalmodels.blob.core.windows.net/staging/paged-attention/${{ parameters.storage_model }}/*" \
+          "$destination" \
+          --recursive
+
+  - template: steps/integration-pytest-step.yml
+    parameters:
+      os: ${{ parameters.os }}
+      ep: ${{ parameters.ep }}
+      model: ${{ parameters.model }}
+      modelRoot: $(modelRoot)
+      cudaDockerImage: $(cuda_docker_image)
+      wheelDir: $(wheelDir)
+      testPath: 'test/python/integration/test_integration_engine.py'
+      extraPytestArgs: '--run-engine-tests'
+      resultPrefix: 'integration-engine'
+      testRunTitlePrefix: 'integration engine'
