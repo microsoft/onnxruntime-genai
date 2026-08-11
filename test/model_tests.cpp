@@ -14,12 +14,18 @@
 #include <gtest/gtest.h>
 
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/qwen_vl_vision.h"
 
 #include "test_utils.h"
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
+
+TEST(ModelTests, MuseGlimmerUsesGenericVLMPath) {
+  EXPECT_TRUE(Generators::ModelType::IsVLM("muse_glimmer"));
+  EXPECT_FALSE(Generators::ModelType::IsQwenVLFamily("muse_glimmer"));
+}
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
