@@ -2161,3 +2161,20 @@ TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
   // audios should not have been created
   EXPECT_EQ(audios, nullptr);
 }
+
+// A non-empty buffer smaller than the minimum audio header size must be rejected
+// before it reaches format detection, which reads the first bytes of the input.
+TEST(CAPITests, LoadAudiosFromBuffersRejectsUndersizedBuffer) {
+  const unsigned char byte = 0xFF;
+  const void* data_ptr = &byte;
+  size_t data_size = 1;
+  OgaAudios* audios = nullptr;
+  OgaResult* result = OgaLoadAudiosFromBuffers(&data_ptr, &data_size, 1, &audios);
+
+  // Should return an error for undersized buffers.
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("too small"), std::string::npos);
+  OgaDestroyResult(result);
+  // audios should not have been created
+  EXPECT_EQ(audios, nullptr);
+}

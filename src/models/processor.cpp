@@ -58,10 +58,18 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
   if (audio_data.size() != audio_data_sizes.size())
     throw std::runtime_error("Number of audio data buffers does not match the number of audio data sizes");
 
+  // Minimum number of bytes required to detect an audio container format from its
+  // magic-number header (e.g. "fLaC", "RIFF", MP3 sync word). Buffers smaller than
+  // this cannot hold a valid audio stream and must be rejected before reaching the
+  // decoder, which reads the first bytes to sniff the format.
+  constexpr size_t kMinAudioBufferSize = 4;
+
   std::vector<int64_t> sizes;
   for (size_t i = 0; i < audio_data_sizes.size(); ++i) {
     if (audio_data_sizes[i] == 0)
       throw std::runtime_error("Audio buffer " + std::to_string(i) + " is empty.");
+    if (audio_data_sizes[i] < kMinAudioBufferSize)
+      throw std::runtime_error("Audio buffer " + std::to_string(i) + " is too small to contain a valid audio header.");
     sizes.push_back(audio_data_sizes[i]);
   }
 
