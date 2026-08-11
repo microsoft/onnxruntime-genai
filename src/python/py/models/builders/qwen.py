@@ -706,7 +706,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
         # but the C++ runtime expects "qwen3_vl" (with underscore).
         # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration"  # lgtm[py/overwritten-inherited-attribute]
+        self.model_type = "Qwen3_VLForConditionalGeneration"  # noqa: overrides Model.model_type on purpose
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
@@ -2270,8 +2270,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         # The base builder derives the GenAI model.type by stripping the suffix
         # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = (  # lgtm[py/overwritten-inherited-attribute]
-            "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
+        self.model_type = (
+            "Qwen3_5_Moe_textForCausalLM"
+            if self.is_text_only
+            else "Qwen3_5_MoeForConditionalGeneration"
         )
 
         # MoE attributes specific to Qwen3.5-MoE
