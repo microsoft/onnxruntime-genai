@@ -36,6 +36,10 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
                                      BatchedSampler* batched_sampler,
                                      BatchedSamplingPlan* sampling_plan)
     : requests_{requests}, model_{model}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+  // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
+  for (auto& request : requests_) {
+    request->ScheduleTokens();
+  }
 }
 
 ExecutionContext& ScheduledRequests::CreateExecutionContext() {
@@ -70,15 +74,22 @@ void ScheduledRequests::GenerateNextTokens() {
     // serialize the whole batch; launching all of them first means only the first completion below
     // actually waits for the device.
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-      if (requests_[request_idx]->status_ != RequestStatus::Completed) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+          requests_[request_idx]->IsChunkComplete()) {
         requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
       }
     }
 
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-      if (requests_[request_idx]->status_ != RequestStatus::Completed) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+          requests_[request_idx]->IsChunkComplete()) {
         requests_[request_idx]->CompleteGeneration();
       }
+    }
+
+    for (const auto& request : requests_) {
+      if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+        request->AdvanceChunk();
     }
   } catch (...) {
     const auto error = std::current_exception();
@@ -110,7 +121,8 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
     return false;
 
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed)
+    if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+        requests_[request_idx]->IsChunkComplete())
       sampling_plan_->logits.push_back(logits[request_idx]);
   }
 
@@ -136,6 +148,10 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
   for (auto* request : sampling_plan_->requests) {
     request->CompleteGeneration();
   }
+  for (const auto& request : requests_) {
+    if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+      request->AdvanceChunk();
+  }
 
   return true;
 }
@@ -149,7 +165,7 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
 
   sampling_plan_->Clear();
   for (const auto& request : requests_) {
-    if (request->status_ == RequestStatus::Completed)
+    if (request->status_ == RequestStatus::Completed || !request->IsChunkComplete())
       continue;
 
     const auto args = ResolveSampleArgs(request->SearchOptions());
@@ -161,7 +177,7 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
     sampling_plan_->params.push_back(*args);
     sampling_plan_->states.push_back(&request->SamplingState(*batched_sampler_));
   }
-  return true;
+  return !sampling_plan_->requests.empty();
 }
 
 void ScheduledRequests::BeginTransaction() {
@@ -200,35 +216,46 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   }
 
   auto logits = ProcessLogits();
-  results.clear();
+  results.assign(requests_.size(), RequestStepResult{});
   if (transaction_uses_batched_sampler_) {
-    if (sampling_plan_->requests.size() != requests_.size())
-      throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
-
     sampling_plan_->logits.clear();
+    size_t sampling_index = 0;
     for (size_t i = 0; i < requests_.size(); ++i) {
+      if (!requests_[i]->IsChunkComplete())
+        continue;
+      if (sampling_index >= sampling_plan_->requests.size() ||
+          sampling_plan_->requests[sampling_index] != requests_[i].get()) {
+        throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
+      }
       sampling_plan_->logits.push_back(logits[i]);
       requests_[i]->PrepareGenerationForTransaction(logits[i]);
+      ++sampling_index;
     }
+    if (sampling_index != sampling_plan_->requests.size())
+      throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
 
     auto next_tokens = batched_sampler_->Sample(
         sampling_plan_->logits, sampling_plan_->params,
         sampling_plan_->states, model_->config_->model.vocab_size);
-    for (size_t i = 0; i < requests_.size(); ++i) {
-      if (!requests_[i]->BindNextTokensSlot(next_tokens.subspan(i, 1)))
+    for (size_t i = 0; i < sampling_plan_->requests.size(); ++i) {
+      if (!sampling_plan_->requests[i]->BindNextTokensSlot(next_tokens.subspan(i, 1)))
         throw std::runtime_error("The request search rejected the batched sampler output.");
-      requests_[i]->OnNextTokensSampled();
+      sampling_plan_->requests[i]->OnNextTokensSampled();
     }
     next_tokens.CopyDeviceToCpu();
+    sampling_index = 0;
     for (size_t i = 0; i < requests_.size(); ++i) {
-      results.push_back(
-          requests_[i]->StageGenerationForTransaction(plan.requests[i]));
+      if (!requests_[i]->IsChunkComplete())
+        continue;
+      results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      ++sampling_index;
     }
     return;
   }
 
   for (size_t i = 0; i < requests_.size(); ++i) {
-    results.push_back(requests_[i]->ApplyLogitsForTransaction(logits[i]));
+    if (requests_[i]->IsChunkComplete())
+      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
   }
 }
 

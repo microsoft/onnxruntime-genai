@@ -54,8 +54,11 @@ PagedCacheReservation::PagedCacheReservation(
     }
 
     const size_t committed_capacity = committed_blocks * block_pool.BlockSize();
+    // Blocks are taken for the whole sequence so that a chunked prefill cannot lose the rest of its
+    // capacity to another request between steps, but only target_slots is committed below.
+    const size_t reserved_slots = std::max(request.reserved_slots, request.target_slots);
     const size_t additional_slots =
-        request.target_slots > committed_capacity ? request.target_slots - committed_capacity : 0;
+        reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool.BlocksNeeded(additional_slots);
     const size_t tail_capacity = committed_capacity - committed_slots;
     const size_t growth = request.target_slots - committed_slots;

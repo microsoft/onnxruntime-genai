@@ -3,6 +3,7 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
+#include "../sequence_positions.h"
 
 namespace Generators {
 
@@ -126,9 +127,9 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
     // number of tokens already in the cache and therefore the base position for this step.
     const int64_t processed_sequence_length = request->ProcessedSequenceLength();
-    if (entry &&
-        processed_sequence_length !=
-            entry->sequence_length_before - static_cast<int64_t>(entry->unprocessed_token_count)) {
+    if (entry && (request->CurrentSequenceLength() != entry->sequence_length_before ||
+                  SlotsAfterStep(processed_sequence_length, entry->unprocessed_token_count) !=
+                      entry->target_cache_slots)) {
       throw std::runtime_error("Step plan processed sequence length does not match the request.");
     }
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);

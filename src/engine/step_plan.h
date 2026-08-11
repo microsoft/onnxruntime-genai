@@ -48,11 +48,12 @@ struct StepPlanningResult {
 struct RequestStepPlan {
   std::shared_ptr<Request> request;
   const void* request_id{};
-  int64_t sequence_length_before{};  // Search length before this transaction appends a token.
-  size_t unprocessed_token_count{};  // Prompt chunk or single decode token sent to the model.
-  size_t packed_token_offset{};      // First row for this request in the flat varlen input.
-  size_t logits_row_index{};         // Last packed row; its logits produce this request's next token.
-  size_t target_cache_slots{};       // Committed KV slots required after the model run succeeds.
+  int64_t sequence_length_before{};     // Search length before this transaction appends a token.
+  size_t unprocessed_token_count{};     // Prompt chunk or single decode token sent to the model.
+  size_t packed_token_offset{};         // First row for this request in the flat varlen input.
+  size_t logits_row_index{};            // Last packed row; its logits produce this request's next token.
+  size_t target_cache_slots{};          // Committed KV slots required after the model run succeeds.
+  size_t whole_sequence_cache_slots{};  // KV slots the whole sequence needs; admitted and reserved on this.
   bool is_prefill{};
   bool newly_admitted{};
 };

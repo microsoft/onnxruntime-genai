@@ -5,6 +5,8 @@
 
 #include <numeric>
 
+#include "sequence_positions.h"
+
 namespace Generators {
 
 namespace {
@@ -204,19 +206,23 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     size_t proposed_blocks{};
     size_t new_blocks{};
   };
+  // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
+  // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
+  // first chunk and then losing the rest of the pool to another request would stall it part way
+  // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
     const size_t committed_slots = table ? table->committed_slots : 0;
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
     if (entry.target_cache_slots < committed_slots) {
       throw std::runtime_error("Step plan target precedes the committed cache boundary.");
     }
 
+    const size_t reserved_slots =
+        std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
-        entry.target_cache_slots > committed_capacity
-            ? entry.target_cache_slots - committed_capacity
-            : 0;
+        reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
     return CacheGrowth{committed_blocks + new_blocks, new_blocks};
   };

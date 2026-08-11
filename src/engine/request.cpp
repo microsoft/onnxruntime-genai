@@ -4,6 +4,7 @@
 #include "request.h"
 
 #include "engine.h"
+#include "sequence_positions.h"
 #include "../search.h"
 
 namespace Generators {
@@ -53,6 +54,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
   processed_sequence_length_ = 0;
   search_->AppendTokens(device_tokens);
+  prompt_sequence_length_ = CurrentSequenceLength();
   seen_sequence_length_ = CurrentSequenceLength();
   tokens_host_.reserve(params_->search.max_length);
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
@@ -96,6 +98,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
+    prompt_sequence_length_ = CurrentSequenceLength();
     tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
@@ -120,6 +123,24 @@ int64_t Request::ProcessedSequenceLength() const {
   return processed_sequence_length_;
 }
 
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens() {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size);
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+}
+
 int32_t Request::UnseenToken() {
   if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
     throw std::runtime_error("All tokens have been seen.");
@@ -133,13 +154,12 @@ bool Request::HasUnseenTokens() const {
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
-  return unprocessed_tokens;
+  return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
 }
 
 std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   const size_t begin = static_cast<size_t>(processed_sequence_length_);
-  const size_t end = static_cast<size_t>(CurrentSequenceLength());
+  const size_t end = begin + ScheduledTokenCount();
   if (end > tokens_host_.size())
     throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
 
@@ -151,7 +171,7 @@ bool Request::IsDone() const {
 }
 
 bool Request::IsPrefill() const {
-  return processed_sequence_length_ == 0;
+  return processed_sequence_length_ < prompt_sequence_length_;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
@@ -240,7 +260,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
   }
-  processed_sequence_length_ = plan.sequence_length_before;
+  processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
   status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;
 }
 

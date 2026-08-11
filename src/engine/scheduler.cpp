@@ -3,6 +3,7 @@
 
 #include "engine.h"
 #include "admission.h"
+#include "sequence_positions.h"
 
 namespace Generators {
 
@@ -35,6 +36,12 @@ StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::sh
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so it
+  // cannot resume a half written prompt. Only the paged cache can hold one.
+  if (request->SearchOptions().chunk_size.value_or(0) != 0) {
+    throw std::runtime_error(
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
+  }
   if (auto* sampler = GetBatchedSampler())
     request->SamplingState(*sampler);
   requests_pool_.push_back(request);
@@ -186,9 +193,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     if (snapshot.status != expected_status) {
       throw std::runtime_error("Request status is invalid for dynamic step planning.");
     }
-    const auto unprocessed_token_count =
+    const auto remaining_token_count =
         snapshot.current_sequence_length - snapshot.processed_sequence_length;
-    if (unprocessed_token_count <= 0) {
+    if (remaining_token_count <= 0) {
       throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
     }
 
@@ -196,11 +203,13 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.request = request;
     entry.request_id = request.get();
     entry.sequence_length_before = snapshot.current_sequence_length;
-    entry.unprocessed_token_count =
-        static_cast<size_t>(unprocessed_token_count);
+    entry.unprocessed_token_count = ScheduledTokenCount(
+        static_cast<size_t>(remaining_token_count), request->SearchOptions().chunk_size);
     entry.target_cache_slots = RequiredSlots(
         static_cast<size_t>(snapshot.processed_sequence_length),
         entry.unprocessed_token_count);
+    entry.whole_sequence_cache_slots =
+        SlotsForWholeSequence(snapshot.current_sequence_length);
     entry.is_prefill = snapshot.is_prefill;
     entry.newly_admitted = newly_admitted;
     plan.requests.push_back(std::move(entry));
