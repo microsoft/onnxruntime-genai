@@ -36,7 +36,7 @@ jobs:
   - name: wheelDir
     value: '$(Build.BinariesDirectory)/wheel'
   - name: cuda_docker_image
-    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20250714.2
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1
 
   steps:
   - checkout: self
@@ -63,7 +63,7 @@ jobs:
       scriptLocation: 'inlineScript'
       workingDirectory: '$(Build.Repository.LocalPath)'
       inlineScript: |
-        set -e -x
+        set -euo pipefail
         destination="$(modelRoot)/${{ parameters.model }}/onnx/${{ parameters.ep }}/v1"
         mkdir -p "$destination"
         export AZCOPY_AUTO_LOGIN_TYPE=AZCLI

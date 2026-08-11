@@ -21,9 +21,6 @@ pytestmark = pytest.mark.engine
 
 _MODEL_ID = "qwen2.5-0.5b-instruct-paged"
 
-# Plain completion prompts with confident greedy continuations. They avoid
-# chat templating so the batching-equality assertions do not hinge on a
-# particular template.
 _PROMPTS = [
     "The capital of France is",
     "Water is made of hydrogen and",
@@ -31,14 +28,10 @@ _PROMPTS = [
     "One plus one equals",
 ]
 
-# Upper bound on engine.step() calls per generation, so a scheduling bug
-# fails fast instead of hanging CI.
 _MAX_STEPS = 20_000
 
 
 class _Sink:
-    """Per-request token collector correlated back through opaque data."""
-
     __slots__ = ("tokens",)
 
     def __init__(self) -> None:
@@ -64,10 +57,6 @@ def paged_model_path(device, pytestconfig) -> Path:
 
 @pytest.fixture
 def bundle(device, paged_model_path) -> _Bundle:
-    # PagedAttention is a CUDA-only operator, so this lane is CUDA only. Other
-    # devices (including the default cpu) skip cleanly. The catalog also
-    # declares cuda-only support, so resolution already skips them; this keeps
-    # the requirement explicit at the model-load boundary.
     if device != "cuda":
         pytest.skip(f"Paged Engine test is CUDA only; device '{device}' is not supported.")
     if not og.is_cuda_available():
@@ -87,8 +76,6 @@ def _greedy_params(model: og.Model, prompt_len: int, max_new_tokens: int, min_ne
     params = og.GeneratorParams(model)
     options = {"do_sample": False, "max_length": prompt_len + max_new_tokens}
     if min_new_tokens:
-        # min_length suppresses the stop token until the sequence reaches it,
-        # making the stop condition deterministic regardless of the checkpoint.
         options["min_length"] = prompt_len + min_new_tokens
     params.set_search_options(**options)
     return params
@@ -122,7 +109,6 @@ def _run(engine, *, max_steps=_MAX_STEPS) -> None:
 
 
 def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0) -> list[int]:
-    """Greedy output of one prompt on its own dedicated engine."""
     sink = _Sink()
     engine = og.Engine(model)
     _add_request(engine, model, prompt_tokens, max_new_tokens, sink, min_new_tokens=min_new_tokens)
@@ -208,8 +194,6 @@ def test_staggered_admission(bundle):
     sink_a = _Sink()
     _add_request(engine, bundle.model, prompt_a, max_new, sink_a)
 
-    # Advance the first request a few steps before the second is admitted, so
-    # admission happens while a request is already in flight.
     for _ in range(3):
         if not engine.has_pending_requests():
             break
@@ -230,8 +214,6 @@ def test_staggered_admission(bundle):
 
 
 def test_isolated_matches_batched(bundle):
-    # Greedy decoding: batching a request alongside others must not change its
-    # own output.
     max_new = 16
     prompt = _PROMPTS[0]
     prompt_tokens = bundle.tokenizer.encode(prompt)
@@ -248,7 +230,6 @@ def test_isolated_matches_batched(bundle):
 
 
 def test_output_isolation(bundle):
-    # Two different prompts sharing a batch must keep their own outputs.
     max_new = 16
     p0, p1 = _PROMPTS[0], _PROMPTS[2]
 
@@ -267,8 +248,6 @@ def test_output_isolation(bundle):
 
 
 def test_completion_isolation(bundle):
-    # A short request that finishes and is removed mid-run must not truncate a
-    # longer sibling: the survivor still matches its isolated run.
     short_new, long_new = 6, 20
     short_prompt, long_prompt = _PROMPTS[3], _PROMPTS[1]
 
@@ -288,8 +267,6 @@ def test_completion_isolation(bundle):
 
 
 def test_max_length_stops(bundle):
-    # min_length == max_length forces exactly max_new tokens, so the bound is
-    # testable independent of when the checkpoint would emit a stop token.
     max_new = 8
     prompt_tokens = bundle.tokenizer.encode(_PROMPTS[0])
 
@@ -299,13 +276,6 @@ def test_max_length_stops(bundle):
 
 
 def test_eos_gates_termination(bundle):
-    # The Engine stops a greedy request for exactly two reasons: it reaches
-    # max_length, or the model emits an EOS token (the EOS token is consumed,
-    # not surfaced as output). So a greedy run that stops *before* max_length
-    # was terminated by EOS. Rather than asserting on a hardcoded token stream,
-    # prove that positively: forcing generation past that point with min_length
-    # suppresses the EOS and yields strictly more tokens with an identical
-    # prefix.
     eos_ids = _eos_ids(bundle)
     if not eos_ids:
         pytest.skip("Model config declares no eos_token_id.")
@@ -320,8 +290,7 @@ def test_eos_gates_termination(bundle):
     if not natural or len(natural) >= headroom:
         pytest.skip("Greedy generation did not stop before max_length; EOS stop not reproducible here.")
 
-    # Stopped early => EOS gated it. Forcing min_length past that point must
-    # suppress the stop and extend the otherwise-identical greedy sequence.
+    # Suppress EOS past the natural stop and verify the greedy prefix is stable.
     forced = _generate_isolated(
         bundle.model,
         prompt_tokens,
@@ -342,7 +311,6 @@ def test_remove_request_stops_output(bundle):
     request_a = _add_request(engine, bundle.model, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a)
     _add_request(engine, bundle.model, sibling_prompt, max_new, sink_b)
 
-    # Let both requests generate a few tokens, then remove the first in flight.
     for _ in range(4):
         if not engine.has_pending_requests():
             break
@@ -375,7 +343,6 @@ def test_engine_teardown_and_recreation(bundle):
     del first
     gc.collect()
 
-    # A fresh engine on the same model must reload the paged cache and serve.
     second = og.Engine(bundle.model)
     assert not second.has_pending_requests()
     sink2 = _Sink()

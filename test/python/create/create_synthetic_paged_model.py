@@ -3,48 +3,12 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""Create a tiny deterministic paged-attention model for the engine tests.
+"""Create the deterministic paged model used by the Engine tests.
 
-Unlike ``create_dummy_engine_model.py`` (whose graph never runs), this model is
-executed end to end by the continuous-batching engine on the paged-attention
-path. It is *synthetic*: instead of real attention it computes next-token logits
-with a closed-form rule that is easy to predict in Python, yet depends on the
-same paged inputs a real ``PagedAttention`` model consumes. That lets the tests
-assert exact tokens and catch any row, sequence-length, or block-table mixing.
+The graph writes packed tokens through the supplied block table and emits
+one-hot logits for:
 
-I/O contract (the engine's variable-length paged decoder, one KV layer):
-
-  inputs
-    input_ids                     int64  [num_tokens]        packed 1-D tokens
-    cumulative_sequence_lengths   int32  [batch + 1]         per-request offsets
-    past_sequence_lengths         int32  [batch]             KV write base / row
-    block_table                   int32  [batch, max_blocks] physical block ids
-    past_key_values.0.key/value   float  [num_blocks, block_size, 1, 1]
-  outputs
-    logits                        float  [num_tokens, vocab_size]
-    present.0.key/value           float  [num_blocks, block_size, 1, 1]
-
-The key/value caches are bound to the same buffers as their ``past`` inputs, so
-the graph writes each token into its slot in place, exactly like the real op.
-
-The rule (see ``predicted_tokens`` in the test helper, which mirrors it):
-
-    slot(pos)  = block_table[row, pos // block_size] * block_size + pos % block_size
-    write      key[slot] = value[slot] = token            for every packed token
-    first_key  = key  read at the row's first slot   (block_table[row, 0])
-    cur_value  = value read at the token's own slot   (its own block/column)
-    logits row = one-hot( (first_key + cur_value + (pos + 1)) % vocab_size )
-
-For the row the engine samples (a request's last token) this reduces to
-
-    next_token = (first_prompt_token + current_token + current_length) % vocab_size
-
-so a request's output depends on its first token (only reachable through its
-block table after prefill), its current token, and its length. Swap any of those
-between requests and the sampled token changes.
-
-Usage:
-  python create_synthetic_paged_model.py [--output_dir OUTPUT_DIR]
+    (first_prompt_token + current_token + current_length) % vocab_size
 """
 
 import argparse
@@ -55,8 +19,6 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-# Tiny synthetic configuration. Small blocks make short prompts span several
-# blocks, which is what stresses the block-table addressing.
 VOCAB_SIZE = 64
 BLOCK_SIZE = 4
 NUM_BLOCKS = 128
@@ -92,8 +54,7 @@ def _decoder_graph():
     def node(op_type, inputs, outputs, **attrs):
         nodes.append(helper.make_node(op_type, inputs, outputs, **attrs))
 
-    # Row index of every packed token: the number of request boundaries at or
-    # below its flat position. boundaries = cumulative_sequence_lengths[1:].
+    # Derive each packed token's request row from the cumulative boundaries.
     node("Shape", ["input_ids"], ["ids_shape"])
     node("Squeeze", ["ids_shape"], ["num_tokens"])
     node("Range", ["c0", "num_tokens", "c1"], ["token_index"])
@@ -105,8 +66,7 @@ def _decoder_graph():
     node("Cast", ["at_or_past"], ["at_or_past_i64"], to=TensorProto.INT64)
     node("ReduceSum", ["at_or_past_i64", "axis1"], ["row_id"], keepdims=0)
 
-    # Absolute sequence position of every packed token:
-    #   pos = past_sequence_lengths[row] + (flat_index - row_start)
+    # Compute the token's absolute position within its request.
     node("Cast", ["cumulative_sequence_lengths"], ["cum_i64"], to=TensorProto.INT64)
     node("Gather", ["cum_i64", "row_id"], ["row_start"], axis=0)
     node("Sub", ["token_index", "row_start"], ["offset_in_row"])
@@ -114,7 +74,7 @@ def _decoder_graph():
     node("Gather", ["past_i64", "row_id"], ["past_of_row"], axis=0)
     node("Add", ["past_of_row", "offset_in_row"], ["pos"])
 
-    # Physical slot = block_table[row, pos // block_size] * block_size + pos % block_size.
+    # Map each request position to its physical cache slot.
     node("Div", ["pos", "cB"], ["block_col"])
     node("Mul", ["block_col", "cB"], ["block_col_base"])
     node("Sub", ["pos", "block_col_base"], ["slot_in_block"])
@@ -126,7 +86,7 @@ def _decoder_graph():
     node("Mul", ["block_id", "cB"], ["block_base"])
     node("Add", ["block_base", "slot_in_block"], ["phys"])
 
-    # Write the token into its slot in both caches, in place.
+    # Write tokens to the key and value caches.
     node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
     node("Reshape", ["past_key_values.0.key", "flat"], ["past_key_flat"])
     node("Reshape", ["past_key_values.0.value", "flat"], ["past_value_flat"])
@@ -136,9 +96,7 @@ def _decoder_graph():
     node("Reshape", ["present_key_flat", "cache_shape"], ["present.0.key"])
     node("Reshape", ["present_value_flat", "cache_shape"], ["present.0.value"])
 
-    # first_key: the row's first token, reachable only through block_table[row, 0]
-    # after prefill. cur_value: this token read back from its own (possibly
-    # higher) block-table column.
+    # Read the request's first token and the current token through the cache.
     node("Gather", ["block_table_i64", "c0"], ["first_block_id"], axis=1)
     node("Mul", ["first_block_id", "cB"], ["first_slot_per_row"])
     node("Gather", ["first_slot_per_row", "row_id"], ["first_slot"], axis=0)
@@ -154,7 +112,6 @@ def _decoder_graph():
     node("Mul", ["score_div", "cV"], ["score_floor"])
     node("Sub", ["score", "score_floor"], ["next_token"])
 
-    # One-hot logits so the argmax is exactly next_token.
     node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
     node("Equal", ["next_token_col", "vocab_range"], ["is_next"])
     node("Cast", ["is_next"], ["logits"], to=TensorProto.FLOAT)
@@ -187,7 +144,6 @@ def create_decoder(output_dir):
     onnx.checker.check_model(model)
     path = os.path.join(output_dir, "decoder.onnx")
     onnx.save_model(model, path)
-    print(f"  Saved decoder -> {path}")
 
 
 def create_config(output_dir):
@@ -237,7 +193,6 @@ def create_config(output_dir):
     path = os.path.join(output_dir, "genai_config.json")
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
-    print(f"  Saved config -> {path}")
 
 
 def main():
@@ -251,10 +206,8 @@ def main():
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Creating synthetic paged engine test model in {output_dir}")
     create_decoder(output_dir)
     create_config(output_dir)
-    print("Done!")
 
 
 if __name__ == "__main__":

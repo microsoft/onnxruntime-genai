@@ -47,9 +47,7 @@ MODELS: dict[str, set[str]] = {
     "mistralai-Mistral-7B-Instruct-v0-2": {"cpu", "cuda", "webgpu"},
     "olmo-3-7b-instruct": {"cpu", "cuda", "webgpu"},
     "qwen2.5-0.5b-instruct": {"cpu", "cuda", "webgpu"},
-    # Paged-attention export for the Engine integration test. CUDA only: the
-    # PagedAttention operator has no CPU kernel, and this build's paged KV
-    # cache derives its block count from free GPU memory.
+    # PagedAttention is CUDA-only.
     "qwen2.5-0.5b-instruct-paged": {"cuda"},
     "qwen2.5-1.5b-instruct": {"cpu", "cuda", "webgpu"},
     "qwen2.5-14b-instruct": {"cpu", "cuda", "webgpu"},
@@ -76,17 +74,11 @@ MODELS: dict[str, set[str]] = {
 }
 
 
-# Exact local-layout version pins. The Engine pipeline places the staged paged
-# model in v1, while its file hashes below protect against changes at the
-# mutable staging path. Ids absent from this map resolve to the newest v<N>.
 PINNED_VERSIONS: dict[str, int] = {
     "qwen2.5-0.5b-instruct-paged": 1,
 }
 
 
-# Content identity for pinned artifacts: logical id -> {filename: sha256}.
-# The Engine test verifies the config, graph, and external weights because the
-# source artifact is stored in the mutable staging container.
 PINNED_IDENTITY: dict[str, dict[str, str]] = {
     "qwen2.5-0.5b-instruct-paged": {
         "genai_config.json": "2d2b99a2a2d8049fd921d4483fb05f4fad22603f058fc1dffd5f73f9a36e148c",
@@ -96,16 +88,7 @@ PINNED_IDENTITY: dict[str, dict[str, str]] = {
 }
 
 
-# Suites are explicit subsets of MODELS, ordered cheapest-first.
-#
-#   pr     - runs on every pull request. One small representative model per
-#            architecture family, all sub-3B. Optimised for fast PR signal.
-#   all    - runs on every merge to main. Broad coverage including larger
-#            models and reasoning variants.
-#   engine - the paged-attention Engine integration test. Deliberately not
-#            part of pr/all (which drive the text-generation test fan-out);
-#            it runs as a separate Linux CUDA stage in the existing integration
-#            pipeline. CUDA only (PagedAttention has no CPU kernel).
+# Suites are ordered cheapest-first. The Engine suite runs in its own stage.
 pr: list[str] = [
     "qwen2.5-0.5b-instruct",
     "qwen3-0.6b",

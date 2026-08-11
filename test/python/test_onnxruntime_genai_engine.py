@@ -1,13 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Deterministic integration tests for the paged Engine execution path.
-
-The synthetic graph reads and writes KV slots through the Engine-provided block
-table. It detects row or length mixing, overlapping allocations, and block
-drift across decode steps. CUDA runs this synthetic graph through the CUDA EP;
-the real PagedAttention operator is covered by the real-model integration test.
-"""
+"""Deterministic integration tests for the paged Engine path."""
 
 from __future__ import annotations
 
@@ -19,42 +13,23 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
-# Tiny checked-in fixture; no external model download or --test_models needed.
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
 
-# These mirror create_synthetic_paged_model.py. block_size 4 makes short prompts
-# span several blocks, which is what stresses block-table addressing.
 _VOCAB_SIZE = 64
 _BLOCK_SIZE = 4
 _EOS_TOKEN_ID = 1
 
-# Upper bound on engine.step() calls per generation so a scheduling bug fails
-# fast instead of hanging.
 _MAX_STEPS = 10_000
 
-# CPU covers the paged transaction path on every build; CUDA adds the executable
-# paged-attention graph when a GPU build is present.
 _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 
-# Distinct prompts (tokens < vocab). They differ in first token and length, so
-# their generations diverge and mixing them in a batch is detectable. Lengths 3
-# and 4 sit inside one block; length 6 spans two 4-slot blocks.
 _PROMPT_A = [5, 9, 13]
 _PROMPT_B = [7, 2, 20, 4]
 _PROMPT_LONG = [3, 8, 2, 15, 6, 11]
 
 
 def predicted_tokens(prompt, max_new_tokens):
-    """Greedy tokens the synthetic graph makes the engine emit for one request.
-
-    Chaining the graph's per-row rule over a request's own tokens gives
-
-        g_0   = (prompt[0] + prompt[-1] + len(prompt)) % vocab
-        g_k   = (prompt[0] + g_{k-1}   + len(prompt) + k) % vocab   for k >= 1
-
-    The engine stops when it samples the EOS token and does not surface it, which
-    this mirrors by breaking before appending an EOS token.
-    """
+    """Return the synthetic graph's greedy output, excluding EOS."""
     first, prev, length = prompt[0], prompt[-1], len(prompt)
     tokens = []
     for step in range(max_new_tokens):
@@ -67,8 +42,6 @@ def predicted_tokens(prompt, max_new_tokens):
 
 
 class _Sink:
-    """Per-request token collector correlated back through opaque data."""
-
     __slots__ = ("tokens",)
 
     def __init__(self):
@@ -107,10 +80,6 @@ def _drain(ready):
 
 
 def _step_once(engine):
-    """Advance one transaction; drain and release a request that completed.
-
-    Returns False when the engine had no work to do, else True.
-    """
     ready = engine.step()
     if ready is None:
         return False
@@ -128,7 +97,6 @@ def _run(engine, *, max_steps=_MAX_STEPS):
 
 
 def _generate_isolated(model, prompt, max_new_tokens):
-    """Greedy output of one prompt on its own dedicated engine."""
     sink = _Sink()
     engine = og.Engine(model)
     _add_request(engine, model, prompt, max_new_tokens, sink)
@@ -139,8 +107,6 @@ def _generate_isolated(model, prompt, max_new_tokens):
 
 
 def test_model_declares_paged_config():
-    # The fixture must route through the paged cache, or none of the scenarios
-    # below exercise it. This does not need a device.
     config = json.loads((_MODEL_DIR / "genai_config.json").read_text())
     dynamic_batching = config.get("engine", {}).get("dynamic_batching")
     assert dynamic_batching, f"synthetic fixture must declare engine.dynamic_batching; got {config.get('engine')!r}"
@@ -151,8 +117,6 @@ def test_model_declares_paged_config():
 
 
 def test_deterministic_tokens(model):
-    # Exact greedy output, cross-checked against a concrete expected sequence so
-    # the check cannot silently drift in lockstep with the helper.
     max_new = 12
     tokens = _generate_isolated(model, _PROMPT_A, max_new)
 
@@ -162,8 +126,6 @@ def test_deterministic_tokens(model):
 
 
 def test_isolated_matches_simultaneous(model):
-    # Two differing prompts sharing a batch must each keep the output they
-    # produce alone: batching must not mix rows, lengths, or block tables.
     max_new = 16
     expected_a = predicted_tokens(_PROMPT_A, max_new)
     expected_b = predicted_tokens(_PROMPT_B, max_new)
@@ -186,8 +148,6 @@ def test_isolated_matches_simultaneous(model):
 
 
 def test_staggered_admission(model):
-    # Admitting a request while another is already in flight must not perturb
-    # either: both still match their isolated runs.
     max_new = 16
     expected_a = predicted_tokens(_PROMPT_A, max_new)
     expected_b = predicted_tokens(_PROMPT_B, max_new)
@@ -196,7 +156,6 @@ def test_staggered_admission(model):
     sink_a = _Sink()
     _add_request(engine, model, _PROMPT_A, max_new, sink_a)
 
-    # Advance A a few steps before B is admitted, so admission happens mid-flight.
     for _ in range(3):
         if not engine.has_pending_requests():
             break
@@ -212,8 +171,6 @@ def test_staggered_admission(model):
 
 
 def test_max_length_stops(model):
-    # An EOS-free horizon stops purely because the sequence reached max_length,
-    # so the request emits exactly max_new tokens.
     max_new = 16
     expected = predicted_tokens(_PROMPT_LONG, max_new)
     assert len(expected) == max_new, "chosen prompt must not hit EOS within the horizon"
@@ -225,8 +182,6 @@ def test_max_length_stops(model):
 
 
 def test_eos_terminates_before_max_length(model):
-    # _PROMPT_A samples the EOS token at generated index 24, well before this
-    # horizon, so the engine stops early and never surfaces the EOS token.
     max_new = 60
     expected = predicted_tokens(_PROMPT_A, max_new)
     assert len(expected) < max_new, "chosen prompt must reach EOS before the horizon"
@@ -235,14 +190,11 @@ def test_eos_terminates_before_max_length(model):
 
     assert tokens == expected
     assert len(tokens) < max_new, "generation did not stop early on EOS"
-    # The token that would come next is exactly the EOS the engine stopped on.
     next_token = (_PROMPT_A[0] + tokens[-1] + len(_PROMPT_A) + len(tokens)) % _VOCAB_SIZE
     assert next_token == _EOS_TOKEN_ID
 
 
 def test_completion_isolation(model):
-    # A short request that finishes and is released mid-run must not truncate a
-    # longer sibling: the survivor still matches its isolated run.
     short_new, long_new = 5, 20
     long_isolated = _generate_isolated(model, _PROMPT_LONG, long_new)
 
@@ -257,8 +209,6 @@ def test_completion_isolation(model):
 
 
 def test_remove_request_freezes_output(model):
-    # Removing a request in flight stops its output there; the sibling still
-    # completes and matches its isolated run.
     max_new = 40
     sibling_new = 16
     sibling_expected = predicted_tokens(_PROMPT_B, sibling_new)
@@ -284,8 +234,6 @@ def test_remove_request_freezes_output(model):
 
 
 def test_engine_teardown_and_recreation(model):
-    # A fresh engine on the same model must reload the paged cache and serve the
-    # same deterministic output.
     max_new = 12
     expected = predicted_tokens(_PROMPT_A, max_new)
 
