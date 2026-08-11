@@ -26,9 +26,11 @@ def _make_model(scales):
     model._fp8_attention_activation_cache = {}
     model._fp8_weight_key_for_matmul = MethodType(lambda self, basename: basename, model)
 
-    def load_scale(self, key):
+    def load_scale(self, key, required=True):
         basename = key.removesuffix(".input_scale")
         if basename not in scales:
+            if not required:
+                return None
             raise RuntimeError(f"missing {key}")
         return torch.tensor(scales[basename])
 
@@ -50,11 +52,10 @@ def test_static_input_scale_is_read_from_checkpoint():
     assert model._fp8_attention_input_scale("q") == 0.125
 
 
-def test_static_input_scale_rejects_missing_checkpoint_scale():
+def test_static_input_scale_falls_back_to_weight_only_when_missing():
     model, _ = _make_model({})
 
-    with pytest.raises(RuntimeError, match="missing q.input_scale"):
-        model._fp8_attention_input_scale("q")
+    assert model._fp8_attention_input_scale("q") is None
 
 
 @pytest.mark.parametrize("scale", [0.0, -0.125, float("inf"), float("nan")])

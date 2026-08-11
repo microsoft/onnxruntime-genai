@@ -706,7 +706,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Fix model_type: HF architecture "Qwen3VLForConditionalGeneration" would produce "qwen3vl"
         # but the C++ runtime expects "qwen3_vl" (with underscore).
         # Intentional override of the superclass attribute (used in genai_config.json).
-        self.model_type = "Qwen3_VLForConditionalGeneration"
+        self.model_type = "Qwen3_VLForConditionalGeneration"  # lgtm[py/overwritten-inherited-attribute]
 
         # Qwen3 attention uses QK normalization
         self.attention_attrs["q_norm"] = True
@@ -2270,7 +2270,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         # The base builder derives the GenAI model.type by stripping the suffix
         # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
+        self.model_type = (  # lgtm[py/overwritten-inherited-attribute]
+            "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
+        )
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
@@ -2368,7 +2370,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             return None
         if ".linear_attn." in key_prefix:
             return None
-        scale = self._load_nvfp4_tensor(f"{key_prefix}.input_scale")
+        scale = self._load_nvfp4_tensor(f"{key_prefix}.input_scale", required=False)
+        if scale is None:
+            return None
         return self._modelopt_positive_scalar(scale, f"{key_prefix}.input_scale")
 
     def _make_fp8_activation_scale_initializer(self, basename, scale_val):
@@ -2745,7 +2749,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self._nvfp4_weight_map_cache = None
         return self._nvfp4_weight_map_cache
 
-    def _load_nvfp4_tensor(self, tensor_name):
+    def _load_nvfp4_tensor(self, tensor_name, required=True):
         """Read a raw tensor from the source safetensors (bypasses transformers)."""
         snapshot_dir = self._nvfp4_snapshot_dir()
         weight_map = self._nvfp4_weight_map()
@@ -2753,11 +2757,15 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         if handles is None:
             handles = self._nvfp4_handles = {}
             self._nvfp4_handle_keys = {}
-        files = (
-            [snapshot_dir / weight_map[tensor_name]]
-            if weight_map is not None
-            else sorted(snapshot_dir.glob("*.safetensors"))
-        )
+        if weight_map is not None:
+            filename = weight_map.get(tensor_name)
+            if filename is None:
+                if required:
+                    raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
+                return None
+            files = [snapshot_dir / filename]
+        else:
+            files = sorted(snapshot_dir.glob("*.safetensors"))
         for f in files:
             key = str(f)
             handle = handles.get(key)
@@ -2766,7 +2774,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 self._nvfp4_handle_keys[key] = set(handle.keys())
             if tensor_name in self._nvfp4_handle_keys[key]:
                 return handle.get_tensor(tensor_name)
-        raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
+        if required:
+            raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
+        return None
 
     def _close_nvfp4_handles(self):
         handles = getattr(self, "_nvfp4_handles", None)

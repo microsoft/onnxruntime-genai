@@ -42,7 +42,7 @@ def test_bf16_linear_attn_projections_are_not_fp8():
 
 def test_linear_attn_is_weight_only():
     model = _make_model()
-    model._load_nvfp4_tensor = MethodType(lambda self, key: torch.tensor([0.125]), model)
+    model._load_nvfp4_tensor = MethodType(lambda self, key, required=True: torch.tensor([0.125]), model)
 
     assert model._fp8_attention_input_scale(QKV) is None
     # The self-attention projections still get the calibrated static scale.
