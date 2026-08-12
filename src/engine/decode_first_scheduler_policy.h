@@ -5,8 +5,9 @@
 
 #include <cstddef>
 #include <optional>
-#include <span>
 #include <vector>
+
+#include "../span.h"
 
 namespace Generators {
 
