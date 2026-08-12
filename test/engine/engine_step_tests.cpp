@@ -207,6 +207,36 @@ TEST_F(EngineStepTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   EXPECT_TRUE(request->IsDone());
 }
 
+TEST_F(EngineStepTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  engine.engine->AddRequest(request);
+  const auto before = request->Snapshot();
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected execution capacity failure.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::ExecutionCapacityExceeded);
+  }
+
+  const auto rolled_back = request->Snapshot();
+  EXPECT_EQ(rolled_back.status, before.status);
+  EXPECT_EQ(rolled_back.current_sequence_length,
+            before.current_sequence_length);
+  EXPECT_EQ(rolled_back.processed_sequence_length,
+            before.processed_sequence_length);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  auto ready = engine.engine->Step();
+  EXPECT_EQ(ready, request);
+  EXPECT_TRUE(request->IsDone());
+}
+
 TEST_F(EngineStepTest, PostProcessingFailureRestoresSearchAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);

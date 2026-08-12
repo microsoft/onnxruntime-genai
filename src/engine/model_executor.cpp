@@ -8,6 +8,14 @@
 
 namespace Generators {
 
+ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
+  if (message.find("Failed to allocate memory for requested buffer") !=
+      std::string_view::npos) {
+    return ExecutionFailureKind::CapacityExceeded;
+  }
+  return ExecutionFailureKind::Unknown;
+}
+
 namespace {
 
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
@@ -32,9 +40,21 @@ DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::sh
 
 void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
                                   ExecutionContext& context) {
-  cache_manager_->PrepareStep(scheduled_requests.Requests(), context);
-  context.block_table_columns = cache_manager_->BlockTableColumns();
-  decoder_->Decode(scheduled_requests, context);
+  try {
+    cache_manager_->PrepareStep(scheduled_requests.Requests(), context);
+    context.block_table_columns = cache_manager_->BlockTableColumns();
+    decoder_->Decode(scheduled_requests, context);
+  } catch (const Ort::Exception& error) {
+    const auto failure_kind = ClassifyOrtExecutionFailure(error.what());
+    if (failure_kind == ExecutionFailureKind::CapacityExceeded) {
+      throw ModelExecutionError{
+          failure_kind,
+          std::string{"Model execution exceeded available memory. Cause: "} +
+              error.what(),
+      };
+    }
+    throw;
+  }
 }
 
 }  // namespace Generators
