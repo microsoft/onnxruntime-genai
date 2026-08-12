@@ -102,6 +102,8 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 
 def aggregate_measurements(measurements, aggregation):
+    if not measurements:
+        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
     if aggregation == "mean":
         return float(np.mean(measurements))
     if aggregation == "median":
