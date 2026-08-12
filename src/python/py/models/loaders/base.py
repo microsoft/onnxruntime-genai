@@ -16,6 +16,7 @@ ONNX Runtime's format no matter where the quantized weights actually come from.
 
 import os
 import re
+import json
 
 import torch
 from safetensors.torch import load_file
@@ -33,6 +34,8 @@ class QuantizedTensorModule:
         self.out_features = 0
         self.bits = None
         self.group_size_value = None
+        # Factored-rotation per-input prescale (Quark rotation algo); None if absent.
+        self.input_prescale = None
 
     @property
     def group_size(self):
@@ -198,6 +201,18 @@ class QuantizedExperts:
         return "\n".join(lines)
 
 
+class QuantizedRouter:
+    """MoE router: bias-free projection + scaleless-RMSNorm scale + per-expert output scale.
+
+    Used by architectures (e.g. Gemma4 MoE) whose router pre-projection is more than a
+    plain Linear. `proj` is a TensorModule so the builder can emit it via `make_matmul`.
+    """
+    def __init__(self):
+        self.proj = TensorModule()
+        self.scale = None
+        self.per_expert_scale = None
+
+
 class QuantizedMLP:
     def __init__(self):
         self.gate_proj = QuantizedTensorModule()
@@ -218,6 +233,13 @@ class QuantizedDecoderLayer:
         self.post_attention_layernorm = TensorModule()
         self.pre_feedforward_layernorm = TensorModule()
         self.post_feedforward_layernorm = TensorModule()
+        # Extra Gemma4-MoE norms (parallel dense + MoE FFN); unused by other archs.
+        self.pre_feedforward_layernorm_2 = TensorModule()
+        self.post_feedforward_layernorm_1 = TensorModule()
+        self.post_feedforward_layernorm_2 = TensorModule()
+        # Gemma4-MoE per-layer residual multiplier + router; experts live under mlp.experts.
+        self.layer_scalar = None
+        self.router = QuantizedRouter()
         self.mlp = QuantizedMLP()
 
     def is_empty(self):
@@ -245,6 +267,13 @@ class QuantizedModel:
         self.lm_head = lm_head if lm_head is not None else TensorModule()
         self.layers = {} if load_weights else []
         self.num_layers = num_layers
+        self.q_size = q_size
+        self.kv_size = kv_size
+        self.intermediate_size = intermediate_size
+        # Factored online rotation (Quark rotation algo): x_rot = (x / input_prescale) @ shared_input_rotation_<in>.
+        # `shared_input_rotations` maps in_features -> [in, in] rotation matrix (shared across all layers).
+        self.input_path = input_path
+        self.shared_input_rotations = {}
         if not load_weights:
             return
 
@@ -298,6 +327,10 @@ class QuantizedModel:
                         # transformer.rotary_pos_emb.inv_freq in ChatGLM3.
                         # Skip rotary embedding weights since they can be re-calculated when looping through the model
                         continue
+                    elif name.startswith("shared_input_rotation_"):
+                        # Model-level shared input-rotation matrix keyed by in_features (Quark factored rotation).
+                        in_features = int(name.rsplit("_", 1)[1])
+                        self.shared_input_rotations[in_features] = tensor
                     else:
                         if name.startswith("transformer.encoder"):
                             # Chatglm3, e.g., transformer.encoder.layers.0.input_layernorm.weight
@@ -525,8 +558,8 @@ class QuantizedModel:
                                 tensor_map["self_attn.v_proj.qweight"] = tensor[q_size + kv_size :, :]
                             else:
                                 # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
-                                q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "quark"} else q_size
-                                kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "quark"} else kv_size
+                                q_dim = q_size // self._packed_out_factor(tensor, local_bits) if quant_type in {"awq", "quark"} else q_size
+                                kv_dim = kv_size // self._packed_out_factor(tensor, local_bits) if quant_type in {"awq", "quark"} else kv_size
                                 tensor_map["self_attn.q_proj.qweight"] = tensor[:, :q_dim]
                                 tensor_map["self_attn.k_proj.qweight"] = tensor[:, q_dim : q_dim + kv_dim]
                                 tensor_map["self_attn.v_proj.qweight"] = tensor[:, q_dim + kv_dim :]
@@ -570,10 +603,14 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 q_dim = (
-                                    q_size // (32 // local_bits) if quant_type in {"awq", "gptq", "quark"} else q_size
+                                    q_size // self._packed_out_factor(tensor, local_bits)
+                                    if quant_type in {"awq", "gptq", "quark"}
+                                    else q_size
                                 )
                                 kv_dim = (
-                                    kv_size // (32 // local_bits) if quant_type in {"awq", "gptq", "quark"} else kv_size
+                                    kv_size // self._packed_out_factor(tensor, local_bits)
+                                    if quant_type in {"awq", "gptq", "quark"}
+                                    else kv_size
                                 )
                                 tensor_map["self_attn.q_proj.qzeros"] = tensor[:, :q_dim]
                                 tensor_map["self_attn.k_proj.qzeros"] = tensor[:, q_dim : q_dim + kv_dim]
@@ -612,7 +649,7 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
                                 intermediate_dim = (
-                                    intermediate_size // (32 // local_bits)
+                                    intermediate_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "quark"}
                                     else intermediate_size
                                 )
@@ -654,7 +691,7 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 intermediate_dim = (
-                                    intermediate_size // (32 // local_bits)
+                                    intermediate_size // self._packed_out_factor(tensor, local_bits)
                                     if quant_type in {"awq", "gptq", "quark"}
                                     else intermediate_size
                                 )
@@ -691,6 +728,51 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn\.sinks$", name)):
                             # model.layers.layer_id.self_attn.sinks
                             tensor_map["self_attn.sinks"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.input_prescale$", name)):
+                            # Factored-rotation per-input scale, shared by the q/k/v splits (same input).
+                            tensor_map["self_attn.q_proj.input_prescale"] = tensor
+                            tensor_map["self_attn.k_proj.input_prescale"] = tensor
+                            tensor_map["self_attn.v_proj.input_prescale"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.input_prescale$", name)):
+                            tensor_map["self_attn." + name.split(".")[-2] + ".input_prescale"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.input_prescale$", name)):
+                            # Shared by the gate/up splits (same input).
+                            tensor_map["mlp.gate_proj.input_prescale"] = tensor
+                            tensor_map["mlp.up_proj.input_prescale"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_proj|up_proj|down_proj|dense_4h_to_h)\.input_prescale$", name)):
+                            leaf = name.split(".")[-2]
+                            leaf = "down_proj" if leaf == "dense_4h_to_h" else leaf
+                            tensor_map["mlp." + leaf + ".input_prescale"] = tensor
+                        # --- Gemma4 MoE: experts live directly under the layer (not `mlp.experts`) ---
+                        elif bool(re.match(r"^model\.layers\.\d+\.experts\.\d+\.(gate_proj|up_proj|gate_up_proj|down_proj)\.(weight|bias|qweight|scales|qzeros|weight_scale|weight_zero_point|g_idx)$", name)):
+                            # model.layers.layer_id.experts.expert_id.proj_type.param_type
+                            split_name = name.split(".")
+                            expert_id = int(split_name[4])
+                            proj_type = split_name[-2]
+                            param_type = split_name[-1]
+                            module.mlp.experts.set_weight_data(expert_id, proj_type, param_type, tensor, local_bits, local_group_size)
+                        elif bool(re.match(r"^model\.layers\.\d+\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.input_prescale$", name)):
+                            # Per-expert factored-rotation input scale. Byte-identical across all experts and
+                            # gate==up within a layer, so store one shared prescale on the router for the MoE input.
+                            split_name = name.split(".")
+                            expert_id = int(split_name[4])
+                            proj_type = split_name[-2]
+                            module.mlp.experts.set_weight_data(expert_id, proj_type, "input_prescale", tensor, local_bits, local_group_size)
+                        elif bool(re.match(r"^model\.layers\.\d+\.router\.proj\.weight$", name)):
+                            # Router projection is a plain (non-quantized) bf16 Linear -> float MatMul.
+                            tensor_map["router.proj.weight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.router\.scale$", name)):
+                            tensor_map["router.scale"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.router\.per_expert_scale$", name)):
+                            tensor_map["router.per_expert_scale"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.layer_scalar$", name)):
+                            tensor_map["layer_scalar"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.pre_feedforward_layernorm_2\.weight$", name)):
+                            tensor_map["pre_feedforward_layernorm_2.weight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.post_feedforward_layernorm_1\.weight$", name)):
+                            tensor_map["post_feedforward_layernorm_1.weight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.post_feedforward_layernorm_2\.weight$", name)):
+                            tensor_map["post_feedforward_layernorm_2.weight"] = tensor
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
 
@@ -724,15 +806,117 @@ class QuantizedModel:
         # Set properties of each layer based on quantization type
         self.set_properties()
 
+        # Bake additive PEFT LoRA adapters into the projections (if present).
+        self._load_lora_adapters()
+
     def normalize_weight_name(self, name):
         """Normalize a checkpoint tensor key to the shared model structure."""
-        if name.startswith(("model.visual.", "model.vision.", "visual.")):
+        if name.startswith((
+            "model.visual.",
+            "model.vision.",
+            "visual.",
+            "model.vision_tower.",
+            "model.embed_vision.",
+            "model.audio_tower.",
+            "model.embed_audio.",
+        )):
             return None
         if name.startswith("model.language_model."):
             name = "model." + name[len("model.language_model.") :]
         for old, new in getattr(self, "weight_name_replacements", ()):
             name = name.replace(old, new)
         return name
+
+    def _load_lora_adapters(self):
+        """Attach PEFT LoRA adapters (baked additively into the graph) if present.
+
+        The adapter lives at ``<input_path>/lora_adapters/adapter_model.safetensors``
+        with keys ``base_model.model.model.layers.{i}.{proj}.lora_A.weight`` [r, in]
+        and ``.lora_B.weight`` [out, r] for proj in {qkv_proj, o_proj, gate_up_proj,
+        down_proj}. ``lora_A`` is shared across split projections that share an input
+        (q/k/v share the qkv input, gate/up share the gate_up input); ``lora_B`` is
+        split along its output dimension. The builder emits the runtime delta
+        ``(lora_B @ lora_A @ x) * scaling`` added to the quantized projection output.
+        """
+        adapter_dir = os.path.join(self.input_path, "lora_adapters")
+        adapter_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+        if not os.path.exists(adapter_path):
+            return
+
+        scaling = 1.0
+        config_path = os.path.join(adapter_dir, "adapter_config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as config_file:
+                adapter_config = json.load(config_file)
+            rank = adapter_config.get("r")
+            alpha = adapter_config.get("lora_alpha")
+            if rank:
+                scaling = alpha / (rank ** 0.5) if adapter_config.get("use_rslora", False) else alpha / rank
+
+        weights = load_file(adapter_path)
+        layers_by_id = {layer.layer_id: layer for layer in self.layers}
+
+        for name, tensor in weights.items():
+            # Normalize the VLM prefix (Gemma4 stores the text tower under `language_model.`)
+            # so the same regex works for both flat-LLM and VLM adapters.
+            norm = name.replace("model.language_model.", "model.")
+            # Expert LoRA has no slot in the fused QMoE op and is intentionally dropped
+            # (unbakeable rank-64 residual; the dense/attention LoRA carries the recovery).
+            if re.match(r"^base_model\.model\.model\.layers\.\d+\.experts\.\d+\.", norm):
+                continue
+            match = re.match(
+                r"^base_model\.model\.model\.layers\.(\d+)\."
+                r"(self_attn\.qkv_proj|self_attn\.q_proj|self_attn\.k_proj|self_attn\.v_proj|self_attn\.o_proj|"
+                r"mlp\.gate_up_proj|mlp\.gate_proj|mlp\.up_proj|mlp\.down_proj)\."
+                r"(lora_A|lora_B)\.weight$",
+                norm,
+            )
+            if match is None:
+                raise NotImplementedError(f"{name} in the LoRA adapter is not recognized.")
+            layer_id, proj, ab = int(match.group(1)), match.group(2), match.group(3)
+            layer = layers_by_id.get(layer_id)
+            if layer is None:
+                continue
+
+            # Map the adapter projection to the builder's split modules. Fused adapter names
+            # (qkv_proj / gate_up_proj) fan out to multiple split targets; already-split names
+            # map 1:1.
+            if proj == "self_attn.qkv_proj":
+                targets = [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]
+                out_splits = [self.q_size, self.kv_size, self.kv_size]
+            elif proj == "self_attn.q_proj":
+                targets, out_splits = [layer.self_attn.q_proj], None
+            elif proj == "self_attn.k_proj":
+                targets, out_splits = [layer.self_attn.k_proj], None
+            elif proj == "self_attn.v_proj":
+                targets, out_splits = [layer.self_attn.v_proj], None
+            elif proj == "self_attn.o_proj":
+                targets, out_splits = [layer.self_attn.o_proj], None
+            elif proj == "mlp.gate_up_proj":
+                targets = [layer.mlp.gate_proj, layer.mlp.up_proj]
+                out_splits = [self.intermediate_size, self.intermediate_size]
+            elif proj == "mlp.gate_proj":
+                targets, out_splits = [layer.mlp.gate_proj], None
+            elif proj == "mlp.up_proj":
+                targets, out_splits = [layer.mlp.up_proj], None
+            else:  # mlp.down_proj
+                targets, out_splits = [layer.mlp.down_proj], None
+
+            if ab == "lora_A":
+                # Shared input projection: every split target uses the same lora_A.
+                for target in targets:
+                    target.lora_A = tensor
+                    target.lora_scaling = scaling
+            elif out_splits is None:
+                targets[0].lora_B = tensor
+                targets[0].lora_scaling = scaling
+            else:
+                # lora_B is split along its output dimension across the targets.
+                start = 0
+                for target, size in zip(targets, out_splits):
+                    target.lora_B = tensor[start : start + size, :]
+                    target.lora_scaling = scaling
+                    start += size
 
     def assign_lm_head_tensors(self, lm_head_tensors):
         """Assign collected lm_head tensors in a defined order so that weight/bias
@@ -875,6 +1059,18 @@ class QuantizedModel:
         Return list of modules in quantized model in order of appearance in the model
         """
         return [self.embedding] + self.layers + [self.final_norm, self.lm_head]
+
+    @staticmethod
+    def _packed_out_factor(tensor, bits):
+        """Number of logical output channels stored per element along the packed
+        (column) axis: 8//bits for uint8 packing (Quark native uint2/uint4),
+        32//bits for int32 packing (AWQ/GPTQ style), and 1 for unpacked floating
+        tensors (per-group float scales / float zero-points)."""
+        if tensor.dtype == torch.uint8:
+            return 8 // bits
+        if tensor.dtype == torch.int32:
+            return 32 // bits
+        return 1
 
     def unpack(self, module):
         """

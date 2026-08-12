@@ -60,6 +60,8 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "uint8": DtypeDescriptor("uint8", "int", 8, signed=False),
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
+    "int2": DtypeDescriptor("int2", "int", 2, signed=True),
+    "uint2": DtypeDescriptor("uint2", "int", 2, signed=False),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),
     "nvfp4": DtypeDescriptor("nvfp4", "mx", 4, block_size=16),
     "none": DtypeDescriptor("none", "float", 0),  # explicit "do not quantize this target"
@@ -290,7 +292,9 @@ _LEGACY_ALGO_ALIASES: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 # ``--precision`` -> weights.type. Float precisions do not quantize weights.
+# int2 quantizes dense weights to 2-bit MatMulNBits (asymmetric uint2, matching the Quark export).
 _PRECISION_TO_WEIGHTS_TYPE = {
+    "int2": "uint2",
     "int4": "int4",
     "int8": "int8",
     "fp16": "none",
@@ -429,6 +433,9 @@ class QuantConfig:
             # Match the model precision unless the MoE target is configured independently.
             if precision == "int8" or extra_options.get("use_8bits_moe", False):
                 moe_quant_type = "int8"
+            elif precision == "int2":
+                # int2 quantizes MoE experts to 2-bit (asymmetric uint2 QMoE), matching the dense weights.
+                moe_quant_type = "uint2"
             elif precision in IO_DTYPES:
                 moe_quant_type = "none"
             else:
