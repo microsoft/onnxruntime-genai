@@ -81,6 +81,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/cuda/session_options.cpp"
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.h"
   "${GENERATORS_ROOT}/nvtensorrtrtx/*.cpp"
+  "${GENERATORS_ROOT}/amdgpu/*.h"
+  "${GENERATORS_ROOT}/amdgpu/*.cpp"
   "${GENERATORS_ROOT}/vitisai/*.h"
   "${GENERATORS_ROOT}/vitisai/*.cpp"
   "${GENERATORS_ROOT}/dml/session_options.h"

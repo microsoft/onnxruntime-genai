@@ -26,6 +26,7 @@
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
 #include "ryzenai/interface.h"
+#include "amdgpu/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -368,6 +369,9 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
+    case DeviceType::AMDGPU:
+      slot = GetAMDGPUInterface();
+      break;
     case DeviceType::CPU:
     default:
       owned_interfaces_.push_back(CreateCpuInterface());
@@ -396,6 +400,8 @@ std::string to_string(DeviceType device_type) {
       return "NvTensorRtRtx";
     case DeviceType::RyzenAI:
       return "RyzenAI";
+    case DeviceType::AMDGPU:
+      return "AMDGPU";
     default:
       throw std::runtime_error("Unknown device type");
   }
