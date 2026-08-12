@@ -53,7 +53,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
                    Ort::Allocator& allocator, int64_t spatial_merge_size,
-                   bool use_muse_patch_token) {
+                   bool expand_image_patch_placeholders) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
@@ -89,7 +89,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   // Generate input_ids with vision tokens
   std::string text = prompt;
 
-  if (use_muse_patch_token) {
+  if (expand_image_patch_placeholders) {
     constexpr char patch_token[] = "<|patch|>";
     const std::regex patch_regex{R"(<\|patch\|>)"};
     if (text.empty()) {
@@ -218,7 +218,7 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
     : pixel_values_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},  // Default to float, will be determined at runtime if vision session exists
       spatial_merge_size_{config.model.vision.spatial_merge_size},
       patch_size_{config.model.vision.patch_size},
-      use_muse_patch_token_{config.model.type == "muse_glimmer"} {
+      expand_image_patch_placeholders_{config.model.type == "muse_glimmer"} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -241,7 +241,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images || images->num_images_ == 0) {
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_, use_muse_patch_token_);
+    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_, expand_image_patch_placeholders_);
     named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
     return named_tensors;
@@ -382,7 +382,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   }
 
   auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values,
-                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_, use_muse_patch_token_);
+                                                        image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_, expand_image_patch_placeholders_);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   // Use patched pixel_values if we computed it, otherwise use processor output
