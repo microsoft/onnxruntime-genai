@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cpu_aarch64_almalinux8_gcc14:20251017.1
 
 ADD scripts /tmp/scripts
