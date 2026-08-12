@@ -79,11 +79,11 @@ TEST(QwenVisionMultiImageTest, RejectsMalformedGridInMultiImageVisionRun) {
       pixel_values.data(), std::array<int64_t, 3>{2, 1, 1});
   harness.inputs->Set("pixel_values", *rank_three_pixel_values);
 
-  // The first six values form two valid flat triplets for position-id processing,
-  // while the [2, 4] layout is rejected specifically by QwenVisionState::Run.
-  std::array<int64_t, 8> malformed_grid{1, 1, 1, 0, 1, 1, 1, 0};
+  // The six values form two valid flat triplets for position-id processing,
+  // while the [3, 2] layout is rejected specifically by QwenVisionState::Run.
+  std::array<int64_t, 6> malformed_grid{1, 1, 1, 1, 1, 1};
   auto malformed_tensor = OgaTensor::Create(
-      malformed_grid.data(), std::array<int64_t, 2>{2, 4});
+      malformed_grid.data(), std::array<int64_t, 2>{3, 2});
   harness.inputs->Set("image_grid_thw", *malformed_tensor);
 
   const std::string message = CaptureRuntimeErrorMessage([&] {
