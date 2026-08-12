@@ -324,7 +324,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "uint2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -523,6 +523,11 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     if precision == "int4":
         return ir.DataType.INT4 if extra_options.get("is_symmetric", True) else ir.DataType.UINT4
 
+    if precision == "int2":
+        # 2-bit quantized weights are emitted as MatMulNBits (per-module bits=2); non-quantized
+        # ops follow io_dtype, so onnx_dtype tracks the FLOAT io_dtype used on CPU.
+        return ir.DataType.FLOAT
+
     if precision == "int8":
         return ir.DataType.INT8 if extra_options.get("is_symmetric", True) else ir.DataType.UINT8
 
@@ -657,6 +662,10 @@ def create_model(
     else:
         io_dtype = set_io_dtype(precision, execution_provider, extra_options)
         onnx_dtype = set_onnx_dtype(precision, extra_options)
+    # int2 carries onnx_dtype FLOAT (2-bit weights are per-module MatMulNBits bits=2), so the
+    # onnx_dtype alone can't distinguish an int2 build from a genuine fp32 build. Thread the true
+    # precision string through so the builder can resolve the QMoE bit-width / op selection.
+    extra_options["precision"] = precision
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
@@ -857,7 +866,7 @@ def get_args():
         "--precision",
         required=False,
         default=None,
-        choices=["int4", "int8", "bf16", "fp16", "fp32"],
+        choices=["int2", "int4", "int8", "bf16", "fp16", "fp32"],
         help="Precision of model. Optional when target_options.quant_config specifies the target weight type.",
     )
 

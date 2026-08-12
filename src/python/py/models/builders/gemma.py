@@ -468,8 +468,25 @@ class Gemma4MoEModel(Gemma4Model):
         # op's "geglu" activation with swiglu_fusion=1 (interleaved gate|up), which applies the
         # gelu-tanh gate on the gate half. HF renormalizes the selected top-k weights to sum to 1.
         self.moe_attrs["activation_type"] = "geglu"
-        self.moe_attrs["swiglu_fusion"] = 1
+        # Float re-quant path interleaves gate|up (swiglu_fusion=1). The pre-quantized Quark
+        # path re-fuses experts as gate|up CONCAT (matching the factored checkpoint's layout),
+        # which the CUDA op consumes with swiglu_fusion=2 (fused, non-interleaved). The CPU QMoE
+        # kernel only supports the interleaved layout (swiglu_fusion=1), so for the CPU quark path
+        # we interleave the fc1 expert rows at build time (see make_moe_quark_preprocessing) and
+        # use fusion=1.
+        if self.quant_type == "quark":
+            self.moe_attrs["swiglu_fusion"] = 1 if self.ep == "cpu" else 2
+        else:
+            self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
+
+        # The pre-quantized Quark experts are group-wise (asymmetric, per-group scales/zero
+        # points). Emit block_size so the QMoE op interprets the 3D block-wise scales/zero
+        # points ([E, out, in/group_size]) instead of treating them as per-row.
+        if self.quant_type == "quark":
+            quant_config = self.quant_attrs["config"]
+            group_size = quant_config["global_quant_config"]["weight"]["group_size"]
+            self.moe_attrs["block_size"] = group_size
 
         # MoE layers emit MoE/QMoE ops instead of dense /mlp/ MatMuls for the experts, but
         # the parallel DENSE mlp is still a normal MatMul path — keep its mixed-precision
@@ -624,11 +641,18 @@ class Gemma4MoEModel(Gemma4Model):
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
     def make_moe_preprocessing(self, layer_id, moe, root_input=None):
-        # Emit the fused-gate/up expert initializers. HF stores experts.gate_up_proj [E, 2*inter,
-        # hidden] as [gate | up] concat; the fused SwiGLU op (swiglu_fusion=1) wants the rows
-        # interleaved [g0, u0, g1, u1, ...]. per_expert_scale is a pure per-expert output constant,
-        # folded into down_proj here (equivalent to scaling each expert's output). The MoE/QMoE op
-        # takes the (empty) expert biases as separate inputs.
+        # Emit the fused-gate/up expert initializers. Pre-quantized Quark experts take a dedicated
+        # path (weights are already quantized; no float re-quantization); see
+        # make_moe_quark_preprocessing. The float path re-quantizes HF float experts here.
+        if self.quant_type == "quark":
+            self.make_moe_quark_preprocessing(layer_id, moe)
+            return
+
+        # HF stores experts.gate_up_proj [E, 2*inter, hidden] as [gate | up] concat; the fused
+        # SwiGLU op (swiglu_fusion=1) wants the rows interleaved [g0, u0, g1, u1, ...].
+        # per_expert_scale is a pure per-expert output constant, folded into down_proj here
+        # (equivalent to scaling each expert's output). The MoE/QMoE op takes the (empty) expert
+        # biases as separate inputs.
         experts = moe.experts
         raw_gate_up = experts.gate_up_proj
         half = raw_gate_up.shape[1] // 2
@@ -684,6 +708,18 @@ class Gemma4MoEModel(Gemma4Model):
         # in make_moe).
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)
+        gate_up_zero = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
+        down_zero = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
+
+        if self.quant_type == "quark":
+            # Pre-quantized Quark experts may be stored in a prescaled+rotated domain and carry
+            # explicit zero-points. Apply the shared input transform (once) and thread the
+            # zero-point initializers emitted by make_moe_quark_preprocessing.
+            root_input = self.make_moe_quark_input_transform(layer_id, moe, root_input)
+            use_zero_points = getattr(self, "_quark_use_zero_points", False)
+        else:
+            use_zero_points = False
+
         moe_name = f"/model/layers.{layer_id}/moe/{op_type}"
         self.make_moe_op(
             moe_name,
@@ -695,5 +731,106 @@ class Gemma4MoEModel(Gemma4Model):
             weight2=names["down_weight"],
             scales2=names["down_scales"] if op_type == "QMoE" else "",
             bias2=names["down_bias"],
+            zero_points1=gate_up_zero if use_zero_points else "",
+            zero_points2=down_zero if use_zero_points else "",
         )
         return f"{moe_name}/output_0"
+
+    def make_moe_quark_input_transform(self, layer_id, moe, expert_input):
+        # Shared gate/up input transform: x_rot = (x * input_prescale) @ shared_input_rotation.
+        # The experts are stored in the prescaled+rotated domain (down is plain), with a per-input
+        # `input_prescale` that is byte-identical across all experts and gate==up, so use expert 0's.
+        basename = f"/model/layers.{layer_id}/moe"
+        experts = moe.mlp.experts
+        expert0 = experts[sorted(experts.keys())[0]]
+
+        prescale_name = f"model.layers.{layer_id}.moe.experts.input_prescale"
+        self.make_initializer(expert0.gate_proj.input_prescale, prescale_name, to=self.io_dtype)
+        prescale_mul_name = f"{basename}/experts/input_prescale/Mul"
+        self.make_mul(
+            prescale_mul_name,
+            [expert_input, prescale_name],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+        rot_init = f"model.shared_input_rotation_{self.hidden_size}"
+        if rot_init not in self.shared_rotation_initializers:
+            self.make_initializer(self.shared_input_rotations[self.hidden_size], rot_init, to=self.io_dtype)
+            self.shared_rotation_initializers.add(rot_init)
+        rot_matmul_name = f"{basename}/experts/shared_input_rotation/MatMul"
+        self.make_node(
+            "MatMul",
+            inputs=[f"{prescale_mul_name}/output_0", rot_init],
+            outputs=[f"{rot_matmul_name}/output_0"],
+            name=rot_matmul_name,
+        )
+        self.make_value(
+            f"{rot_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size]
+        )
+        return f"{rot_matmul_name}/output_0"
+
+    def make_moe_quark_preprocessing(self, layer_id, moe):
+        """Emit initializers for pre-quantized Quark uint2 experts (split gate/up re-fused offline).
+
+        The QuarkModel loader has already re-fused each layer's split experts into
+        `experts.fc1_weights/fc1_scales/fc1_zero_points` (gate|up CONCAT, [E, 2*inter, hidden/pack])
+        and `experts.fc2_*` ([E, hidden, inter/pack]), with float zero_points. Here we:
+          - fold router.per_expert_scale into fc2 scales (pure per-expert output constant),
+          - emit weight / scale / (optional) zero-point / zero-bias initializers under the shared
+            make_moe_expert_names, so make_moe_subgraph can reference them.
+        make_moe_subgraph applies the shared input transform and emits the op.
+        """
+        num_experts = self.moe_attrs["num_experts"]
+        experts = moe.mlp.experts
+        names = self.make_moe_expert_names(layer_id)
+
+        # --- Fold router.per_expert_scale into fc2 (down) scales: pure per-expert output constant ---
+        per_expert = moe.router.per_expert_scale.to(experts.fc2_scales.dtype).reshape(-1, 1, 1)
+        fc2_scales = experts.fc2_scales * per_expert
+
+        # The CPU QMoE kernel only supports the interleaved gate|up layout (swiglu_fusion=1), while
+        # the Quark checkpoint stores fc1 as [gate(inter), up(inter)] concat along the output dim.
+        # Reorder the fc1 output rows from concat to interleaved ([gate0,up0,gate1,up1,...]) for the
+        # CPU path so the op's interleaved activation reads the correct gate/up pairs. fc1 rows are
+        # independent (quantization packs the input dim), so this is a pure row permutation on
+        # weights/scales/zero_points.
+        fc1_weights = experts.fc1_weights
+        fc1_scales = experts.fc1_scales
+        fc1_zero_points = experts.fc1_zero_points
+        if self.ep == "cpu":
+            inter = self.moe_intermediate_size
+
+            def _concat_to_interleaved(t):
+                # dim 1 is [gate(inter), up(inter)] -> [gate0,up0,gate1,up1,...]
+                gate, up = t[:, :inter], t[:, inter:]
+                return torch.stack((gate, up), dim=2).reshape(t.shape[0], 2 * inter, *t.shape[2:])
+
+            fc1_weights = _concat_to_interleaved(fc1_weights)
+            fc1_scales = _concat_to_interleaved(fc1_scales)
+            fc1_zero_points = _concat_to_interleaved(fc1_zero_points)
+
+        self.make_initializer(fc1_weights, names["gate_up_weight"])
+        self.make_initializer(experts.fc2_weights, names["down_weight"])
+        self.make_initializer(fc1_scales, names["gate_up_scales"], to=self.io_dtype)
+        self.make_initializer(fc2_scales, names["down_scales"], to=self.io_dtype)
+
+        # Experts have no bias; the op still expects the (empty) bias inputs.
+        self.make_initializer(
+            torch.zeros(num_experts, 2 * self.moe_intermediate_size), names["gate_up_bias"], to=self.io_dtype
+        )
+        self.make_initializer(torch.zeros(num_experts, self.hidden_size), names["down_bias"], to=self.io_dtype)
+
+        # zero_points: the Quark uint2 export is symmetric with a constant zp of 1.5
+        # (codes {0,1,2,3} -> {-1.5,-0.5,0.5,1.5}*scale). On CUDA the GeGLU QMoE op reconstructs the
+        # -1.5*scale bias internally from scales when zp is omitted (bits==2, no zp input), so we
+        # emit NO zero_points tensor there. CPU keeps the float zp inputs as-is; trt-rtx never
+        # supports ZP inputs.
+        is_int2 = int(self.moe_attrs["expert_weight_bits"]) == 2
+        omit_zero_points = self.ep == "trt-rtx" or (self.ep == "cuda" and is_int2)
+        use_zero_points = not omit_zero_points
+        self._quark_use_zero_points = use_zero_points
+        if use_zero_points:
+            gate_up_zero = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
+            down_zero = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
+            self.make_initializer(fc1_zero_points, gate_up_zero, to=self.io_dtype)
+            self.make_initializer(experts.fc2_zero_points, down_zero, to=self.io_dtype)
