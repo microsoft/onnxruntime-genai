@@ -149,6 +149,13 @@ if(ANDROID)
   set(ORTGENAI_TELEMETRY_LICENSE_FILE "${cpp_client_telemetry_SOURCE_DIR}/LICENSE")
   target_sources(mat PRIVATE
     "${PROJECT_SOURCE_DIR}/cmake/telemetry/android_telemetry_bridge.cpp")
+
+  # Build libmat.so with support for Android's 16 KB page size, matching the genai shared
+  # libraries. The global CMAKE_SHARED_LINKER_FLAGS setting in the top-level CMakeLists is applied
+  # after this module is included (via FetchContent_MakeAvailable -> add_subdirectory), so the `mat`
+  # target does not inherit it and would otherwise ship 4 KB-aligned. Set it directly on the target.
+  # https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+  target_link_options(mat PRIVATE "LINKER:-z,max-page-size=16384")
 endif()
 foreach(_ortgenai_1ds_cache_var
     BUILD_UNIT_TESTS
