@@ -66,7 +66,54 @@ struct Search : LeakChecked<Search> {
   virtual bool SupportsBatchedSampling() const { return false; }
   virtual void OnNextTokensSampled() {}
 
+  void SaveStateForTransaction() {
+    StartTransactionCheckpoint(true);
+  }
+
+  // The Engine's batched sampler owns RNG and next-token scratch. Its varlen decoder does not use
+  // or mutate Search sequence lengths, so the Search checkpoint only needs tail and logical state.
+  void SaveStateForExternalSamplingTransaction() {
+    StartTransactionCheckpoint(false);
+  }
+
+  void QueueStateRestoreForTransaction() {
+    if (!transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is not active.");
+    if (transaction_restore_pending_)
+      throw std::logic_error("Search transaction restore is already pending.");
+
+    sequences_.RewindTo(transaction_sequence_length_);
+    RestoreStateForTransactionImpl();
+    transaction_restore_pending_ = true;
+  }
+
+  void RestoreStateForTransaction() {
+    QueueStateRestoreForTransaction();
+    SynchronizeStateForTransactionImpl();
+    CompleteStateRestoreForTransaction();
+  }
+
+  void CompleteStateRestoreForTransaction() {
+    if (!transaction_checkpoint_active_ || !transaction_restore_pending_)
+      throw std::logic_error("Search transaction restore is not pending.");
+
+    CompleteStateRestoreForTransactionImpl();
+    transaction_restore_pending_ = false;
+    transaction_checkpoint_active_ = false;
+  }
+
+  void CommitStateForTransaction() {
+    if (!transaction_checkpoint_active_ || transaction_restore_pending_)
+      throw std::logic_error("Search transaction checkpoint is not active.");
+
+    transaction_checkpoint_active_ = false;
+  }
+
   virtual void SelectTop() = 0;
+  // Commit an already-decided token id straight to the sequence, with the usual EOS / max-length
+  // bookkeeping. Used by speculative decoding, which chooses the token itself (there is no logits
+  // row to sample). Default asserts: only the greedy searches implement it.
+  virtual void CommitToken(int32_t /*token*/) { assert(false); }
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) { assert(false); }
@@ -82,13 +129,35 @@ struct Search : LeakChecked<Search> {
     throw std::runtime_error("no_repeat_ngram_size is only supported for CPU search");
   }
 
-  // Set user input tokens
+  // Note: unlike CommitToken (commits an already-selected generated token and applies EOS, padding,
+  // and max-length handling), AppendTokens ingests prompt/continuation tokens. It
+  // skips generated-token EOS/padding handling.
   virtual void AppendTokens(DeviceSpan<int32_t>& next_tokens) { assert(false); };
   // To be used for rewind
   virtual void RewindTo(size_t index) { assert(false); };
 
   std::shared_ptr<const GeneratorParams> params_;
   Sequences sequences_;
+
+ protected:
+  virtual void SaveStateForTransactionImpl(bool /*checkpoint_local_state*/) {}
+  virtual void RestoreStateForTransactionImpl() {}
+  virtual void SynchronizeStateForTransactionImpl() {}
+  virtual void CompleteStateRestoreForTransactionImpl() {}
+
+ private:
+  void StartTransactionCheckpoint(bool checkpoint_local_state) {
+    if (transaction_checkpoint_active_)
+      throw std::logic_error("Search transaction checkpoint is already active.");
+
+    transaction_sequence_length_ = sequences_.GetSequenceLength();
+    SaveStateForTransactionImpl(checkpoint_local_state);
+    transaction_checkpoint_active_ = true;
+  }
+
+  bool transaction_checkpoint_active_{};
+  bool transaction_restore_pending_{};
+  int transaction_sequence_length_{};
 };
 
 struct Search_Cpu : Search {
@@ -120,6 +189,14 @@ struct Search_Cpu : Search {
   std::vector<bool> repetition_penalty_visited_;
 
   bool done_{};
+
+ protected:
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  std::vector<int32_t> transaction_sequence_lengths_;
+  bool transaction_done_{};
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
@@ -129,6 +206,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
   void SelectTop() override;
+  void CommitToken(int32_t token) override;
   void SampleTopK(int k, float temperature) override;
   void SampleTopP(float p, float temperature) override;
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
@@ -152,6 +230,16 @@ struct GreedySearch_Cpu : Search_Cpu {
   int not_done_count_{params_->search.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 
   std::mt19937 gen_;
+
+ protected:
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
+  void RestoreStateForTransactionImpl() override;
+
+ private:
+  std::vector<int32_t> transaction_next_tokens_;
+  std::unique_ptr<bool[]> transaction_eos_seen_;
+  int transaction_not_done_count_{};
+  std::mt19937 transaction_gen_;
 };
 
 struct BeamSearch_Cpu : Search_Cpu {

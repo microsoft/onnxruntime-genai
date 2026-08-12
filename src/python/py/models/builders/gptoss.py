@@ -671,7 +671,13 @@ class GPTOSSModel(Model):
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
 
         has_quark_experts = self.has_quark_experts(mlp.experts)
-        is_fp4_moe = self.moe_attrs.get("quant_type") == "fp4"
+        moe_quant_type = self.moe_attrs.get("quant_type")
+        if moe_quant_type == "nvfp4":
+            # GPT-OSS checkpoints ship MXFP4 experts; there is no NVFP4 source to preserve and
+            # re-quantizing MXFP4 to NVFP4 is not implemented. Fail loudly instead of silently
+            # falling through to the integer QMoE path.
+            raise ValueError("moe_quant_type=nvfp4 is not supported for GPT-OSS. Use moe_quant_type=mxfp4.")
+        is_fp4_moe = moe_quant_type == "fp4"
         if is_fp4_moe and has_quark_experts:
             raise ValueError("moe_quant_type=mxfp4 is not supported with pre-quantized Quark GPT-OSS experts.")
 

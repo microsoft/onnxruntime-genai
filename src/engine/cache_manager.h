@@ -6,8 +6,17 @@
 #include "request.h"
 #include "../models/kv_cache.h"
 #include "paged_key_value_cache.h"
+#include "execution_context.h"
+#include "step_plan.h"
 
 namespace Generators {
+
+struct CacheStepReservation {
+  virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  virtual void Commit() = 0;
+  virtual void Release() = 0;
+  virtual ~CacheStepReservation() = default;
+};
 
 struct KeyValueCacheState : State {
   KeyValueCacheState(const GeneratorParams& params, const Model& model)
@@ -30,11 +39,18 @@ struct CacheManager {
 
   virtual void Step() = 0;
 
+  virtual void PrepareStep(const std::vector<std::shared_ptr<Request>>&,
+                           ExecutionContext&) {
+    Step();
+  }
+
   KeyValueCacheState* Cache() { return key_value_cache_state_.get(); };
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
   virtual bool SupportsDynamicBatching() const = 0;
+
+  virtual size_t MaxBatchSize() const { return 4; }
 
   virtual std::vector<std::shared_ptr<Request>> AllocatedRequests() const = 0;
 
@@ -46,6 +62,14 @@ struct CacheManager {
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
   virtual PagedCacheSnapshot Snapshot() const { return {}; }
+
+  virtual StepPlanningResult PlanStepResources(StepPlan&, size_t) const {
+    throw std::logic_error("Cache manager does not support transactional step planning.");
+  }
+
+  virtual std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan&) {
+    throw std::logic_error("Cache manager does not support transactional reservation.");
+  }
 
   virtual ~CacheManager() = default;
 
@@ -84,15 +108,28 @@ struct PagedCacheManager : CacheManager {
 
   void Step() override;
 
+  void PrepareStep(const std::vector<std::shared_ptr<Request>>& requests,
+                   ExecutionContext& context) override;
+
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
 
   bool SupportsDynamicBatching() const override;
+
+  size_t MaxBatchSize() const override {
+    return model_->config_->engine.dynamic_batching->max_batch_size;
+  }
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
+
+  StepPlanningResult PlanStepResources(StepPlan& plan, size_t committed_request_count) const override {
+    return key_value_cache_->PlanStepResources(plan, committed_request_count);
+  }
+
+  std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 
  private:
   std::shared_ptr<GeneratorParams> params_;

@@ -6,6 +6,7 @@
 #include "../scheduled_requests.h"
 #include "../../models/model.h"
 #include "../cache_manager.h"
+#include "../execution_context.h"
 
 namespace Generators {
 
@@ -62,7 +63,8 @@ struct DecoderIO : ModelIO {
 struct Decoder {
   Decoder() = default;
 
-  virtual void Decode(ScheduledRequests& scheduled_requests) = 0;
+  virtual void Decode(ScheduledRequests& scheduled_requests,
+                      ExecutionContext& context) = 0;
 
   virtual ~Decoder() = default;
 };

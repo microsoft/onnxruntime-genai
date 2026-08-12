@@ -131,6 +131,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      [MarshalAs(UnmanagedType.I1)] out bool /* const bool* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSpeculativeNumber(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                           byte[] /* const char* */ name,
+                                                                                           double value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSpeculativeNumber(IntPtr /* const OgaGeneratorParams* */ generatorParams,
+                                                                                           byte[] /* const char* */ name,
+                                                                                           out double /* double* */ value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
@@ -185,6 +195,28 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern UIntPtr /* size_t */ OgaGenerator_GetSequenceCount(IntPtr /* const OgaGenerator* */ generator,
                                                                                 UIntPtr /* size_t */ index);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetSpeculativeStats(IntPtr /* const OgaGenerator* */ generator,
+                                                                                     out IntPtr /* OgaSpeculativeStats* */ stats);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroySpeculativeStats(IntPtr /* OgaSpeculativeStats* */ stats);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetCount(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                                byte[] /* const char* */ name,
+                                                                                out ulong value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetNumber(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                                 byte[] /* const char* */ name,
+                                                                                 out double value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSpeculativeStatsGetBool(IntPtr /* const OgaSpeculativeStats* */ stats,
+                                                                               byte[] /* const char* */ name,
+                                                                               [MarshalAs(UnmanagedType.I1)] out bool value);
 
         // This function returns the sequence data at the given index. The returned pointer is owned by the
         // OgaGenerator object and will be freed when the OgaGenerator object is destroyed. It is expected

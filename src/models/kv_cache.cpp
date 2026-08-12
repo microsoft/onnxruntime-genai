@@ -824,6 +824,17 @@ LFM2Cache::LFM2Cache(State& state)
     : state_{state},
       layer_types_{model_.config_->model.decoder.layer_types},
       layer_count_{model_.config_->model.decoder.num_hidden_layers} {
+  // Validate layer_types array size matches num_hidden_layers before accessing elements.
+  if (layer_count_ < 0) {
+    throw std::runtime_error("LFM2Cache: num_hidden_layers must be non-negative. Actual: " + std::to_string(layer_count_));
+  }
+
+  const size_t expected_layer_types_size = static_cast<size_t>(layer_count_);
+  if (layer_types_.size() != expected_layer_types_size) {
+    throw std::runtime_error("LFM2Cache: layer_types array size (" + std::to_string(layer_types_.size()) +
+                             ") does not match num_hidden_layers (" + std::to_string(layer_count_) + ")");
+  }
+
   // Classify layers into attention (KV) and conv types
   for (int i = 0; i < layer_count_; ++i) {
     if (layer_types_[i] == "full_attention") {
@@ -1078,6 +1089,13 @@ bool IsCacheNeeded(const Model& model) {
 
 }  // namespace
 
+bool UsesNonRewindableWindowedKeyValueCache(
+    const Model& model, const Config::Model::Decoder& decoder) {
+  return model.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
+         decoder.sliding_window &&
+         decoder.sliding_window->slide_key_value_cache;
+}
+
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
   // For OpenVINO and QNN Stateful models, they do not contain exposed past/present KV tensors.
   // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
@@ -1098,9 +1116,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
-      state.model_.config_->model.decoder.sliding_window &&
-      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+  if (UsesNonRewindableWindowedKeyValueCache(
+          state.model_, state.model_.config_->model.decoder)) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }
 

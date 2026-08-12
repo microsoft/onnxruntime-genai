@@ -1,5 +1,16 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "../generators.h"
+#include "model.h"
+
 namespace Generators {
 
 struct PositionInputs {
@@ -108,6 +119,37 @@ struct WindowedPositionInputs : PositionInputs {
   size_t num_windows_{};
   size_t window_index_{};
 };
+
+inline constexpr int64_t kMaxQwen2VLGridDim = 16384;
+
+inline void ValidateQwen2VLGridTensorValues(const int64_t* grid_data, size_t elem_count, const char* tensor_name) {
+  if (elem_count % 3 != 0) {
+    throw std::runtime_error(std::string(tensor_name) + " element count must be divisible by 3");
+  }
+
+  for (size_t i = 0; i < elem_count; ++i) {
+    if (grid_data[i] < 0) {
+      throw std::runtime_error(std::string(tensor_name) + " values must be non-negative");
+    }
+    if (grid_data[i] > kMaxQwen2VLGridDim) {
+      throw std::runtime_error(std::string(tensor_name) + " values must be <= " + std::to_string(kMaxQwen2VLGridDim));
+    }
+  }
+}
+
+inline void ValidateQwen2VLVisionLengthFitsSequence(int64_t llm_grid_t, int64_t llm_grid_h, int64_t llm_grid_w,
+                                                    int64_t ed, int64_t seq_len) {
+  const int64_t vision_len = llm_grid_t * llm_grid_h * llm_grid_w;
+  if (ed + vision_len > seq_len) {
+    throw std::runtime_error("Image/video grid dimensions (t=" + std::to_string(llm_grid_t) +
+                             " h=" + std::to_string(llm_grid_h) +
+                             " w=" + std::to_string(llm_grid_w) +
+                             ") result in " + std::to_string(vision_len) +
+                             " tokens but only " + std::to_string(seq_len - ed) +
+                             " positions available in sequence");
+  }
+}
+
 // Qwen2-VL uses 3D rotary position embeddings (mrope) for multimodal (vision + text) content.
 // Position IDs have shape [3, batch_size, seq_len] where the 3 dimensions represent:
 //   - Dimensions 0: Temporal position

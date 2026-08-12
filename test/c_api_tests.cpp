@@ -298,7 +298,7 @@ TEST(CAPITests, SequencesOutOfBoundsAccess) {
   EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
   EXPECT_NE(sequences->SequenceData(0), nullptr);
 
-  // Out-of-bounds indices must not read past the underlying storage.
+  // Indices outside the stored range return empty results.
   EXPECT_EQ(sequences->SequenceCount(1), 0u);
   EXPECT_EQ(sequences->SequenceData(1), nullptr);
   EXPECT_EQ(sequences->SequenceCount(1000), 0u);
@@ -439,6 +439,33 @@ TEST(CAPITests, MarianBatchIOContract) {
   EXPECT_EQ(generator->GetSequenceCount(0), generator->GetSequenceCount(1));
 }
 
+// The decoder turns each row's attention-mask sum into its selected token.
+// Unequal prompt lengths therefore validate both per-row EOS insertion and
+// the actual mask values rather than only tensor dimensions.
+TEST(CAPITests, MarianBatchAttentionMaskValues) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch-values");
+
+  const std::array<int32_t, 1> first{5};
+  const std::array<int32_t, 2> second{7, 8};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("batch_size", 2);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  const auto generated_start = generator->TokenCount();
+  generator->GenerateNextToken();
+
+  ASSERT_EQ(generated_start, 2U);
+  ASSERT_GT(generator->GetSequenceCount(0), generated_start);
+  ASSERT_GT(generator->GetSequenceCount(1), generated_start);
+  EXPECT_EQ(generator->GetSequenceData(0)[generated_start], 2);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start], 3);
+}
+
 // Beam search makes every graph tensor batch*beam wide. The prompt length is
 // load-bearing: at two tokens the correct sequence width is 3 and sizing the
 // prompt buffer by batch*beam gives 4, so the fixture rejects the regression.
@@ -457,6 +484,16 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*sequences);
   generator->GenerateNextToken();
+  ASSERT_FALSE(generator->IsDone());
+  auto logits = generator->GetLogits();
+  EXPECT_EQ(logits->Shape(), (std::vector<int64_t>{4, 1, 32001}));
+  generator->GenerateNextToken();
+
+  auto next_tokens = generator->GetNextTokens();
+  constexpr std::array<int32_t, 4> expected_tokens{2, 2, 4, 4};
+  ASSERT_EQ(next_tokens.size(), expected_tokens.size());
+  for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
+    EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
 }
 
 #if ENABLE_ENGINE_TESTS
@@ -1182,9 +1219,8 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
-// Regression test: a top_k value larger than the model's vocab_size must be
-// rejected at generator creation time instead of triggering an out-of-bounds
-// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+// A top_k value larger than the model's vocab_size must be rejected during
+// generator creation.
 TEST(CAPITests, TopKExceedsVocabSizeThrows) {
   Phi2Test test;
 

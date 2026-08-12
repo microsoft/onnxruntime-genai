@@ -6,6 +6,7 @@
 #include "../generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
+#include "step_plan.h"
 
 /**
  * @file request.h
@@ -14,6 +15,12 @@
  */
 
 namespace Generators {
+
+struct RequestStepResult {
+  int32_t token{};
+  bool token_appended{};
+  bool done{};
+};
 
 /**
  * @class Request
@@ -104,6 +111,20 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void GenerateNextTokens(DeviceSpan<float> logits);
 
+  void ValidateEngineCompatibility() const;
+  void SaveStateForTransaction();
+  void SaveStateForExternalSamplingTransaction();
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult StageGenerationForTransaction(
+      const RequestStepPlan& plan);
+  void RestoreStateForTransaction();
+  void QueueStateRestoreForTransaction();
+  void CompleteStateRestoreForTransaction();
+  void CommitStateForTransaction();
+  void CommitStep(const RequestStepPlan& plan,
+                  const RequestStepResult& result) noexcept;
+
   /**
    * @brief Completes the generation started by GenerateNextTokens().
    *
@@ -124,7 +145,11 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Checks if the request is in prefill mode.
-   * @return True if the request is in prefill mode, false otherwise.
+   * @return True while the tokens the application supplied have not all been through the model.
+   *
+   * Stays true across every chunk of a chunked prefill, so callers that treat prefill steps
+   * differently from decode steps (graph capture, for one) never mistake a trailing one token
+   * prefill chunk for a decode step.
    */
   bool IsPrefill() const;
 
@@ -142,6 +167,36 @@ struct Request : std::enable_shared_from_this<Request>,
    * reference into the request and does not mutate any state.
    */
   RequestStateSnapshot Snapshot() const;
+
+  /**
+   * @brief Number of leading tokens of the sequence whose keys and values are already in the cache.
+   *
+   * This is the absolute position the next scheduled token will be written at, which is what the
+   * decoder has to report to the model as the past sequence length.
+   */
+  int64_t ProcessedSequenceLength() const;
+
+  /**
+   * @brief Chooses the tokens this request contributes to the step that is about to run.
+   *
+   * Called once per step, before anything reads UnprocessedTokens(). With a `search.chunk_size`
+   * configured, a prompt longer than the chunk size is processed over several steps, which bounds
+   * the number of tokens a single model run carries.
+   */
+  void ScheduleTokens();
+
+  /**
+   * @brief True when this step's tokens run to the end of the sequence.
+   *
+   * Only then does the last logits row of this request predict a new token. A partial prefill chunk
+   * ends in the middle of the prompt, so its logits are discarded.
+   */
+  bool IsChunkComplete() const;
+
+  /**
+   * @brief Moves the cursor past the tokens this step processed.
+   */
+  void AdvanceChunk();
 
   RequestStatus status_{RequestStatus::Unassigned};
 
@@ -204,17 +259,30 @@ struct Request : std::enable_shared_from_this<Request>,
   void* GetOpaqueData();
 
  private:
+  // Tokens of the current step, clamped to what is actually left to process.
+  size_t ScheduledTokenCount() const;
+
+  // The search sequence is partitioned at processed_sequence_length_: tokens before it already
+  // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
+  // seen_sequence_length_ independently tracks tokens consumed by the application.
   std::vector<int32_t> prefill_input_ids_;
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
+  // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
+  // request is still prefilling while processed_sequence_length_ has not caught up with it.
+  int64_t prompt_sequence_length_{};
+  size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
-  bool is_prefill_{true};
+
+  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void SelectNextToken();
+  RequestStepResult StageGeneration(int64_t sequence_length_before);
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };

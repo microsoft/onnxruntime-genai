@@ -4,6 +4,7 @@
 #include "request.h"
 
 #include "engine.h"
+#include "sequence_positions.h"
 #include "../search.h"
 
 namespace Generators {
@@ -44,13 +45,18 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
+  if (prefill_input_ids_.empty()) {
+    throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
+  }
   engine_ = engine;
   status_ = RequestStatus::Assigned;
 
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
-  processed_sequence_length_ = CurrentSequenceLength();
+  processed_sequence_length_ = 0;
   search_->AppendTokens(device_tokens);
+  prompt_sequence_length_ = CurrentSequenceLength();
   seen_sequence_length_ = CurrentSequenceLength();
+  tokens_host_.reserve(params_->search.max_length);
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
 }
@@ -92,6 +98,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
+    prompt_sequence_length_ = CurrentSequenceLength();
     tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
@@ -108,8 +115,30 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.current_sequence_length = current;
   snapshot.processed_sequence_length = processed_sequence_length_;
   snapshot.seen_sequence_length = seen_sequence_length_;
-  snapshot.is_prefill = is_prefill_;
+  snapshot.is_prefill = IsPrefill();
   return snapshot;
+}
+
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
+}
+
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens() {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size);
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
 }
 
 int32_t Request::UnseenToken() {
@@ -125,13 +154,12 @@ bool Request::HasUnseenTokens() const {
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
-  return unprocessed_tokens;
+  return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
 }
 
 std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   const size_t begin = static_cast<size_t>(processed_sequence_length_);
-  const size_t end = static_cast<size_t>(CurrentSequenceLength());
+  const size_t end = begin + ScheduledTokenCount();
   if (end > tokens_host_.size())
     throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
 
@@ -143,7 +171,7 @@ bool Request::IsDone() const {
 }
 
 bool Request::IsPrefill() const {
-  return is_prefill_;
+  return processed_sequence_length_ < prompt_sequence_length_;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
@@ -174,15 +202,109 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   }
 }
 
-void Request::PrepareGeneration(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
-  is_prefill_ = false;
+void Request::ValidateEngineCompatibility() const {
+  const auto& search = params_->search;
+  if (search.batch_size != 1 || search.num_beams != 1) {
+    throw std::runtime_error("Engine requests require batch_size and num_beams to both be 1.");
+  }
+  if (search.top_p < 0.0f || search.top_p > 1.0f) {
+    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  }
+  if (search.top_k < 0) {
+    throw std::runtime_error("top_k must be 0 or greater");
+  }
+}
 
+void Request::SaveStateForTransaction() {
+  search_->SaveStateForTransaction();
+}
+
+void Request::SaveStateForExternalSamplingTransaction() {
+  search_->SaveStateForExternalSamplingTransaction();
+}
+
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
+  const auto sequence_length_before = CurrentSequenceLength();
+  PrepareGenerationForTransaction(logits);
+  SelectNextToken();
+  return StageGeneration(sequence_length_before);
+}
+
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
+  ApplyLogitsProcessors(logits);
+}
+
+RequestStepResult Request::StageGenerationForTransaction(
+    const RequestStepPlan& plan) {
+  return StageGeneration(plan.sequence_length_before);
+}
+
+void Request::RestoreStateForTransaction() {
+  search_->RestoreStateForTransaction();
+}
+
+void Request::QueueStateRestoreForTransaction() {
+  search_->QueueStateRestoreForTransaction();
+}
+
+void Request::CompleteStateRestoreForTransaction() {
+  search_->CompleteStateRestoreForTransaction();
+}
+
+void Request::CommitStateForTransaction() {
+  search_->CommitStateForTransaction();
+}
+
+void Request::CommitStep(const RequestStepPlan& plan,
+                         const RequestStepResult& result) noexcept {
+  if (result.token_appended) {
+    tokens_host_.push_back(result.token);
+  }
+  processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
+  status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;
+}
+
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->SetLogits(logits);
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
+
+void Request::SelectNextToken() {
+  auto& search_params = search_->params_->search;
+  if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
+    search_->SelectTop();
+  } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
+             search_params.top_k > 1) {
+    search_->SampleTopKTopP(search_params.top_k, search_params.top_p,
+                            search_params.temperature);
+  } else if (search_params.top_k > 1) {
+    search_->SampleTopK(search_params.top_k, search_params.temperature);
+  } else {
+    search_->SampleTopP(search_params.top_p, search_params.temperature);
+  }
+}
+
+RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
+  search_->CompleteGeneration();
+  const bool done = search_->IsDone();
+  const bool token_appended = CurrentSequenceLength() > sequence_length_before;
+  int32_t token = 0;
+  if (token_appended) {
+    token = search_->GetNextTokens().CpuSpan().back();
+  }
+  return RequestStepResult{
+      token,
+      token_appended,
+      done,
+  };
+}
+
+void Request::PrepareGeneration(DeviceSpan<float> logits) {
+  processed_sequence_length_ = search_->GetSequence(0).size();
+  ApplyLogitsProcessors(logits);
 }
 
 const Config::Search& Request::SearchOptions() const {

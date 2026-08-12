@@ -27,10 +27,14 @@ std::unique_ptr<ModelExecutor> ModelExecutor::Create(std::shared_ptr<Model> mode
 
 DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : model_{model},
+      cache_manager_{cache_manager},
       decoder_{CreateDecoder(model, cache_manager)} {}
 
-void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests) {
-  decoder_->Decode(scheduled_requests);
+void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
+                                  ExecutionContext& context) {
+  cache_manager_->PrepareStep(scheduled_requests.Requests(), context);
+  context.block_table_columns = cache_manager_->BlockTableColumns();
+  decoder_->Decode(scheduled_requests, context);
 }
 
 }  // namespace Generators

@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 #include "cache_manager.h"
-#include "admission.h"
 
 #include <numeric>
+
+#include "sequence_positions.h"
 
 namespace Generators {
 
@@ -40,14 +41,6 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
           num_caches_per_layer);
 }
 
-// Slots reserved for a request but not yet written to.
-size_t EmptySlots(const std::vector<std::shared_ptr<Block>>& blocks) {
-  return std::accumulate(blocks.begin(), blocks.end(), size_t{0},
-                         [](size_t sum, const std::shared_ptr<Block>& block) {
-                           return sum + block->EmptySlots();
-                         });
-}
-
 size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
   return std::accumulate(blocks.begin(), blocks.end(), size_t{0},
                          [](size_t sum, const std::shared_ptr<Block>& block) {
@@ -55,17 +48,9 @@ size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
                          });
 }
 
-// Number of KV slots the model will have addressed once the pending step has run, i.e. one per
-// token whose key and value live in the cache afterwards. The pure arithmetic lives in
-// admission.h (RequiredSlots); here we only supply the request-derived counters.
-//
-// This has to match how VarlenDecoderIO fills `past_sequence_lengths`: the decoder writes the
-// unprocessed tokens at absolute positions [past, past + unprocessed), so the cache must own
-// `past + unprocessed` slots.
+// Once the pending step completes, every token currently in the sequence has a KV slot.
 size_t RequiredSlots(const std::shared_ptr<Request>& request) {
-  const size_t sequence_length = request->CurrentSequenceLength();
-  const size_t unprocessed_count = request->IsPrefill() ? 0 : request->UnprocessedTokens().size();
-  return Generators::RequiredSlots(sequence_length, unprocessed_count, request->IsPrefill());
+  return static_cast<size_t>(request->CurrentSequenceLength());
 }
 
 }  // namespace
@@ -90,10 +75,11 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
   }
   block_pool_ = std::make_unique<BlockPool>(model->config_->engine.dynamic_batching->block_size, num_blocks);
 
+  max_batch_size_ = model->config_->engine.dynamic_batching->max_batch_size;
   graph_capture_ = IsGraphCaptureEnabled(model->config_->model.decoder.session_options);
   if (graph_capture_) {
     const size_t block_size = model->config_->engine.dynamic_batching->block_size;
-    max_block_table_rows_ = model->config_->engine.dynamic_batching->max_batch_size;
+    max_block_table_rows_ = max_batch_size_;
     // A sequence can never need more blocks than the model's context window, and it can never use
     // more than the pool holds. The buffer is allocated once at that ceiling; individual steps view
     // a smaller [rows, columns] window of it.
@@ -123,26 +109,27 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
   // too would count the prompt twice and force the pool to be sized at roughly twice the
   // capacity it can actually use.
   auto reserved_blocks = block_pool_->ReserveBlocks(RequiredSlots(request));
-  block_tables_.emplace_back(BlockTable{request, std::move(reserved_blocks)});
+  block_tables_.emplace_back(PagedCacheBlockTable{request.get(), 0, std::move(reserved_blocks)});
 }
 
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
-                                           [&request](const BlockTable& block_table) {
-                                             return block_table.request == request;
+                                           [&request](const PagedCacheBlockTable& block_table) {
+                                             return block_table.request_id == request.get();
                                            });
   if (block_table_it == block_tables_.end()) {
     throw std::runtime_error("Given request is not found in the cache.");
   }
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = UsedSlots(block_table_it->blocks);
+  const size_t used_slots = block_table_it->committed_slots;
   if (required_slots <= used_slots) {
     return true;
   }
 
-  const size_t num_slots_available = EmptySlots(block_table_it->blocks) +
-                                     block_pool_->AvailableBlocks() * block_pool_->BlockSize();
+  const size_t num_slots_available =
+      block_table_it->blocks.size() * block_pool_->BlockSize() - used_slots +
+      block_pool_->AvailableBlocks() * block_pool_->BlockSize();
 
   return num_slots_available >= required_slots - used_slots;
 }
@@ -153,27 +140,26 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
   }
 
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
-                                           [&request](const BlockTable& block_table) {
-                                             return block_table.request == request;
+                                           [&request](const PagedCacheBlockTable& block_table) {
+                                             return block_table.request_id == request.get();
                                            });
   assert(block_table_it != block_tables_.end());
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = UsedSlots(block_table_it->blocks);
+  const size_t used_slots = block_table_it->committed_slots;
+  assert(UsedSlots(block_table_it->blocks) == used_slots);
+  assert(used_slots == static_cast<size_t>(request->ProcessedSequenceLength()));
   if (required_slots <= used_slots) {
     return;
   }
   size_t num_slots = required_slots - used_slots;
 
-  // Consume the slots already reserved for this request before asking the pool for more.
-  for (auto& block : block_table_it->blocks) {
-    while (num_slots > 0 && !block->IsFull()) {
-      block->AddSlot();
-      --num_slots;
-    }
-    if (num_slots == 0) {
-      break;
-    }
+  size_t block_index = used_slots / block_pool_->BlockSize();
+  while (num_slots > 0 && block_index < block_table_it->blocks.size()) {
+    auto& block = block_table_it->blocks[block_index++];
+    const size_t slots = std::min(num_slots, block->EmptySlots());
+    block->AddSlots(slots);
+    num_slots -= slots;
   }
 
   if (num_slots > 0) {
@@ -181,16 +167,181 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
     std::move(allocated_blocks.begin(), allocated_blocks.end(),
               std::back_inserter(block_table_it->blocks));
   }
+  block_table_it->committed_slots = required_slots;
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   for (auto request_it = block_tables_.begin(); request_it != block_tables_.end(); ++request_it) {
-    if (request_it->request == request) {
+    if (request_it->request_id == request.get()) {
       block_pool_->Free(request_it->blocks);
       block_tables_.erase(request_it);
       return;
     }
   }
+}
+
+PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
+  return PagedCacheReservation{*block_pool_, block_tables_, requests};
+}
+
+StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
+                                                         size_t committed_request_count) const {
+  if (committed_request_count != block_tables_.size() ||
+      committed_request_count > plan.requests.size()) {
+    throw std::runtime_error("Step plan does not contain the committed paged cache requests.");
+  }
+  if (committed_request_count > max_batch_size_) {
+    throw std::runtime_error("Committed paged cache requests exceed the configured batch size.");
+  }
+
+  const size_t available_blocks = block_pool_->AvailableBlocks();
+  size_t planned_blocks = 0;
+  size_t selected_requests = 0;
+  size_t selected_new_requests = 0;
+  size_t max_blocks_per_request = 0;
+  bool capacity_deferred = false;
+  const void* unserviceable_request_id = nullptr;
+
+  struct CacheGrowth {
+    size_t proposed_blocks{};
+    size_t new_blocks{};
+  };
+  // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
+  // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
+  // first chunk and then losing the rest of the pool to another request would stall it part way
+  // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
+  const auto calculate_growth = [&](const RequestStepPlan& entry,
+                                    const PagedCacheBlockTable* table) {
+    const size_t committed_slots = table ? table->committed_slots : 0;
+    if (entry.target_cache_slots < committed_slots) {
+      throw std::runtime_error("Step plan target precedes the committed cache boundary.");
+    }
+
+    const size_t reserved_slots =
+        std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
+    const size_t additional_slots =
+        reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
+    const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
+  };
+  const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
+    return growth.proposed_blocks > block_pool_->Capacity() ||
+           (graph_capture_ &&
+            growth.proposed_blocks > max_block_table_columns_);
+  };
+  const auto select = [&](size_t request_index,
+                          const CacheGrowth& growth) {
+    // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
+    // pending with their committed block tables untouched and can be reconsidered next Step().
+    planned_blocks += growth.new_blocks;
+    max_blocks_per_request =
+        std::max(max_blocks_per_request, growth.proposed_blocks);
+    if (selected_requests != request_index) {
+      plan.requests[selected_requests] =
+          std::move(plan.requests[request_index]);
+    }
+    ++selected_requests;
+  };
+  const auto find_table = [this](const void* request_id) {
+    const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
+                                 [request_id](const PagedCacheBlockTable& table) {
+                                   return table.request_id == request_id;
+                                 });
+    return it == block_tables_.end() ? nullptr : &*it;
+  };
+  for (size_t i = 0; i < committed_request_count; ++i) {
+    // Cache residents are considered before new admissions. This preserves their block-table
+    // identity and prevents waiting requests from consuming capacity needed to advance them.
+    const auto& entry = plan.requests[i];
+    const auto& table = block_tables_[i];
+    if (entry.newly_admitted || entry.request_id != table.request_id) {
+      throw std::runtime_error("Step plan order does not match the committed block table order.");
+    }
+
+    const auto growth = calculate_growth(entry, &table);
+    if (permanently_unserviceable(growth)) {
+      if (!unserviceable_request_id) {
+        unserviceable_request_id = entry.request_id;
+      }
+      continue;
+    }
+    if (planned_blocks + growth.new_blocks > available_blocks) {
+      capacity_deferred = true;
+      continue;
+    }
+    select(i, growth);
+  }
+
+  for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
+    // Assigned requests are admitted in pool order until either the batch-size limit or free-block
+    // budget is reached. Capacity-deferred requests stay Assigned and require no rollback.
+    const auto& candidate = plan.requests[i];
+    if (!candidate.newly_admitted || find_table(candidate.request_id)) {
+      throw std::runtime_error("New step plan request already belongs to the paged cache.");
+    }
+
+    const auto growth = calculate_growth(candidate, nullptr);
+    if (permanently_unserviceable(growth)) {
+      if (!unserviceable_request_id) {
+        unserviceable_request_id = candidate.request_id;
+      }
+      continue;
+    }
+
+    if (committed_request_count + selected_new_requests >= max_batch_size_ ||
+        planned_blocks + growth.new_blocks > available_blocks) {
+      capacity_deferred = true;
+      continue;
+    }
+
+    select(i, growth);
+    ++selected_new_requests;
+  }
+  plan.requests.resize(selected_requests);
+
+  size_t block_table_columns = max_blocks_per_request;
+  if (graph_capture_) {
+    block_table_columns = 8;
+    while (block_table_columns < max_blocks_per_request) {
+      block_table_columns *= 2;
+    }
+    block_table_columns = std::min(block_table_columns, max_block_table_columns_);
+  }
+
+  plan.proposed_block_table_columns = block_table_columns;
+
+  if (!plan.requests.empty()) {
+    return StepPlanningResult{
+        true,
+        capacity_deferred,
+        unserviceable_request_id,
+        {StepOutcomeKind::Committed, plan.transaction_id, nullptr},
+    };
+  }
+  if (unserviceable_request_id) {
+    return StepPlanningResult{
+        false,
+        capacity_deferred,
+        unserviceable_request_id,
+        {StepOutcomeKind::UnserviceableRequest, plan.transaction_id, unserviceable_request_id},
+    };
+  }
+  if (capacity_deferred) {
+    return StepPlanningResult{
+        false,
+        true,
+        nullptr,
+        {StepOutcomeKind::CapacityDeferred, plan.transaction_id, nullptr},
+    };
+  }
+  return StepPlanningResult{
+      false,
+      false,
+      nullptr,
+      {StepOutcomeKind::NoWork, plan.transaction_id, nullptr},
+  };
 }
 
 PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
@@ -202,7 +353,7 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
-    request_snapshot.request_id = block_table.request.get();
+    request_snapshot.request_id = block_table.request_id;
     request_snapshot.block_ids.reserve(block_table.blocks.size());
     for (const auto& block : block_table.blocks) {
       request_snapshot.block_ids.push_back(block->Id());
@@ -210,6 +361,32 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
       request_snapshot.empty_slots += block->EmptySlots();
     }
     snapshot.requests.push_back(std::move(request_snapshot));
+  }
+  return snapshot;
+}
+
+PagedCacheSnapshot PagedKeyValueCache::Snapshot(
+    const PagedCacheReservation& reservation) const {
+  auto snapshot = Snapshot();
+  snapshot.transaction_reserved_block_ids.reserve(
+      reservation.ReservedBlocks().size());
+  for (const auto& block : reservation.ReservedBlocks()) {
+    snapshot.transaction_reserved_block_ids.push_back(block->Id());
+  }
+  snapshot.reservations.reserve(reservation.Deltas().size());
+  for (const auto& delta : reservation.Deltas()) {
+    RequestReservationSnapshot request_reservation;
+    request_reservation.request_id = delta.request_id;
+    request_reservation.committed_slots = delta.committed_slots;
+    request_reservation.target_slots = delta.target_slots;
+    request_reservation.tail_slots_to_consume = delta.tail_slots_to_consume;
+    request_reservation.reserved_block_ids.reserve(
+        delta.reserved_block_count);
+    for (size_t i = 0; i < delta.reserved_block_count; ++i) {
+      request_reservation.reserved_block_ids.push_back(
+          reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
+    }
+    snapshot.reservations.push_back(std::move(request_reservation));
   }
   return snapshot;
 }
@@ -241,7 +418,10 @@ std::vector<std::pair<const char*, const char*>> PagedKeyValueCache::OutputNames
 std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vector<std::shared_ptr<Request>>& requests) {
   size_t max_blocks = 0;
   for (auto& block_table : block_tables_) {
-    if (std::find(requests.begin(), requests.end(), block_table.request) != requests.end()) {
+    if (std::find_if(requests.begin(), requests.end(),
+                     [&block_table](const std::shared_ptr<Request>& request) {
+                       return request.get() == block_table.request_id;
+                     }) != requests.end()) {
       max_blocks = std::max(max_blocks, block_table.blocks.size());
     } else {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
@@ -279,7 +459,10 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   constexpr int32_t block_tables_pad_value = -1;
 
   for (auto& block_table : block_tables_) {
-    auto it = std::find(requests.begin(), requests.end(), block_table.request);
+    auto it = std::find_if(requests.begin(), requests.end(),
+                           [&block_table](const std::shared_ptr<Request>& request) {
+                             return request.get() == block_table.request_id;
+                           });
     if (it == requests.end()) {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
     }
@@ -300,7 +483,56 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   return {block_tables_value_.get(), model_->config_->model.decoder.inputs.block_table.c_str()};
 }
 
-void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests) {
+std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
+    const std::vector<std::shared_ptr<Request>>& requests,
+    const PagedCacheReservation& reservation,
+    size_t columns) {
+  if (columns < reservation.RequiredBlockTableColumns()) {
+    throw std::runtime_error("Proposed block table is narrower than the cache reservation.");
+  }
+
+  std::vector<int64_t> shape{
+      static_cast<int64_t>(requests.size()),
+      static_cast<int64_t>(columns),
+  };
+  int32_t* block_table_data = nullptr;
+  DeviceSpan<int32_t> device_span;
+  if (graph_capture_) {
+    if (columns > max_block_table_columns_ ||
+        requests.size() > max_block_table_rows_) {
+      throw std::runtime_error("Proposed block table exceeds the graph capture buffer.");
+    }
+    block_tables_tensor_->CreateTensor(shape, /*make_static=*/true);
+    device_span = block_tables_tensor_->GetDeviceSpan<int32_t>();
+    block_table_data = device_span.CpuSpan().data();
+  } else {
+    block_tables_value_ =
+        OrtValue::CreateTensor(model_->allocator_cpu_, shape,
+                               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    block_table_data = block_tables_value_->GetTensorMutableData<int32_t>();
+  }
+
+  std::vector<const void*> request_ids;
+  request_ids.reserve(requests.size());
+  for (const auto& request : requests) {
+    request_ids.push_back(request.get());
+  }
+  reservation.FillBlockTable(
+      request_ids,
+      columns,
+      std::span<int32_t>{block_table_data, requests.size() * columns});
+  block_table_columns_ = columns;
+
+  if (graph_capture_) {
+    device_span.CopyCpuToDevice();
+    return {block_tables_tensor_->GetOrtTensor(),
+            model_->config_->model.decoder.inputs.block_table.c_str()};
+  }
+  return {block_tables_value_.get(),
+          model_->config_->model.decoder.inputs.block_table.c_str()};
+}
+
+void PagedKeyValueCache::BindCache(State& state) {
   auto cache = Cache();
   auto cache_names = Names();
   auto cache_output_names = OutputNames();
@@ -330,8 +562,22 @@ void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared
     state.input_names_[layer_idx * 2 + 1] = cache_names[layer_idx].second;
     state.output_names_[layer_idx * 2 + 1] = cache_output_names[layer_idx].second;
   }
+}
 
+void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests) {
+  BindCache(state);
   auto block_tables = BlockTables(requests);
+  state.inputs_.back() = block_tables.first;
+  state.input_names_.back() = block_tables.second;
+}
+
+void PagedKeyValueCache::UpdateState(
+    State& state,
+    const std::vector<std::shared_ptr<Request>>& requests,
+    const PagedCacheReservation& reservation,
+    size_t columns) {
+  BindCache(state);
+  auto block_tables = BlockTables(requests, reservation, columns);
   state.inputs_.back() = block_tables.first;
   state.input_names_.back() = block_tables.second;
 }

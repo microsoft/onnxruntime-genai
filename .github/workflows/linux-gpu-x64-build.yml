@@ -12,9 +12,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
+  ORT_BUILD_VERSION: "1.26.0"
+  ORT_RUNTIME_VERSION: "1.28.0"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -27,11 +27,11 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
       - name: Checkout ManyLinux repo  # We are using the same manylinux repo as the one used in the packaging build
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: pypa/manylinux
           ref: 5eda9aded5462201e6310105728d33016e637ea7
@@ -39,11 +39,11 @@ jobs:
           path: manylinux
           submodules: true
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: '8.0.x'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -52,7 +52,7 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
         with:
           vcpkg-version: '2025.03.19'
           vcpkg-hash: '17e96169cd3f266c4716fcdc1bb728e6a64f103941ece463a2834d50694eba4fb48f30135503fd466402afa139abc847ef630733c442595d1c34979f261b0114'
@@ -71,33 +71,33 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
-      - name: Get the Latest OnnxRuntime Nightly Version
-        shell: pwsh
+      - name: Download build-time and runtime CUDA 12 OnnxRuntime
         run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "$ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Download OnnxRuntime Nightly
-        run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-        continue-on-error: true
+          curl -fsSL \
+            "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_BUILD_VERSION }}/content?api-version=6.0-preview.1" \
+            -o ort-build.zip
+          curl -fsSL \
+            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/onnxruntime-cuda-12/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_RUNTIME_VERSION }}/content?api-version=6.0-preview.1" \
+            -o ort-runtime.zip
+          unzip -q ort-build.zip -d ort-build-package
+          unzip -q ort-runtime.zip -d ort-runtime-package
 
       - name: list files
         shell: bash
         run: |
           ls -l
-          ls -R ${{ env.ORT_PACKAGE_NAME }}
+          ls -R ort-build-package
+          ls -R ort-runtime-package
         continue-on-error: true
 
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
-          mkdir -p ort/lib
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mkdir -p ort-build/lib ort/lib
+          mv ort-build-package/buildTransitive/native/include ort-build/
+          mv ort-build-package/runtimes/linux-x64/native/* ort-build/lib/
+          mv ort-runtime-package/runtimes/linux-x64/native/* ort/lib/
+          cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
 
@@ -115,7 +115,7 @@ jobs:
             --multiple_repos \
             --repository onnxruntimecudabuildx64
 
-      - name: Config with CMake in Docker
+      - name: Build with build.py in Docker
         run: |
           set -e -x
           docker run \
@@ -124,24 +124,31 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --preset linux_gcc_cuda_release \
-                -DMANYLINUX=ON \
-                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
-                -DENABLE_JAVA=ON \
-                -DUSE_GUIDANCE=ON \
-                -DTEST_PHI2=True \
-                -DTEST_QWEN_2_5=True"
-
-      - name: Build with CMake in Docker
-        run: |
-          set -e -x
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 \
-            bash -c " \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r requirements-dev.txt && \
+              CC=gcc CXX=g++ ${{ env.PYTHON_EXECUTABLE }} build.py \
+                --config Release \
+                --build_dir build/cuda \
+                --cmake_generator Ninja \
+                --build_java \
+                --use_cuda \
+                --cuda_home /usr/local/cuda \
+                --ort_home /ort_genai_src/ort-build \
+                --use_guidance \
+                --update --build \
+                --skip_examples \
+                --cmake_path /usr/bin/cmake \
+                --ctest_path /usr/bin/ctest \
+                --cmake_extra_defines \
+                  MANYLINUX=ON \
+                  PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
+                  TEST_PHI2=True \
+                  TEST_QWEN_2_5=True \
+                  'CMAKE_CUDA_ARCHITECTURES=60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120' \
+                  'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_MODULE_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_SHARED_LINKER_FLAGS_INIT=-Wl,-z,now' \
+                  'CMAKE_C_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe' \
+                  'CMAKE_CXX_FLAGS=-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe'"
 
       - name: Build the C Examples in Docker
         run: |
@@ -154,10 +161,10 @@ jobs:
             bash -c " \
               /usr/bin/cmake -S examples/c -B examples/c/build \
                 -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER=ON -DNEMOTRON_SPEECH=ON \
-                -DORT_INCLUDE_DIR=/ort_genai_src/ort/include \
-                -DORT_LIB_DIR=/ort_genai_src/ort/lib \
+                -DORT_INCLUDE_DIR=/ort_genai_src/ort-build/include \
+                -DORT_LIB_DIR=/ort_genai_src/ort-build/lib \
                 -DOGA_INCLUDE_DIR=/ort_genai_src/src \
-                -DOGA_LIB_DIR=/ort_genai_src/build/cuda && \
+                -DOGA_LIB_DIR=/ort_genai_src/build/cuda/Release && \
               /usr/bin/cmake --build examples/c/build --config Release"
 
       - name: Run the Java tests in Docker
@@ -168,7 +175,8 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              /usr/bin/ctest --test-dir build/cuda/src/java --build-config Release --verbose --timeout 10800"
+              LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/ort_genai_src/ort/lib \
+                /usr/bin/ctest --test-dir build/cuda/Release/src/java --build-config Release --verbose --timeout 10800"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
@@ -182,7 +190,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
       # TODO: Enable this by adding dotnet to the docker image
@@ -194,7 +202,7 @@ jobs:
       #       --rm \
       #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
       #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
-      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
+      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/Release/'"
 
       - name: Docker -- Run unit tests
         run: |
@@ -204,4 +212,4 @@ jobs:
             --rm \
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests && ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/engine_unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/ort/lib:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/unit_tests && ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/ort/lib:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/engine_unit_tests"
