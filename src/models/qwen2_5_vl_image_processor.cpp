@@ -91,6 +91,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
   if (expand_image_patch_placeholders) {
     constexpr char patch_token[] = "<|patch|>";
+    constexpr char image_start_token[] = "<|image_start|>";
+    constexpr char image_end_token[] = "<|image_end|>";
     const std::regex patch_regex{R"(<\|patch\|>)"};
     if (text.empty()) {
       for (int64_t i = 0; i < num_images; ++i) {
@@ -116,9 +118,11 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
         const int64_t* grid = image_grid_thw_data + image_idx * 3;
         const int64_t num_patches =
             (grid[0] * grid[1] * grid[2]) / (spatial_merge_size * spatial_merge_size);
+        modified_text += image_start_token;
         for (int64_t i = 0; i < num_patches; ++i) {
           modified_text += patch_token;
         }
+        modified_text += image_end_token;
         last_pos = match->position() + match->length();
       }
       modified_text += text.substr(last_pos);
