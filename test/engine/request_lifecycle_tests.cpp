@@ -331,37 +331,35 @@ TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
                                            EosToken(*guidance_model));
   auto tokenizer = guidance_model->CreateTokenizer();
-  const auto first_tokens = tokenizer->Encode("1");
-  const auto second_tokens = tokenizer->Encode("2");
+  const auto expected_tokens = tokenizer->Encode("!");
   const auto invalid_tokens = tokenizer->Encode("a");
-  ASSERT_EQ(first_tokens.size(), 1u);
-  ASSERT_EQ(second_tokens.size(), 1u);
+  ASSERT_EQ(expected_tokens.size(), 1u);
   ASSERT_EQ(invalid_tokens.size(), 1u);
 
   auto params = MakeGreedyParams(*guidance_model);
-  params->SetGuidance("regex", "12", false);
+  params->SetGuidance("regex", "!!", false);
   auto request = std::make_shared<Request>(params);
   auto prompt = Prompt();
   request->AddTokens(prompt);
   request->Assign(guidance_engine.engine);
 
   auto first_logits = LogitsFavoringToken(
-      *guidance_model, invalid_tokens.front(), first_tokens.front());
+      *guidance_model, invalid_tokens.front(), expected_tokens.front());
   request->SaveStateForTransaction();
   const auto staged_first = request->ApplyLogitsForTransaction(first_logits);
-  EXPECT_EQ(staged_first.token, first_tokens.front());
+  EXPECT_EQ(staged_first.token, expected_tokens.front());
   request->RestoreStateForTransaction();
 
   request->SaveStateForTransaction();
   const auto retried_first = request->ApplyLogitsForTransaction(first_logits);
-  EXPECT_EQ(retried_first.token, first_tokens.front());
+  EXPECT_EQ(retried_first.token, expected_tokens.front());
   request->CommitStateForTransaction();
 
   auto second_logits = LogitsFavoringToken(
-      *guidance_model, invalid_tokens.front(), second_tokens.front());
+      *guidance_model, invalid_tokens.front(), expected_tokens.front());
   request->SaveStateForTransaction();
   const auto staged_second = request->ApplyLogitsForTransaction(second_logits);
-  EXPECT_EQ(staged_second.token, second_tokens.front());
+  EXPECT_EQ(staged_second.token, expected_tokens.front());
   request->RestoreStateForTransaction();
 }
 #endif

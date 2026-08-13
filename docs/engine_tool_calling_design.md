@@ -43,16 +43,6 @@ Recreating all model state between steps 2 and 5 requires reprocessing the full 
 - Support optional per-request guidance with Engine transaction semantics.
 - Provide focused unit and end-to-end coverage.
 
-## Non-Goals
-
-- Implement tool selection, JSON parsing, tool execution, or retries inside the C++ Engine.
-- Define one universal tool-call schema across model families.
-- Replace model-specific chat templates.
-- Require guidance for tool calling.
-- Add support for guidance fast-forward tokens in the Engine.
-- Change the existing Generator tool-calling contract.
-- Cover GPT-OSS tool calling in this change.
-
 ## Existing Architecture
 
 Tool calling is an application-level protocol layered over token generation. The runtime supplies model execution, tokenization, chat-template rendering, search, and streaming. The application owns the semantic loop:
