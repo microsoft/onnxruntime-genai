@@ -20,7 +20,13 @@ where ``threshold`` per channel is the abs-max (``method="minmax"``), a high per
 ``|x|`` (``method="percentile"``, tames outliers), or the clip point that minimizes the
 quantization mean squared error (``method="mse"``). The output JSON is::
 
-    {"scales": {"k_scales": [<per-layer>...], "v_scales": [<per-layer>...]}}
+    {
+        "scales": {"k_scales": [<per-layer>...], "v_scales": [<per-layer>...]},
+        "layer_ids": [<model-layer-id>...]
+    }
+
+``layer_ids`` maps each scale entry to its model layer. It is contiguous for dense models and
+sparse for hybrid models where only full-attention layers own a KV cache.
 
 Typical two-step flow::
 
@@ -300,7 +306,7 @@ def _detect_kv_shape(sess, model_path: str) -> tuple[int, int]:
     num_kv_heads = head_size = None
     for meta in sess.get_inputs():
         # Only the attention cache carries the [batch, num_kv_heads, past_seq_len, head_size]
-        # layout. Hybrid models (e.g. Qwen3.5) also expose `past_key_values.<layer>.conv_state`
+        # layout. Hybrid models also expose `past_key_values.<layer>.conv_state`
         # and `.recurrent_state` inputs, which are 4-D/5-D linear-attention state buffers with a
         # completely different meaning, so match on the `.key`/`.value` suffix rather than on the
         # `past_key_values.` prefix alone.
@@ -505,7 +511,7 @@ def calibrate_kv_scales(
         raise ValueError("Model has no present.*.key outputs; cannot calibrate KV scales.")
     # Hybrid attention models interleave full-attention and linear-attention layers, so only a
     # subset of layers owns a KV cache and the `present.<layer>.key` indices are sparse (e.g.
-    # Qwen3.5 emits layers 3, 7, 11, ... 39). Calibrate whichever layers are present, in
+    # some models emit layers 3, 7, 11, ... 39). Calibrate whichever layers are present, in
     # ascending layer order, instead of demanding a contiguous 0..N-1 range.
     layer_ids = sorted(present_keys.keys() & present_values.keys())
     unpaired = sorted(present_keys.keys() ^ present_values.keys())
