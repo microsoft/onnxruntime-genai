@@ -30,7 +30,7 @@ namespace {
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -e,--execution_provider <provider>\n"
-    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx. Default: " << defaults.execution_provider << "\n"
+    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU. Default: " << defaults.execution_provider << "\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
@@ -98,8 +98,9 @@ std::string ReadFileContent(std::string_view file_path) {
 }
 
 void ValidateExecutionProvider(const std::string& provider) {
-  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx") {
-    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx");
+  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx" &&
+      provider != "AMDGPU") {
+    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU");
   }
 }
 

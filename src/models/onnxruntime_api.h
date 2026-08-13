@@ -572,6 +572,11 @@ struct OrtEnv {
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
 
+  /// \brief Get an EP-advertised shared allocator matching mem_info (e.g. HOST_ACCESSIBLE), or
+  /// nullptr if none exists. Wraps OrtApi::GetSharedAllocator. The returned allocator is owned by
+  /// the OrtEnv — do NOT delete it.
+  Ort::Allocator* GetSharedAllocator(const OrtMemoryInfo& mem_info) const;
+
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
   /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
