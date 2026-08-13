@@ -506,8 +506,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
 }
 
 // Update provider options using values from a parent if they are not already specified in the child.
-// Used for pipeline models to ensure that top-level provider options are communicated into the options
-// for each component model in the pipeline.
+// Used for pipeline models that opt in to inheritance to ensure that top-level provider options are
+// communicated into the options for those component models.
 static void InheritParentProviderOptions(const std::vector<Config::ProviderOptions>& parent_provider_options,
                                          std::vector<Config::ProviderOptions>& child_provider_options) {
   std::unordered_set<std::string> child_ep_option_keys;
@@ -804,19 +804,27 @@ void Model::CreateSessionOptions() {
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
-      // Update config ProviderOptions for pipeline model with values from top-level options
-      InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
-                                   pipeline_model.session_options->provider_options);
+      if (pipeline_model.inherit_session_options) {
+        // Update config ProviderOptions for pipeline model with values from top-level options
+        InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
+                                     pipeline_model.session_options->provider_options);
+      }
 
-      // Clone the main OrtSessionOptions and then overlay any options explicitly set for this pipeline model
-      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, true);
+      // When inheriting, clone the main OrtSessionOptions to use as the base, then overlay the options explicitly set
+      // for this pipeline model on top of it. Otherwise start from a fresh set of options.
+      auto emplaced = pipeline_model.inherit_session_options
+                          ? pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone())
+                          : pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options,
+                                     *emplaced.first->second,
+                                     pipeline_model.inherit_session_options);
 
       AppendSessionProviders(*pipeline_model.session_options, *emplaced.first->second, false);
     }
   }
 
-  // Append providers to the main session options only after cloning it for pipeline components
+  // Append providers to the main session options only after cloning it for pipeline components, so that inheriting
+  // components do not get the top level providers appended twice.
   AppendSessionProviders(config_->model.decoder.session_options, *session_options_, true);
 
   // Fallback to CPU if no provider specific interface was set
