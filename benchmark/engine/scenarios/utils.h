@@ -29,6 +29,7 @@ struct ScenarioConfig {
 struct BenchmarkContext {
   std::string ort_version{"unknown"};
   std::string genai_version{"unknown"};
+  std::string cuda_plugin_ep_version{"unknown"};
 };
 
 struct RequestMetrics {

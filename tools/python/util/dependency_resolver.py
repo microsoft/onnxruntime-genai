@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import platform
 import shutil
 import subprocess
@@ -239,5 +240,11 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
             subprocess.run([patchelf, "--set-rpath", "$ORIGIN", staged_lib], check=True)
         else:
             _log.warning("patchelf not found; the staged ORT may be ignored in favor of the build-time RPATH.")
+
+    # Read back by the benchmark so results record which packages they ran against.
+    versions_path = destination_dir / "versions.json"
+    versions_path.write_text(
+        json.dumps({"ort_version": _ORT_VERSION, "cuda_plugin_ep_version": _CUDA_PLUGIN_EP_VERSION}, indent=2)
+    )
 
     return destination_dir

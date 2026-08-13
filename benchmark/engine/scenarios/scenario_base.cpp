@@ -32,6 +32,7 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"model_path", config.model_path},
       {"ort_version", context.ort_version},
       {"genai_version", context.genai_version},
+      {"cuda_plugin_ep_version", context.cuda_plugin_ep_version},
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
       {"prompt_length_k", config.prompt_length_k},

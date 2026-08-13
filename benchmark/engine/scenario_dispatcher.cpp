@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -30,6 +31,24 @@ std::string GetGenAIVersion() {
 #else
   return "unknown";
 #endif
+}
+
+// versions.json is written next to the executable when the build stages the benchmark dependencies.
+nlohmann::json ReadStagedVersions() {
+  std::error_code ec;
+  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  if (ec) {
+    return nlohmann::json::object();
+  }
+
+  std::ifstream file(exe.parent_path() / "versions.json", std::ios::binary);
+  if (!file) {
+    return nlohmann::json::object();
+  }
+
+  nlohmann::json versions;
+  file >> versions;
+  return versions;
 }
 
 std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
@@ -136,8 +155,12 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
 
   RegisterExecutionProviderLibraries(configs);
 
+  const nlohmann::json staged_versions = ReadStagedVersions();
+
   BenchmarkContext context;
   context.genai_version = GetGenAIVersion();
+  context.ort_version = staged_versions.value("ort_version", std::string{"unknown"});
+  context.cuda_plugin_ep_version = staged_versions.value("cuda_plugin_ep_version", std::string{"unknown"});
 
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
