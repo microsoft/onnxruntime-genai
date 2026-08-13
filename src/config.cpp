@@ -1365,35 +1365,20 @@ struct Speculative_Element : JSON::Element {
             "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
             ". Got: " + std::to_string(ngram_size) + ".");
       v_.ngram_size = ngram_size;
-    } else if (name == "ngram_chained_lookup_bool") {
-      const int ngram_chained_lookup_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (ngram_chained_lookup_bool != 0 && ngram_chained_lookup_bool != 1)
+    } else if (name == "ngram_chained_lookup") {
+      v_.ngram_chained_lookup = JSON::Get<bool>(value);
+    } else if (name == "adaptive_k") {
+      v_.adaptive_k = JSON::Get<bool>(value);
+    } else if (name == "min_adaptive_k") {
+      const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (min_adaptive_k < kMinK || min_adaptive_k > kMaxK)
         throw std::runtime_error(
-            "speculative.ngram_chained_lookup_bool must be 0 or 1. Got: " +
-            std::to_string(ngram_chained_lookup_bool) + ".");
-      v_.ngram_chained_lookup_bool = ngram_chained_lookup_bool;
-    } else if (name == "adaptive_k_bool") {
-      const int adaptive_k_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (adaptive_k_bool != 0 && adaptive_k_bool != 1)
-        throw std::runtime_error(
-            "speculative.adaptive_k_bool must be 0 or 1. Got: " +
-            std::to_string(adaptive_k_bool) + ".");
-      v_.adaptive_k_bool = adaptive_k_bool;
-    } else if (name == "adaptive_k_min") {
-      const int adaptive_k_min = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (adaptive_k_min < kMinK || adaptive_k_min > kMaxK)
-        throw std::runtime_error(
-            "speculative.adaptive_k_min must be between " + std::to_string(kMinK) +
+            "speculative.min_adaptive_k must be between " + std::to_string(kMinK) +
             " and " + std::to_string(kMaxK) + ". Got: " +
-            std::to_string(adaptive_k_min) + ".");
-      v_.adaptive_k_min = adaptive_k_min;
-    } else if (name == "cooldown_bool") {
-      const int cooldown_bool = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (cooldown_bool != 0 && cooldown_bool != 1)
-        throw std::runtime_error(
-            "speculative.cooldown_bool must be 0 or 1. Got: " +
-            std::to_string(cooldown_bool) + ".");
-      v_.cooldown_bool = cooldown_bool;
+            std::to_string(min_adaptive_k) + ".");
+      v_.min_adaptive_k = min_adaptive_k;
+    } else if (name == "cooldown") {
+      v_.cooldown = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1493,6 +1478,14 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value) {
   try {
     Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {

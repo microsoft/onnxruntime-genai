@@ -467,13 +467,13 @@ struct Config {
   struct Speculative {
     // Four is a conservative default that amortizes target verification without excessive draft
     // work; the best value depends on repetition/acceptance and the execution provider. When
-    // adaptive_k_bool is enabled, this is treated as the initial width (adaptive probing may grow up to 16).
+    // adaptive_k is enabled, this is treated as the initial width (adaptive probing may grow up to 16).
     int max_draft_tokens{4};
-    int ngram_size{};                 // 0 disables n-gram decoding; N matches the last N-1 tokens.
-    int ngram_chained_lookup_bool{};  // 1 refills the proposal by repeatedly looking up synthetic context.
-    int adaptive_k_bool{};            // 0 uses max_draft_tokens every round; 1 adapts up to the hard limit.
-    int adaptive_k_min{2};            // Starting width and floor when adaptive_k_bool is enabled.
-    int cooldown_bool{};              // 1 skips one speculative attempt after three zero-accept rounds.
+    int ngram_size{};             // 0 disables n-gram decoding; N matches the last N-1 tokens.
+    bool ngram_chained_lookup{};  // Refill the proposal by repeatedly looking up synthetic context.
+    bool adaptive_k{};            // Adapt the proposal width up to the hard limit.
+    int min_adaptive_k{2};        // Starting width and floor when adaptive_k is enabled.
+    bool cooldown{};              // Skip one speculative attempt after three zero-accept rounds.
   } speculative;
 
   struct Engine {
@@ -503,6 +503,7 @@ struct Config {
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

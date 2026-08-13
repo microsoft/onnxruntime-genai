@@ -50,9 +50,6 @@ void ValidateNGramDecoding(const Model& model, const GeneratorParams& params) {
       config.speech.filename.empty();
 
   NGramDecodingCapabilities capabilities;
-  capabilities.batch_size = params.search.batch_size;
-  capabilities.num_beams = params.search.num_beams;
-  capabilities.num_return_sequences = params.search.num_return_sequences;
   capabilities.uses_guidance =
       !params.guidance_type.empty() || !params.guidance_data.empty();
   capabilities.uses_draft_model = config.draft.has_value();
@@ -62,14 +59,13 @@ void ValidateNGramDecoding(const Model& model, const GeneratorParams& params) {
   capabilities.uses_model_managed_state =
       IsOpenVINOStatefulModel(model) || IsQNNStatefulModel(model);
   capabilities.has_pruned_logits = is_plain_decoder_only_text && model.IsPruned();
-  ValidateNGramDecodingCapabilities(capabilities);
+  ValidateNGramDecodingCapabilities(params.search, capabilities);
 }
 
 NGramDecodingStrategy::NGramDecodingStrategy(Generator& g)
     : SpeculativeDecodingStrategy{*g.state_, *g.model_},
       lookup_{ValidateAndGetNGramSize(g)},
-      chained_lookup_{
-          g.search_->params_->speculative.ngram_chained_lookup_bool != 0} {}
+      chained_lookup_{g.search_->params_->speculative.ngram_chained_lookup} {}
 
 void NGramDecodingStrategy::Sync(Generator& g) {
   using clock = std::chrono::steady_clock;

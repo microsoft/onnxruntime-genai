@@ -222,6 +222,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         generatorParams.SetSearchOption("max_length", maxLength);
                         generatorParams.SetSearchOption("batch_size", batchSize);
                         generatorParams.SetSpeculativeNumber("max_draft_tokens", 4);
+                        generatorParams.SetSpeculativeBool("adaptive_k", true);
 
                         using (var generator = new Generator(model, generatorParams))
                         {
@@ -232,6 +233,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
                             Assert.True(generatorParams.GetSearchBool("early_stopping"));
                             Assert.Equal(4.0, generatorParams.GetSpeculativeNumber("max_draft_tokens"));
+                            Assert.True(generatorParams.GetSpeculativeBool("adaptive_k"));
                             using (SpeculativeStats stats = generator.GetSpeculativeStats())
                             {
                                 Assert.Equal(0UL, stats.GetCount("rounds"));

@@ -32,8 +32,8 @@ class AdaptiveKController {
  public:
   static constexpr int kAdaptiveMaxK = 16;
 
-  AdaptiveKController(int fixed_k, int adaptive_min_k, bool enabled)
-      : min_k_{enabled ? adaptive_min_k : fixed_k},
+  AdaptiveKController(int fixed_k, int min_adaptive_k, bool enabled)
+      : min_k_{enabled ? min_adaptive_k : fixed_k},
         max_k_{enabled ? kAdaptiveMaxK : fixed_k},
         enabled_{enabled},
         effective_k_{min_k_} {}
@@ -114,6 +114,11 @@ class AdaptiveKController {
   }
 
  private:
+  // Heuristic defaults, not values tuned for one model. New rounds get 25% weight so one noisy
+  // measurement does not dominate. Acceptance below 50% can lower K, while 75% or higher can
+  // raise it; the gap prevents oscillation. Throughput changes within 3% are treated as noise,
+  // while a 20% loss rejects a probe immediately. Normal decisions require two samples.
+  // Successful probes wait one round; rejected probes wait six before another attempt.
   static constexpr float kEwmaAlpha = 0.25f;
   static constexpr float kHighAcceptanceThreshold = 0.75f;
   static constexpr float kLowAcceptanceThreshold = 0.50f;

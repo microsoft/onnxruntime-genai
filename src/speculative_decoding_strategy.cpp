@@ -92,9 +92,9 @@ SpeculativeDecodingStrategy::SpeculativeDecodingStrategy(State& target_state,
     : target_state_{RequireDecoderOnlyState(target_state)},
       target_model_{target_model},
       adaptive_k_{target_state_.params_->speculative.max_draft_tokens,
-                  target_state_.params_->speculative.adaptive_k_min,
-                  target_state_.params_->speculative.adaptive_k_bool != 0},
-      cooldown_{target_state_.params_->speculative.cooldown_bool != 0} {}
+                  target_state_.params_->speculative.min_adaptive_k,
+                  target_state_.params_->speculative.adaptive_k},
+      cooldown_{target_state_.params_->speculative.cooldown} {}
 
 std::deque<int32_t> SpeculativeDecodingStrategy::CreateGuidanceFFQueue() const {
   return {ff_carry_.begin(), ff_carry_.end()};

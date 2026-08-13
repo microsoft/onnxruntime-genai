@@ -475,6 +475,20 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGenerato
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeBool(OgaGeneratorParams* params, const char* name, bool value) {
+  OGA_TRY
+  params->SetSpeculativeBool(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeBool(const OgaGeneratorParams* params, const char* name, bool* value) {
+  OGA_TRY
+  *value = params->GetSpeculativeBool(name);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
   *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));

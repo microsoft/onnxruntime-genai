@@ -67,6 +67,27 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return value;
         }
 
+        /// <summary>
+        /// Sets a boolean speculative decoding option.
+        /// </summary>
+        /// <param name="name">The speculative option name.</param>
+        /// <param name="value">The value to set.</param>
+        public void SetSpeculativeBool(string name, bool value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSpeculativeBool(_generatorParamsHandle, StringUtils.ToUtf8(name), value));
+        }
+
+        /// <summary>
+        /// Gets the current value of a boolean speculative decoding option.
+        /// </summary>
+        /// <param name="name">The speculative option name.</param>
+        /// <returns>The current option value.</returns>
+        public bool GetSpeculativeBool(string name)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSpeculativeBool(_generatorParamsHandle, StringUtils.ToUtf8(name), out bool value));
+            return value;
+        }
+
         ~GeneratorParams()
         {
             Dispose(false);

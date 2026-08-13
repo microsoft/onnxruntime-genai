@@ -6,6 +6,7 @@ package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +20,9 @@ public class GeneratorParamsTest {
       params.setSearchOption("early_stopping", true); // boolean
       params.setSearchOption("max_length", 20); // number
       params.setSpeculativeNumber("max_draft_tokens", 4);
+      params.setSpeculativeBool("adaptive_k", true);
       assertEquals(4.0, params.getSpeculativeNumber("max_draft_tokens"));
+      assertTrue(params.getSpeculativeBool("adaptive_k"));
     }
   }
 

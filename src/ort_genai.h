@@ -505,6 +505,16 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
+  void SetSpeculativeBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeBool(this, name, value));
+  }
+
+  bool GetSpeculativeBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeBool(this, name, &value));
+    return value;
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 

@@ -45,6 +45,9 @@ void GreedySearch_Cuda::EnsureSamplingData() {
   sampling_buffer_ = params_->p_device->Allocate<uint8_t>(sampling_buffer_size);
 
   // Create SamplingData with the externally allocated buffer
+  // SamplingData requires initialized cuRAND states even before a stochastic call.
+  // Stochastic sampling replaces them from the caller-owned RNG in SampleTopKTopP;
+  // 0 is therefore only a deterministic initialization value.
   samplingdata_ = std::make_unique<cuda::SamplingData>(0, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
                                                        sampling_buffer_.Span().data(), sampling_buffer_size);
 }
@@ -391,6 +394,8 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
   ResetDone();
+  // For a nonzero rewind, preserve sequence[index] as the boundary token that the next
+  // generation step replays. Launch_GetLastTokens reads sequence_length - 1 so index + 1.
   if (index > 0)
     cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index + 1), sequences_.max_length_, GetStream());
   else

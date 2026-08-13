@@ -91,6 +91,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool GetSearchBool(std::string_view name) const;
   void SetSpeculativeNumber(std::string_view name, double value);
   double GetSpeculativeNumber(std::string_view name) const;
+  void SetSpeculativeBool(std::string_view name, bool value);
+  bool GetSpeculativeBool(std::string_view name) const;
 
   int max_batch_size{0};
   bool use_graph_capture{};

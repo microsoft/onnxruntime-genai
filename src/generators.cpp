@@ -491,15 +491,23 @@ double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
     return static_cast<double>(speculative.max_draft_tokens);
   if (name == "ngram_size")
     return static_cast<double>(speculative.ngram_size);
-  if (name == "ngram_chained_lookup_bool")
-    return static_cast<double>(speculative.ngram_chained_lookup_bool);
-  if (name == "adaptive_k_bool")
-    return static_cast<double>(speculative.adaptive_k_bool);
-  if (name == "adaptive_k_min")
-    return static_cast<double>(speculative.adaptive_k_min);
-  if (name == "cooldown_bool")
-    return static_cast<double>(speculative.cooldown_bool);
+  if (name == "min_adaptive_k")
+    return static_cast<double>(speculative.min_adaptive_k);
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
+}
+
+void GeneratorParams::SetSpeculativeBool(std::string_view name, bool value) {
+  Generators::SetSpeculativeBool(speculative, name, value);
+}
+
+bool GeneratorParams::GetSpeculativeBool(std::string_view name) const {
+  if (name == "ngram_chained_lookup")
+    return speculative.ngram_chained_lookup;
+  if (name == "adaptive_k")
+    return speculative.adaptive_k;
+  if (name == "cooldown")
+    return speculative.cooldown;
+  throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeBool.");
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -528,10 +536,9 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
       generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)},
       rng_{CreateRandomGenerator(params.search.random_seed)} {
-  if (params.speculative.ngram_chained_lookup_bool != 0 &&
-      params.speculative.ngram_size == 0)
+  if (params.speculative.ngram_chained_lookup && params.speculative.ngram_size == 0)
     throw std::runtime_error(
-        "speculative.ngram_chained_lookup_bool requires speculative.ngram_size to enable "
+        "speculative.ngram_chained_lookup requires speculative.ngram_size to enable "
         "n-gram decoding.");
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);

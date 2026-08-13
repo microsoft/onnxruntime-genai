@@ -198,7 +198,7 @@ struct PyGeneratorParams {
       if (pybind11::isinstance<pybind11::float_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
       } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
-        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<bool>() ? 1.0 : 0.0);
+        params_->SetSpeculativeBool(name.c_str(), entry.second.cast<bool>());
       } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
       } else
@@ -210,11 +210,10 @@ struct PyGeneratorParams {
     pybind11::dict d;
     d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
     d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
-    d["ngram_chained_lookup_bool"] =
-        params_->GetSpeculativeNumber("ngram_chained_lookup_bool") != 0.0;
-    d["adaptive_k_bool"] = params_->GetSpeculativeNumber("adaptive_k_bool") != 0.0;
-    d["adaptive_k_min"] = params_->GetSpeculativeNumber("adaptive_k_min");
-    d["cooldown_bool"] = params_->GetSpeculativeNumber("cooldown_bool") != 0.0;
+    d["ngram_chained_lookup"] = params_->GetSpeculativeBool("ngram_chained_lookup");
+    d["adaptive_k"] = params_->GetSpeculativeBool("adaptive_k");
+    d["min_adaptive_k"] = params_->GetSpeculativeNumber("min_adaptive_k");
+    d["cooldown"] = params_->GetSpeculativeBool("cooldown");
     return d;
   }
 

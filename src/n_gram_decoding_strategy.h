@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 
+#include "config.h"
 #include "n_gram_lookup.h"
 #include "speculative_decoding_strategy.h"
 
@@ -13,9 +14,6 @@ struct GeneratorParams;
 struct Model;
 
 struct NGramDecodingCapabilities {
-  int batch_size{1};
-  int num_beams{1};
-  int num_return_sequences{1};
   bool uses_guidance{};
   bool uses_draft_model{};
   bool is_plain_decoder_only_text{true};
@@ -26,15 +24,16 @@ struct NGramDecodingCapabilities {
 };
 
 inline void ValidateNGramDecodingCapabilities(
+    const Config::Search& search,
     const NGramDecodingCapabilities& capabilities) {
   if (capabilities.uses_draft_model)
     throw std::runtime_error(
         "N-gram decoding cannot be combined with draft-model speculative decoding.");
-  if (capabilities.batch_size != 1)
+  if (search.batch_size != 1)
     throw std::runtime_error("N-gram decoding requires batch_size=1 in this release.");
-  if (capabilities.num_beams != 1)
+  if (search.num_beams != 1)
     throw std::runtime_error("N-gram decoding does not support beam search in this release.");
-  if (capabilities.num_return_sequences != 1)
+  if (search.num_return_sequences != 1)
     throw std::runtime_error(
         "N-gram decoding requires num_return_sequences=1 in this release.");
   if (!capabilities.is_plain_decoder_only_text)

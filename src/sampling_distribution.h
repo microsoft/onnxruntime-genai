@@ -201,11 +201,6 @@ inline int32_t SampleCategoricalToken(std::span<const int32_t> indices,
   return indices[static_cast<size_t>(distribution(rng))];
 }
 
-inline int32_t SampleCategoricalToken(const SampledCategorical& categorical,
-                                      std::mt19937& rng) {
-  return SampleCategoricalToken(categorical.indices, categorical.probs, rng);
-}
-
 // New function consolidating the top-k/top-p/top-k+top-p paths from search.cpp's SampleTop*;
 // added so standard and speculative decoding build the distribution through one shared routine.
 // Inputs: scores (logits), top_k, top_p, temperature; output struct out
