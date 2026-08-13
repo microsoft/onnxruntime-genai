@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -71,6 +72,35 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
   return configs;
 }
 
+// Provider libraries can only be registered once per process, so this runs before any scenario.
+void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& configs) {
+  std::set<std::string> registered;
+
+  for (const auto& config : configs) {
+    if (config.execution_provider != "cuda") {
+      continue;
+    }
+
+    if (config.execution_provider_library.empty()) {
+      throw std::invalid_argument(
+          "execution_provider_library is required when execution_provider is 'cuda'");
+    }
+
+    const fs::path provider_library = fs::absolute(config.execution_provider_library);
+    if (!fs::exists(provider_library)) {
+      throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
+    }
+
+    if (!registered.insert("CUDAExecutionProvider").second) {
+      continue;
+    }
+
+    std::cout << "[dispatcher] Registering CUDA execution provider library: "
+              << provider_library.string() << std::endl;
+    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
+  }
+}
+
 std::string MakeResultFilename(const std::string& scenario_name, size_t id) {
   std::ostringstream oss;
   oss << scenario_name << "_results_" << std::setw(3) << std::setfill('0') << id << ".json";
@@ -134,6 +164,8 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   }
 
   fs::create_directories(out_dir);
+
+  RegisterExecutionProviderLibraries(configs);
 
   BenchmarkContext context;
   context.genai_version = GetGenAIVersion();

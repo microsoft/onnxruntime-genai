@@ -65,23 +65,6 @@ ScenarioExecutionOutput RunEngineWorkload(const ScenarioConfig& config, const st
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
   std::cout << tag << "Resolved model path: " << resolved_model_path << std::endl;
 
-  if (config.execution_provider == "cuda") {
-    if (config.execution_provider_library.empty()) {
-      throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is 'cuda'");
-    }
-
-    const fs::path provider_library = fs::absolute(config.execution_provider_library);
-    std::cout << tag << "Registering CUDA execution provider library: "
-              << provider_library.string() << std::endl;
-    if (!fs::exists(provider_library)) {
-      throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
-    }
-
-    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
-    std::cout << tag << "CUDA execution provider registered." << std::endl;
-  }
-
   std::cout << tag << "Creating OGA config..." << std::endl;
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
   std::cout << tag << "OGA config created. Clearing providers..." << std::endl;
