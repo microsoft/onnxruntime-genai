@@ -426,10 +426,10 @@ struct Config {
         bool inherit_session_options{false};  // If true, the top level (decoder) session options are used as the
                                               // base for this component's session options, which are then overlaid
                                               // on top of them.
-        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
-                                    // This is the index of the session that needs to be reset during the execution of the current session.
-                                    // This is a temporary solution until the QNN driver updates are available.
-                                    // Once the driver updates are available, this option will be deprecated.
+        int reset_session_idx{-1};            // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                              // This is the index of the session that needs to be reset during the execution of the current session.
+                                              // This is a temporary solution until the QNN driver updates are available.
+                                              // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
