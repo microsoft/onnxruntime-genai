@@ -163,9 +163,9 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
         shutil.copy(Path(lib_dir) / file_name, destination_dir)
 
 
-# Packages the engine benchmark loads at runtime, pinned so ORT and the plugin EP share an ORT_API_VERSION.
+# Packages the engine benchmark loads at runtime, pinned so the plugin EP matches the ORT core.
 _ENGINE_BENCHMARK_PACKAGES = {
-    "Microsoft.ML.OnnxRuntime": "1.29.0",
+    "Microsoft.ML.OnnxRuntime": "1.28.0",
     "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": "0.1.0-dev.20260812+c675b44c",
 }
 # Project and feed ids of the public aiinfra ORT-Nightly feed.
