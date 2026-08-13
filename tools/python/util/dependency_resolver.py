@@ -163,31 +163,32 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
         shutil.copy(Path(lib_dir) / file_name, destination_dir)
 
 
-# Packages the engine benchmark loads at runtime, pinned so the plugin EP matches the ORT core.
-_ENGINE_BENCHMARK_PACKAGES = {
-    "Microsoft.ML.OnnxRuntime": "1.28.0",
-    "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": "0.1.0-dev.20260812+c675b44c",
-}
 # Project and feed ids of the public aiinfra ORT-Nightly feed.
 _ORT_NIGHTLY_FEED_PROJECT = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
 _ORT_NIGHTLY_FEED_ID = "7982ae20-ed19-4a35-a362-a96ac99897b7"
+# Packages the engine benchmark loads at runtime, pinned so the plugin EP matches the ORT core.
+_ENGINE_BENCHMARK_PACKAGES = {
+    "Microsoft.ML.OnnxRuntime": "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/1.28.0",
+    "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": (
+        f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
+        "/nuget/packages/Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64/versions/0.1.0-dev.20260812+c675b44c"
+        "/content?api-version=6.0-preview.1"
+    ),
+}
 
 
-def _download_and_unpack_nupkg(package_name: str, version: str, destination_dir: Path) -> Path:
+def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_dir: Path) -> Path:
     unpacked_dir = destination_dir / package_name
     if unpacked_dir.exists():
         _log.info(f"Package {package_name} already downloaded")
         return unpacked_dir
 
-    _log.info(f"Downloading {package_name} {version} from ORT-Nightly")
+    _log.info(f"Downloading {package_name} from {package_url}")
+    response = requests.get(package_url)
+    response.raise_for_status()
     package_path = destination_dir / f"{package_name}.zip"
     with open(package_path, "wb") as f:
-        f.write(
-            requests.get(
-                f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
-                f"/nuget/packages/{package_name}/versions/{version}/content?api-version=6.0-preview.1"
-            ).content
-        )
+        f.write(response.content)
 
     shutil.unpack_archive(package_path, unpacked_dir, format="zip")
     return unpacked_dir
@@ -205,8 +206,8 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     dependencies_dir = destination_dir / "dependencies"
     dependencies_dir.mkdir(parents=True, exist_ok=True)
 
-    for package_name, version in _ENGINE_BENCHMARK_PACKAGES.items():
-        package_dir = _download_and_unpack_nupkg(package_name, version, dependencies_dir)
+    for package_name, package_url in _ENGINE_BENCHMARK_PACKAGES.items():
+        package_dir = _download_and_unpack_nupkg(package_name, package_url, dependencies_dir)
         _log.info(f"Extracting {package_name} .so files to {destination_dir}")
         for lib in package_dir.rglob("linux-x64/native/*"):
             if lib.is_file():
