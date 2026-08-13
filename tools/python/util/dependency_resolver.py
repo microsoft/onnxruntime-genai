@@ -164,6 +164,7 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
 
 
 _ORT_NIGHTLY_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7"
+_CUDA_PLUGIN_EP_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/9387c3aa-d9ad-4513-968c-383f6f7f53b8"
 _ORT_VERSION = "1.29.0"
 _CUDA_PLUGIN_EP_VERSION = "0.1.0"
 
@@ -173,7 +174,7 @@ _ENGINE_BENCHMARK_PACKAGES = {
         f"/versions/{_ORT_VERSION}/content?api-version=6.0-preview.1"
     ),
     "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": (
-        f"{_ORT_NIGHTLY_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64"
+        f"{_CUDA_PLUGIN_EP_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64"
         f"/versions/{_CUDA_PLUGIN_EP_VERSION}/content?api-version=6.0-preview.1"
     ),
 }
