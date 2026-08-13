@@ -791,6 +791,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
+    engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
+    if util.is_linux() and engine_benchmark_dir.is_dir():
+        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir)
+
 
 def install_core(args: argparse.Namespace, env: dict[str, str]):
     """
