@@ -1,7 +1,7 @@
 # GenAI Engine Benchmark
 
-Native benchmark harness for the ONNX Runtime GenAI engine. Scenarios are described in a JSON config,
-results are written to per-scenario JSON files plus a tabbed `visualize.html`.
+Native benchmark harness for the ONNX Runtime GenAI engine. Scenarios are described in a JSON config
+and results are written to per-scenario JSON files.
 
 See [benchmark-design.md](benchmark-design.md) for the architecture and
 [benchmark-requirements.md](benchmark-requirements.md) for the metrics contract.
@@ -77,10 +77,8 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 
 ```
 out/
-├── decode_baseline_results_001.json
-└── visualize.html
+└── decode_baseline_results_001.json
 ```
 
 Each result file contains the run status, config metadata, TTFT / inter-token latency percentiles,
-per-request records, and scenario-specific metrics. `visualize.html` renders every result file found
-in the output directory as a tab.
+per-request records, and scenario-specific metrics.

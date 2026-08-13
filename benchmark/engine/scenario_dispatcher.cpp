@@ -114,36 +114,6 @@ void WriteJsonFile(const fs::path& path, const nlohmann::json& json) {
   out << std::setw(2) << json << "\n";
 }
 
-void WriteVisualizer(const fs::path& out_dir, const std::vector<nlohmann::json>& results) {
-  nlohmann::json embedded = nlohmann::json::array();
-  for (const auto& result : results) {
-    embedded.push_back(result);
-  }
-
-  const std::string html =
-      "<!doctype html><html><head><meta charset='utf-8'><title>Benchmark Results</title>"
-      "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:16px}"
-      ".tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}"
-      "button{padding:6px 10px;border:1px solid #999;background:#f4f4f4;cursor:pointer}"
-      "button.active{background:#e1f0ff;border-color:#5da9ff}"
-      "pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto}</style>"
-      "</head><body><h2>Scenario Results</h2><div id='tabs' class='tabs'></div><pre id='content'></pre><script>"
-      "const results = " + embedded.dump() + ";"
-      "const tabs = document.getElementById('tabs'); const content = document.getElementById('content');"
-      "function show(i){document.querySelectorAll('button').forEach((b,idx)=>b.classList.toggle('active', idx===i));"
-      "content.textContent = JSON.stringify(results[i], null, 2);}"
-      "results.forEach((r,i)=>{const b=document.createElement('button'); b.textContent=`${r.scenario} (#${String(i+1).padStart(3,'0')})`;"
-      "b.onclick=()=>show(i); tabs.appendChild(b);});"
-      "if(results.length>0){show(0);}"
-      "</script></body></html>";
-
-  std::ofstream out(out_dir / "visualize.html", std::ios::binary);
-  if (!out) {
-    throw std::runtime_error("Failed to open visualize.html output file.");
-  }
-  out << html;
-}
-
 }  // namespace
 
 int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
@@ -169,9 +139,6 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   BenchmarkContext context;
   context.genai_version = GetGenAIVersion();
 
-  std::vector<nlohmann::json> all_results;
-  all_results.reserve(configs.size());
-
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
 
@@ -180,14 +147,11 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
     }
 
     DecodeBaselineScenario scenario;
-    nlohmann::json result = scenario.Run(cfg, context);
+    const nlohmann::json result = scenario.Run(cfg, context);
 
-    const std::string file_name = MakeResultFilename(cfg.scenario, i + 1);
-    WriteJsonFile(out_dir / file_name, result);
-    all_results.push_back(std::move(result));
+    WriteJsonFile(out_dir / MakeResultFilename(cfg.scenario, i + 1), result);
   }
 
-  WriteVisualizer(out_dir, all_results);
   return 0;
 }
 
