@@ -39,4 +39,13 @@ target_link_libraries(engine_benchmark PRIVATE
 
 target_link_directories(engine_benchmark PRIVATE ${ORT_LIB_DIR})
 
+# The benchmark runs against the pinned libraries staged next to the executable, so keep the link
+# directories out of the RPATH; otherwise the build tree's ONNX Runtime wins over $ORIGIN.
+if(UNIX AND NOT APPLE)
+  set_target_properties(engine_benchmark PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "$ORIGIN"
+  )
+endif()
+
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${engine_benchmark_srcs})
