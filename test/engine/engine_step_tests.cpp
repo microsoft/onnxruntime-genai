@@ -34,7 +34,11 @@ int IndexOf(const CallTrace& trace, const std::string& entry) {
 
 class EngineStepTest : public ::testing::Test {
  protected:
-  void SetUp() override { model_ = LoadDummyDecoderModel(); }
+  void SetUp() override {
+    model_ = LoadDummyDecoderModel();
+    model_->config_->engine.dynamic_batching =
+        Config::Engine::DynamicBatching{};
+  }
 
   std::shared_ptr<Model> model_;
 };
@@ -138,6 +142,7 @@ TEST_F(EngineStepTest, StepWithNoRequestsReturnsNull) {
 }
 
 TEST_F(EngineStepTest, StaticBatchingRetainsLegacyCommitOrdering) {
+  model_->config_->engine.dynamic_batching.reset();
   auto trace = std::make_shared<CallTrace>();
   auto cache = std::make_shared<RecordingCacheManager>(
       model_, /*capacity=*/4, trace, /*supports_dynamic_batching=*/false);
@@ -347,6 +352,76 @@ TEST_F(EngineStepTest, LaterFailurePreservesEarlierCommittedCycle) {
   EXPECT_EQ(after_abort.processed_sequence_length,
             committed.processed_sequence_length);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+}
+
+TEST_F(EngineStepTest, MixedDecodeAndPrefillCommitPlanOwnedTokenCounts) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto first_prompt = Prompt(10);
+  auto decode = MintRequest(*model_, first_prompt);
+  engine.engine->AddRequest(decode);
+  ASSERT_EQ(engine.engine->Step(), decode);
+  const auto decode_before_mixed = decode->Snapshot();
+
+  const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
+  auto prefill = MintRequest(*model_, long_prompt);
+  engine.engine->AddRequest(prefill);
+
+  EXPECT_EQ(engine.engine->Step(), decode);
+
+  ASSERT_EQ(engine.executor->decoded_batch_sizes.size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_batch_sizes[1], 2u);
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[1], 3u);
+  ASSERT_EQ(engine.executor->decoded_request_ids[1].size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_request_ids[1][0], decode.get());
+  EXPECT_EQ(engine.executor->decoded_request_ids[1][1], prefill.get());
+  EXPECT_EQ(decode->ProcessedSequenceLength(),
+            decode_before_mixed.processed_sequence_length + 1);
+  EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
+  EXPECT_TRUE(prefill->IsPrefill());
+}
+
+TEST_F(EngineStepTest, MixedStepRollbackPreservesProgressAndCacheResidents) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto first_prompt = Prompt(10);
+  auto decode = MintRequest(*model_, first_prompt);
+  engine.engine->AddRequest(decode);
+  ASSERT_EQ(engine.engine->Step(), decode);
+
+  const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
+  auto prefill = MintRequest(*model_, long_prompt);
+  engine.engine->AddRequest(prefill);
+  const auto decode_before = decode->Snapshot();
+  const auto prefill_before = prefill->Snapshot();
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+  engine.executor->SetNextFailure(
+      ScriptedExecutionFailure::RetryableDuringExecution);
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected the mixed step to roll back.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind, StepOutcomeKind::RetryableBatchAbort);
+  }
+
+  const auto decode_after = decode->Snapshot();
+  const auto prefill_after = prefill->Snapshot();
+  EXPECT_EQ(decode_after.current_sequence_length,
+            decode_before.current_sequence_length);
+  EXPECT_EQ(decode_after.processed_sequence_length,
+            decode_before.processed_sequence_length);
+  EXPECT_EQ(prefill_after.status, prefill_before.status);
+  EXPECT_EQ(prefill_after.current_sequence_length,
+            prefill_before.current_sequence_length);
+  EXPECT_EQ(prefill_after.processed_sequence_length,
+            prefill_before.processed_sequence_length);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  EXPECT_EQ(engine.engine->Step(), decode);
+  EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }
 
 }  // namespace

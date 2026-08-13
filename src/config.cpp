@@ -1398,6 +1398,11 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_batch_size must be > 0");
       v_->max_batch_size = static_cast<size_t>(parsed_value);
+    } else if (name == "max_scheduled_tokens") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_scheduled_tokens must be > 0");
+      v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
