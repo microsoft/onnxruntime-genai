@@ -10,25 +10,9 @@
 namespace engine_benchmark {
 namespace {
 
-bool IsAllowedConcurrency(int concurrency) {
-  return concurrency == 1 || concurrency == 2 || concurrency == 4 || concurrency == 8;
-}
-
-// Prompt length buckets from the RULER subset the scenario is intended to mirror.
+// Prompt length buckets this scenario targets (see benchmark-requirements.md).
 bool IsAllowedPromptLength(int prompt_length_k) {
-  switch (prompt_length_k) {
-    case 4:
-    case 16:
-    case 18:
-    case 32:
-    case 48:
-    case 64:
-    case 96:
-    case 128:
-      return true;
-    default:
-      return false;
-  }
+  return prompt_length_k == 32 || prompt_length_k == 64 || prompt_length_k == 128;
 }
 
 }  // namespace
@@ -36,11 +20,11 @@ bool IsAllowedPromptLength(int prompt_length_k) {
 void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
-  if (!IsAllowedConcurrency(config.concurrency)) {
-    throw std::invalid_argument("long_prefill requires concurrency in [1,2,4,8]");
+  if (config.concurrency != 1) {
+    throw std::invalid_argument("long_prefill requires concurrency=1 so prefill is measured in isolation");
   }
   if (!IsAllowedPromptLength(config.prompt_length_k)) {
-    throw std::invalid_argument("long_prefill requires prompt_length_k in [4,16,18,32,48,64,96,128]");
+    throw std::invalid_argument("long_prefill requires prompt_length_k in [32,64,128]");
   }
   if (!config.synthetic) {
     // Dataset-backed prompts (data/ruler/prompts.json) are not wired up yet.
@@ -49,7 +33,10 @@ void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
 }
 
 ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
-  return RunEngineWorkload(config, Name());
+  ScenarioExecutionOutput output = RunEngineWorkload(config, Name());
+  // Decode throughput is not meaningful when only a handful of tokens are generated.
+  output.scenario_metrics.erase("tokens_per_s");
+  return output;
 }
 
 }  // namespace engine_benchmark
