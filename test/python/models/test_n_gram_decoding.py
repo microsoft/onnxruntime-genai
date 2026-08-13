@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -174,6 +175,90 @@ def _make_tiny_ngram_model(directory, logits_table, *, prune_logits=False,
             "eos_token_id": [vocab_size - 1],
             "pad_token_id": 0,
             "decoder": decoder,
+        },
+        "search": {"max_length": 64},
+    }
+    with open(directory / "genai_config.json", "w") as config_file:
+        json.dump(config, config_file, indent=2)
+    return os.fspath(directory)
+
+
+def _make_constant_guidance_model(
+        directory, tokenizer_source, selected_token):
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(tokenizer_source, "genai_config.json")) as config_file:
+        source_config = json.load(config_file)["model"]
+    vocab_size = source_config["vocab_size"]
+
+    input_ids = helper.make_tensor_value_info(
+        "input_ids", TensorProto.INT32, ["batch", "sequence"])
+    attention_mask = helper.make_tensor_value_info(
+        "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
+    logits = helper.make_tensor_value_info(
+        "logits", TensorProto.FLOAT, ["batch", "sequence", vocab_size])
+    nodes = [
+        helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+        helper.make_node(
+            "Expand", ["selected_token", "input_shape"], ["selected_tokens"]),
+        helper.make_node(
+            "OneHot",
+            ["selected_tokens", "vocab_size", "logit_values"],
+            ["logits"],
+            axis=-1,
+        ),
+    ]
+    initializers = [
+        numpy_helper.from_array(
+            np.array(selected_token, dtype=np.int32), "selected_token"),
+        numpy_helper.from_array(
+            np.array(vocab_size, dtype=np.int64), "vocab_size"),
+        numpy_helper.from_array(
+            np.array([-20.0, 20.0], dtype=np.float32), "logit_values"),
+    ]
+    graph = helper.make_graph(
+        nodes, "constant_guidance", [input_ids, attention_mask], [logits],
+        initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+    onnx.save(model, directory / "model.onnx")
+
+    for filename in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
+        source = Path(tokenizer_source) / filename
+        if source.exists():
+            shutil.copy2(source, directory / filename)
+
+    config = {
+        "model": {
+            "type": "llama",
+            "vocab_size": vocab_size,
+            "context_length": 64,
+            "bos_token_id": source_config["bos_token_id"],
+            "eos_token_id": source_config["eos_token_id"],
+            "pad_token_id": source_config["pad_token_id"],
+            "decoder": {
+                "session_options": {"provider_options": []},
+                "filename": "model.onnx",
+                "head_size": 1,
+                "hidden_size": 1,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "num_hidden_layers": 0,
+                "inputs": {
+                    "input_ids": "input_ids",
+                    "attention_mask": "attention_mask",
+                    "past_key_names": "past_key_values.%d.key",
+                    "past_value_names": "past_key_values.%d.value",
+                },
+                "outputs": {
+                    "logits": "logits",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
+                },
+            },
         },
         "search": {"max_length": 64},
     }
@@ -2843,6 +2928,69 @@ class TestNGramGuidance:
 
         assert actual == expected
         assert _decode_tokens(qwen3_guidance_model_path, actual).strip() == literal
+
+    def test_rejected_sampling_forced_tokens_share_rng_checkpoint(
+            self, qwen3_guidance_model_path, tmp_path):
+        tokenizer = og.Tokenizer(og.Model(qwen3_guidance_model_path))
+        proposal_tokens = [int(token) for token in tokenizer.encode("7")]
+        target_tokens = [int(token) for token in tokenizer.encode("8")]
+        if len(proposal_tokens) != 1 or len(target_tokens) != 1:
+            pytest.skip("The rejection test requires single-token digits")
+
+        model_path = _make_constant_guidance_model(
+            tmp_path / "rejected_forced_rng",
+            qwen3_guidance_model_path,
+            target_tokens[0],
+        )
+        context = _PROMPT[-2:]
+        prompt = _PROMPT + context + proposal_tokens + context
+        guidance_data = 'start: ("7" | "8") " cats"'
+        options = {
+            "do_sample": True,
+            "random_seed": 2468,
+            "top_k": 2,
+            "temperature": 0.01,
+        }
+
+        reference = _guided_generator(
+            model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 16,
+            enable_ff_tokens=True,
+            **options,
+        )
+        reference.generate_next_token()
+        reference.rewind_to(0)
+        reference.append_tokens(np.array([prompt], dtype=np.int32))
+        expected = _guided_tail(reference, len(prompt))
+
+        generator = _guided_generator(
+            model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 16,
+            ngram_size=3,
+            max_draft_tokens=4,
+            enable_ff_tokens=True,
+            **options,
+        )
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["correction_tokens"] == 1
+        assert stats["tokens_buffered"] > 0
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _guided_tail(generator, len(prompt))
+
+        assert actual == expected
+        assert _decode_tokens(model_path, actual).strip() == "8 cats"
 
     @pytest.mark.parametrize("max_draft_tokens", [1, 4, 8])
     @pytest.mark.parametrize(

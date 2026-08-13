@@ -11,6 +11,13 @@
 
 namespace Generators {
 
+// Incremental exact lookup over committed token history. Token-vector keys are hashed for the
+// unordered_map, and exact vector equality keeps hash collisions safe. Repeated equal keys replace
+// the stored position, so proposals use the most recent occurrence. The worst-case storage is
+// O(sequence_length * ngram_size): history is stored once and each indexed suffix owns its key.
+// Append indexes only newly available suffixes; Reset rebuilds after a rewind or replacement.
+// Regular proposals copy one contiguous continuation, while chained proposals advance a temporary
+// context without changing committed history or the index.
 class NGramLookup {
  public:
   explicit NGramLookup(int ngram_size)

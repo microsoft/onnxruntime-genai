@@ -78,6 +78,36 @@ std::vector<int32_t> CommitGuidanceToken(ConstrainedLogitsProcessor& guidance_pr
   return guidance_processor.GetFFTokens(0);
 }
 
+struct DeterministicGuidanceTokenResult {
+  int32_t target_token;
+  bool accepted;
+  std::mt19937 rng_state_after_draw;
+  std::vector<int32_t> forced_tokens;
+};
+
+DeterministicGuidanceTokenResult VerifyDeterministicGuidanceToken(
+    ConstrainedLogitsProcessor& guidance_processor,
+    const TargetTokenSelection& target_selection,
+    int32_t proposal_token,
+    std::span<const int32_t> eos_token_ids,
+    std::mt19937& rng) {
+  const int32_t target_token = SampleTargetToken(target_selection, rng);
+  std::vector<int32_t> forced_tokens;
+  if (!IsEosToken(eos_token_ids, target_token))
+    forced_tokens = CommitGuidanceToken(guidance_processor, target_token);
+
+  return {target_token, target_token == proposal_token, rng, std::move(forced_tokens)};
+}
+
+void AppendDeterministicGuidanceOutput(
+    std::vector<int32_t>& committed,
+    std::vector<std::mt19937>& rng_states,
+    int32_t token,
+    const std::mt19937& rng_state) {
+  committed.push_back(token);
+  rng_states.push_back(rng_state);
+}
+
 DecoderOnly_State& RequireDecoderOnlyState(State& state) {
   auto* decoder_state = dynamic_cast<DecoderOnly_State*>(&state);
   if (!decoder_state)
@@ -1038,10 +1068,14 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         throw std::runtime_error(
             "Speculative guidance proposal does not match the pending fast-forward token.");
       pending_forced.pop_front();
-      committed.push_back(f);
+      if (deterministic_sampling) {
+        // Forced tokens consume no random draw, so they keep the current RNG state.
+        AppendDeterministicGuidanceOutput(
+            committed, deterministic_rng_states, f, g.rng_);
+      } else {
+        committed.push_back(f);
+      }
       verify_prefix++;
-      if (deterministic_sampling)
-        deterministic_rng_states.push_back(g.rng_);
       if (penalty_processor.IsActive()) dist_prefix.push_back(f);
       if (IsEosToken(eos_ids, f)) {
         eos_hit = true;
@@ -1085,28 +1119,30 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         break;
       }
     } else if (deterministic_sampling) {
-      const int32_t target_token = SampleTargetToken(target_selection, g.rng_);
-      deterministic_rng_states.push_back(g.rng_);
-      committed.push_back(target_token);
-      if (target_token == proposal.tokens[i]) {
+      const auto result = VerifyDeterministicGuidanceToken(
+          proc, target_selection, proposal.tokens[i], eos_ids, g.rng_);
+      AppendDeterministicGuidanceOutput(
+          committed, deterministic_rng_states, result.target_token,
+          result.rng_state_after_draw);
+      if (result.accepted) {
         verify_prefix++;
         n_direct++;
-        if (penalty_processor.IsActive()) dist_prefix.push_back(target_token);
-        if (IsEosToken(eos_ids, target_token)) {
+        if (penalty_processor.IsActive()) dist_prefix.push_back(result.target_token);
+        if (IsEosToken(eos_ids, result.target_token)) {
           eos_hit = true;
           break;
         }
-        for (int32_t fwd : CommitGuidanceToken(proc, target_token))
+        for (int32_t fwd : result.forced_tokens)
           pending_forced.push_back(fwd);
       } else {
         rejected = true;
         corrections_++;
-        if (!IsEosToken(eos_ids, target_token)) {
-          for (int32_t fwd : CommitGuidanceToken(proc, target_token)) {
-            committed.push_back(fwd);
-            deterministic_rng_states.push_back(g.rng_);
-          }
-        }
+        // Grammar-forced tokens consume no random draw and inherit the state of the sampled
+        // correction that triggered them.
+        for (int32_t fwd : result.forced_tokens)
+          AppendDeterministicGuidanceOutput(
+              committed, deterministic_rng_states, fwd,
+              result.rng_state_after_draw);
         break;
       }
     } else {
