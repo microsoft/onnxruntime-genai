@@ -128,10 +128,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
     const auto run_start = std::chrono::steady_clock::now();
     size_t generated_tokens = 0;
-    size_t step_events = 0;
 
     while (auto ready_request = engine->Step()) {
-      ++step_events;
       const auto now = std::chrono::steady_clock::now();
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
       if (tokens == nullptr) {
