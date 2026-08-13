@@ -3,6 +3,7 @@
 
 #include "engine.h"
 #include "admission.h"
+#include "decode_first_scheduler_policy.h"
 #include "sequence_positions.h"
 
 namespace Generators {
@@ -23,12 +24,7 @@ Scheduler::Scheduler(std::shared_ptr<Model> model)
 }
 
 ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
-  std::vector<std::shared_ptr<Request>> requests;
-  requests.reserve(plan.requests.size());
-  for (const auto& entry : plan.requests) {
-    requests.push_back(entry.request);
-  }
-  return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
+  return ScheduledRequests{plan, model_, GetBatchedSampler(),
                            GetBatchedSamplingPlan()};
 }
 
@@ -125,35 +121,8 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 ScheduledRequests DynamicBatchScheduler::Schedule() {
-  StepPlan plan;
-  const auto result = PlanStep(plan);
-  if (!result.executable) {
-    if (result.outcome.kind == StepOutcomeKind::UnserviceableRequest) {
-      throw std::runtime_error("A request cannot be serviced by the configured paged cache.");
-    }
-    throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
-  }
-
-  std::vector<std::shared_ptr<Request>> newly_admitted;
-  for (const auto& entry : plan.requests) {
-    if (entry.newly_admitted) {
-      newly_admitted.push_back(entry.request);
-    }
-  }
-  if (!newly_admitted.empty()) {
-    cache_manager_->Allocate(newly_admitted);
-    for (const auto& request : newly_admitted) {
-      request->Schedule();
-    }
-  }
-
-  std::vector<std::shared_ptr<Request>> requests;
-  requests.reserve(plan.requests.size());
-  for (const auto& entry : plan.requests) {
-    requests.push_back(entry.request);
-  }
-  return ScheduledRequests{std::move(requests), model_, GetBatchedSampler(),
-                           GetBatchedSamplingPlan()};
+  throw std::logic_error(
+      "Dynamic batching requires transactional step planning.");
 }
 
 void DynamicBatchScheduler::ReapCompletedRequests() {
@@ -181,12 +150,20 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   ReapCompletedRequests();
 
   plan.requests.clear();
+  plan.scheduled_request_limit = 0;
   plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
   plan.graph_capture_eligible = false;
 
-  const auto add_request = [&plan](const std::shared_ptr<Request>& request,
-                                   bool newly_admitted) {
+  struct Candidate {
+    RequestStepPlan entry;
+    DecodeFirstBudgetCandidate budget;
+    size_t processed_sequence_length{};
+  };
+  std::vector<Candidate> candidates;
+
+  const auto add_candidate = [&candidates](const std::shared_ptr<Request>& request,
+                                           bool newly_admitted) {
     const auto snapshot = request->Snapshot();
     const RequestStatus expected_status =
         newly_admitted ? RequestStatus::Assigned : RequestStatus::InProgress;
@@ -199,47 +176,91 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
     }
 
-    RequestStepPlan entry;
-    entry.request = request;
-    entry.request_id = request.get();
-    entry.sequence_length_before = snapshot.current_sequence_length;
-    entry.unprocessed_token_count = ScheduledTokenCount(
-        static_cast<size_t>(remaining_token_count), request->SearchOptions().chunk_size);
-    entry.target_cache_slots = RequiredSlots(
-        static_cast<size_t>(snapshot.processed_sequence_length),
-        entry.unprocessed_token_count);
-    entry.whole_sequence_cache_slots =
+    Candidate candidate;
+    candidate.entry.request = request;
+    candidate.entry.request_id = request.get();
+    candidate.entry.sequence_length_before = snapshot.current_sequence_length;
+    candidate.entry.unprocessed_token_count = 1;
+    candidate.entry.target_cache_slots = RequiredSlots(
+        static_cast<size_t>(snapshot.processed_sequence_length), 1);
+    candidate.entry.whole_sequence_cache_slots =
         SlotsForWholeSequence(snapshot.current_sequence_length);
-    entry.is_prefill = snapshot.is_prefill;
-    entry.newly_admitted = newly_admitted;
-    plan.requests.push_back(std::move(entry));
+    candidate.entry.is_prefill = snapshot.is_prefill;
+    candidate.entry.newly_admitted = newly_admitted;
+    candidate.budget = DecodeFirstBudgetCandidate{
+        snapshot.is_prefill,
+        static_cast<size_t>(remaining_token_count),
+        request->SearchOptions().chunk_size,
+    };
+    candidate.processed_sequence_length =
+        static_cast<size_t>(snapshot.processed_sequence_length);
+    candidates.push_back(std::move(candidate));
   };
 
   const auto allocated_requests = cache_manager_->AllocatedRequests();
-  // Existing cache residents come first and retain block-table order. New requests follow them as
-  // admission candidates; the cache planner may compact this list to the subset that fits.
   for (const auto& request : allocated_requests) {
-    add_request(request, false);
+    add_candidate(request, false);
   }
-  const size_t committed_request_count = plan.requests.size();
 
   for (const auto& request : requests_pool_) {
     if (request->status_ == RequestStatus::Assigned) {
-      add_request(request, true);
+      add_candidate(request, true);
     }
   }
 
-  auto result = cache_manager_->PlanStepResources(plan, committed_request_count);
+  std::vector<DecodeFirstBudgetCandidate> budget_candidates;
+  budget_candidates.reserve(candidates.size());
+  for (const auto& candidate : candidates)
+    budget_candidates.push_back(candidate.budget);
+  const auto order = DecodeFirstCandidateOrder(budget_candidates);
+  plan.requests.reserve(candidates.size());
+  for (size_t candidate_index : order) {
+    plan.requests.push_back(candidates[candidate_index].entry);
+  }
+
+  const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
+  plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
+      dynamic_batching.max_scheduled_tokens,
+      dynamic_batching.max_batch_size);
+
+  auto result = cache_manager_->PlanStepResources(plan);
   if (!result.executable) {
     return result;
   }
+
+  std::vector<DecodeFirstBudgetCandidate> selected_candidates;
+  selected_candidates.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    const auto candidate = std::find_if(
+        candidates.begin(), candidates.end(),
+        [&entry](const Candidate& value) {
+          return value.entry.request_id == entry.request_id;
+        });
+    if (candidate == candidates.end())
+      throw std::logic_error("Cache planning selected an unknown request.");
+    selected_candidates.push_back(candidate->budget);
+  }
+  const auto token_counts = AllocateDecodeFirstTokenBudget(
+      selected_candidates, dynamic_batching.max_scheduled_tokens);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
   plan.graph_capture_eligible = true;
-  for (auto& entry : plan.requests) {
+  for (size_t i = 0; i < plan.requests.size(); ++i) {
+    auto& entry = plan.requests[i];
+    const auto candidate = std::find_if(
+        candidates.begin(), candidates.end(),
+        [&entry](const Candidate& value) {
+          return value.entry.request_id == entry.request_id;
+        });
+    if (candidate == candidates.end())
+      throw std::logic_error("Cache planning selected an unknown request.");
+    entry.unprocessed_token_count = token_counts[i];
+    entry.target_cache_slots = RequiredSlots(
+        candidate->processed_sequence_length,
+        entry.unprocessed_token_count);
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
         packed_token_offset + entry.unprocessed_token_count - 1;
