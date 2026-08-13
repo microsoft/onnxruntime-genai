@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,8 +15,9 @@
 
 #include "ort_genai.h"
 
-#include "common/benchmark_types.h"
+#include "scenarios/utils.h"
 #include "scenarios/decode_baseline.h"
+#include "scenarios/long_prefill.h"
 
 namespace fs = std::filesystem;
 
@@ -142,12 +144,16 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
 
-    if (cfg.scenario != "decode_baseline") {
-      throw std::runtime_error("Only decode_baseline is implemented in the MVP. Found: " + cfg.scenario);
+    std::unique_ptr<ScenarioBase> scenario;
+    if (cfg.scenario == "decode_baseline") {
+      scenario = std::make_unique<DecodeBaselineScenario>();
+    } else if (cfg.scenario == "long_prefill") {
+      scenario = std::make_unique<LongPrefillScenario>();
+    } else {
+      throw std::runtime_error("Unknown scenario: " + cfg.scenario);
     }
 
-    DecodeBaselineScenario scenario;
-    nlohmann::json result = scenario.Run(cfg, context);
+    nlohmann::json result = scenario->Run(cfg, context);
 
     const std::string file_name = MakeResultFilename(cfg.scenario, i + 1);
     WriteJsonFile(out_dir / file_name, result);

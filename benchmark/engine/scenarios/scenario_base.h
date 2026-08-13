@@ -5,7 +5,7 @@
 
 #include <string>
 
-#include "common/benchmark_types.h"
+#include "scenarios/utils.h"
 
 namespace engine_benchmark {
 
