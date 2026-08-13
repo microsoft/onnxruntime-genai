@@ -332,12 +332,12 @@ if(USE_DML)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
   find_program(NUGET_PATH NAMES nuget nuget.exe REQUIRED)
   set(NUGET_RESTORE_COMMAND
-    ${NUGET_PATH} restore
-    ${PACKAGES_CONFIG}
-    -PackagesDirectory ${PACKAGES_DIR}
+    "${NUGET_PATH}" restore
+    "${PACKAGES_CONFIG}"
+    -PackagesDirectory "${PACKAGES_DIR}"
   )
   if(NUGET_PACKAGE_SOURCE)
-    list(APPEND NUGET_RESTORE_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+    list(APPEND NUGET_RESTORE_COMMAND -Source "${NUGET_PACKAGE_SOURCE}")
   endif()
 
   add_custom_command(
