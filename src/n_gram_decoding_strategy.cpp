@@ -109,11 +109,12 @@ void NGramDecodingStrategy::RecordLookup(std::span<const int32_t> candidates,
 }
 
 SpeculativeDecodingStrategy::Proposal NGramDecodingStrategy::Propose(
-    Generator& g, int K, int seed_length) {
+  Generator& g, int K, int seed_length, std::mt19937& round_rng) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
   (void)seed_length;
+  (void)round_rng;
   Sync(g);
   Proposal proposal{ProposalMode::kDeterministic};
   if (!g.guidance_logits_processor_) {

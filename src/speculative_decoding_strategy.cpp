@@ -99,7 +99,7 @@ DeterministicGuidanceTokenResult VerifyDeterministicGuidanceToken(
   return {target_token, target_token == proposal_token, rng, std::move(forced_tokens)};
 }
 
-void AppendDeterministicGuidanceOutput(
+void AppendGuidanceSamplingOutput(
     std::vector<int32_t>& committed,
     std::vector<std::mt19937>& rng_states,
     int32_t token,
@@ -346,6 +346,7 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
     throw std::runtime_error("Speculative decoding started a round before the previous round was settled.");
   if (queued == 0)
     throw std::runtime_error("Speculative decoding produced a round with no output tokens.");
+  round_.ValidateRngCheckpoints();
 
   rounds_++;
   draft_proposed_ += static_cast<size_t>(K);
@@ -373,6 +374,7 @@ void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
     return;
   if (!round_.pending.empty())
     throw std::runtime_error("Speculative decoding settled a round while output tokens were still buffered.");
+  round_.ValidateRngCheckpoints();
 
   if (round_.discarded) {
     interrupted_rounds_++;
@@ -400,6 +402,7 @@ void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
   round_.filled_proposal_budget = false;
   round_.propose_ms = 0.0f;
   round_.target_ms = 0.0f;
+  round_.uses_rng_checkpoints = false;
 }
 
 void SpeculativeDecodingStrategy::DiscardPendingTokens() {
@@ -409,6 +412,7 @@ void SpeculativeDecodingStrategy::DiscardPendingTokens() {
     round_.pending.clear();
   }
   round_.pending_rng_states.clear();
+  round_.uses_rng_checkpoints = false;
   FinishRound(RoundState::Phase::kReconcilePending);
 }
 
@@ -487,10 +491,11 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   }
   // Read sampling settings from the canonical config/method rather than a parallel struct.
   const auto& search = params.search;
+  std::mt19937 round_rng = g.rng_;
 
   // Propose: draft produces K candidate tokens.
   auto t_propose_start = clock::now();
-  Proposal proposal = Propose(g, K, seed_length);
+  Proposal proposal = Propose(g, K, seed_length, round_rng);
   auto t_propose_end = clock::now();
 
   if (static_cast<int>(proposal.tokens.size()) > K)
@@ -526,7 +531,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   // the draft proposal from above). Handles greedy and sampling.
   if (g.guidance_logits_processor_) {
     RunGuidanceRound(g, proposal, seed_length, K, filled_proposal_budget,
-                     ms_f(t_propose_end - t_propose_start).count());
+                     ms_f(t_propose_end - t_propose_start).count(), round_rng);
     return;
   }
 
@@ -699,17 +704,17 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   // vocab vector; correction_buf holds the built correction distribution.
   std::vector<float> dense_row;
   std::vector<float> correction_buf;
+  std::vector<std::mt19937> rng_states_after_output;
+  if (!target_uses_greedy)
+    rng_states_after_output.reserve(static_cast<size_t>(K + 1));
 
   if (!target_uses_greedy && proposal.mode == ProposalMode::kDeterministic) {
-    std::vector<std::mt19937> states_after_draw;
     const DeterministicProposalVerification result = VerifyDeterministicProposal(
-        proposal.tokens, pos0_selection, target_selections, g.rng_, &states_after_draw);
+        proposal.tokens, pos0_selection, target_selections, round_rng,
+        &rng_states_after_output);
     n_direct = result.accepted_count;
     n_evaluated = result.evaluated_count;
     final_token = result.final_token;
-    round_.pending_rng_states.assign(
-        std::make_move_iterator(states_after_draw.begin()),
-        std::make_move_iterator(states_after_draw.end()));
     if (result.used_bonus)
       bonuses_++;
     else
@@ -725,11 +730,13 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       } else {
         const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
         const float p_d = proposal.probs[i][proposal.tokens[i]];
-        accepted = (uni(g.rng_) < ComputeAcceptProb(p_t, p_d));
+        accepted = (uni(round_rng) < ComputeAcceptProb(p_t, p_d));
       }
 
       if (accepted) {
         n_direct++;
+        if (!target_uses_greedy)
+          rng_states_after_output.push_back(round_rng);
       } else {
         if (target_uses_greedy) {
           final_token = target.greedy_token;
@@ -742,7 +749,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
               {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
               {correction_buf.data(), static_cast<size_t>(vocab_size)});
           std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-          final_token = dist(g.rng_);
+          final_token = dist(round_rng);
+          rng_states_after_output.push_back(round_rng);
         }
         corrections_++;
         break;
@@ -758,7 +766,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         std::vector<float>& dense_last =
             DensifyTargetTokenSelection(bonus_target, vocab_size, dense_row);
         std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
-        final_token = dist(g.rng_);
+        final_token = dist(round_rng);
+        rng_states_after_output.push_back(round_rng);
       }
       bonuses_++;
     }
@@ -769,10 +778,13 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   for (int i = 0; i < n_direct; i++)
     round_.pending.push_back(proposal.tokens[i]);
   round_.pending.push_back(final_token);
-  if (!round_.pending_rng_states.empty() &&
-      round_.pending_rng_states.size() != round_.pending.size())
-    throw std::runtime_error(
-        "N-gram decoding captured an inconsistent number of sampling RNG states.");
+  round_.uses_rng_checkpoints = !target_uses_greedy;
+  if (round_.uses_rng_checkpoints) {
+    round_.pending_rng_states.assign(
+        std::make_move_iterator(rng_states_after_output.begin()),
+        std::make_move_iterator(rng_states_after_output.end()));
+  }
+  round_.ValidateRngCheckpoints();
 
   round_.final_token = final_token;
   round_.n_direct = n_direct;
@@ -810,11 +822,8 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   }
 
   const int32_t tok = round_.pending.front();
+  round_.ApplyNextRngCheckpoint(g.rng_);
   round_.pending.pop_front();
-  if (!round_.pending_rng_states.empty()) {
-    g.rng_ = round_.pending_rng_states.front();
-    round_.pending_rng_states.pop_front();
-  }
   if (EmitToken(g, tok)) {
     tokens_emitted_++;
     round_.emitted++;
@@ -947,7 +956,8 @@ SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal& proposal,
                                                    int seed_length, int K,
                                                    bool filled_proposal_budget,
-                                                   float propose_ms) {
+                                                   float propose_ms,
+                                                   std::mt19937& round_rng) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
   const auto guidance_start = clock::now();
@@ -1040,9 +1050,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   std::vector<float> dense_target;    // reject path: dense target distribution from sparse selection
   TargetTokenSelection target_selection;
   SampledCategorical sampled_target;
-  std::vector<std::mt19937> deterministic_rng_states;
-  if (deterministic_sampling)
-    deterministic_rng_states.reserve(static_cast<size_t>(K));
+  std::vector<std::mt19937> sampling_rng_states;
+  if (!target_uses_greedy)
+    sampling_rng_states.reserve(static_cast<size_t>(K));
 
   // Forced tokens the grammar has already decided - prior round's overflow (ff_carry_) + each
   // accepted token's fast-forward span. A position filled from here is auto-accepted; it is in the
@@ -1068,10 +1078,10 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         throw std::runtime_error(
             "Speculative guidance proposal does not match the pending fast-forward token.");
       pending_forced.pop_front();
-      if (deterministic_sampling) {
-        // Forced tokens consume no random draw, so they keep the current RNG state.
-        AppendDeterministicGuidanceOutput(
-            committed, deterministic_rng_states, f, g.rng_);
+      if (!target_uses_greedy) {
+        // Forced tokens consume no random draw, so they keep the current round RNG state.
+        AppendGuidanceSamplingOutput(
+          committed, sampling_rng_states, f, round_rng);
       } else {
         committed.push_back(f);
       }
@@ -1120,9 +1130,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       }
     } else if (deterministic_sampling) {
       const auto result = VerifyDeterministicGuidanceToken(
-          proc, target_selection, proposal.tokens[i], eos_ids, g.rng_);
-      AppendDeterministicGuidanceOutput(
-          committed, deterministic_rng_states, result.target_token,
+          proc, target_selection, proposal.tokens[i], eos_ids, round_rng);
+      AppendGuidanceSamplingOutput(
+          committed, sampling_rng_states, result.target_token,
           result.rng_state_after_draw);
       if (result.accepted) {
         verify_prefix++;
@@ -1140,8 +1150,8 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         // Grammar-forced tokens consume no random draw and inherit the state of the sampled
         // correction that triggered them.
         for (int32_t fwd : result.forced_tokens)
-          AppendDeterministicGuidanceOutput(
-              committed, deterministic_rng_states, fwd,
+          AppendGuidanceSamplingOutput(
+              committed, sampling_rng_states, fwd,
               result.rng_state_after_draw);
         break;
       }
@@ -1151,8 +1161,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       const int32_t dtok = proposal.tokens[i];
       const float accept_p = ComputeAcceptProb(GetTargetTokenProbability(target_selection, dtok),
                                                proposal.probs[i][static_cast<size_t>(dtok)]);
-      if (uni(g.rng_) < accept_p) {
-        committed.push_back(dtok);
+      if (uni(round_rng) < accept_p) {
+        AppendGuidanceSamplingOutput(
+            committed, sampling_rng_states, dtok, round_rng);
         verify_prefix++;
         n_direct++;
         if (penalty_processor.IsActive()) dist_prefix.push_back(dtok);
@@ -1170,11 +1181,15 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
                                     {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
                                     {correction_buf.data(), static_cast<size_t>(vocab_size)});
         std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-        const int32_t ctok = static_cast<int32_t>(dist(g.rng_));
-        committed.push_back(ctok);
+        const int32_t ctok = static_cast<int32_t>(dist(round_rng));
+        AppendGuidanceSamplingOutput(
+            committed, sampling_rng_states, ctok, round_rng);
         corrections_++;
-        if (!IsEosToken(eos_ids, ctok))
-          for (int32_t fwd : CommitGuidanceToken(proc, ctok)) committed.push_back(fwd);
+        if (!IsEosToken(eos_ids, ctok)) {
+          for (int32_t fwd : CommitGuidanceToken(proc, ctok))
+            AppendGuidanceSamplingOutput(
+                committed, sampling_rng_states, fwd, round_rng);
+        }
         break;
       }
     }
@@ -1187,15 +1202,18 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   if (!eos_hit && !rejected)
     ff_carry_.assign(pending_forced.begin(), pending_forced.end());
 
+  if (!target_uses_greedy && sampling_rng_states.size() != committed.size())
+    throw std::runtime_error(
+        "Speculative guidance captured an inconsistent number of sampling RNG states.");
+
   for (int32_t t : committed) round_.pending.push_back(t);
-  if (deterministic_sampling) {
-    if (deterministic_rng_states.size() != committed.size())
-      throw std::runtime_error(
-          "N-gram guidance captured an inconsistent number of sampling RNG states.");
+  round_.uses_rng_checkpoints = !target_uses_greedy;
+  if (round_.uses_rng_checkpoints) {
     round_.pending_rng_states.assign(
-        std::make_move_iterator(deterministic_rng_states.begin()),
-        std::make_move_iterator(deterministic_rng_states.end()));
+        std::make_move_iterator(sampling_rng_states.begin()),
+        std::make_move_iterator(sampling_rng_states.end()));
   }
+  round_.ValidateRngCheckpoints();
   round_.seed_length = seed_length;
   round_.k = K;
   round_.n_direct = n_direct;

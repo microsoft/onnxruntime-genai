@@ -288,9 +288,32 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     bool IsActive() const { return phase == Phase::kDraining; }
     bool NeedsReconciliation() const { return phase != Phase::kIdle; }
 
+    void ValidateRngCheckpoints() const {
+      if (uses_rng_checkpoints) {
+        if (pending_rng_states.size() != pending.size())
+          throw std::runtime_error(
+              "Speculative decoding requires one RNG checkpoint per pending token.");
+      } else if (!pending_rng_states.empty()) {
+        throw std::runtime_error(
+            "Speculative decoding has RNG checkpoints for a round that does not use them.");
+      }
+    }
+
+    void ApplyNextRngCheckpoint(std::mt19937& rng) {
+      ValidateRngCheckpoints();
+      if (!uses_rng_checkpoints)
+        return;
+      if (pending.empty())
+        throw std::runtime_error(
+            "Speculative decoding cannot apply an RNG checkpoint without a pending token.");
+      rng = pending_rng_states.front();
+      pending_rng_states.pop_front();
+    }
+
     Phase phase{Phase::kIdle};
     Kind kind{Kind::kStandard};
     bool discarded{};
+    bool uses_rng_checkpoints{};
 
     std::deque<int32_t> pending;
     std::deque<std::mt19937> pending_rng_states;
@@ -333,7 +356,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
   // Produce K candidate tokens. seed_length = sequence length at start. Sampling settings are
   // read from the canonical config (g.search_->params_->search) and g.IsGreedySampling().
-  virtual Proposal Propose(Generator& g, int K, int seed_length) = 0;
+  virtual Proposal Propose(Generator& g, int K, int seed_length,
+                           std::mt19937& round_rng) = 0;
 
   // Update the draft model's own state (its KV cache, n-gram tables, ...) after the base class
   // commits the accepted tokens. n_direct = how many proposed tokens were accepted (excludes the
@@ -420,7 +444,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // grammar about each committed token, and add any tokens the grammar forces. Handles greedy and
   // sampling. Runs instead of the normal batched path.
   void RunGuidanceRound(Generator& g, const Proposal& proposal, int seed_length, int K,
-                        bool filled_proposal_budget, float propose_ms);
+                        bool filled_proposal_budget, float propose_ms,
+                        std::mt19937& round_rng);
 
   // Cleans up after a guidance round and returns the target's logits for the next position. Keeps
   // the accepted tokens already in the cache and feeds the rest back one at a time; also refreshes

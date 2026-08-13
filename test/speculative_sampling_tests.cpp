@@ -282,6 +282,67 @@ TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
   EXPECT_FALSE(deterministic.UsesDraftProbabilities());
 }
 
+TEST(SpeculativeRoundStateTest, AcceptsOneRngCheckpointPerPendingToken) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states.emplace_back(11);
+  round.pending_rng_states.emplace_back(12);
+
+  EXPECT_NO_THROW(round.ValidateRngCheckpoints());
+}
+
+TEST(SpeculativeRoundStateTest, RejectsMissingRngCheckpoint) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states.emplace_back(11);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, RejectsExtraRngCheckpoint) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1};
+  round.pending_rng_states.emplace_back(11);
+  round.pending_rng_states.emplace_back(12);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, RejectsCheckpointForNonSamplingRound) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.pending = {1};
+  round.pending_rng_states.emplace_back(11);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, AppliesOnlyVisibleTokenCheckpoint) {
+  std::mt19937 canonical_rng{42};
+  std::mt19937 round_rng = canonical_rng;
+  (void)round_rng();
+  const std::mt19937 first_visible_state = round_rng;
+  (void)round_rng();
+  const std::mt19937 discarded_state = round_rng;
+
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states = {first_visible_state, discarded_state};
+
+  round.ApplyNextRngCheckpoint(canonical_rng);
+  round.pending.pop_front();
+  EXPECT_EQ(canonical_rng, first_visible_state);
+
+  round.pending.clear();
+  round.pending_rng_states.clear();
+  round.uses_rng_checkpoints = false;
+  EXPECT_EQ(canonical_rng, first_visible_state);
+  EXPECT_NE(canonical_rng, discarded_state);
+}
+
 // ComputeAcceptProb
 
 TEST(SpeculativeSamplingTest, AcceptProbTargetGreaterAlwaysAccepts) {

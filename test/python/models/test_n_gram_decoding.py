@@ -200,24 +200,20 @@ def _make_constant_guidance_model(
         "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
     logits = helper.make_tensor_value_info(
         "logits", TensorProto.FLOAT, ["batch", "sequence", vocab_size])
+    constant_logits = np.full(vocab_size, -20.0, dtype=np.float32)
+    constant_logits[selected_token] = 20.0
     nodes = [
         helper.make_node("Shape", ["input_ids"], ["input_shape"]),
         helper.make_node(
-            "Expand", ["selected_token", "input_shape"], ["selected_tokens"]),
+            "Concat", ["input_shape", "vocab_axis"], ["logits_shape"], axis=0),
         helper.make_node(
-            "OneHot",
-            ["selected_tokens", "vocab_size", "logit_values"],
-            ["logits"],
-            axis=-1,
-        ),
+            "Expand", ["constant_logits", "logits_shape"], ["logits"]),
     ]
     initializers = [
         numpy_helper.from_array(
-            np.array(selected_token, dtype=np.int32), "selected_token"),
+            constant_logits, "constant_logits"),
         numpy_helper.from_array(
-            np.array(vocab_size, dtype=np.int64), "vocab_size"),
-        numpy_helper.from_array(
-            np.array([-20.0, 20.0], dtype=np.float32), "logit_values"),
+            np.array([vocab_size], dtype=np.int64), "vocab_axis"),
     ]
     graph = helper.make_graph(
         nodes, "constant_guidance", [input_ids, attention_mask], [logits],
