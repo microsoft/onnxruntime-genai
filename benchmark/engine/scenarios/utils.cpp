@@ -103,7 +103,6 @@ ScenarioExecutionOutput RunEngineWorkload(const ScenarioConfig& config, const st
   nlohmann::json outputs = nlohmann::json::array();
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
-  nlohmann::json prefill_ms_values = nlohmann::json::array();
 
   for (int run = 0; run < config.measured_runs; ++run) {
     std::cout << tag << "Run " << run + 1 << "/" << config.measured_runs
@@ -210,16 +209,6 @@ ScenarioExecutionOutput RunEngineWorkload(const ScenarioConfig& config, const st
     e2e_ms_values.push_back(run_elapsed_ms);
     tokens_per_s_values.push_back(tokens_per_s);
 
-    // The first token cannot arrive before prefill finishes, so the earliest TTFT of the run is the
-    // prefill cost.
-    double run_prefill_ms = 0.0;
-    for (const double first_ms : first_token_ms) {
-      if (first_ms >= 0.0 && (run_prefill_ms == 0.0 || first_ms < run_prefill_ms)) {
-        run_prefill_ms = first_ms;
-      }
-    }
-    prefill_ms_values.push_back(run_prefill_ms);
-
     for (int i = 0; i < config.concurrency; ++i) {
       const double ttft_ms = std::max(0.0, first_token_ms[static_cast<size_t>(i)]);
       ttft_values.push_back(ttft_ms);
@@ -255,7 +244,6 @@ ScenarioExecutionOutput RunEngineWorkload(const ScenarioConfig& config, const st
       {"outputs", std::move(outputs)},
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
-      {"prefill_ms", std::move(prefill_ms_values)},
       {"prompt_tokens", prompt_token_count},
   };
 
