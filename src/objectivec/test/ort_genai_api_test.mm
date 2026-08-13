@@ -163,9 +163,9 @@ NS_ASSUME_NONNULL_BEGIN
   ORTAssertBoolResultSuccessful(ret, error);
   XCTAssertEqual([params getSpeculativeNumber:@"max_draft_tokens" error:&error], 4);
   XCTAssertNil(error);
-  ret = [params setSpeculativeBool:@"adaptive_k" boolValue:YES error:&error];
+  ret = [params setSpeculativeNumber:@"min_adaptive_k" doubleValue:2 error:&error];
   ORTAssertBoolResultSuccessful(ret, error);
-  XCTAssertTrue([params getSpeculativeBool:@"adaptive_k" error:&error]);
+  XCTAssertEqual([params getSpeculativeNumber:@"min_adaptive_k" error:&error], 2);
   XCTAssertNil(error);
 
   OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model params:params error:&error];

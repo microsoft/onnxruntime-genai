@@ -20,9 +20,9 @@ public class GeneratorParamsTest {
       params.setSearchOption("early_stopping", true); // boolean
       params.setSearchOption("max_length", 20); // number
       params.setSpeculativeNumber("max_draft_tokens", 4);
-      params.setSpeculativeBool("adaptive_k", true);
+      params.setSpeculativeNumber("min_adaptive_k", 2);
       assertEquals(4.0, params.getSpeculativeNumber("max_draft_tokens"));
-      assertTrue(params.getSpeculativeBool("adaptive_k"));
+      assertEquals(2.0, params.getSpeculativeNumber("min_adaptive_k"));
     }
   }
 

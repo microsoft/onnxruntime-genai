@@ -1371,13 +1371,11 @@ struct Speculative_Element : JSON::Element {
       v_.ngram_size = ngram_size;
     } else if (name == "ngram_chained_lookup") {
       v_.ngram_chained_lookup = JSON::Get<bool>(value);
-    } else if (name == "adaptive_k") {
-      v_.adaptive_k = JSON::Get<bool>(value);
     } else if (name == "min_adaptive_k") {
       const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (min_adaptive_k < kMinK || min_adaptive_k > kMaxK)
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
         throw std::runtime_error(
-            "speculative.min_adaptive_k must be between " + std::to_string(kMinK) +
+            "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
             " and " + std::to_string(kMaxK) + ". Got: " +
             std::to_string(min_adaptive_k) + ".");
       v_.min_adaptive_k = min_adaptive_k;

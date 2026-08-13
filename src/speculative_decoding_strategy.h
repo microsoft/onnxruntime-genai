@@ -32,10 +32,10 @@ class AdaptiveKController {
  public:
   static constexpr int kAdaptiveMaxK = 16;
 
-  AdaptiveKController(int fixed_k, int min_adaptive_k, bool enabled)
-      : min_k_{enabled ? min_adaptive_k : fixed_k},
-        max_k_{enabled ? kAdaptiveMaxK : fixed_k},
-        enabled_{enabled},
+  AdaptiveKController(int fixed_k, int min_adaptive_k)
+      : min_k_{min_adaptive_k > 0 ? min_adaptive_k : fixed_k},
+        max_k_{min_adaptive_k > 0 ? kAdaptiveMaxK : fixed_k},
+        enabled_{min_adaptive_k > 0},
         effective_k_{min_k_} {}
 
   int GetK() const {
@@ -288,6 +288,9 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     bool IsActive() const { return phase == Phase::kDraining; }
     bool NeedsReconciliation() const { return phase != Phase::kIdle; }
 
+    // Sampling rounds keep exactly one post-output checkpoint per queued token. This explicit mode
+    // flag lets an empty checkpoint queue be diagnosed as an underrun instead of mistaken for a
+    // non-sampling round.
     void ValidateRngCheckpoints() const {
       if (uses_rng_checkpoints) {
         if (pending_rng_states.size() != pending.size())
@@ -306,6 +309,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
       if (pending.empty())
         throw std::runtime_error(
             "Speculative decoding cannot apply an RNG checkpoint without a pending token.");
+      // Commit speculative RNG work only when its corresponding token becomes externally visible.
       rng = pending_rng_states.front();
       pending_rng_states.pop_front();
     }

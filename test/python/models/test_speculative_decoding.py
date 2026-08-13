@@ -195,20 +195,18 @@ class TestSpeculativeConfigGuards:
         with pytest.raises(Exception, match="max_draft_tokens"):
             og.Model(path)
 
-    @pytest.mark.parametrize("value", [0, 1, -1, 2, 0.5])
-    def test_adaptive_k_rejects_non_boolean_values(
-            self, tmp_path, value):
+    def test_removed_adaptive_k_option_is_rejected(self, tmp_path):
         path = _write_config(
-            tmp_path / f"adaptive_k_{value}",
+            tmp_path / "removed_adaptive_k",
             _spec_config(speculative={
                 "max_draft_tokens": 4,
-                "adaptive_k": value,
+                "adaptive_k": True,
             }),
         )
         with pytest.raises(Exception, match="adaptive_k"):
             og.Model(path)
 
-    @pytest.mark.parametrize("value", [0, 17, 1.5])
+    @pytest.mark.parametrize("value", [-1, 17, 1.5])
     def test_min_adaptive_k_rejects_values_outside_supported_range(
             self, tmp_path, value):
         path = _write_config(
@@ -451,7 +449,7 @@ def _build_spec(target_dir: str, draft_dir: str, dest_dir: Path, max_draft_token
 
 def _greedy(model_path: str, prompt, max_length: int, k: int | None = None,
             repetition_penalty: float | None = None, min_length: int | None = None,
-            adaptive_k: bool = False, min_adaptive_k: int = 2):
+            min_adaptive_k: int = 0):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     opts = dict(do_sample=False, max_length=max_length)
@@ -463,7 +461,6 @@ def _greedy(model_path: str, prompt, max_length: int, k: int | None = None,
     if k is not None:
         params.set_speculative_options(
             max_draft_tokens=k,
-            adaptive_k=adaptive_k,
             min_adaptive_k=min_adaptive_k,
         )
     gen = og.Generator(model, params)
@@ -493,7 +490,7 @@ def _vocab_size(model_dir: str) -> int:
 
 def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None = None,
             top_k: int = 0, top_p: float = 0.0, temperature: float = 1.0,
-            adaptive_k: bool = False, min_adaptive_k: int = 2):
+            min_adaptive_k: int = 0):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
     opts = dict(do_sample=True, max_length=max_length, random_seed=seed, temperature=temperature)
@@ -505,7 +502,6 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
     if k is not None:
         params.set_speculative_options(
             max_draft_tokens=k,
-            adaptive_k=adaptive_k,
             min_adaptive_k=min_adaptive_k,
         )
     gen = og.Generator(model, params)
@@ -518,8 +514,8 @@ def _sample(model_path: str, prompt, max_length: int, seed: int, k: int | None =
 
 
 def _tiny_spec_generator(model_path, prompt, max_length, *,
-                         max_draft_tokens=4, adaptive_k=True,
-                         min_adaptive_k=2, cooldown=False,
+                         max_draft_tokens=4, min_adaptive_k=2,
+                         cooldown=False,
                          do_sample=False, random_seed=0):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
@@ -530,7 +526,6 @@ def _tiny_spec_generator(model_path, prompt, max_length, *,
     )
     params.set_speculative_options(
         max_draft_tokens=max_draft_tokens,
-        adaptive_k=adaptive_k,
         min_adaptive_k=min_adaptive_k,
         cooldown=cooldown,
     )
@@ -560,7 +555,7 @@ class TestSpeculativeGeneration:
             prompt,
             max_length=7,
             max_draft_tokens=2,
-            adaptive_k=False,
+            min_adaptive_k=0,
             cooldown=True,
         )
 
@@ -585,27 +580,25 @@ class TestSpeculativeGeneration:
         assert actual == expected
         assert generator.get_speculative_stats()["rounds"] == 5
 
-    def test_adaptive_k_option_round_trips_as_shared_speculative_option(
+    def test_min_adaptive_k_round_trips_as_shared_speculative_option(
             self, tmp_path):
         path = _make_tiny_draft_spec_model(
             tmp_path / "adaptive_option", "llama", context_length=16)
         model = og.Model(path)
         params = og.GeneratorParams(model)
 
-        assert params.get_speculative_options()["adaptive_k"] is False
-        assert params.get_speculative_options()["min_adaptive_k"] == 2
+        assert params.get_speculative_options()["min_adaptive_k"] == 0
         assert params.get_speculative_options()["cooldown"] is False
         params.set_speculative_options(
-            max_draft_tokens=6, adaptive_k=True, min_adaptive_k=3,
+            max_draft_tokens=6, min_adaptive_k=3,
             cooldown=True)
         options = params.get_speculative_options()
 
         assert options["max_draft_tokens"] == 6
-        assert options["adaptive_k"] is True
         assert options["min_adaptive_k"] == 3
         assert options["cooldown"] is True
 
-    def test_non_adaptive_mode_uses_fixed_max_draft_tokens_not_adaptive_floor(
+    def test_min_adaptive_k_zero_uses_fixed_max_draft_tokens(
             self, tmp_path):
         path = _make_tiny_draft_spec_model(
             tmp_path / "fixed_k_ignores_adaptive_floor",
@@ -617,8 +610,7 @@ class TestSpeculativeGeneration:
             [3],
             16,
             max_draft_tokens=6,
-            adaptive_k=False,
-            min_adaptive_k=1,
+            min_adaptive_k=0,
         )
 
         assert generator.get_speculative_stats()["effective_k"] == 6
@@ -776,7 +768,7 @@ class TestSpeculativeGeneration:
         path = _make_tiny_draft_spec_model(
             tmp_path / "adaptive_disabled", "llama", context_length=20)
         generator = _tiny_spec_generator(
-            path, [3], 16, max_draft_tokens=4, adaptive_k=False)
+            path, [3], 16, max_draft_tokens=4, min_adaptive_k=0)
 
         _generate_steps(generator, 5)
         stats = generator.get_speculative_stats()
@@ -942,7 +934,7 @@ class TestSpeculativeGeneration:
             decoder_only_model_path, tmp_path / "adaptive_qwen_greedy", max_k)
 
         result, stats = _greedy(
-            spec_path, _PROMPT, max_length, k=max_k, adaptive_k=True)
+            spec_path, _PROMPT, max_length, k=max_k, min_adaptive_k=2)
 
         assert result
         assert stats["rounds"] > 0
@@ -966,7 +958,7 @@ class TestSpeculativeGeneration:
             "top_k": 40,
             "top_p": 0.95,
             "temperature": 0.8,
-            "adaptive_k": True,
+            "min_adaptive_k": 2,
         }
 
         result, stats = _sample(
@@ -1998,7 +1990,7 @@ def guidance_model_path(decoder_only_model_path):
 
 
 def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=False,
-                   repetition_penalty=None, min_length=None, adaptive_k=False):
+                   repetition_penalty=None, min_length=None, min_adaptive_k=0):
     """Greedy + guidance generation. k=None -> regular; k set -> speculative. Returns the generated
     tail token ids (after the prompt); with want_stats=True also returns the speculative stats dict."""
     model = og.Model(model_path)
@@ -2012,7 +2004,7 @@ def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=Fals
     if k is not None:
         params.set_speculative_options(
             max_draft_tokens=k,
-            adaptive_k=adaptive_k,
+            min_adaptive_k=min_adaptive_k,
         )
     params.set_guidance(gtype, gdata)
     gen = og.Generator(model, params)
@@ -2027,7 +2019,7 @@ def _guided_tokens(model_path, gtype, gdata, max_length, k=None, want_stats=Fals
 
 def _sampled_guided_tokens(model_path, gtype, gdata, max_length, seed, k=None,
                            temperature=1.0, top_p=1.0, top_k=0,
-                           adaptive_k=False, want_stats=False):
+                           min_adaptive_k=0, want_stats=False):
     """Sampling (do_sample=True) + guidance. k=None -> regular; k set -> speculative. Returns the
     generated tail token ids. A fixed seed makes a single run reproducible."""
     model = og.Model(model_path)
@@ -2041,7 +2033,7 @@ def _sampled_guided_tokens(model_path, gtype, gdata, max_length, seed, k=None,
     if k is not None:
         params.set_speculative_options(
             max_draft_tokens=k,
-            adaptive_k=adaptive_k,
+            min_adaptive_k=min_adaptive_k,
         )
     params.set_guidance(gtype, gdata)
     gen = og.Generator(model, params)
@@ -2085,10 +2077,10 @@ class TestSpeculativeGuidance:
 
         first, first_stats = _guided_tokens(
             spec_path, "regex", pattern, max_length, k=max_k,
-            adaptive_k=True, want_stats=True)
+            min_adaptive_k=2, want_stats=True)
         second, second_stats = _guided_tokens(
             spec_path, "regex", pattern, max_length, k=max_k,
-            adaptive_k=True, want_stats=True)
+            min_adaptive_k=2, want_stats=True)
         eos = _eos_ids(guidance_model_path)
         text = og.Tokenizer(og.Model(spec_path)).decode(
             [token for token in first if token not in eos])
@@ -2116,7 +2108,7 @@ class TestSpeculativeGuidance:
             "temperature": 0.8,
             "top_p": 0.95,
             "top_k": 40,
-            "adaptive_k": True,
+            "min_adaptive_k": 2,
             "want_stats": True,
         }
 

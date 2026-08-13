@@ -33,7 +33,7 @@ def qwen3_model_path(request):
 
 def _generator(model_path, prompt, max_length, *, ngram_size=0,
                max_draft_tokens=4, ngram_chained_lookup=False,
-               adaptive_k=False, min_adaptive_k=2,
+               min_adaptive_k=0,
                cooldown=False,
                **search_options):
     model = og.Model(model_path)
@@ -46,7 +46,6 @@ def _generator(model_path, prompt, max_length, *, ngram_size=0,
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
             ngram_chained_lookup=ngram_chained_lookup,
-            adaptive_k=adaptive_k,
             min_adaptive_k=min_adaptive_k,
             cooldown=cooldown,
         )
@@ -69,7 +68,7 @@ def _generate_steps(generator, count):
 
 def _generate(model_path, prompt, max_length, *, ngram_size=0,
               max_draft_tokens=4, ngram_chained_lookup=False,
-              adaptive_k=False, min_adaptive_k=2,
+              min_adaptive_k=0,
               cooldown=False,
               **search_options):
     generator = _generator(
@@ -79,7 +78,6 @@ def _generate(model_path, prompt, max_length, *, ngram_size=0,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
         ngram_chained_lookup=ngram_chained_lookup,
-        adaptive_k=adaptive_k,
         min_adaptive_k=min_adaptive_k,
         cooldown=cooldown,
         **search_options,
@@ -659,7 +657,7 @@ class TestNGramControlledSemantics:
             model_path, prompt, len(prompt) + 24,
             ngram_size=2, max_draft_tokens=1,
             ngram_chained_lookup=True,
-            adaptive_k=True, min_adaptive_k=2)
+            min_adaptive_k=2)
 
         for _ in range(6):
             generator.generate_next_token()
@@ -800,7 +798,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 12,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
 
         assert generator.get_speculative_stats()["effective_k"] == 2
         generator.generate_next_token()
@@ -841,7 +839,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 3, 4, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 8,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
 
         generator.generate_next_token()
         generator.generate_next_token()
@@ -862,7 +860,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 3, 4, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 8,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
 
         generator.generate_next_token()
         stats = generator.get_speculative_stats()
@@ -882,7 +880,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 3, 5]
         generator = _generator(
             model_path, prompt, len(prompt) + 1,
-            ngram_size=4, max_draft_tokens=8, adaptive_k=True)
+            ngram_size=4, max_draft_tokens=8, min_adaptive_k=2)
 
         generator.generate_next_token()
         stats = generator.get_speculative_stats()
@@ -902,7 +900,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 1,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
 
         generator.generate_next_token()
         stats = generator.get_speculative_stats()
@@ -923,7 +921,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 12,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
         generator.generate_next_token()
         assert generator.get_speculative_stats()["active_rounds"] == 1
 
@@ -945,7 +943,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 12,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
         for _ in range(6):
             generator.generate_next_token()
         assert generator.get_speculative_stats()["effective_k"] == 3
@@ -967,10 +965,10 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         first = _generator(
             model_path, prompt, len(prompt) + 12,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
         second = _generator(
             model_path, prompt, len(prompt) + 12,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
 
         for _ in range(6):
             first.generate_next_token()
@@ -989,7 +987,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         generator = _generator(
             model_path, prompt, len(prompt) + 8,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=False)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=0)
 
         generator.generate_next_token()
         stats = generator.get_speculative_stats()
@@ -1010,8 +1008,7 @@ class TestNGramControlledSemantics:
         prompt = [1, 2, 1, 2]
         result, stats = _generate(
             model_path, prompt, len(prompt) + 2,
-            ngram_size=3, max_draft_tokens=4, adaptive_k=True,
-            min_adaptive_k=1)
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=1)
 
         assert result == prompt + [1, 2]
         assert stats["effective_k"] == 1
@@ -1182,7 +1179,6 @@ class TestNGramControlledSemantics:
             max_length,
             ngram_size=3,
             max_draft_tokens=4,
-            adaptive_k=True,
             min_adaptive_k=min_adaptive_k,
         )
 
@@ -1234,7 +1230,7 @@ class TestNGramControlledSemantics:
                 "random_seed": seed,
                 "ngram_size": 3,
                 "max_draft_tokens": max_k,
-                "adaptive_k": True,
+                "min_adaptive_k": 2,
             }
             result, stats = _generate(
                 qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
@@ -1393,14 +1389,14 @@ class TestNGramDecoding:
             ngram_size=4,
             max_draft_tokens=8,
             ngram_chained_lookup=True,
-            adaptive_k=True,
+            min_adaptive_k=2,
             cooldown=True,
         )
         options = params.get_speculative_options()
         assert options["ngram_size"] == 4
         assert options["max_draft_tokens"] == 8
         assert options["ngram_chained_lookup"] is True
-        assert options["adaptive_k"] is True
+        assert options["min_adaptive_k"] == 2
         assert options["cooldown"] is True
 
         with pytest.raises(Exception, match="ngram_size"):
@@ -1416,9 +1412,7 @@ class TestNGramDecoding:
         with pytest.raises(Exception, match="ngram_chained_lookup"):
             params.set_speculative_options(ngram_chained_lookup=0.5)
         with pytest.raises(Exception, match="adaptive_k"):
-            params.set_speculative_options(adaptive_k=2)
-        with pytest.raises(Exception, match="adaptive_k"):
-            params.set_speculative_options(adaptive_k=0.5)
+            params.set_speculative_options(adaptive_k=True)
         with pytest.raises(Exception, match="cooldown"):
             params.set_speculative_options(cooldown=2)
         with pytest.raises(Exception, match="cooldown"):
@@ -2304,7 +2298,7 @@ def qwen3_guidance_model_path(qwen3_model_path):
 def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
                       max_length, ngram_size=0, max_draft_tokens=4,
                       ngram_chained_lookup=False,
-                      adaptive_k=False, enable_ff_tokens=False,
+                      min_adaptive_k=0, enable_ff_tokens=False,
                       **search_options):
     model = og.Model(model_path)
     params = og.GeneratorParams(model)
@@ -2319,7 +2313,7 @@ def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
             ngram_size=ngram_size,
             max_draft_tokens=max_draft_tokens,
             ngram_chained_lookup=ngram_chained_lookup,
-            adaptive_k=adaptive_k,
+            min_adaptive_k=min_adaptive_k,
         )
     params.set_guidance(
         guidance_type,
@@ -2358,7 +2352,7 @@ def _assert_guidance_output(text, output_kind):
 def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
                 max_length, ngram_size=0, max_draft_tokens=4,
                 ngram_chained_lookup=False,
-                adaptive_k=False, enable_ff_tokens=False, **search_options):
+                min_adaptive_k=0, enable_ff_tokens=False, **search_options):
     generator = _guided_generator(
         model_path,
         prompt,
@@ -2368,7 +2362,7 @@ def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
         ngram_size=ngram_size,
         max_draft_tokens=max_draft_tokens,
         ngram_chained_lookup=ngram_chained_lookup,
-        adaptive_k=adaptive_k,
+        min_adaptive_k=min_adaptive_k,
         enable_ff_tokens=enable_ff_tokens,
         **search_options,
     )
@@ -2558,7 +2552,7 @@ class TestNGramGuidance:
             ngram_size=2,
             max_draft_tokens=1,
             ngram_chained_lookup=True,
-            adaptive_k=True,
+            min_adaptive_k=2,
         )
 
         assert tail
@@ -2592,7 +2586,7 @@ class TestNGramGuidance:
             max_length=max_length,
             ngram_size=3,
             max_draft_tokens=8,
-            adaptive_k=True,
+            min_adaptive_k=2,
         )
 
         assert actual == expected
@@ -2622,7 +2616,7 @@ class TestNGramGuidance:
             max_length=max_length,
             ngram_size=3,
             max_draft_tokens=8,
-            adaptive_k=True,
+            min_adaptive_k=2,
             **options,
         )
         assert result
@@ -2645,7 +2639,7 @@ class TestNGramGuidance:
             max_length=max_length,
             ngram_size=3,
             max_draft_tokens=8,
-            adaptive_k=True,
+            min_adaptive_k=2,
             enable_ff_tokens=True,
         )
 

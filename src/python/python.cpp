@@ -211,7 +211,6 @@ struct PyGeneratorParams {
     d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
     d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
     d["ngram_chained_lookup"] = params_->GetSpeculativeBool("ngram_chained_lookup");
-    d["adaptive_k"] = params_->GetSpeculativeBool("adaptive_k");
     d["min_adaptive_k"] = params_->GetSpeculativeNumber("min_adaptive_k");
     d["cooldown"] = params_->GetSpeculativeBool("cooldown");
     return d;

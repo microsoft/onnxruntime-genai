@@ -35,7 +35,7 @@ void EstablishK3AsFaster(AdaptiveKController& controller) {
 }  // namespace
 
 TEST(AdaptiveKControllerTest, DisabledUsesConfiguredMaximumAndNeverUpdates) {
-  AdaptiveKController controller{/*fixed_k=*/8, /*adaptive_min_k=*/2, /*enabled=*/false};
+  AdaptiveKController controller{/*fixed_k=*/8, /*min_adaptive_k=*/0};
 
   EXPECT_EQ(controller.GetK(), 8);
   RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/8.0f);
@@ -49,7 +49,7 @@ TEST(AdaptiveKControllerTest, DisabledUsesConfiguredMaximumAndNeverUpdates) {
 }
 
 TEST(AdaptiveKControllerTest, StartsAtTwoAndProbesUpAfterSmoothedEvidence) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
 
   EXPECT_EQ(controller.GetK(), 2);
   RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
@@ -63,7 +63,7 @@ TEST(AdaptiveKControllerTest, StartsAtTwoAndProbesUpAfterSmoothedEvidence) {
 }
 
 TEST(AdaptiveKControllerTest, KeepsFasterProbeAndContinuesGrowing) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
   EstablishK3AsFaster(controller);
 
   RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
@@ -80,7 +80,7 @@ TEST(AdaptiveKControllerTest, KeepsFasterProbeAndContinuesGrowing) {
 }
 
 TEST(AdaptiveKControllerTest, HighAcceptanceCanGrowToHardLimitSixteen) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
 
   for (int round = 0; round < 100 && controller.GetK() < 16; round++) {
     const int k = controller.GetK();
@@ -96,7 +96,7 @@ TEST(AdaptiveKControllerTest, HighAcceptanceCanGrowToHardLimitSixteen) {
 }
 
 TEST(AdaptiveKControllerTest, UserFloorOneStartsAtOneAndCanGrow) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/1, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/1};
 
   EXPECT_EQ(controller.GetK(), 1);
   RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f);
@@ -109,7 +109,7 @@ TEST(AdaptiveKControllerTest, UserFloorOneStartsAtOneAndCanGrow) {
 }
 
 TEST(AdaptiveKControllerTest, NeverDecreasesBelowUserFloor) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/1, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/1};
 
   RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
   RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
@@ -119,7 +119,7 @@ TEST(AdaptiveKControllerTest, NeverDecreasesBelowUserFloor) {
 }
 
 TEST(AdaptiveKControllerTest, RejectsProbeThatReducesMeasuredThroughput) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
   RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
   RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
   ASSERT_EQ(controller.GetK(), 3);
@@ -133,7 +133,7 @@ TEST(AdaptiveKControllerTest, RejectsProbeThatReducesMeasuredThroughput) {
 }
 
 TEST(AdaptiveKControllerTest, PartialAcceptanceCanWinWhenThroughputImproves) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
   EstablishK3AsFaster(controller);
   RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
   RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
@@ -147,7 +147,7 @@ TEST(AdaptiveKControllerTest, PartialAcceptanceCanWinWhenThroughputImproves) {
 }
 
 TEST(AdaptiveKControllerTest, PoorUsefulWidthProbesDownAndKeepsFasterNeighbor) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
   EstablishK3AsFaster(controller);
   RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
   RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
@@ -162,7 +162,7 @@ TEST(AdaptiveKControllerTest, PoorUsefulWidthProbesDownAndKeepsFasterNeighbor) {
 }
 
 TEST(AdaptiveKControllerTest, IneligibleRoundsDoNotTrainOrProbe) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
 
   RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f,
                       /*filled_proposal_budget=*/false);
@@ -180,7 +180,7 @@ TEST(AdaptiveKControllerTest, IneligibleRoundsDoNotTrainOrProbe) {
 }
 
 TEST(AdaptiveKControllerTest, ResetClearsLearnedRatesButPreservesCumulativeCounts) {
-  AdaptiveKController controller{/*fixed_k=*/4, /*adaptive_min_k=*/2, /*enabled=*/true};
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
   RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
   RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
   ASSERT_EQ(controller.GetK(), 3);

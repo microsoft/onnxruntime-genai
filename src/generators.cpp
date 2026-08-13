@@ -509,8 +509,6 @@ void GeneratorParams::SetSpeculativeBool(std::string_view name, bool value) {
 bool GeneratorParams::GetSpeculativeBool(std::string_view name) const {
   if (name == "ngram_chained_lookup")
     return speculative.ngram_chained_lookup;
-  if (name == "adaptive_k")
-    return speculative.adaptive_k;
   if (name == "cooldown")
     return speculative.cooldown;
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeBool.");
