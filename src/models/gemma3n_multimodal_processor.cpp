@@ -113,6 +113,7 @@ Gemma3nMultiModalProcessor::Gemma3nMultiModalProcessor(Config& config, const Ses
 
       config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
       config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
+      config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
     } else if (!config.model.speech.filename.empty()) {
       throw std::runtime_error("Speech model is configured (speech.filename=" + config.model.speech.filename +
                                ") but the audio processor config file was not found at: " +
@@ -148,6 +149,10 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
     CheckResult(OrtxGetTensorData(pixel_values_owner.get(), reinterpret_cast<const void**>(&pixel_values_data),
                                   &pixel_values_shape, &pixel_values_num_dims));
     // [batch, 3, 768, 768]; a rank-3 tensor is a single un-batched image.
+    if (pixel_values_num_dims != 3 && pixel_values_num_dims != 4) {
+      throw std::runtime_error("Expected the image processor to return a rank-3 or rank-4 pixel_values tensor, got rank " +
+                               std::to_string(pixel_values_num_dims) + ".");
+    }
     num_images = (pixel_values_num_dims == 4) ? pixel_values_shape[0] : 1;
 
     const std::string placeholder =
@@ -173,6 +178,10 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
     CheckResult(OrtxGetTensorData(audio_features, reinterpret_cast<const void**>(&audio_data),
                                   &audio_shape, &audio_dims));
     // [batch, time, 128]; a rank-2 tensor is a single un-batched clip.
+    if (audio_dims != 2 && audio_dims != 3) {
+      throw std::runtime_error("Expected the audio feature extractor to return a rank-2 or rank-3 tensor, got rank " +
+                               std::to_string(audio_dims) + ".");
+    }
     const int64_t batch_dim = (audio_dims == 3) ? audio_shape[0] : 1;
     const int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
 
@@ -185,6 +194,24 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
     std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
     named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
                            std::make_shared<Tensor>(std::move(mask)));
+
+    // audio_sizes is not a session input -- it is how MultiModalPipelineState
+    // learns there is audio at all. GetNumAudioTokens sums it, and the sum both
+    // gates SpeechState::Run and sizes the pre-allocated audio_features buffer.
+    // Omitting it leaves num_audio_tokens_ at 0, so the speech encoder never
+    // runs and the embedding model is handed an empty audio_features while the
+    // prompt still carries audio_seq_length_ placeholders -- which surfaces as
+    // an out-of-bounds Gather on the CPU EP, or as silently wrong output on EPs
+    // that clamp instead.
+    //
+    // One row per clip, each audio_seq_length_ long: unlike Gemma 4, the count
+    // does not follow the mel length, because the audio encoder pads and
+    // truncates its own output to that fixed width.
+    auto audio_sizes = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{batch_dim});
+    std::fill_n(audio_sizes->GetTensorMutableData<int64_t>(), batch_dim,
+                static_cast<int64_t>(audio_seq_length_));
+    named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
+                           std::make_shared<Tensor>(std::move(audio_sizes)));
 
     const std::string placeholder =
         ResolvePlaceholder(text, kAudioToken, kBoaToken, batch_dim, "audio");
@@ -226,8 +253,12 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values_owner.get(),
                            pixel_values_type_, allocator);
 
-    auto num_img_tokens = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1});
-    num_img_tokens->GetTensorMutableData<int64_t>()[0] = static_cast<int64_t>(image_seq_length_);
+    // One row per image, not one row total: GetNumImageTokens sums this tensor to
+    // size the pre-allocated image_features buffer, so a single element would
+    // under-count a multi-image prompt by (num_images - 1) * image_seq_length_.
+    auto num_img_tokens = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{num_images});
+    std::fill_n(num_img_tokens->GetTensorMutableData<int64_t>(), num_images,
+                static_cast<int64_t>(image_seq_length_));
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens),
                            std::make_shared<Tensor>(std::move(num_img_tokens)));
   }
