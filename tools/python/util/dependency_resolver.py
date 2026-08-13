@@ -163,15 +163,10 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
         shutil.copy(Path(lib_dir) / file_name, destination_dir)
 
 
-# Project and feed ids of the public aiinfra ORT-Nightly feed.
-_ORT_NIGHTLY_FEED_PROJECT = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
-_ORT_NIGHTLY_FEED_ID = "7982ae20-ed19-4a35-a362-a96ac99897b7"
-_ORT_NIGHTLY_FEED_URL = (
-    f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
-)
-# Packages the engine benchmark loads at runtime, pinned so the plugin EP matches the ORT core.
+_ORT_NIGHTLY_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7"
 _ORT_VERSION = "1.29.0"
 _CUDA_PLUGIN_EP_VERSION = "0.1.0"
+
 _ENGINE_BENCHMARK_PACKAGES = {
     "Microsoft.ML.OnnxRuntime": (
         f"{_ORT_NIGHTLY_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime"
