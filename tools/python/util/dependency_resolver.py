@@ -225,7 +225,7 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     symlink_ort.symlink_to(unversioned_ort.name)
 
     _log.info(f"Copying local genai and genai-cuda builds to {destination_dir}")
-    patchelf = shutil.which("patchelf")
+    patchelf = shutil.which("patchelf") # patchelf is a utility to modify the dynamic linker and RPATH of ELF executables
     for genai_lib_name in ("libonnxruntime-genai.so", "libonnxruntime-genai-cuda.so"):
         genai_lib = genai_lib_dir / genai_lib_name
         if not genai_lib.is_file():

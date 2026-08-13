@@ -48,11 +48,6 @@ struct ScenarioExecutionOutput {
   nlohmann::json scenario_metrics{nlohmann::json::object()};
 };
 
-// Loads the model, issues `concurrency` identical synthetic-prompt requests per run, and records
-// TTFT / inter-token latency / throughput. Shared by every scenario that only varies the prompt
-// and generation sizes; `log_tag` prefixes the progress output.
-ScenarioExecutionOutput RunEngineWorkload(const ScenarioConfig& config, const std::string& log_tag);
-
 inline double Mean(const std::vector<double>& values) {
   if (values.empty()) {
     return 0.0;
