@@ -170,11 +170,16 @@ _ORT_NIGHTLY_FEED_URL = (
     f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
 )
 # Packages the engine benchmark loads at runtime, pinned so the plugin EP matches the ORT core.
+_ORT_VERSION = "1.29.0"
+_CUDA_PLUGIN_EP_VERSION = "0.1.0"
 _ENGINE_BENCHMARK_PACKAGES = {
-    "Microsoft.ML.OnnxRuntime": "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/1.28.0",
+    "Microsoft.ML.OnnxRuntime": (
+        f"{_ORT_NIGHTLY_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime"
+        f"/versions/{_ORT_VERSION}/content?api-version=6.0-preview.1"
+    ),
     "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": (
         f"{_ORT_NIGHTLY_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64"
-        "/versions/0.1.0-dev.20260813+72e1c9c9/content?api-version=6.0-preview.1"
+        f"/versions/{_CUDA_PLUGIN_EP_VERSION}/content?api-version=6.0-preview.1"
     ),
 }
 
