@@ -461,7 +461,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -493,6 +493,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
+  // Bind the allocator to the selected device rather than assuming device 0.
+  allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
     auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
@@ -504,6 +506,11 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
+
+  // Let the device set up any additional allocators it offers (e.g. host-accessible memory for
+  // decode inputs). Devices that offer none leave the defaults in place.
+  device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
+  allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -588,14 +595,23 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
+  // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
+  // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
+  DeviceInterface* p_host_accessible_inputs = p_device_->GetHostAccessibleDevice();
+
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
       p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
+  else if (p_host_accessible_inputs)
+    p_device_inputs_ = p_host_accessible_inputs;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // Logits are read back on the CPU every step, which is slow from a host-accessible allocation.
+  p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.

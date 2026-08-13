@@ -23,6 +23,7 @@ class PagedCacheStepReservation final : public CacheStepReservation {
           entry.request_id,
           entry.target_cache_slots,
           entry.newly_admitted,
+          entry.whole_sequence_cache_slots,
       });
       if (entry.newly_admitted) {
         newly_admitted_.push_back(entry.request);

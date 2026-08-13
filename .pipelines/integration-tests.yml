@@ -39,6 +39,8 @@
 #     Stage 2: test jobs - one ADO job per (model, ep). Models run in
 #              parallel on separate agents, so each agent only needs disk
 #              for one model.
+#   Linux also has a separate paged Engine correctness stage that downloads
+#   the Linux wheel from Stage 1.
 
 trigger:
   branches:
@@ -82,6 +84,11 @@ parameters:
 
 - name: linux_x64_cuda
   displayName: 'Run Linux x64 CUDA tests'
+  type: boolean
+  default: true
+
+- name: linux_x64_engine
+  displayName: 'Run Linux x64 paged Engine tests'
   type: boolean
   default: true
 
@@ -154,13 +161,14 @@ stages:
       models: ${{ parameters.all_models }}
     # Skip the per-(os, arch) build if no test job needs it.
     build_windows_x64: ${{ or(parameters.windows_x64_cpu, parameters.windows_x64_cuda, parameters.windows_x64_webgpu) }}
-    build_linux_x64: ${{ or(parameters.linux_x64_cpu, parameters.linux_x64_cuda) }}
+    build_linux_x64: ${{ or(parameters.linux_x64_cpu, parameters.linux_x64_cuda, parameters.linux_x64_engine) }}
     build_macos_arm64: ${{ or(parameters.macos_arm64_cpu, parameters.macos_arm64_webgpu) }}
     windows_x64_cpu: ${{ parameters.windows_x64_cpu }}
     windows_x64_cuda: ${{ parameters.windows_x64_cuda }}
     windows_x64_webgpu: ${{ parameters.windows_x64_webgpu }}
     linux_x64_cpu: ${{ parameters.linux_x64_cpu }}
     linux_x64_cuda: ${{ parameters.linux_x64_cuda }}
+    linux_x64_engine: ${{ parameters.linux_x64_engine }}
     macos_arm64_cpu: ${{ parameters.macos_arm64_cpu }}
     macos_arm64_webgpu: ${{ parameters.macos_arm64_webgpu }}
 

@@ -80,9 +80,10 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
     if (extra_inputs[i].name == Config::Defaults::ImageGridThwName) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-      if (!shape.empty()) {
-        return shape[0];  // num_images
-      }
+      const int64_t num_images = shape.empty() ? 0 : shape[0];
+      const size_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+      ValidateImageGridThwLayoutAndCount(shape, elem_count, num_images, "image_grid_thw");
+      return num_images;
     }
   }
 
@@ -195,6 +196,10 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   OrtValue* grid_full = inputs_[grid_idx];
   const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+
+  const auto grid_shape = grid_full->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
+  ValidateImageGridThwLayoutAndCount(grid_shape, grid_elem_count, num_images_, "image_grid_thw");
 
   // Check if the ONNX model accepts dynamic num_images.
   // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.

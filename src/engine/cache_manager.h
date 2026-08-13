@@ -63,7 +63,7 @@ struct CacheManager {
   // inspection. Caches that do not use paged blocks return an empty snapshot.
   virtual PagedCacheSnapshot Snapshot() const { return {}; }
 
-  virtual StepPlanningResult PlanStepResources(StepPlan&, size_t) const {
+  virtual StepPlanningResult PlanStepResources(StepPlan&) const {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
 
@@ -125,8 +125,8 @@ struct PagedCacheManager : CacheManager {
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
-  StepPlanningResult PlanStepResources(StepPlan& plan, size_t committed_request_count) const override {
-    return key_value_cache_->PlanStepResources(plan, committed_request_count);
+  StepPlanningResult PlanStepResources(StepPlan& plan) const override {
+    return key_value_cache_->PlanStepResources(plan);
   }
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;

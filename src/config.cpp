@@ -45,6 +45,10 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "RyzenAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
+  } else if (lower_name == "amdgpu" ||
+             lower_name == "amdgpuexecutionprovider") {
+    // Accept canonical and catalog forms, all route to AMDGPU.
+    return "AMDGPU";
   }
   return name;  // Return name unchanged
 }
@@ -1216,7 +1220,7 @@ struct Model_Element : JSON::Element {
     }
     if (name == "draft") {
       if (!v_.draft)
-        v_.draft.emplace();
+        v_.draft = Config::Model::Decoder{};
       if (!draft_)
         draft_ = std::make_unique<Decoder_Element>(*v_.draft);
       return *draft_;
@@ -1415,6 +1419,11 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_batch_size must be > 0");
       v_->max_batch_size = static_cast<size_t>(parsed_value);
+    } else if (name == "max_scheduled_tokens") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_scheduled_tokens must be > 0");
+      v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1611,6 +1620,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
             return false;
           }
         }
+        return true;
+      } else if (provider_options->name == "AMDGPU") {
         return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {

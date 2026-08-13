@@ -525,7 +525,9 @@ void NemotronSpeechState::RunEncoder() {
     throw std::runtime_error("No mel input set. Call generator.set_model_input(\"audio_features\", mel) first.");
 
   OrtValue* mel_tensor = current_mel_->ort_tensor_.get();
-  int64_t total_mel_frames = mel_tensor->GetTensorTypeAndShapeInfo()->GetShape()[1];
+  auto mel_shape = mel_tensor->GetTensorTypeAndShapeInfo()->GetShape();
+  ValidateNemotronMelInputShape(mel_shape, nemotron_config_.num_mels);
+  int64_t total_mel_frames = mel_shape[2];
 
   encoder_state_->SetMelInput(mel_tensor, total_mel_frames);
   encoder_state_->UpdateCacheInputs();
@@ -575,6 +577,7 @@ void NemotronSpeechState::StepToken() {
 
   auto enc_info = encoded_output_->GetTensorTypeAndShapeInfo();
   auto enc_shape = enc_info->GetShape();
+  ValidateNemotronEncoderOutputRank(enc_shape);
   auto enc_type = enc_info->GetElementType();
   int64_t time_steps = std::min(enc_shape[1], encoded_len_);
   int64_t hidden_dim = enc_shape[2];

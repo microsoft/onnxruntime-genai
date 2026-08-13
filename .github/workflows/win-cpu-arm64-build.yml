@@ -11,7 +11,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
-  binaryDir: 'build/cpu/win-arm64'
+  buildRoot: 'build/cpu/win-arm64'
+  binaryDir: 'build/cpu/win-arm64/Release'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
@@ -79,16 +80,25 @@ jobs:
           choco install llvm --yes
           Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON
-
-      - name: Build with CMake
-        run: |
-          cmake --build --preset windows_arm64_cpu_release --parallel
-          cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
+          python build.py `
+            --config Release `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_guidance `
+            --arm64 `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG'
 
       - name: Build the C Examples
         run: |
