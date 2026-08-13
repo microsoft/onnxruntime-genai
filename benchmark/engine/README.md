@@ -8,11 +8,11 @@ See [benchmark-design.md](benchmark-design.md) for the architecture and
 
 ## Build
 
-Built as part of the normal onnxruntime-genai build:
+Opt in with `--build_engine_benchmark`; it is not built by default:
 
 ```bash
 python build.py --update --build --config RelWithDebInfo --parallel --skip_tests --skip_examples \
-  --cuda_home <cuda_home>
+  --build_engine_benchmark --cuda_home <cuda_home>
 ```
 
 The build stages the benchmark's runtime dependencies next to the executable in
@@ -82,3 +82,10 @@ out/
 
 Each result file contains the run status, config metadata, TTFT / inter-token latency percentiles,
 per-request records, and scenario-specific metrics.
+
+Device memory is sampled on a background thread while the scenario runs. NVML is loaded lazily, so
+`peak_device_memory_bytes` and `steady_state_device_memory_bytes` are 0 on machines without an
+NVIDIA driver. When the driver reports per-process usage those numbers are attributed to this
+process; otherwise they are the device-wide growth since before the model was loaded, so run on an
+otherwise idle GPU for meaningful values. Note that ONNX Runtime and the CUDA driver cache
+allocations, so these measure reserved rather than live memory.

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "ort_genai.h"
+#include "scenarios/memory_sampler.h"
 #include "scenarios/utils.h"
 
 namespace fs = std::filesystem;
@@ -77,6 +78,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
             << std::endl;
 
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
+
+  // Started before the model is created so the baseline excludes this process's device allocations.
+  MemorySampler memory;
+  memory.Start();
 
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
   oga_config->ClearProviders();
@@ -202,11 +207,17 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
+
+  memory.Stop();
+  output.peak_device_memory_bytes = memory.PeakDeviceBytes();
+  output.steady_state_device_memory_bytes = memory.SteadyStateDeviceBytes();
+
   output.scenario_metrics = {
       {"outputs", std::move(outputs)},
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
       {"prompt_tokens", prompt_token_count},
+      {"peak_host_memory_bytes", memory.PeakHostBytes()},
   };
 
   std::cout << tag << "Execute complete: ttft_p50_ms=" << output.ttft_p50_ms

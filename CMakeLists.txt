@@ -381,6 +381,10 @@ endif()
 if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")
   add_subdirectory("${REPO_ROOT}/benchmark/c")
+endif()
+
+if(ENABLE_ENGINE_BENCHMARK)
+  message("------------------Enabling engine benchmark------------------")
   add_subdirectory("${REPO_ROOT}/benchmark/engine")
 endif()
 

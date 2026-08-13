@@ -13,6 +13,8 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(engine_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/scenario_dispatcher.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/utils.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/memory_sampler.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/memory_sampler.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.h
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/decode_baseline.h
@@ -32,6 +34,7 @@ target_compile_definitions(engine_benchmark PRIVATE ORT_GENAI_BENCH_GENAI_VERSIO
 
 target_link_libraries(engine_benchmark PRIVATE
   onnxruntime-genai
+  ${CMAKE_DL_LIBS}
 )
 
 target_link_directories(engine_benchmark PRIVATE ${ORT_LIB_DIR})
