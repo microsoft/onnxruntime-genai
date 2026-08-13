@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import platform
 import shutil
+import subprocess
 from os import PathLike, listdir
 from os.path import isfile
 from pathlib import Path
@@ -224,11 +225,19 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     symlink_ort.symlink_to(unversioned_ort.name)
 
     _log.info(f"Copying local genai and genai-cuda builds to {destination_dir}")
+    patchelf = shutil.which("patchelf")
     for genai_lib_name in ("libonnxruntime-genai.so", "libonnxruntime-genai-cuda.so"):
         genai_lib = genai_lib_dir / genai_lib_name
-        if genai_lib.is_file():
-            shutil.copy(genai_lib, destination_dir)
-        else:
+        if not genai_lib.is_file():
             _log.warning(f"{genai_lib} not found; skipping.")
+            continue
+
+        staged_lib = shutil.copy(genai_lib, destination_dir)
+        # The build bakes the configure-time ORT path into RPATH, which beats LD_LIBRARY_PATH and
+        # would load that ORT instead of the pinned one staged here.
+        if patchelf:
+            subprocess.run([patchelf, "--set-rpath", "$ORIGIN", staged_lib], check=True)
+        else:
+            _log.warning("patchelf not found; the staged ORT may be ignored in favor of the build-time RPATH.")
 
     return destination_dir
