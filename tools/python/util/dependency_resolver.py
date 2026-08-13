@@ -163,24 +163,31 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
         shutil.copy(Path(lib_dir) / file_name, destination_dir)
 
 
-# ONNX Runtime version whose linux-x64 native libraries the engine benchmark loads at runtime.
-_ENGINE_BENCHMARK_ORT_VERSION = "1.28.0"
-_ENGINE_BENCHMARK_CUDA_PLUGIN_EP_VERSION = "0.1.0-dev.20260812+c675b44c"
+# Packages the engine benchmark loads at runtime, pinned so ORT and the plugin EP share an ORT_API_VERSION.
+_ENGINE_BENCHMARK_PACKAGES = {
+    "Microsoft.ML.OnnxRuntime": "1.29.0",
+    "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": "0.1.0-dev.20260812+c675b44c",
+}
 # Project and feed ids of the public aiinfra ORT-Nightly feed.
 _ORT_NIGHTLY_FEED_PROJECT = "2692857e-05ef-43b4-ba9c-ccf1c22c437c"
 _ORT_NIGHTLY_FEED_ID = "7982ae20-ed19-4a35-a362-a96ac99897b7"
 
 
-def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_dir: Path) -> Path:
+def _download_and_unpack_nupkg(package_name: str, version: str, destination_dir: Path) -> Path:
     unpacked_dir = destination_dir / package_name
     if unpacked_dir.exists():
         _log.info(f"Package {package_name} already downloaded")
         return unpacked_dir
 
-    _log.info(f"Downloading {package_name} from {package_url}")
+    _log.info(f"Downloading {package_name} {version} from ORT-Nightly")
     package_path = destination_dir / f"{package_name}.zip"
     with open(package_path, "wb") as f:
-        f.write(requests.get(package_url).content)
+        f.write(
+            requests.get(
+                f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
+                f"/nuget/packages/{package_name}/versions/{version}/content?api-version=6.0-preview.1"
+            ).content
+        )
 
     shutil.unpack_archive(package_path, unpacked_dir, format="zip")
     return unpacked_dir
@@ -189,8 +196,8 @@ def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_
 def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir: PathLike) -> Path:
     """
     Populate the engine_benchmark output directory with the shared libraries it loads at runtime:
-    the ONNX Runtime linux-x64 libraries (nuget.org), the CUDA execution provider plugin
-    (ORT-Nightly ADO feed), and the locally built onnxruntime-genai libraries.
+    the ONNX Runtime linux-x64 libraries and CUDA execution provider plugin from the ORT-Nightly
+    feed, plus the locally built onnxruntime-genai libraries.
     """
     genai_lib_dir = Path(genai_lib_dir)
     destination_dir = Path(destination_dir)
@@ -198,30 +205,9 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     dependencies_dir = destination_dir / "dependencies"
     dependencies_dir.mkdir(parents=True, exist_ok=True)
 
-    _log.info(f"Downloading onnxruntime {_ENGINE_BENCHMARK_ORT_VERSION} from nuget")
-    ort_package_name = "Microsoft.ML.OnnxRuntime"
-    packages = [
-        _download_and_unpack_nupkg(
-            ort_package_name,
-            f"https://www.nuget.org/api/v2/package/{ort_package_name}/{_ENGINE_BENCHMARK_ORT_VERSION}",
-            dependencies_dir,
-        )
-    ]
-
-    _log.info(f"Downloading cuda plugin ep {_ENGINE_BENCHMARK_CUDA_PLUGIN_EP_VERSION} from ORT-Nightly")
-    cuda_ep_package_name = "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64"
-    packages.append(
-        _download_and_unpack_nupkg(
-            cuda_ep_package_name,
-            f"https://pkgs.dev.azure.com/aiinfra/{_ORT_NIGHTLY_FEED_PROJECT}/_apis/packaging/feeds/{_ORT_NIGHTLY_FEED_ID}"
-            f"/nuget/packages/{cuda_ep_package_name}/versions/{_ENGINE_BENCHMARK_CUDA_PLUGIN_EP_VERSION}"
-            "/content?api-version=6.0-preview.1",
-            dependencies_dir,
-        )
-    )
-
-    for package_dir in packages:
-        _log.info(f"Extracting {package_dir.name} .so files to {destination_dir}")
+    for package_name, version in _ENGINE_BENCHMARK_PACKAGES.items():
+        package_dir = _download_and_unpack_nupkg(package_name, version, dependencies_dir)
+        _log.info(f"Extracting {package_name} .so files to {destination_dir}")
         for lib in package_dir.rglob("linux-x64/native/*"):
             if lib.is_file():
                 shutil.copy(lib, destination_dir)
@@ -229,7 +215,7 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     # ORT is loaded by soname, which the nuget package only ships as the unversioned file.
     unversioned_ort = destination_dir / "libonnxruntime.so"
     symlink_ort = destination_dir / "libonnxruntime.so.1"
-    _log.info(f"Creating symlink {symlink_ort.name} --> {unversioned_ort.name}")
+    _log.info(f"Creating symlink {unversioned_ort.name} --> {symlink_ort.name}")
     symlink_ort.unlink(missing_ok=True)
     symlink_ort.symlink_to(unversioned_ort.name)
 
