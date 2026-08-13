@@ -209,15 +209,15 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
 
   memory.Stop();
-  output.peak_device_memory_bytes = memory.PeakDeviceBytes();
-  output.steady_state_device_memory_bytes = memory.SteadyStateDeviceBytes();
+  output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
+  output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
 
   output.scenario_metrics = {
       {"outputs", std::move(outputs)},
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
       {"prompt_tokens", prompt_token_count},
-      {"peak_host_memory_bytes", memory.PeakHostBytes()},
+      {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
   };
 
   std::cout << tag << "Execute complete: ttft_p50_ms=" << output.ttft_p50_ms

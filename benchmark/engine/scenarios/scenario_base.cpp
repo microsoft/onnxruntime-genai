@@ -57,8 +57,8 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
         {"summary",
          {{"ttft_ms", {{"p50", output.ttft_p50_ms}, {"p95", output.ttft_p95_ms}}},
           {"inter_token_latency_ms", {{"p50", output.inter_token_latency_p50_ms}, {"p95", output.inter_token_latency_p95_ms}}},
-          {"peak_device_memory_bytes", output.peak_device_memory_bytes},
-          {"steady_state_device_memory_bytes", output.steady_state_device_memory_bytes}}},
+          {"peak_device_memory_mb", output.peak_device_memory_mb},
+          {"steady_state_device_memory_mb", output.steady_state_device_memory_mb}}},
         {"raw_requests", std::move(raw_requests)}};
     result["scenario_metrics"] = output.scenario_metrics;
   } catch (const std::exception& ex) {

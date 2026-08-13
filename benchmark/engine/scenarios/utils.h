@@ -43,10 +43,14 @@ struct ScenarioExecutionOutput {
   double ttft_p95_ms{0.0};
   double inter_token_latency_p50_ms{0.0};
   double inter_token_latency_p95_ms{0.0};
-  uint64_t peak_device_memory_bytes{0};
-  uint64_t steady_state_device_memory_bytes{0};
+  double peak_device_memory_mb{0.0};
+  double steady_state_device_memory_mb{0.0};
   nlohmann::json scenario_metrics{nlohmann::json::object()};
 };
+
+inline double BytesToMb(uint64_t bytes) {
+  return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
 
 inline double Percentile(std::vector<double> values, double p) {
   if (values.empty()) {
