@@ -5,6 +5,7 @@
 
 #include "engine.h"
 #include "sequence_positions.h"
+#include "../constrained_logits_processor.h"
 #include "../search.h"
 
 namespace Generators {
@@ -35,11 +36,27 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   if (params->search.num_beams != 1) {
     throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
   }
+  if (params->guidance_ff_tokens_enabled) {
+    throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
+  }
+
+  const bool guidance_requested = !params->guidance_type.empty() || !params->guidance_data.empty();
+  if (guidance_requested && !params->model_) {
+    throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
+  }
+  if (params->model_) {
+    guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
+  }
+  if (guidance_requested && !guidance_logits_processor_) {
+    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true and provide both guidance type and data.");
+  }
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
 }
+
+Request::~Request() = default;
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
@@ -96,10 +113,15 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
   } else if (status_ == RequestStatus::InProgress) {
     throw std::runtime_error("Cannot add tokens to a request that is in progress.");
   } else if (status_ == RequestStatus::Completed) {
+    if (HasUnseenTokens()) {
+      throw std::runtime_error("Consume all generated tokens before continuing a completed request.");
+    }
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
     prompt_sequence_length_ = CurrentSequenceLength();
     tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+    seen_sequence_length_ = CurrentSequenceLength();
+    status_ = RequestStatus::InProgress;
   }
 }
 
@@ -216,10 +238,16 @@ void Request::ValidateEngineCompatibility() const {
 }
 
 void Request::SaveStateForTransaction() {
+  if (guidance_logits_processor_) {
+    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
+  }
   search_->SaveStateForTransaction();
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
+  if (guidance_logits_processor_) {
+    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
+  }
   search_->SaveStateForExternalSamplingTransaction();
 }
 
@@ -241,6 +269,9 @@ RequestStepResult Request::StageGenerationForTransaction(
 
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
 }
 
 void Request::QueueStateRestoreForTransaction() {
@@ -249,23 +280,33 @@ void Request::QueueStateRestoreForTransaction() {
 
 void Request::CompleteStateRestoreForTransaction() {
   search_->CompleteStateRestoreForTransaction();
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
 }
 
 void Request::CommitStateForTransaction() {
   search_->CommitStateForTransaction();
+  guidance_transaction_checkpoint_.reset();
 }
 
 void Request::CommitStep(const RequestStepPlan& plan,
-                         const RequestStepResult& result) noexcept {
+                         const RequestStepResult& result) {
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
   status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;
+  if (result.done && guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->SetLogits(logits);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->ProcessLogits(logits);
+  }
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
@@ -295,11 +336,20 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   if (token_appended) {
     token = search_->GetNextTokens().CpuSpan().back();
   }
-  return RequestStepResult{
+  RequestStepResult result{
       token,
       token_appended,
       done,
   };
+  CommitGuidanceToken(result);
+  return result;
+}
+
+void Request::CommitGuidanceToken(const RequestStepResult& result) {
+  if (guidance_logits_processor_ && result.token_appended) {
+    int32_t token = result.token;
+    guidance_logits_processor_->CommitTokens(std::span<int32_t>{&token, 1});
+  }
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
@@ -330,6 +380,7 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
 }
 
 void Request::CompleteGeneration() {
+  const size_t sequence_length_before = static_cast<size_t>(CurrentSequenceLength());
   search_->CompleteGeneration();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
@@ -342,8 +393,19 @@ void Request::CompleteGeneration() {
     tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
   }
 
+  if (sequence_length > sequence_length_before) {
+    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    auto new_tokens = next_tokens.last(sequence_length - sequence_length_before);
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->CommitTokens(new_tokens);
+    }
+  }
+
   if (search_->IsDone()) {
     status_ = RequestStatus::Completed;
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+    }
   }
 }
 

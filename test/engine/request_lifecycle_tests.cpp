@@ -33,6 +33,14 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   return logits;
 }
 
+DeviceSpan<float> LogitsFavoringToken(Model& model, int32_t preferred_token,
+                                      int32_t fallback_token) {
+  auto logits = LogitsForToken(model, preferred_token);
+  logits.CpuSpan()[fallback_token] = 50.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
 class RequestLifecycleTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -130,10 +138,36 @@ TEST_F(RequestLifecycleTest, AppendAfterCompletedExtendsSequence) {
   const int64_t assigned_length = request->CurrentSequenceLength();
 
   request->status_ = RequestStatus::Completed;
+  while (request->HasUnseenTokens()) {
+    static_cast<void>(request->UnseenToken());
+  }
   std::vector<int32_t> more{5, 6};
   request->AddTokens(more);
 
   EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
+  EXPECT_EQ(request->status_, RequestStatus::InProgress);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
+TEST_F(RequestLifecycleTest, AppendAfterCompletedRequiresGeneratedTokensToBeConsumed) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = request->CurrentSequenceLength();
+  plan.target_cache_slots = static_cast<size_t>(request->CurrentSequenceLength());
+  auto logits = LogitsForToken(*model_, 5);
+  request->SaveStateForTransaction();
+  auto result = request->ApplyLogitsForTransaction(logits);
+  request->CommitStateForTransaction();
+  result.done = true;
+  request->CommitStep(plan, result);
+  ASSERT_TRUE(request->HasUnseenTokens());
+
+  EXPECT_THROW(request->AddTokens(std::vector<int32_t>{5, 6}), std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Completed);
+  EXPECT_EQ(request->CurrentSequenceLength(), static_cast<int64_t>(prompt.size() + 1));
 }
 
 // Removing a request releases it from the engine (deallocating its cache resources) and returns it
@@ -255,6 +289,82 @@ TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
       },
       std::runtime_error);
 }
+
+TEST_F(RequestLifecycleTest, RequestRejectsGuidanceFastForwardTokens) {
+  auto params = MakeGreedyParams(*model_);
+  params->SetGuidance("regex", "[0-9]+", true);
+
+  EXPECT_THROW(
+      {
+        auto request = std::make_shared<Request>(params);
+        static_cast<void>(request);
+      },
+      std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RequestRejectsIncompleteGuidanceConfiguration) {
+  auto params = MakeGreedyParams(*model_);
+  params->guidance_type = "regex";
+
+  EXPECT_THROW(
+      {
+        auto request = std::make_shared<Request>(params);
+        static_cast<void>(request);
+      },
+      std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, EngineRejectsRequestCreatedForDifferentModel) {
+  auto other_model = CreateModel(GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = MakeGreedyParams(*other_model);
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+
+  EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+}
+
+#if USE_GUIDANCE
+TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto first_tokens = tokenizer->Encode("1");
+  const auto second_tokens = tokenizer->Encode("2");
+  const auto invalid_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(first_tokens.size(), 1u);
+  ASSERT_EQ(second_tokens.size(), 1u);
+  ASSERT_EQ(invalid_tokens.size(), 1u);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "12", false);
+  auto request = std::make_shared<Request>(params);
+  auto prompt = Prompt();
+  request->AddTokens(prompt);
+  request->Assign(guidance_engine.engine);
+
+  auto first_logits = LogitsFavoringToken(
+      *guidance_model, invalid_tokens.front(), first_tokens.front());
+  request->SaveStateForTransaction();
+  const auto staged_first = request->ApplyLogitsForTransaction(first_logits);
+  EXPECT_EQ(staged_first.token, first_tokens.front());
+  request->RestoreStateForTransaction();
+
+  request->SaveStateForTransaction();
+  const auto retried_first = request->ApplyLogitsForTransaction(first_logits);
+  EXPECT_EQ(retried_first.token, first_tokens.front());
+  request->CommitStateForTransaction();
+
+  auto second_logits = LogitsFavoringToken(
+      *guidance_model, invalid_tokens.front(), second_tokens.front());
+  request->SaveStateForTransaction();
+  const auto staged_second = request->ApplyLogitsForTransaction(second_logits);
+  EXPECT_EQ(staged_second.token, second_tokens.front());
+  request->RestoreStateForTransaction();
+}
+#endif
 
 }  // namespace
 }  // namespace test

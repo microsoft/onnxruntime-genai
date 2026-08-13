@@ -65,6 +65,36 @@ TEST_F(EngineStepTest, SingleRequestSchedulesThenDecodesThenReturns) {
   EXPECT_LT(decode_at, allocate_at);
 }
 
+TEST_F(EngineStepTest, CompletedRequestContinuesAfterToolResponseTokens) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_TRUE(request->IsDone());
+  while (request->HasUnseenTokens()) {
+    static_cast<void>(request->UnseenToken());
+  }
+
+  const auto completed = request->Snapshot();
+  const std::vector<int32_t> tool_response_tokens{7, 8};
+  request->AddTokens(tool_response_tokens);
+
+  EXPECT_EQ(request->status_, RequestStatus::InProgress);
+  EXPECT_FALSE(request->HasUnseenTokens());
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(engine.cache->deallocate_calls, 0);
+
+  engine.executor->SetForcedToken(5);
+  ASSERT_EQ(engine.engine->Step(), request);
+  EXPECT_FALSE(request->IsDone());
+  EXPECT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), 5);
+  EXPECT_EQ(engine.executor->decode_calls, 2);
+  EXPECT_EQ(engine.cache->deallocate_calls, 0);
+  EXPECT_GT(request->CurrentSequenceLength(), completed.current_sequence_length);
+}
+
 // Several requests that all fit are decoded together in a single batch, and the remaining ready
 // requests are drained without any further model execution.
 TEST_F(EngineStepTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) {

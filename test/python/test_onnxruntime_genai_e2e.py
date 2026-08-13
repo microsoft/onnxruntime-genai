@@ -178,6 +178,23 @@ def run_tool_calling():
             ]
             run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
+            # Run a full Engine conversation: tool call, local tool result, and continuation.
+            command = [
+                sys.executable,
+                os.path.join(cwd, "..", "..", "examples", "python", "engine", "tool-calling.py"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--max_length",
+                str(max_length),
+                "--tools_file",
+                os.path.join(cwd, "..", "tool-definitions", "weather.json"),
+                "--user_prompt",
+                user_prompt,
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
             # Run model_qa.cpp for inference
             command = [
                 os.path.join(

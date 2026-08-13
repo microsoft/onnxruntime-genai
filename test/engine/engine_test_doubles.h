@@ -291,6 +291,7 @@ struct RecordingModelExecutor : ModelExecutor {
   }
 
   void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
+  void SetForcedToken(int32_t forced_token) { forced_token_ = forced_token; }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;

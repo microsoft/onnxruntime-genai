@@ -92,7 +92,7 @@ __global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int voca
     return;
   int batch_index = index / vocab_size;
   int vocab_index = index % vocab_size;
-  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (1 << (vocab_index % 32))))
+  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (uint32_t{1} << (vocab_index % 32))))
     batch_logits[index] = std::numeric_limits<float>::lowest();
 }
 

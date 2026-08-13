@@ -55,6 +55,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 }
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
+  const auto request_params = request->Params();
+  if (request_params->model_ && request_params->model_.get() != model_.get()) {
+    throw std::runtime_error("Cannot add a request created for a different model to the engine.");
+  }
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
