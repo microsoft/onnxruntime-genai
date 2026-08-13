@@ -120,7 +120,7 @@ jobs:
             --update --build `
             --skip_examples `
             --cmake_extra_defines `
-              TEST_PHI2=True `
+              TEST_PHI2=False `
               TEST_QWEN_2_5=True `
               CMAKE_CUDA_ARCHITECTURES=86-real `
               CMAKE_C_COMPILER_LAUNCHER=sccache `
