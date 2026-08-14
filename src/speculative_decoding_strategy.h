@@ -22,12 +22,12 @@ struct Generator;
 // for the next round. Subclasses implement Propose (produce K tokens) and Advance (update the
 // draft's state); all shared logic (RNG, target rewind, stats, vocab check) lives here.
 struct SpeculativeDecodingStrategy : DecodingStrategy {
-  // Draft model's output. If probs is empty, accept a token when it equals the target's argmax
-  // (greedy). Otherwise probs[i] is the draft's probability distribution for token i, and the
+  // Draft model's output. If distributions is empty, accept a token when it equals the target's argmax
+  // (greedy). Otherwise distributions[i] is the draft's sparse categorical for token i, and the
   // token is accepted with probability min(1, p_target/p_draft).
   struct Proposal {
     std::vector<int32_t> tokens;
-    std::vector<std::vector<float>> probs;
+    std::vector<TargetTokenSelection> distributions;
   };
 
   struct RoundState {
