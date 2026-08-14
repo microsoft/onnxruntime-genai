@@ -207,34 +207,212 @@ TEST_F(EngineStepTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   EXPECT_TRUE(request->IsDone());
 }
 
-TEST_F(EngineStepTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
+TEST_F(EngineStepTest, ExecutionCapacityFailureRetriesSmallerPlan) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
-  auto prompt = Prompt(10);
-  auto request = MintRequest(*model_, prompt);
-  engine.engine->AddRequest(request);
-  const auto before = request->Snapshot();
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30, 40}) {
+    auto prompt = Prompt(seed);
+    auto request = MintRequest(*model_, prompt);
+    engine.engine->AddRequest(request);
+    requests.push_back(request);
+  }
   engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
+
+  auto ready = engine.engine->Step();
+
+  EXPECT_EQ(ready, requests[0]);
+  ASSERT_EQ(engine.executor->decoded_batch_sizes,
+            (std::vector<size_t>{4, 2}));
+  ASSERT_EQ(engine.executor->decoded_token_counts,
+            (std::vector<size_t>{12, 6}));
+  ASSERT_EQ(engine.executor->decoded_transaction_ids.size(), 2u);
+  EXPECT_NE(engine.executor->decoded_transaction_ids[0],
+            engine.executor->decoded_transaction_ids[1]);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
+  EXPECT_TRUE(requests[0]->IsDone());
+  EXPECT_TRUE(requests[1]->IsDone());
+  EXPECT_EQ(requests[2]->status_, RequestStatus::Assigned);
+  EXPECT_EQ(requests[3]->status_, RequestStatus::Assigned);
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+}
+
+TEST_F(EngineStepTest, ExhaustedCapacityRetryPreservesStateAndEngineHealth) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  std::vector<std::shared_ptr<Request>> requests;
+  std::vector<RequestStateSnapshot> before;
+  for (int32_t seed : {10, 20, 30, 40}) {
+    auto prompt = Prompt(seed);
+    auto request = MintRequest(*model_, prompt);
+    engine.engine->AddRequest(request);
+    requests.push_back(request);
+    before.push_back(request->Snapshot());
+  }
+  engine.executor->SetFailures({
+      ScriptedExecutionFailure::CapacityExceeded,
+      ScriptedExecutionFailure::CapacityExceeded,
+  });
 
   try {
     static_cast<void>(engine.engine->Step());
-    FAIL() << "Expected execution capacity failure.";
+    FAIL() << "Expected the smaller capacity retry to fail.";
   } catch (const EngineStepError& error) {
     EXPECT_EQ(error.Outcome().kind,
               StepOutcomeKind::ExecutionCapacityExceeded);
   }
 
-  const auto rolled_back = request->Snapshot();
-  EXPECT_EQ(rolled_back.status, before.status);
-  EXPECT_EQ(rolled_back.current_sequence_length,
-            before.current_sequence_length);
-  EXPECT_EQ(rolled_back.processed_sequence_length,
-            before.processed_sequence_length);
+  ASSERT_EQ(engine.executor->decoded_batch_sizes,
+            (std::vector<size_t>{4, 2}));
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  for (size_t i = 0; i < requests.size(); ++i) {
+    const auto after = requests[i]->Snapshot();
+    EXPECT_EQ(after.status, before[i].status);
+    EXPECT_EQ(after.current_sequence_length,
+              before[i].current_sequence_length);
+    EXPECT_EQ(after.processed_sequence_length,
+              before[i].processed_sequence_length);
+  }
   EXPECT_TRUE(engine.engine->HasPendingRequests());
 
-  auto ready = engine.engine->Step();
-  EXPECT_EQ(ready, request);
+  EXPECT_EQ(engine.engine->Step(), requests[0]);
+  EXPECT_TRUE(requests[0]->IsDone());
+}
+
+TEST_F(EngineStepTest, CapacityRetryIsUsedOnlyOnceAcrossInternalCycles) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  engine.engine->AddRequest(request);
+  engine.executor->SetFailures({
+      ScriptedExecutionFailure::CapacityExceeded,
+      ScriptedExecutionFailure::None,
+      ScriptedExecutionFailure::CapacityExceeded,
+  });
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected the later capacity failure to be surfaced.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::ExecutionCapacityExceeded);
+  }
+
+  EXPECT_EQ(engine.executor->decoded_token_counts,
+            (std::vector<size_t>{3, 1, 2}));
+  EXPECT_EQ(request->ProcessedSequenceLength(), 1);
+  EXPECT_TRUE(request->IsPrefill());
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  EXPECT_EQ(engine.engine->Step(), request);
   EXPECT_TRUE(request->IsDone());
+}
+
+TEST_F(EngineStepTest, DecodeOnlyCapacityFailureIsNotRetried) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_FALSE(request->IsPrefill());
+  const int calls_before_failure = engine.executor->decode_calls;
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected decode execution capacity failure.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::ExecutionCapacityExceeded);
+  }
+
+  EXPECT_EQ(engine.executor->decode_calls, calls_before_failure + 1);
+  EXPECT_EQ(engine.engine->Step(), request);
+}
+
+TEST_F(EngineStepTest, CapacityRetryPreservesDecodeAndDropsFinalPrefill) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto decode_prompt = Prompt(10);
+  auto decode = MintRequest(*model_, decode_prompt);
+  engine.engine->AddRequest(decode);
+  ASSERT_EQ(engine.engine->Step(), decode);
+  ASSERT_FALSE(decode->IsPrefill());
+  const size_t calls_before_failure =
+      engine.executor->decoded_batch_sizes.size();
+
+  const std::array<int32_t, 1> prefill_prompt{2};
+  auto prefill = MintRequest(*model_, prefill_prompt);
+  engine.engine->AddRequest(prefill);
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
+
+  EXPECT_EQ(engine.engine->Step(), decode);
+
+  ASSERT_EQ(engine.executor->decoded_batch_sizes.size(),
+            calls_before_failure + 2);
+  EXPECT_EQ(engine.executor->decoded_batch_sizes[calls_before_failure], 2u);
+  EXPECT_EQ(engine.executor->decoded_batch_sizes[calls_before_failure + 1], 1u);
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(),
+            calls_before_failure + 2);
+  EXPECT_EQ(engine.executor->decoded_token_counts[calls_before_failure], 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[calls_before_failure + 1],
+            1u);
+  ASSERT_EQ(
+      engine.executor->decoded_request_ids[calls_before_failure + 1].size(),
+      1u);
+  EXPECT_EQ(
+      engine.executor->decoded_request_ids[calls_before_failure + 1][0],
+      decode.get());
+  EXPECT_EQ(prefill->status_, RequestStatus::Assigned);
+}
+
+TEST_F(EngineStepTest, FailedDecodeOnlyRetryPreservesMixedBatchState) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto decode_prompt = Prompt(10);
+  auto decode = MintRequest(*model_, decode_prompt);
+  engine.engine->AddRequest(decode);
+  ASSERT_EQ(engine.engine->Step(), decode);
+  ASSERT_FALSE(decode->IsPrefill());
+
+  const std::array<int32_t, 1> prefill_prompt{2};
+  auto prefill = MintRequest(*model_, prefill_prompt);
+  engine.engine->AddRequest(prefill);
+  const auto decode_before = decode->Snapshot();
+  const auto prefill_before = prefill->Snapshot();
+  const size_t calls_before_failure =
+      engine.executor->decoded_batch_sizes.size();
+  engine.executor->SetFailures({
+      ScriptedExecutionFailure::CapacityExceeded,
+      ScriptedExecutionFailure::CapacityExceeded,
+  });
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected the decode-only retry to fail.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::ExecutionCapacityExceeded);
+  }
+
+  ASSERT_EQ(engine.executor->decoded_batch_sizes.size(),
+            calls_before_failure + 2);
+  EXPECT_EQ(engine.executor->decoded_batch_sizes[calls_before_failure], 2u);
+  EXPECT_EQ(engine.executor->decoded_batch_sizes[calls_before_failure + 1], 1u);
+  const auto decode_after = decode->Snapshot();
+  const auto prefill_after = prefill->Snapshot();
+  EXPECT_EQ(decode_after.current_sequence_length,
+            decode_before.current_sequence_length);
+  EXPECT_EQ(decode_after.processed_sequence_length,
+            decode_before.processed_sequence_length);
+  EXPECT_EQ(prefill_after.status, prefill_before.status);
+  EXPECT_EQ(prefill_after.processed_sequence_length,
+            prefill_before.processed_sequence_length);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  EXPECT_EQ(engine.engine->Step(), decode);
 }
 
 TEST_F(EngineStepTest, PostProcessingFailureRestoresSearchAndCanRetry) {

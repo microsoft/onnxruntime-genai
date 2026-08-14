@@ -121,6 +121,52 @@ TEST_F(SchedulerContractTest, DynamicPreservesRequestOrder) {
   EXPECT_EQ(plan.requests[2].request, third);
 }
 
+TEST_F(SchedulerContractTest, DynamicHonorsTemporaryPlanningLimits) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
+  auto first = MintAssignedRequest(
+      assign_target_, *model_, long_prompt);
+  auto second = MintAssignedRequest(
+      assign_target_, *model_, long_prompt);
+  scheduler.AddRequest(first);
+  scheduler.AddRequest(second);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(
+      plan, StepPlanningLimits{/*max_scheduled_tokens=*/4,
+                               /*max_prefill_requests=*/1});
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, first);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 4u);
+  EXPECT_EQ(plan.token_count, 4u);
+}
+
+TEST_F(SchedulerContractTest, TemporaryPrefillLimitKeepsLaterFittingRequest) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto blocked = Assigned(10);
+  auto fitting = Assigned(20);
+  scheduler.AddRequest(blocked);
+  scheduler.AddRequest(fitting);
+  cache->SetCapacityDeferredRequest(blocked);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(
+      plan, StepPlanningLimits{/*max_scheduled_tokens=*/2,
+                               /*max_prefill_requests=*/1});
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, fitting);
+}
+
 TEST_F(SchedulerContractTest, DynamicHonorsCapacityBackpressure) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/2);
   DynamicBatchScheduler scheduler(model_, cache);

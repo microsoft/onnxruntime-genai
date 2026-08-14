@@ -45,6 +45,10 @@ struct EngineTransactionMetrics {
   uint64_t reservation_failures{};
   uint64_t rollbacks{};
   uint64_t retryable_aborts{};
+  uint64_t capacity_retry_attempts{};
+  uint64_t capacity_retry_commits{};
+  uint64_t capacity_retry_exhausted{};
+  uint64_t capacity_no_retry_plan{};
   uint64_t post_processing_aborts{};
   uint64_t fatal_execution_failures{};
 };

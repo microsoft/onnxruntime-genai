@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -287,9 +288,14 @@ struct RecordingModelExecutor : ModelExecutor {
       for (const auto& entry : context.plan->requests)
         request_ids.push_back(entry.request_id);
       decoded_request_ids.push_back(std::move(request_ids));
+      decoded_transaction_ids.push_back(context.plan->transaction_id);
     }
     if (trace_) trace_->Record("Decode");
-    const auto failure = std::exchange(next_failure_, ScriptedExecutionFailure::None);
+    ScriptedExecutionFailure failure = ScriptedExecutionFailure::None;
+    if (!failures_.empty()) {
+      failure = failures_.front();
+      failures_.pop_front();
+    }
     if (failure == ScriptedExecutionFailure::RetryableBeforeExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable execution failure."};
@@ -312,19 +318,27 @@ struct RecordingModelExecutor : ModelExecutor {
     static_cast<void>(context);
   }
 
-  void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
+  void SetNextFailure(ScriptedExecutionFailure failure) {
+    failures_ = {failure};
+  }
+
+  void SetFailures(
+      std::initializer_list<ScriptedExecutionFailure> failures) {
+    failures_ = failures;
+  }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
   std::vector<size_t> decoded_token_counts;
   std::vector<std::vector<const void*>> decoded_request_ids;
+  std::vector<StepTransactionId> decoded_transaction_ids;
 
  private:
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   int32_t forced_token_;
   std::shared_ptr<CallTrace> trace_;
-  ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
+  std::deque<ScriptedExecutionFailure> failures_;
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those

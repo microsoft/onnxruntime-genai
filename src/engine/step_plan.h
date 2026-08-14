@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -45,6 +46,11 @@ struct StepPlanningResult {
   bool capacity_deferred{};
   const void* unserviceable_request_id{};
   StepOutcome outcome;
+};
+
+struct StepPlanningLimits {
+  std::optional<size_t> max_scheduled_tokens;  // Temporary cap for this planning attempt.
+  std::optional<size_t> max_prefill_requests;  // Decodes do not consume this row cap.
 };
 
 struct RequestStepPlan {

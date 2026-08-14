@@ -19,6 +19,45 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   return message;
 }
 
+std::optional<StepPlanningLimits> CreateCapacityRetryLimits(
+    const StepPlan& failed_plan) {
+  // Keep the token cap positive. A zero prefill cap is valid only when the failed
+  // plan has decode work that can form the complete retry plan.
+  size_t decode_token_count = 0;
+  size_t prefill_token_count = 0;
+  size_t prefill_request_count = 0;
+  for (const auto& entry : failed_plan.requests) {
+    if (entry.is_prefill) {
+      prefill_token_count += entry.unprocessed_token_count;
+      ++prefill_request_count;
+    } else {
+      decode_token_count += entry.unprocessed_token_count;
+    }
+  }
+
+  if (prefill_request_count == 0 || prefill_token_count == 0) {
+    return std::nullopt;
+  }
+
+  size_t retry_prefill_requests = prefill_request_count / 2;
+  if (retry_prefill_requests == 0 && decode_token_count == 0) {
+    retry_prefill_requests = 1;
+  }
+  const size_t retry_prefill_tokens =
+      retry_prefill_requests == 0
+          ? 0
+          : std::max<size_t>(1, prefill_token_count / 2);
+  if (retry_prefill_tokens == prefill_token_count &&
+      retry_prefill_requests == prefill_request_count) {
+    return std::nullopt;
+  }
+
+  return StepPlanningLimits{
+      decode_token_count + retry_prefill_tokens,
+      retry_prefill_requests,
+  };
+}
+
 }  // namespace
 
 Engine::Engine(std::shared_ptr<Model> model)
@@ -95,12 +134,16 @@ std::shared_ptr<Request> Engine::StepStatic() {
 }
 
 std::shared_ptr<Request> Engine::StepDynamic() {
+  bool capacity_retry_used = false;
+  bool capacity_retry_in_progress = false;
+  std::optional<StepPlanningLimits> planning_limits;
   while (scheduler_->HasPendingRequests()) {
     // A dynamic step is a transaction with six phases:
     // plan -> reserve cache -> checkpoint request state -> execute -> stage sampled tokens -> commit.
     // Nothing becomes externally visible until the final commit succeeds.
     step_plan_.transaction_id = next_transaction_id_++;
-    auto planning_result = scheduler_->PlanStep(step_plan_);
+    auto planning_result = scheduler_->PlanStep(
+        step_plan_, planning_limits.value_or(StepPlanningLimits{}));
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -210,15 +253,31 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
       rollback_transaction();
-      if (error.FailureKind() == ExecutionFailureKind::RetryableAbort ||
-          error.FailureKind() == ExecutionFailureKind::CapacityExceeded) {
+      if (error.FailureKind() == ExecutionFailureKind::CapacityExceeded) {
+        ++transaction_metrics_.retryable_aborts;
+        if (!capacity_retry_used) {
+          if (auto retry_limits = CreateCapacityRetryLimits(step_plan_)) {
+            planning_limits = *retry_limits;
+            capacity_retry_used = true;
+            capacity_retry_in_progress = true;
+            ++transaction_metrics_.capacity_retry_attempts;
+            continue;
+          }
+          ++transaction_metrics_.capacity_no_retry_plan;
+        } else {
+          ++transaction_metrics_.capacity_retry_exhausted;
+        }
+        throw EngineStepError{
+            {StepOutcomeKind::ExecutionCapacityExceeded,
+             step_plan_.transaction_id, nullptr},
+            error.what(),
+        };
+      }
+      if (error.FailureKind() == ExecutionFailureKind::RetryableAbort) {
         ++transaction_metrics_.retryable_aborts;
         throw EngineStepError{
-            {error.FailureKind() == ExecutionFailureKind::CapacityExceeded
-                 ? StepOutcomeKind::ExecutionCapacityExceeded
-                 : StepOutcomeKind::RetryableBatchAbort,
-             step_plan_.transaction_id,
-             nullptr},
+            {StepOutcomeKind::RetryableBatchAbort,
+             step_plan_.transaction_id, nullptr},
             error.what(),
         };
       }
@@ -290,6 +349,11 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     ready_requests_.swap(staged_ready_requests_);
     ready_request_index_ = 0;
     ++transaction_metrics_.committed_steps;
+    if (capacity_retry_in_progress) {
+      ++transaction_metrics_.capacity_retry_commits;
+      capacity_retry_in_progress = false;
+      planning_limits.reset();
+    }
     if (auto request = DrainReadyRequest()) {
       return request;
     }
