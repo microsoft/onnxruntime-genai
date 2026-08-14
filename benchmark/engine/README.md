@@ -6,6 +6,8 @@ and results are written to per-scenario JSON files.
 See [benchmark-design.md](docs/benchmark-design.md) for the architecture and
 [benchmark-requirements.md](docs/benchmark-requirements.md) for the metrics contract.
 
+**Note:** currently hardcoded for linux platform, tested on a100 linux-x64 vm
+
 ## Build
 
 Opt in with `--build_engine_benchmark`; it is not built by default:
