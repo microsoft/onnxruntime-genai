@@ -12,6 +12,7 @@ namespace Generators {
 namespace {
 
 ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
+  // ORT has no resource-exhaustion status code, so this is coupled to its BFC arena diagnostic.
   if (message.find("Failed to allocate memory for requested buffer") !=
       std::string_view::npos) {
     return ExecutionFailureKind::CapacityExceeded;
@@ -35,9 +36,20 @@ std::unique_ptr<ModelExecutor> ModelExecutor::Create(std::shared_ptr<Model> mode
 }
 
 DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model},
-      cache_manager_{cache_manager},
-      decoder_{CreateDecoder(model, cache_manager)} {}
+    : DecoderModelExecutor{model, cache_manager,
+                           CreateDecoder(model, cache_manager)} {}
+
+DecoderModelExecutor::DecoderModelExecutor(
+    std::shared_ptr<Model> model,
+    std::shared_ptr<CacheManager> cache_manager,
+    std::unique_ptr<Decoder> decoder)
+    : model_{std::move(model)},
+      cache_manager_{std::move(cache_manager)},
+      decoder_{std::move(decoder)} {
+  if (!decoder_) {
+    throw std::invalid_argument("DecoderModelExecutor requires a decoder.");
+  }
+}
 
 void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
                                   ExecutionContext& context) {
