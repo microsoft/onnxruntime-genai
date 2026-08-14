@@ -50,8 +50,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
       execution_context_{execution_context} {
-  // Older paged-attention models expose one row per packed token. Current models identify their
-  // already-selected per-request rows with the symbolic batch_size dimension.
+  // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
+  // dimension is treated as one row per packed token.
   const auto logits_symbolic_shape =
       model->session_info_.GetOutputSymbolicShape(model->config_->model.decoder.outputs.logits);
   logits_are_per_token_ = logits_symbolic_shape.empty() ||
@@ -273,8 +273,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
     }
   }
 
-  // [logits_rows, vocab_size], where logits_rows is batch_size for current models and num_tokens
-  // for legacy paged-attention models.
+  // The output shape is either [batch_size, vocab_size] or [num_tokens, vocab_size].
   const auto active_logits_shape = active_logits_->GetShape();
   const int64_t vocab_size = active_logits_shape[1];
   const int64_t element_size = static_cast<int64_t>(Ort::SizeOf(active_logits_->GetType()));
@@ -300,9 +299,8 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
     logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
   }
 
-  // Current models always return contiguous per-request rows. Legacy models do so on pure decode
-  // steps because every request contributes exactly one token. Convert the whole batch in one launch
-  // whenever either condition applies.
+  // Per-request logits occupy contiguous rows. Per-token logits do too on pure decode steps because
+  // every request contributes exactly one token. Convert the whole batch in one launch in either case.
   bool rows_are_contiguous = !valid_token_indices.empty();
   for (size_t i = 0; i < valid_token_indices.size() && rows_are_contiguous; ++i) {
     rows_are_contiguous = valid_token_indices[i] == i;

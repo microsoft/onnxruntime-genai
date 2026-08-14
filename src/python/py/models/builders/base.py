@@ -459,19 +459,21 @@ class Model:
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
+        self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+        self.prune_lm_head = self.extra_options.get("prune_lm_head", True)
+
+        if self.prune_lm_head and self.exclude_lm_head:
+            if "prune_lm_head" in self.extra_options:
+                print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
+            self.prune_lm_head = False
+
         if self.use_paged_attention:
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
-
-        self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
-        self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
-        self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
-
-        if self.prune_lm_head and self.exclude_lm_head:
-            print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
-            self.prune_lm_head = False
+            logits_first_dim = "batch_size" if self.prune_lm_head else "num_tokens"
+            self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -4412,10 +4414,10 @@ class Model:
         matmul_basename = f"{basename}/MatMul"
         root_input = self.layernorm_attrs["output_0"]
 
-        # Sequence dimension for shape annotations ("sequence_length" normally, 1 when pruned)
+        # Sequence dimension used for LM-head shape annotations.
         seq_dim = "sequence_length"
 
-        if self.use_paged_attention:
+        if self.use_paged_attention and self.prune_lm_head:
             # Select the final packed token from every sequence before applying the LM head:
             #
             # cumulative_sequence_lengths --> Slice[1:] --> Sub(1) --+

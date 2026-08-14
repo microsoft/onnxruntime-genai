@@ -49,8 +49,8 @@ struct VarlenGraphBuffers {
  * - Past Sequence Lengths - int32[batch_size]
  * - Attention Metadata - int32[2] (CPU), optional
  * Outputs:
- * - Logits - float16/float32[batch_size, vocab_size]. Legacy models may output
- *   float16/float32[total_num_tokens, vocab_size].
+ * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
+ *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.
  *
  * The inputs prepared by this class are compatible with models that use the
  * PagedAttention operator.

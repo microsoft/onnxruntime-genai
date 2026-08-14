@@ -366,7 +366,14 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     assert model.hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
 
 
-def test_paged_attention_uses_flat_hidden_states_output_shape():
+@pytest.mark.parametrize(
+    "extra_options, logits_first_dim",
+    [
+        ({"include_hidden_states": True}, "batch_size"),
+        ({"include_hidden_states": True, "prune_lm_head": False}, "num_tokens"),
+    ],
+)
+def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.io_dtype = ir.DataType.FLOAT16
@@ -374,7 +381,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape():
     model.vocab_size = 128
     model.num_kv_heads = 4
     model.head_size = 16
-    model.extra_options = {"include_hidden_states": True}
+    model.extra_options = extra_options
     model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
     model.output_types = {"logits": ir.DataType.FLOAT16}
     model.output_shapes = {
@@ -387,19 +394,29 @@ def test_paged_attention_uses_flat_hidden_states_output_shape():
     model.make_outputs_init()
 
     assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
-    assert model.output_shapes["logits"] == ["batch_size", model.vocab_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+    assert model.prune_lm_head is (logits_first_dim == "batch_size")
 
 
-def test_paged_attention_lm_head_selects_each_sequence_last_token(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "prune_lm_head, logits_first_dim, expected_rows",
+    [
+        (True, "batch_size", [1, 4, 5]),
+        (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
+    ],
+)
+def test_paged_attention_lm_head_pruning(
+    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
+):
     model = Model.__new__(Model)
     model.use_paged_attention = True
-    model.prune_lm_head = False
+    model.prune_lm_head = prune_lm_head
     model.io_dtype = ir.DataType.FLOAT
     model.hidden_size = 3
     model.vocab_size = 3
     model.input_names = {"cumulative_sequence_lengths": "cumulative_sequence_lengths"}
     model.output_types = {"logits": ir.DataType.FLOAT}
-    model.output_shapes = {"logits": ["num_tokens", model.vocab_size]}
+    model.output_shapes = {"logits": [logits_first_dim, model.vocab_size]}
     model.layernorm_attrs = {"output_0": "hidden_states"}
     model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
     model.values = {}
@@ -419,7 +436,7 @@ def test_paged_attention_lm_head_selects_each_sequence_last_token(monkeypatch, t
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
-        model.make_value("logits", ir.DataType.FLOAT, ["batch_size", model.vocab_size])
+        model.make_value("logits", ir.DataType.FLOAT, [logits_first_dim, model.vocab_size])
         return name
 
     monkeypatch.setattr(model, "make_matmul", make_matmul)
@@ -440,9 +457,9 @@ def test_paged_attention_lm_head_selects_each_sequence_last_token(monkeypatch, t
         },
     )
 
-    np.testing.assert_array_equal(logits, hidden_states[[1, 4, 5]])
-    assert session.get_outputs()[0].shape == ["batch_size", model.vocab_size]
-    assert model.output_shapes["logits"] == ["batch_size", model.vocab_size]
+    np.testing.assert_array_equal(logits, hidden_states[expected_rows])
+    assert session.get_outputs()[0].shape == [logits_first_dim, model.vocab_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
 
 
 @pytest.mark.parametrize(
@@ -474,7 +491,23 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
     assert extra_options["max_batch_size"] == 32
 
 
-@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head", "prune_lm_head"])
+@pytest.mark.parametrize(
+    "option_value, expected",
+    [
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_paged_attention_accepts_lm_head_pruning_option(monkeypatch, option_value, expected):
+    extra_options = {
+        "use_paged_attention": "true",
+        "prune_lm_head": option_value,
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["prune_lm_head"] is expected
+
+
+@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head"])
 def test_paged_attention_rejects_incompatible_graph_interfaces(monkeypatch, option):
     with pytest.raises(ValueError, match=option):
         _run_check_extra_options(
