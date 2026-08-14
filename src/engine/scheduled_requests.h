@@ -37,6 +37,11 @@ struct ScheduledRequests {
                     BatchedSampler* batched_sampler,
                     BatchedSamplingPlan* sampling_plan);
 
+  ScheduledRequests(const StepPlan& plan,
+                    std::shared_ptr<Model> model,
+                    BatchedSampler* batched_sampler,
+                    BatchedSamplingPlan* sampling_plan);
+
   ExecutionContext& CreateExecutionContext();
 
   std::shared_ptr<GeneratorParams> Params();

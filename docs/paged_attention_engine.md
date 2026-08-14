@@ -16,7 +16,7 @@ The main implementation is under `src/engine/`:
 | --- | --- |
 | Top-level orchestration and transaction handling | `engine.h`, `engine.cpp` |
 | Request lifecycle and per-request search state | `request.h`, `request.cpp` |
-| Batch planning and request admission | `scheduler.h`, `scheduler.cpp` |
+| Batch planning and request admission | `scheduler.h`, `scheduler.cpp`, `decode_first_scheduler_policy.*` |
 | KV-cache capacity planning and ownership | `cache_manager.h`, `cache_manager.cpp`, `paged_key_value_cache.h`, `paged_key_value_cache.cpp` |
 | Speculative cache reservation | `paged_cache_reservation.h`, `paged_cache_reservation.cpp` |
 | Packed model inputs and logits selection | `decoders/varlen_decoder_io.h`, `decoders/varlen_decoder_io.cpp` |
@@ -73,6 +73,10 @@ When `model->config_->engine.dynamic_batching` is present:
 - `SimpleDecoder` uses `VarlenDecoderIO`.
 - `Engine::Step()` calls `StepDynamic()`.
 
+Dynamic batching limits scheduled rows with `max_batch_size` and limits the total
+query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
+to 2048. Both limits are positive and independent.
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Request lifecycle
@@ -126,15 +130,21 @@ Three views of request progress are important:
 | `processed_sequence_length_` | Number of sequence tokens already represented in the committed KV cache |
 | `seen_sequence_length_` | Number of tokens already observed by the API caller |
 
-The tokens sent to the model on a step are:
+The unprocessed tokens are:
 
 ```text
 [processed_sequence_length_, CurrentSequenceLength())
 ```
 
-For a newly assigned request, `processed_sequence_length_` is zero, so the whole prompt is unprocessed and the first model run is prefill.
+The dynamic plan sends a non-empty prefix of that interval. For a newly
+assigned request, `processed_sequence_length_` is zero, so the whole prompt is
+initially unprocessed and the first model run is prefill.
 
-After prefill commits, the prompt is marked processed and the newly sampled token is appended to the search sequence. That sampled token is not in the KV cache yet, so it becomes the one unprocessed token for the next decode step.
+Partial prefill commits advance `processed_sequence_length_` by the planned
+count without sampling. When the final prefill contribution commits, the prompt
+is marked processed and the newly sampled token is appended to the search
+sequence. That sampled token is not in the KV cache yet, so it becomes the one
+unprocessed token for the next decode step.
 
 The same pattern repeats during decoding:
 
@@ -179,34 +189,47 @@ Completed requests that still own paged-cache blocks are deallocated and removed
 
 ### 2. Build the initial step plan
 
-The scheduler first adds all requests that already belong to the paged cache. These requests are expected to be `InProgress`.
+The scheduler snapshots all requests that already belong to the paged cache. These requests are expected to be `InProgress`.
 
-It then adds waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates.
+It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates.
 
-Existing cache residents are listed first because their order must agree with the committed paged-cache block-table order. New admission candidates follow in scheduler-pool order.
+The scheduler orders candidates with decodes first. Order remains stable among
+decodes and among prefills. Each candidate initially contributes one provisional
+token so cache feasibility can be decided before a large prefill consumes the
+global token budget.
 
 For each candidate, the scheduler records a `RequestStepPlan` containing:
 
 - The request identity.
 - The sequence length before the transaction.
-- The number of unprocessed tokens.
+- The provisional number of unprocessed tokens.
 - The number of cache slots required after the model run.
 - Whether the work is prefill.
 - Whether the request is newly admitted.
 
-At this point, the plan contains candidates. It has not yet been reduced to the requests that fit.
+At this point, the plan contains candidates. It has not yet been reduced to the requests that fit or expanded to the final token counts.
 
 ### 3. Plan paged-cache resources and admission
 
 `PagedKeyValueCache::PlanStepResources()` evaluates the candidate plan against:
 
 - The configured maximum batch size.
+- The provisional scheduled-row limit.
 - The number of free physical blocks.
 - Blocks already committed to active requests.
 - Additional blocks each request needs for this step.
 - The maximum block-table width supported by graph-capture buffers, when graph capture is enabled.
 
-Existing cache residents are considered before new requests. A resident may still be deferred if the current free-block budget cannot cover the growth it needs. New requests are admitted in pool order until the batch-size or block budget is exhausted.
+The planner considers candidates in the scheduler's decode-first order. It may
+skip an infeasible candidate and continue to later candidates, so a blocked
+prefill does not hide smaller work that can run. It matches residents by request
+identity rather than block-table position, and the plan may contain an ordered
+subset of residents.
+
+Scheduled rows cannot exceed `max_batch_size`. Separately, all committed
+residents, including omitted ones, count toward residency capacity. A new
+admission is allowed only when the committed resident count plus selected new
+admissions remains within `max_batch_size`.
 
 Selected entries are compacted to the beginning of the plan. Deferred entries remain unchanged in committed state:
 
@@ -223,7 +246,13 @@ If at least one request fits, the step is executable even when other requests we
 
 ### 4. Finalize the packed token layout
 
-After cache planning selects the batch, the scheduler assigns each request:
+After cache planning selects the batch, each decode keeps its one-token
+contribution. Every selected prefill also keeps its provisional token, then
+prefills expand in stable order while tokens remain. A prefill contribution is
+bounded by its remaining prompt, `search.chunk_size` when configured, and
+`max_scheduled_tokens`.
+
+The scheduler recomputes cache targets and assigns each request:
 
 - `packed_token_offset`: the first row occupied by the request in the flattened token input.
 - `logits_row_index`: the row containing logits for the request's final input token.
@@ -237,6 +266,11 @@ selected logits rows:   2        3     5
 ```
 
 Only the logits for the last input token of each request are used to sample its next token.
+
+`RequestStepPlan::unprocessed_token_count` is authoritative on the dynamic path.
+`ScheduledRequests` validates that every count is positive and no larger than
+the request's remaining tokens, then binds those counts before decoder input or
+chunk-completion logic reads the request.
 
 The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be a pure decode step where every request contributes exactly one token. Prefill and mixed prefill/decode steps have variable token counts and run eagerly.
 
@@ -428,7 +462,13 @@ The engine uses the same transaction flow for prefill and decoding.
 
 ### Prefill
 
-A newly assigned request contributes its full prompt because none of its tokens are in the KV cache. Its query length can be much larger than one.
+A prefill contributes as many pending prompt tokens as the remaining global
+budget allows, bounded by `search.chunk_size` when configured. A prompt can
+therefore span several committed steps even when `search.chunk_size` is absent.
+
+Admitting a new prefill still reserves blocks for its whole prompt. Only the
+executed contribution advances committed slots. This prevents another request
+from taking the capacity needed to finish an admitted partial prefill.
 
 ### Decode
 
@@ -439,8 +479,6 @@ An in-progress request normally contributes one token: the token sampled by its 
 The scheduler can place prefill and decode requests in the same model invocation if cache and batch capacity allow it. `VarlenDecoderIO` packs their different query lengths without padding.
 
 Mixed batches are not eligible for the pure-decode CUDA graph path, but they remain valid eager executions.
-
-The current planner does not split one request's prefill across several engine steps. The request's complete unprocessed prompt must fit the cache resources selected for that step.
 
 ## Batched sampling
 
@@ -476,16 +514,18 @@ Continuous batching does not mean every pending request runs on every step.
 Backpressure can come from:
 
 - Maximum batch size.
+- Maximum scheduled tokens.
 - Free paged-cache blocks.
 - Per-request block growth.
 - Graph-capture block-table width limits.
 
-The current ordering policy is simple:
+The current ordering policy is:
 
-1. Consider existing cache residents first, in committed block-table order.
-2. Consider newly assigned requests afterward, in scheduler-pool order.
+1. Consider decodes first, preserving their resident order.
+2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
+3. Give every feasible selected row one token before expanding selected prefills in stable order.
 
-Requests skipped because of temporary capacity remain pending for a later step. This policy favors preserving progress for admitted requests and avoids giving new requests blocks needed by current cache residents.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Phase 1 does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
 
 If no request can run because of temporary capacity, `StepDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 

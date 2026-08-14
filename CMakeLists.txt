@@ -330,13 +330,14 @@ if(USE_DML)
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
+  find_program(NUGET_PATH NAMES nuget nuget.exe REQUIRED)
   set(NUGET_RESTORE_COMMAND
-    ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore
-    ${PACKAGES_CONFIG}
-    -PackagesDirectory ${PACKAGES_DIR}
+    "${NUGET_PATH}" restore
+    "${PACKAGES_CONFIG}"
+    -PackagesDirectory "${PACKAGES_DIR}"
   )
   if(NUGET_PACKAGE_SOURCE)
-    list(APPEND NUGET_RESTORE_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+    list(APPEND NUGET_RESTORE_COMMAND -Source "${NUGET_PACKAGE_SOURCE}")
   endif()
 
   add_custom_command(
@@ -354,7 +355,6 @@ if(USE_DML)
     ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
   )
 
-  add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(${ORTGENAI_COMPILE_TARGET} RESTORE_PACKAGES)
 endif()
 

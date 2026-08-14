@@ -126,9 +126,10 @@ jobs:
         run: |
           # ONNX Runtime comes from the ORT-Nightly ADO feed. Passing EPDir is the single switch that
           # turns on the EP-plugin registration code path; the tests enumerate and register every EP
-          # plugin in that directory (the one the pipeline downloaded them to).
+          # plugin in that directory (the one the pipeline downloaded them to). The matching ORT
+          # package is already in the global NuGet cache, so keep its feed out of dependency restore.
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:EPDir="$env:GITHUB_WORKSPACE\ort\ep" /p:RestoreSources="https://api.nuget.org/v3/index.json" --verbosity normal
 
       - name: Verify Build Artifacts
         if: always()

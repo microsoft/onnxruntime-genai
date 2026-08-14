@@ -13,6 +13,7 @@
 #include "../openvino/session_options.h"
 #include "../qnn/session_options.h"
 #include "../ryzenai/session_options.h"
+#include "../amdgpu/session_options.h"
 #include "../vitisai/session_options.h"
 #include "../webgpu/session_options.h"
 
@@ -164,6 +165,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"AMDGPU", AMDGPUExecutionProvider::AppendExecutionProvider},
       {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},
