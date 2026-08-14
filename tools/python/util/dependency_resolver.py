@@ -165,14 +165,17 @@ def copy_dependencies(lib_dir: PathLike, destination_dir: PathLike):
         shutil.copy(Path(lib_dir) / file_name, destination_dir)
 
 
-_ORT_NIGHTLY_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7"
-_CUDA_PLUGIN_EP_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/9387c3aa-d9ad-4513-968c-383f6f7f53b8"
+# ADO Feed: aiinfra / PublicPackages / ORT-Nightly
+_ORT_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7"
 _ORT_VERSION = "1.29.0"
+
+# ADO Feed: aiinfra / PublicPackages / onnxruntime-cuda-12
+_CUDA_PLUGIN_EP_FEED_URL = "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/9387c3aa-d9ad-4513-968c-383f6f7f53b8"
 _CUDA_PLUGIN_EP_VERSION = "0.1.0"
 
 _ENGINE_BENCHMARK_PACKAGES = {
     "Microsoft.ML.OnnxRuntime": (
-        f"{_ORT_NIGHTLY_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime"
+        f"{_ORT_FEED_URL}/nuget/packages/Microsoft.ML.OnnxRuntime"
         f"/versions/{_ORT_VERSION}/content?api-version=6.0-preview.1"
     ),
     "Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64": (
@@ -190,7 +193,7 @@ def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_
 
     _log.info(f"Downloading {package_name} from {package_url}")
     response = requests.get(package_url)
-    response.raise_for_status()
+    response.raise_for_status() # raises a 4xx or 5xx (client/server error) if encountered
     package_path = destination_dir / f"{package_name}.zip"
     with open(package_path, "wb") as f:
         f.write(response.content)
@@ -202,7 +205,7 @@ def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_
 def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir: PathLike) -> Path:
     """
     Populate the engine_benchmark output directory with the shared libraries it loads at runtime:
-    the ONNX Runtime linux-x64 libraries and CUDA execution provider plugin from the ORT-Nightly
+    the **linux-x64** ONNX Runtime and CUDA execution provider plugin libraries from the ORT-Nightly
     feed, plus the locally built onnxruntime-genai libraries.
     """
     genai_lib_dir = Path(genai_lib_dir)
