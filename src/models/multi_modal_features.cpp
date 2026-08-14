@@ -14,18 +14,7 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
                 : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
-  const auto dims = mode_ == MultiModalFeatures::Mode::Input
-                        ? model_.session_info_.GetInputSymbolicShape(name).size()
-                        : model_.session_info_.GetOutputSymbolicShape(name).size();
-
-  // If the model expects 3 dimensions, add a batch dimension
-  // batch_size <= 0 signals "skip batch dim even if model has 3D output"
-  if (dims == 3 && batch_size > 0) {
-    shape_.push_back(batch_size);
-  }
-
-  shape_.push_back(num_feature_tokens);
-  shape_.push_back(model_.config_->model.decoder.hidden_size);
+  SetShape(batch_size, num_feature_tokens);
 
   // There are four cases for MultiModalFeatures:
   // 1) Created as an output for vision or speech model (num_feature_tokens > 0)
@@ -40,6 +29,38 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   //    The tensor does not need to be pre-allocated because it will be created during (2).
   if (mode == MultiModalFeatures::Mode::Output) {
     features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+  }
+}
+
+void MultiModalFeatures::SetShape(int64_t batch_size, int64_t num_feature_tokens) {
+  const auto dims = mode_ == MultiModalFeatures::Mode::Input
+                        ? model_.session_info_.GetInputSymbolicShape(name_).size()
+                        : model_.session_info_.GetOutputSymbolicShape(name_).size();
+
+  shape_.clear();
+  // If the model expects 3 dimensions, add a batch dimension
+  // batch_size <= 0 signals "skip batch dim even if model has 3D output"
+  if (dims == 3 && batch_size > 0) {
+    shape_.push_back(batch_size);
+  }
+
+  shape_.push_back(num_feature_tokens);
+  shape_.push_back(model_.config_->model.decoder.hidden_size);
+}
+
+void MultiModalFeatures::Reset(int64_t batch_size, int64_t num_feature_tokens) {
+  SetShape(batch_size, num_feature_tokens);
+
+  if (mode_ == MultiModalFeatures::Mode::Output) {
+    features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+    if (index_ != ~0U) {
+      state_.outputs_[index_] = features_.get();
+    }
+  } else {
+    features_.reset();
+    if (index_ != ~0U) {
+      state_.inputs_[index_] = nullptr;
+    }
   }
 }
 

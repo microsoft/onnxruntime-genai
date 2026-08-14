@@ -151,6 +151,7 @@ struct EmbeddingState : State {
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   void SetExtraInputs(const int64_t num_images_, const int64_t num_image_tokens_, const int64_t num_audio_tokens_);
+  void ResetImageInputs(const int64_t num_images, const int64_t num_image_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {});
 
  private:
@@ -202,6 +203,7 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void SetExtraInputsForAppend(const std::vector<ExtraInput>& extra_inputs, int64_t current_length) override;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
@@ -224,6 +226,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<DecoderState> decoder_state_;
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  bool pending_multimodal_append_{false};
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};
