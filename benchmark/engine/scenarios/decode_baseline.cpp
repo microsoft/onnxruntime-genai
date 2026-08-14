@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -28,7 +29,16 @@ bool IsAllowedConcurrency(int concurrency) {
 }
 
 std::string ResolveModelPath(const std::string& model_path) {
-  fs::path path = fs::absolute(model_path);
+  std::string expanded_path = model_path;
+  if (expanded_path == "~" || expanded_path.rfind("~/", 0) == 0) {
+    const char* home = std::getenv("HOME");
+    if (home == nullptr) {
+      throw std::invalid_argument("Cannot expand '~' in model_path: HOME environment variable is not set");
+    }
+    expanded_path = std::string(home) + expanded_path.substr(1);
+  }
+
+  fs::path path = fs::absolute(expanded_path);
   if (!fs::exists(path)) {
     throw std::invalid_argument("model_path does not exist: " + model_path);
   }
