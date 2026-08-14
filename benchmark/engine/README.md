@@ -8,6 +8,27 @@ See [benchmark-design.md](docs/benchmark-design.md) for the architecture and
 
 **Note:** currently hardcoded for linux platform, tested on a100 linux-x64 vm
 
+## Environment setup
+
+Create and activate a Conda environment, then install the Python dependencies used by the
+ONNX Runtime GenAI build and the `patchelf` utility required to rewrite the staged libraries'
+RPATH:
+
+```bash
+conda create -n engine-benchmark-venv python=3.11 -y
+conda activate engine-benchmark-venv
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+python -m pip install patchelf
+
+python --version
+patchelf --version
+```
+
+Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
+compiler must also be installed separately for a CUDA build.
+
 ## Build
 
 Opt in with `--build_engine_benchmark`; it is not built by default:
