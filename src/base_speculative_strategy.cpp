@@ -61,7 +61,7 @@ BaseSpeculativeStrategy::BaseSpeculativeStrategy(Generator& g)
 // (BaseSpeculativeStrategy shares the helpers in sampling_distribution.h), so the draft approximates the
 // penalized target: acceptance stays high and self-speculative greedy stays exact.
 SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
-  Generator& g, int K, int seed_length, std::mt19937& round_rng) {
+    Generator& g, int K, int seed_length, std::mt19937& round_rng) {
   if (!spec_state_.draft_pending_valid())
     throw std::runtime_error(
         "BaseSpeculativeStrategy::Propose: draft pending logits not initialized. "
@@ -128,9 +128,9 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         draft_grammar->ProcessLogits(guidance_buf);
         auto masked = guidance_buf.CopyDeviceToCpu();
         SampleWithRoundRng(
-          {masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
-          search.top_k, search.top_p, search.temperature, vocab_size,
-          sampled, round_rng, proposal);
+            {masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
+            search.top_k, search.top_p, search.temperature, vocab_size,
+            sampled, round_rng, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
           CommitGuidanceProposalToken(*draft_grammar, chosen, ff_queue);
@@ -151,7 +151,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   }
 
   // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
-    SampleWithRoundRng(
+  SampleWithRoundRng(
       penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix), 0,
       greedy, search.top_k, search.top_p, search.temperature, vocab_size,
       sampled, round_rng, proposal);
@@ -166,8 +166,8 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     SampleWithRoundRng(
         penalty_processor.Apply(
             {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
-      i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
-      sampled, round_rng, proposal);
+        i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+        sampled, round_rng, proposal);
   }
 
   return proposal;

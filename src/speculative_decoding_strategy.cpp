@@ -1080,7 +1080,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       if (!target_uses_greedy) {
         // Forced tokens consume no random draw, so they keep the current round RNG state.
         AppendGuidanceSamplingOutput(
-          committed, sampling_rng_states, f, round_rng);
+            committed, sampling_rng_states, f, round_rng);
       } else {
         committed.push_back(f);
       }
