@@ -98,6 +98,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   memory.Start();
 
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
+  oga_config->ClearProviders();
+  oga_config->AppendProvider(config.execution_provider.c_str());
   auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto engine = OgaEngine::Create(*model);
