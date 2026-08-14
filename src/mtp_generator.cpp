@@ -16,9 +16,6 @@
 namespace Generators {
 
 namespace {
-// The MTP head's own post-final-norm hidden, fed back to chain drafts when N > 1.
-constexpr const char* kHeadHiddenStatesOut = "hidden_states_out";
-
 // Greedy argmax over a contiguous vocab row of fp32 logits on the CPU.
 int32_t ArgmaxRow(const float* row, int vocab_size) {
   int32_t best = 0;
@@ -52,8 +49,13 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   if (main_model_.config_->model.decoder.hidden_size != mtp_model_.config_->model.decoder.hidden_size) {
     throw std::runtime_error("MtpGenerator requires matching main-model and MTP-head hidden sizes");
   }
+  const std::string& main_hidden_states = main_model_.config_->model.mtp.main_hidden_states;
+  if (main_hidden_states.empty() || !main_model_.session_info_.HasOutput(main_hidden_states)) {
+    throw std::runtime_error(
+        "MtpGenerator: model.mtp.main_hidden_states must name a main-model output");
+  }
   const auto main_hidden_type = main_model_.session_info_.GetOutputDataType(
-      main_model_.config_->model.decoder.outputs.hidden_states);
+      main_hidden_states);
   const auto mtp_hidden_type = mtp_model_.session_info_.GetInputDataType(
       mtp_model_.config_->model.decoder.inputs.hidden_states);
   if (main_hidden_type != mtp_hidden_type) {
@@ -65,8 +67,13 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // AutoRegressiveSpeculator does. Chaining needs the head to emit that hidden, so a head exported
   // without `mtp_emit_hidden=true` can only run N=1.
   num_speculative_tokens_ = std::max(1, params.speculative.max_draft_tokens);
-  if (num_speculative_tokens_ > 1 && !mtp_model_.session_info_.HasOutput(kHeadHiddenStatesOut)) {
-    num_speculative_tokens_ = 1;
+  const std::string& head_hidden_states = main_model_.config_->model.mtp.outputs.hidden_states;
+  if (num_speculative_tokens_ > 1 &&
+      (head_hidden_states.empty() || !mtp_model_.session_info_.HasOutput(head_hidden_states))) {
+    throw std::runtime_error(
+        "MtpGenerator: max_draft_tokens=" + std::to_string(num_speculative_tokens_) +
+        " requires the configured MTP feedback output '" + head_hidden_states +
+        "' (model.mtp.outputs.hidden_states)");
   }
   // Chained greedy drafts stay on device between head forwards on CUDA, avoiding a
   // device->host sync per draft. Other devices fall back to the host path.
@@ -145,7 +152,7 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // Reusable [1, 1, hidden] device buffer for the on-device hidden-state handoff.
   hidden_slice_ = std::make_shared<Tensor>(
       main_model_.p_device_inputs_,
-      main_model_.session_info_.GetOutputDataType(main_model_.config_->model.decoder.outputs.hidden_states));
+      main_model_.session_info_.GetOutputDataType(main_model_.config_->model.mtp.main_hidden_states));
   const std::array<int64_t, 3> slice_shape{1, 1, hidden_size_};
   hidden_slice_->CreateTensor(slice_shape);
 
@@ -153,7 +160,7 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // fused with the next step's draft into one MTP forward).
   hidden_slice2_ = std::make_shared<Tensor>(
       main_model_.p_device_inputs_,
-      main_model_.session_info_.GetOutputDataType(main_model_.config_->model.decoder.outputs.hidden_states));
+      main_model_.session_info_.GetOutputDataType(main_model_.config_->model.mtp.main_hidden_states));
   const std::array<int64_t, 3> slice2_shape{1, 2, hidden_size_};
   hidden_slice2_->CreateTensor(slice2_shape);
 
@@ -272,11 +279,14 @@ void MtpGenerator::DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<i
 void MtpGenerator::CaptureHeadFeedbackHidden() {
   // Capture the head's own post-final-norm output (hidden_states_out, the single processed row)
   // into head_out_hidden_ for the next chained draft step.
-  OrtValue* head_hidden = mtp_->state_->GetOutput(kHeadHiddenStatesOut);
+  const std::string& head_hidden_states = main_model_.config_->model.mtp.outputs.hidden_states;
+  OrtValue* head_hidden = mtp_->state_->GetOutput(head_hidden_states.c_str());
   if (head_hidden == nullptr) {
     throw std::runtime_error(
         "MtpGenerator: multi-token speculation requires the MTP head exported with "
-        "mtp_emit_hidden=true (missing 'hidden_states_out' output).");
+        "mtp_emit_hidden=true (missing configured output '" +
+        head_hidden_states +
+        "').");
   }
   const size_t row_bytes = head_out_hidden_->GetByteSpan().size();
   // The head may have processed several tokens in one forward (the fused refeed+draft step), in
@@ -553,8 +563,13 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   length_ = input_ids.size();
   sequence_.assign(input_ids.begin(), input_ids.end());
   emitted_sequence_ = sequence_;
+  if (sequence_.size() >= static_cast<size_t>(max_length_)) {
+    done_ = true;
+    primed_ = true;
+    return;
+  }
 
-  OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
+  OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
   const int last = static_cast<int>(tail) - 1;
   ExtractHiddenPosition(hidden, last);  // h for the token we are about to predict
   if (sampling_) {
@@ -665,7 +680,7 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
       done_ = true;
       return;
     }
-    OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
+    OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
     // Next token to commit is argmax(logits@L+1) (harvested above).
     next_token_ = verify_argmax[1];
     // Fuse the post-accept KV-advance (hidden@L, d) and the next step's draft (hidden@L+1,
@@ -682,7 +697,7 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
     main_->AppendTokens(cpu_span<const int32_t>(rerun));
     stats_.target_forward_passes++;
     stats_.correction_tokens++;
-    OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.hidden_states.c_str());
+    OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
     ArgmaxMainRows(0, 1, &next_token_);
     ExtractHiddenPosition(hidden, 0);
     length_ += 1;
@@ -694,7 +709,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   stats_.rounds++;
   stats_.completed_rounds++;
   stats_.draft_tokens_proposed += static_cast<size_t>(N);
-  const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
+  const std::string& hs_name = main_model_.config_->model.mtp.main_hidden_states;
 
   // --- Draft phase: chain the single MTP module N times. ---
   // Step 0 feeds the main model's hidden (hidden_slice_ holds h paired with t) and appends the
@@ -763,12 +778,10 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     Flash attention), so a greedy argmax can occasionally differ on near-ties. This is the same
   //     tradeoff the N=1 verify already makes; the reject path below re-runs decode-consistently to
   //     bound divergence from plain greedy. ---
-  // SnapshotState() copies every linear-attention layer's conv+recurrent state (2*num_layers D2D
-  // copies + launches) on EVERY step. It is only needed by the RewindToLength fallback below. On a
-  // croppable (windowed-state) model that fallback is unreachable (a==N takes the bonus branch,
-  // a<N takes the crop branch), so the snapshot is dead overhead -- skip it.
-  const bool crop_commit = main_->CanCropRecurrentState();
-  if (!crop_commit) main_->SnapshotState();
+  // Snapshot the recurrent state so a rejected wide verify can replay the committed prefix with
+  // decode-consistent numerics. The snapshot is also needed when no draft is accepted, where there
+  // is no committed recurrent-state window slot to crop to.
+  main_->SnapshotState();
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
@@ -825,16 +838,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     next_token_ = verify_argmax_[a];
     CopyHiddenRow(vhidden, a, *hidden_slice_);
     length_ += static_cast<size_t>(N) + 1;
-  } else if (crop_commit) {
-    // Partial accept, DIRECT ARENA COMMIT: the batched verify already advanced the KV and the
-    // per-position recurrent arena through every verify token, so crop both to the accepted length
-    // and take the bonus from verify row a. No replay forward at all (the reject path is ~30% of
-    // step time otherwise). Row a's argmax is an early row of a wide forward, so it is not
-    // bit-identical to a sequential decode on near-ties; see EXP-023.
-    main_->CropToAccepted(length_ + static_cast<size_t>(a) + 1, static_cast<size_t>(a));
-    next_token_ = verify_argmax_[a];
-    CopyHiddenRow(vhidden, a, *hidden_slice_);
-    length_ += static_cast<size_t>(a) + 1;
   } else if (main_->CanCropRecurrentState() && a >= 1) {
     // Partial accept (a>=1), LOSSLESS CROP fast-path (model exported with recurrent_state_window).
     // The batched verify's row a is an EARLY row of a wide (M=N+1) forward, whose argmax is NOT
@@ -874,7 +877,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
 
   // Row a of the fused refeed buffer pairs with next_token_ (committed at the top of the next
   // step). Its hidden is whatever finalize produced in hidden_slice_ -- verify row a on the
-  // all-accept / direct-arena-commit paths, or the replay forward's row on the fallback paths.
+  // all-accept path or the replay forward's row on the partial-accept paths.
   if (pending_refeed_count_ > 0) {
     Tensor& hbuf = *refeed_multi_[pending_refeed_count_ + 1];
     const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
@@ -889,7 +892,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   stats_.rounds++;
   stats_.completed_rounds++;
   stats_.draft_tokens_proposed += static_cast<size_t>(N);
-  const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
+  const std::string& hs_name = main_model_.config_->model.mtp.main_hidden_states;
 
   // --- Draft phase: chain the single MTP module N times, SAMPLING each draft d_k from its
   //     truncated distribution q_k (top_k/top_p/temperature) and recording q_k for the accept test.

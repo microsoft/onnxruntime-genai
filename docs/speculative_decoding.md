@@ -179,7 +179,8 @@ builder's benefit, an `mtp` block):
       "num_hidden_layers": 1,
       "num_key_value_heads": 16,
       "head_size": 256,
-      "main_hidden_states": "hidden_states"
+      "main_hidden_states": "hidden_states",
+      "outputs": { "hidden_states": "hidden_states_out" }
     }
   }
 }
@@ -241,7 +242,6 @@ finalize branches runs:
 | Branch | Condition | Cost |
 |---|---|---|
 | All accepted | `a == N` | No extra forward; bonus is verify row `N` |
-| Direct arena commit | `a < N` and windowed recurrent state | `CropToAccepted` only; bonus is verify row `a` |
 | Lossless crop + `M=1` replay | `a >= 1` and windowed recurrent state | Crop to `L+a`, replay the last committed token (1-wide, decode-consistent bonus) |
 | Snapshot rewind + replay | otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
 
@@ -305,9 +305,8 @@ absorbed every token of the forward. `RecurrentState`
 
 `Generator` exposes this as `SnapshotState()`, `CanCropRecurrentState()` and
 `CropToAccepted(new_length, recurrent_position)`
-([src/generators.h](../src/generators.h)). When the crop path is available, `MtpGenerator` skips
-the per-step snapshot entirely — the predicate exactly matches the set of finalize branches that
-can reach `RewindToLength`.
+([src/generators.h](../src/generators.h)). `MtpGenerator` snapshots before each wide greedy verify
+so a partial rejection can always replay the committed prefix with decode-consistent numerics.
 
 `RecurrentState::GraphCaptureVariant()` feeds the graph-capture annotation id so a double-buffered
 recurrent state never replays a graph bound to the other buffer.
@@ -433,12 +432,12 @@ draft-model speculative path uses.
 
 | Parameter | Set with | Default | Effect |
 |---|---|---|---|
-| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. Clamped to `1` for a head exported without `mtp_emit_hidden=true`, which cannot feed its hidden back, and to `recurrent_state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide |
+| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. For `N > 1`, `model.mtp.outputs.hidden_states` must name the feedback output exported with `mtp_emit_hidden=true`. `N` is capped at `recurrent_state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide. |
 | `search.chunk_size` | `SetSearchNumber("chunk_size", n)` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
 
-On a windowed-state model (`recurrent_state_window > 1`) a partial accept is always committed by
-cropping the KV cache and the state window instead of replaying the accepted prefix, which also
-makes the per-step recurrent snapshot unnecessary.
+On a windowed-state model (`recurrent_state_window > 1`) with at least one accepted draft, the
+greedy path crops to the last accepted state and replays only that token with an `M=1` forward.
+When no draft is accepted, it restores the snapshot and replays the committed token.
 
 ---
 

@@ -445,13 +445,11 @@ struct Config {
 
     } decoder;
 
-    // Multi-token-prediction (MTP) self-speculative head (e.g. Qwen3.6). Optional:
-    // when ``filename`` is empty the model has no MTP head and runs plain autoregressive
-    // decode. The head is a single extra decoder layer that, given the main model's last
-    // hidden state and the just-emitted token, predicts the next-next token used to draft
-    // a speculative token (verify-and-accept against the main model).
+    // Multi-token-prediction (MTP) self-speculative head metadata (e.g. Qwen3.6). The caller
+    // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
+    // hidden-state output and the head's feedback output.
     struct Mtp {
-      std::string filename;  // e.g. "mtp.onnx"; empty => no MTP head
+      std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
 
@@ -474,6 +472,7 @@ struct Config {
 
       struct Outputs {
         std::string logits{Defaults::LogitsName};
+        std::string hidden_states{"hidden_states_out"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
       } outputs;

@@ -193,7 +193,7 @@ void RecurrentState::CropToPosition(size_t position) {
   const size_t slot = static_cast<size_t>(signed_slot);
   if (slot + 1 == static_cast<size_t>(state_window_)) return;  // Already the committed slot.
 
-  auto& device = *model_.p_device_;
+  auto& device = *model_.p_device_kvcache_;
   // Fast path: one kernel for all 2*num_layers tensors. The per-tensor loop below issues one
   // cudaMemcpyAsync each, and at 30 layers that is 60 host-side driver calls on a step that is
   // already GPU-idle-bound.
@@ -208,7 +208,7 @@ void RecurrentState::CropToPosition(size_t position) {
 }
 
 bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
-  auto& device = *model_.p_device_;
+  auto& device = *model_.p_device_kvcache_;
 
   // The state buffers are stable across steps when inputs alias outputs (which graph capture
   // requires), but re-derive the descriptors and compare so a reallocation cannot go unnoticed.

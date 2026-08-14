@@ -719,6 +719,8 @@ struct MtpOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
       v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_names") {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {

@@ -116,7 +116,8 @@ The builder adds an `mtp` section alongside `decoder`, and exposes the decoder's
         "past_key_names": "past_key_values.%d.key",
         "past_value_names": "past_key_values.%d.value"
       },
-      "outputs": { "logits": "logits", "present_key_names": "present.%d.key",
+      "outputs": { "logits": "logits", "hidden_states": "hidden_states_out",
+           "present_key_names": "present.%d.key",
                    "present_value_names": "present.%d.value" }
     }
   }
