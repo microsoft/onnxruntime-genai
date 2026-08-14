@@ -153,13 +153,9 @@ struct MtpGenerator {
   // >1 chains the single MTP module N times (Qwen3.6 / vLLM-style). Read from the
   // ORT_MTP_NUM_SPECULATIVE_TOKENS env var at construction (default 1).
   int num_speculative_tokens_{1};
-  // Keep chained greedy drafts on device between CUDA head forwards. The override is retained for
-  // controlled performance comparisons; other devices use the existing host-token path by default.
+  // Keep chained greedy drafts on device between CUDA head forwards; other devices use the
+  // existing host-token path.
   bool device_draft_chain_{false};
-  bool validate_device_draft_chain_{false};
-  // ORT_MTP_LOG_TOP2_MARGINS: log the top-1/top-2 margin of every verify row. Read once at
-  // construction -- ArgmaxMainRows runs on the per-step hot path.
-  bool log_top2_margins_{false};
   // ORT_MTP_DIRECT_ARENA_COMMIT: on a model exported with recurrent_state_window > 1, commit a
   // partial accept by cropping the KV cache and the recurrent state window to the accepted length
   // and taking the bonus from the verify forward, instead of replaying the accepted prefix. Also

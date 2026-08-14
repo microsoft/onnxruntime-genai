@@ -125,13 +125,8 @@ RecurrentState::RecurrentState(State& state)
   // produces a small but systematic per-step logit bias on replay that derails greedy
   // decoding (observed MMLU-Pro collapse ~85% -> ~21% with graph on). Double-buffering
   // (distinct past/present with a per-step swap and two captured graph variants) is proven
-  // bit-faithful to eager, so make it the default whenever graph capture is enabled.
-  // ORT_MTP_DOUBLE_BUFFER_RECURRENT_GRAPH forces the behavior on ("1") or off ("0").
-  const std::string double_buffer_env = GetEnv("ORT_MTP_DOUBLE_BUFFER_RECURRENT_GRAPH");
-  const bool double_buffer_default_on = state_.params_->use_graph_capture;
-  const bool double_buffer_requested =
-      double_buffer_env == "1" || (double_buffer_env != "0" && double_buffer_default_on);
-  graph_double_buffer_ = !is_webgpu && double_buffer_requested;
+  // bit-faithful to eager, so it is always used when graph capture is enabled.
+  graph_double_buffer_ = !is_webgpu && state_.params_->use_graph_capture;
   share_buffers_ = !is_webgpu && !graph_double_buffer_;
 
   if (!share_buffers_) {

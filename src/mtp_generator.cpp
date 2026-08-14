@@ -11,8 +11,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#include <chrono>
-#include <cstdio>
 #include <random>
 
 namespace Generators {
@@ -31,47 +29,6 @@ int32_t ArgmaxRow(const float* row, int vocab_size) {
   return best;
 }
 
-// Env-gated (ORT_MTP_PROFILE_HOST=1) per-phase host-wall accumulator for the multi-sample step.
-// Attributes each N>1 sampling step's wall time to draft / verify+topk / accept+refeed / finalize
-// (bonus or reject re-run). The phases already synchronize (TopKScores syncs), so wall time per
-// phase captures GPU+host of that phase -- pinpointing whether the ~90% GPU-idle decode is launch-
-// or sync-bound. Zero overhead when the env var is unset.
-struct HostPhaseProfiler {
-  bool on = false;
-  double draft = 0, verify = 0, accept = 0, finalize = 0, argmax = 0;
-  long steps = 0;
-  long main_fwds = 0, head_fwds = 0, tokens = 0;
-  using clk = std::chrono::steady_clock;
-  HostPhaseProfiler() {
-    const char* e = std::getenv("ORT_MTP_PROFILE_HOST");
-    on = e && std::atoi(e) != 0;
-  }
-  static clk::time_point now() { return clk::now(); }
-  static double ms(clk::time_point a, clk::time_point b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
-  }
-  // Phase boundaries only line up with GPU work if the stream is drained; several phases
-  // (head refeed, the accept-all bonus copy) issue async work that would otherwise be billed to
-  // whichever later phase happens to synchronize. Only used when the env var is set.
-  static void sync(DeviceInterface& dev) { dev.Synchronize(); }
-  void report() {
-    if (steps == 0) return;
-    const double tot = draft + verify + accept + finalize;
-    std::fprintf(stderr,
-                 "[MTP host/step last %ld steps] total=%.3fms  draft=%.3f(%.0f%%)  verify+argmax=%.3f(%.0f%%)  "
-                 "[of which argmax=%.3f]  refeed=%.3f(%.0f%%)  finalize=%.3f(%.0f%%)  | tokens/step=%.2f "
-                 "main_fwd/step=%.2f head_fwd/step=%.2f  ms/token=%.3f\n",
-                 steps, tot / steps, draft / steps, 100 * draft / tot, verify / steps, 100 * verify / tot,
-                 argmax / steps, accept / steps, 100 * accept / tot, finalize / steps, 100 * finalize / tot,
-                 static_cast<double>(tokens) / steps, static_cast<double>(main_fwds) / steps,
-                 static_cast<double>(head_fwds) / steps, tokens > 0 ? tot / tokens : 0.0);
-    // Reset so each report reflects only the most recent window (excludes one-time warmup/MoE-profiler).
-    draft = verify = accept = finalize = argmax = 0;
-    steps = 0;
-    main_fwds = head_fwds = tokens = 0;
-  }
-};
-HostPhaseProfiler g_host_prof;
 }  // namespace
 
 MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, const GeneratorParams& params)
@@ -108,13 +65,9 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     const int v = std::atoi(env);
     if (v >= 1) num_speculative_tokens_ = v;
   }
-  const bool cuda_device_draft_chain = mtp_model_.p_device_->GetType() == DeviceType::CUDA;
-  device_draft_chain_ = cuda_device_draft_chain;
-  if (const char* env = std::getenv("ORT_MTP_DEVICE_DRAFT_CHAIN")) {
-    device_draft_chain_ = cuda_device_draft_chain && std::atoi(env) != 0;
-  }
-  validate_device_draft_chain_ = std::getenv("ORT_MTP_VALIDATE_DEVICE_DRAFT_CHAIN") != nullptr;
-  log_top2_margins_ = std::getenv("ORT_MTP_LOG_TOP2_MARGINS") != nullptr;
+  // Chained greedy drafts stay on device between head forwards on CUDA, avoiding a
+  // device->host sync per draft. Other devices fall back to the host path.
+  device_draft_chain_ = mtp_model_.p_device_->GetType() == DeviceType::CUDA;
   // Opt-in: commit a partial accept straight out of the verify forward's windowed recurrent state
   // instead of replaying the accepted prefix. Requires a model exported with
   // recurrent_state_window > 1. Read once -- the greedy step consults it on the
@@ -279,15 +232,6 @@ void MtpGenerator::CaptureDraftToDevice(DeviceSpan<int32_t> draft) {
   auto logits_span = mtp_->GetLogits();  // fp32, last token, [1, V]
   if (mtp_model_.p_device_->ArgMaxDevice(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
                                          vocab_size_, draft)) {
-    if (validate_device_draft_chain_) {
-      const int32_t device_draft = draft.CopyDeviceToCpu()[0];
-      int32_t host_draft = 0;
-      if (!mtp_model_.p_device_->ArgMax(logits_span.Span().data(), Ort::TypeToTensorType<float>, 1,
-                                        vocab_size_, &host_draft) ||
-          device_draft != host_draft) {
-        throw std::runtime_error("MtpGenerator: device and host draft argmax differ");
-      }
-    }
     return;
   }
 
@@ -505,23 +449,6 @@ void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
       out[r] = ArgmaxRow(processed.data(), vocab_size_);
     }
     return;
-  }
-
-  if (log_top2_margins_) {
-    std::vector<int32_t> top2_tokens(static_cast<size_t>(num_rows) * 2);
-    std::vector<float> top2_scores(static_cast<size_t>(num_rows) * 2);
-    const uint8_t* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
-    const void* rows = base + static_cast<size_t>(first_row) * vocab_size_ * Ort::SizeOf(type);
-    if (main_model_.p_device_->Top2(rows, type, num_rows, vocab_size_, top2_tokens.data(), top2_scores.data())) {
-      for (int row = 0; row < num_rows; ++row) {
-        std::cout << "MTP_TOP2 row=" << first_row + row
-                  << " top1=" << top2_tokens[row * 2]
-                  << " top2=" << top2_tokens[row * 2 + 1]
-                  << " margin=" << top2_scores[row * 2] - top2_scores[row * 2 + 1] << std::endl;
-        out[row] = top2_tokens[row * 2];
-      }
-      return;
-    }
   }
 
   // The CUDA distributed-select Top-K implementation is batch-1 only. The N=1 MTP verify uses
@@ -764,8 +691,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   stats_.completed_rounds++;
   stats_.draft_tokens_proposed += static_cast<size_t>(N);
   const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
-  const bool prof = g_host_prof.on;
-  auto tp0 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Draft phase: chain the single MTP module N times. ---
   // Step 0 feeds the main model's hidden (hidden_slice_ holds h paired with t) and appends the
@@ -827,11 +752,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
       drafts_[k] = DraftHeadStep(drafts_[k - 1]);
     }
   }
-  if (prof) {
-    HostPhaseProfiler::sync(*mtp_model_.p_device_);
-    g_host_prof.head_fwds += N;
-  }
-  auto tp1 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Verify [t, d0..d_{N-1}] in a single batched main forward (the whole point of MTP: one
   //     forward validates N+1 tokens). The batched (M=N+1) forward is numerically ~equal but not
@@ -849,18 +769,8 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
   stats_.target_forward_passes++;
-  // Drain the verify forward before timing the argmax, otherwise the first ArgMax call (which
-  // synchronizes) absorbs the whole forward's GPU time into the argmax bucket.
-  if (prof) HostPhaseProfiler::sync(*main_model_.p_device_);
-  auto tpa = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
   ArgmaxMainRows(0, N + 1, verify_argmax_.data());  // main's real token after each verify position
   OrtValue* vhidden = main_->state_->GetOutput(hs_name.c_str());
-  if (prof) {
-    HostPhaseProfiler::sync(*main_model_.p_device_);
-    ++g_host_prof.main_fwds;
-    g_host_prof.argmax += HostPhaseProfiler::ms(tpa, HostPhaseProfiler::now());
-  }
-  auto tp2 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Longest accepted prefix (greedy match against the main model). ---
   int a = 0;
@@ -903,8 +813,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
         .CopyFrom(src.subspan(0, static_cast<size_t>(a) * row_bytes));
     for (int k = 0; k < a; ++k) merged_tokens_[k] = drafts_[k];
   }
-  if (prof) HostPhaseProfiler::sync(*mtp_model_.p_device_);
-  auto tp3 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   if (a == N) {
     // All drafts accepted: the batched verify already committed [t, d0..d_{N-1}] correctly, so the
@@ -939,7 +847,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     std::array<int32_t, 1> last{drafts_[a - 1]};  // committed token at position L+a
     main_->AppendTokens(cpu_span<const int32_t>(last));
     stats_.target_forward_passes++;
-    if (prof) ++g_host_prof.main_fwds;
     OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
     ArgmaxMainRows(0, 1, &next_token_);         // decode-consistent bonus (M=1 last row)
     CopyHiddenRow(rhidden, 0, *hidden_slice_);  // hidden paired with the bonus token
@@ -959,7 +866,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
     length_ += static_cast<size_t>(a) + 1;
-    if (prof) ++g_host_prof.main_fwds;
   }
 
   // Row a of the fused refeed buffer pairs with next_token_ (committed at the top of the next
@@ -972,17 +878,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
         .subspan(static_cast<size_t>(pending_refeed_count_) * row_bytes, row_bytes)
         .CopyFrom(hidden_slice_->GetByteSpan());
   }
-
-  if (prof) {
-    HostPhaseProfiler::sync(*main_model_.p_device_);
-    auto tp4 = HostPhaseProfiler::now();
-    g_host_prof.draft += HostPhaseProfiler::ms(tp0, tp1);
-    g_host_prof.verify += HostPhaseProfiler::ms(tp1, tp2);
-    g_host_prof.accept += HostPhaseProfiler::ms(tp2, tp3);
-    g_host_prof.finalize += HostPhaseProfiler::ms(tp3, tp4);
-    g_host_prof.tokens += static_cast<long>(a) + 1;
-    if (++g_host_prof.steps % 50 == 0) g_host_prof.report();
-  }
 }
 
 void MtpGenerator::GenerateStepMultiSample(int32_t t) {
@@ -991,8 +886,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   stats_.completed_rounds++;
   stats_.draft_tokens_proposed += static_cast<size_t>(N);
   const std::string& hs_name = main_model_.config_->model.decoder.outputs.hidden_states;
-  const bool prof = g_host_prof.on;
-  auto tp0 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Draft phase: chain the single MTP module N times, SAMPLING each draft d_k from its
   //     truncated distribution q_k (top_k/top_p/temperature) and recording q_k for the accept test.
@@ -1003,7 +896,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     mtp_->SetHiddenStates(head_out_hidden_);
     drafts_[k] = DraftHeadStepSample(drafts_[k - 1], k);
   }
-  auto tp1 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Verify [t, d0..d_{N-1}] in a single batched main forward. ---
   // Snapshot the recurrent state ONLY for the fallback re-run rollback (models WITHOUT
@@ -1041,7 +933,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
       target_prob_[kk] = sampled_scratch_.probs;
     }
   }
-  auto tp2 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   // --- Speculative-sampling accept/reject over the N drafts. Accept d_a with probability
   //     min(1, p_a(d_a)/q_a(d_a)); on the first rejection draw a correction from the residual
@@ -1105,7 +996,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     stats_.draft_forward_passes++;
     head_len_ = head_start + 1 + static_cast<size_t>(a);
   }
-  auto tp3 = prof ? HostPhaseProfiler::now() : HostPhaseProfiler::clk::time_point{};
 
   if (!rejected) {
     // Every draft accepted: the batched verify already committed [t, d0..d_{N-1}] correctly, so the
@@ -1144,18 +1034,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     next_token_ = correction;
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the correction token
     length_ += static_cast<size_t>(a) + 1;
-  }
-
-  if (prof) {
-    auto tp4 = HostPhaseProfiler::now();
-    g_host_prof.draft += HostPhaseProfiler::ms(tp0, tp1);
-    g_host_prof.verify += HostPhaseProfiler::ms(tp1, tp2);
-    g_host_prof.accept += HostPhaseProfiler::ms(tp2, tp3);
-    g_host_prof.finalize += HostPhaseProfiler::ms(tp3, tp4);
-    g_host_prof.tokens += static_cast<long>(a) + 1;
-    g_host_prof.head_fwds += N + (a > 0 ? 1 : 0);
-    g_host_prof.main_fwds += rejected && !main_->CanCropRecurrentState() ? 2 : 1;
-    if (++g_host_prof.steps % 100 == 0) g_host_prof.report();
   }
 }
 

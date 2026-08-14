@@ -280,7 +280,6 @@ every call site has a host fallback.
 | `ArgMaxDevice(..., DeviceSpan<int32_t> out_tokens)` | Same, but the result stays on device to feed the next chained head forward |
 | `TopKScores(..., k, out_tokens, out_scores)` | Per-row top-`k` ids + raw fp32 scores, so speculative sampling never copies full-vocab logits |
 | `CopyStateSlots(descs_device, count, src_slot, dst_slot)` | One kernel replaces the 60+ `cudaMemcpyAsync` calls of the per-tensor window-slot promote loop |
-| `Top2(...)` | Diagnostic top-1/top-2 margins (`ORT_MTP_LOG_TOP2_MARGINS`) |
 
 Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 [src/smartptrs.h](../src/smartptrs.h) is exported as `GetInterfaceVersion` and checked in
@@ -434,12 +433,8 @@ All are read once at `MtpGenerator` construction.
 | Environment variable | Default | Effect |
 |---|---|---|
 | `ORT_MTP_NUM_SPECULATIVE_TOKENS` | `1` | `N`, the number of chained draft tokens per round. `N > 1` requires the head exported with `mtp_emit_hidden=true` |
-| `ORT_MTP_DEVICE_DRAFT_CHAIN` | on for CUDA | Keep chained greedy drafts on device between head forwards (no per-draft device→host sync) |
-| `ORT_MTP_VALIDATE_DEVICE_DRAFT_CHAIN` | off | Cross-check every device draft argmax against the host result; throws on mismatch |
 | `ORT_MTP_DIRECT_ARENA_COMMIT` | off | On a windowed-state model, commit a partial accept by cropping instead of replaying, and skip the per-step recurrent snapshot |
 | `ORT_MTP_PREFILL_CHUNK` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
-| `ORT_MTP_PROFILE_HOST` | off | Accumulate per-phase host wall time (draft / verify+argmax / refeed / finalize) and print a summary every 50–100 rounds |
-| `ORT_MTP_LOG_TOP2_MARGINS` | off | Log the top-1/top-2 logit margin of every verify row (near-tie analysis) |
 
 These are diagnostic and tuning knobs, not a stable interface.
 
