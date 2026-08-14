@@ -1656,8 +1656,8 @@ class OliveModel(GPTQModel):
 # loader only has to materialize the NON-routed weights the builder walks as plain
 # modules: it dequantizes the FP8 attention and NVFP4 shared-expert / lm_head to
 # BF16 and passes BF16 tensors through unchanged. Attention is exported through the
-# builder's normal (int4 RTN) path since ONNX Runtime has no native FP8 attention
-# GEMM; dequantizing the FP8 weights to BF16 reconstructs them exactly.
+# builder's native contrib-op path when requested. The dequantized copies retain
+# compatibility with the builder's standard fallback path.
 
 
 class ModeloptDecoderLayer:
