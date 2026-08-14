@@ -133,5 +133,38 @@ TEST(PagedCacheReservationTest, CommitPublishesNewOwnershipExactlyOnce) {
   EXPECT_THROW(reservation.Release(), std::logic_error);
 }
 
+// A newly admitted chunked prefill takes the blocks for its whole prompt up front, so the rest of
+// the pool cannot be handed to another request between chunks, but only the chunk is committed.
+TEST(PagedCacheReservationTest, ChunkedPrefillHoldsWholePromptButCommitsOnlyTheChunk) {
+  BlockPool pool{kBlockSize, 3};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, /*target_slots=*/2, /*newly_admitted=*/true,
+                                   /*reserved_slots=*/9},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+  EXPECT_EQ(reservation.ReservedBlockCount(), 3u);
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
+
+  reservation.Commit();
+
+  ASSERT_EQ(tables.size(), 1u);
+  EXPECT_EQ(tables[0].committed_slots, 2u);
+  EXPECT_EQ(tables[0].blocks.size(), 3u);
+
+  // The next chunk finds its capacity already owned and needs no new block.
+  const std::array next_requests{
+      PagedCacheReservationRequest{kRequestA, /*target_slots=*/6, /*newly_admitted=*/false,
+                                   /*reserved_slots=*/9},
+  };
+  PagedCacheReservation next{pool, tables, next_requests};
+  EXPECT_EQ(next.ReservedBlockCount(), 0u);
+
+  next.Commit();
+  EXPECT_EQ(tables[0].committed_slots, 6u);
+  EXPECT_EQ(tables[0].blocks.size(), 3u);
+}
+
 }  // namespace
 }  // namespace Generators
