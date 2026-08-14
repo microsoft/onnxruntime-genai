@@ -16,6 +16,9 @@
 namespace Generators {
 
 namespace {
+// The MTP head's own post-final-norm hidden, fed back to chain drafts when N > 1.
+constexpr const char* kHeadHiddenStatesOut = "hidden_states_out";
+
 // Greedy argmax over a contiguous vocab row of fp32 logits on the CPU.
 int32_t ArgmaxRow(const float* row, int vocab_size) {
   int32_t best = 0;
@@ -56,29 +59,24 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   if (main_hidden_type != mtp_hidden_type) {
     throw std::runtime_error("MtpGenerator requires matching hidden-state tensor types");
   }
-  // Number of speculative draft tokens per step (N). N=1 is the original single-token fast path;
-  // N>1 chains the single MTP module N times (feeding its own post-norm hidden back), as vLLM's
-  // AutoRegressiveSpeculator does. Tunable via env var for benchmarking without an API change;
-  // N>1 requires the head exported with `mtp_emit_hidden=true` (extra output hidden_states_out).
-  num_speculative_tokens_ = 1;
-  if (const char* env = std::getenv("ORT_MTP_NUM_SPECULATIVE_TOKENS")) {
-    const int v = std::atoi(env);
-    if (v >= 1) num_speculative_tokens_ = v;
+  // Number of speculative draft tokens per step (N), shared with draft-model speculative decoding
+  // via speculative.max_draft_tokens. N=1 is the original single-token fast path; N>1 chains the
+  // single MTP module N times (feeding its own post-norm hidden back), as vLLM's
+  // AutoRegressiveSpeculator does. Chaining needs the head to emit that hidden, so a head exported
+  // without `mtp_emit_hidden=true` can only run N=1.
+  num_speculative_tokens_ = std::max(1, params.speculative.max_draft_tokens);
+  if (num_speculative_tokens_ > 1 && !mtp_model_.session_info_.HasOutput(kHeadHiddenStatesOut)) {
+    num_speculative_tokens_ = 1;
   }
   // Chained greedy drafts stay on device between head forwards on CUDA, avoiding a
   // device->host sync per draft. Other devices fall back to the host path.
   device_draft_chain_ = mtp_model_.p_device_->GetType() == DeviceType::CUDA;
-  // Opt-in: commit a partial accept straight out of the verify forward's windowed recurrent state
-  // instead of replaying the accepted prefix. Requires a model exported with
-  // recurrent_state_window > 1. Read once -- the greedy step consults it on the
-  // hot path (and uses it to decide whether the recurrent snapshot is needed at all).
-  direct_arena_commit_ = std::getenv("ORT_MTP_DIRECT_ARENA_COMMIT") != nullptr;
   // Chunked prefill. The windowed recurrent state is a fixed [B, W, ...] buffer, so it no longer
   // scales with the prompt, but a single-shot forward over a long prompt still blows up the ORT
   // activation arena (measured: 54 GB chunked vs 94 GB unchunked on a 2.8k-token prompt). Feed
   // the prompt in chunks so peak memory stays bounded; only the last chunk's outputs are consumed.
-  if (const char* env = std::getenv("ORT_MTP_PREFILL_CHUNK")) {
-    prefill_chunk_ = std::atoi(env);
+  if (params.search.chunk_size.has_value()) {
+    prefill_chunk_ = static_cast<int>(*params.search.chunk_size);
     if (prefill_chunk_ < 0) prefill_chunk_ = 0;
     prefill_chunk_explicit_ = true;
   }
@@ -96,6 +94,12 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   main_params_->guidance_ff_tokens_enabled = params.guidance_ff_tokens_enabled;
 
   main_ = CreateGenerator(main_model_, *main_params_);
+  // A windowed recurrent state holds W per-token states, and the verify forward is N+1 wide, so
+  // the window caps N at W-1. Exceeding it fails mid-generation inside CropToPosition, so clamp
+  // here instead. Graph capture was sized from the requested N, which is a harmless upper bound.
+  if (const int64_t window = main_->RecurrentStateWindow(); window > 1) {
+    num_speculative_tokens_ = std::min(num_speculative_tokens_, static_cast<int>(window) - 1);
+  }
   // Default the chunking on for windowed-state models only (they are the ones running long
   // prompts through the MTP loop); 256 tokens/chunk costs a handful of extra forwards.
   if (!prefill_chunk_explicit_ && main_->CanCropRecurrentState()) prefill_chunk_ = 256;
@@ -268,7 +272,7 @@ void MtpGenerator::DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<i
 void MtpGenerator::CaptureHeadFeedbackHidden() {
   // Capture the head's own post-final-norm output (hidden_states_out, the single processed row)
   // into head_out_hidden_ for the next chained draft step.
-  OrtValue* head_hidden = mtp_->state_->GetOutput("hidden_states_out");
+  OrtValue* head_hidden = mtp_->state_->GetOutput(kHeadHiddenStatesOut);
   if (head_hidden == nullptr) {
     throw std::runtime_error(
         "MtpGenerator: multi-token speculation requires the MTP head exported with "
@@ -533,7 +537,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("MtpGenerator: AppendTokens can only be called once");
 
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
-  // Off (single forward) when ORT_MTP_PREFILL_CHUNK is 0/unset or the prompt fits in one chunk.
+  // Off (single forward) when the chunk size is 0 or the prompt fits in one chunk.
   const size_t total = input_ids.size();
   size_t tail = total;
   if (prefill_chunk_ > 0 && total > static_cast<size_t>(prefill_chunk_)) {
@@ -760,10 +764,10 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     tradeoff the N=1 verify already makes; the reject path below re-runs decode-consistently to
   //     bound divergence from plain greedy. ---
   // SnapshotState() copies every linear-attention layer's conv+recurrent state (2*num_layers D2D
-  // copies + launches) on EVERY step. It is only needed by the RewindToLength fallback below. With
-  // the direct-arena commit on a croppable model that fallback is unreachable (a==N takes the bonus
-  // branch, a<N takes the crop branch), so the snapshot is dead overhead -- skip it.
-  const bool crop_commit = direct_arena_commit_ && main_->CanCropRecurrentState();
+  // copies + launches) on EVERY step. It is only needed by the RewindToLength fallback below. On a
+  // croppable (windowed-state) model that fallback is unreachable (a==N takes the bonus branch,
+  // a<N takes the crop branch), so the snapshot is dead overhead -- skip it.
+  const bool crop_commit = main_->CanCropRecurrentState();
   if (!crop_commit) main_->SnapshotState();
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];

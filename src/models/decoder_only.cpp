@@ -120,6 +120,10 @@ bool DecoderOnly_State::HasCroppableRecurrentState() const {
   return recurrent_state_ && recurrent_state_->IsWindowed();
 }
 
+int64_t DecoderOnly_State::RecurrentStateWindow() const {
+  return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
+}
+
 void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_position) {
   // Roll the attention KV cache + position back to the committed length, and crop the recurrent
   // state to the state AFTER verify token `recurrent_position` (no replay forward). Used by

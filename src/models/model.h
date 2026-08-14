@@ -47,6 +47,9 @@ struct State {
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).
   virtual bool HasCroppableRecurrentState() const { return false; }
+  // Width of that window, i.e. the longest forward whose per-token states all stay addressable.
+  // 1 when the model carries no window.
+  virtual int64_t RecurrentStateWindow() const { return 1; }
   virtual void CropToAccepted(size_t new_length, size_t recurrent_position) {
     (void)new_length;
     (void)recurrent_position;

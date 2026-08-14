@@ -30,6 +30,7 @@ struct DecoderOnly_State : State {
   void SnapshotState(size_t position) override;
 
   bool HasCroppableRecurrentState() const override;
+  int64_t RecurrentStateWindow() const override;
   void CropToAccepted(size_t new_length, size_t recurrent_position) override;
 
   // Stage the hidden_states values for the next Run (for models with a hidden_states input,

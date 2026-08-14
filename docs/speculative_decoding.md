@@ -241,7 +241,7 @@ finalize branches runs:
 | Branch | Condition | Cost |
 |---|---|---|
 | All accepted | `a == N` | No extra forward; bonus is verify row `N` |
-| Direct arena commit | `a < N`, `ORT_MTP_DIRECT_ARENA_COMMIT` and windowed recurrent state | `CropToAccepted` only; bonus is verify row `a` |
+| Direct arena commit | `a < N` and windowed recurrent state | `CropToAccepted` only; bonus is verify row `a` |
 | Lossless crop + `M=1` replay | `a >= 1` and windowed recurrent state | Crop to `L+a`, replay the last committed token (1-wide, decode-consistent bonus) |
 | Snapshot rewind + replay | otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
 
@@ -421,22 +421,24 @@ $$
 E[\text{tokens}] = \frac{1 - \alpha^{N+1}}{1 - \alpha}
 $$
 
-so speedup saturates quickly in `N` unless `α` is high — increasing `ORT_MTP_NUM_SPECULATIVE_TOKENS`
+so speedup saturates quickly in `N` unless `α` is high — increasing `max_draft_tokens`
 past the point where `α^N` decays only adds wasted head forwards.
 
 ---
 
 ## 7. Tuning knobs (MTP)
 
-All are read once at `MtpGenerator` construction.
+Both are read once at `MtpGenerator` construction, from the same generator parameters the
+draft-model speculative path uses.
 
-| Environment variable | Default | Effect |
-|---|---|---|
-| `ORT_MTP_NUM_SPECULATIVE_TOKENS` | `1` | `N`, the number of chained draft tokens per round. `N > 1` requires the head exported with `mtp_emit_hidden=true` |
-| `ORT_MTP_DIRECT_ARENA_COMMIT` | off | On a windowed-state model, commit a partial accept by cropping instead of replaying, and skip the per-step recurrent snapshot |
-| `ORT_MTP_PREFILL_CHUNK` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
+| Parameter | Set with | Default | Effect |
+|---|---|---|---|
+| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. Clamped to `1` for a head exported without `mtp_emit_hidden=true`, which cannot feed its hidden back, and to `recurrent_state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide |
+| `search.chunk_size` | `SetSearchNumber("chunk_size", n)` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
 
-These are diagnostic and tuning knobs, not a stable interface.
+On a windowed-state model (`recurrent_state_window > 1`) a partial accept is always committed by
+cropping the KV cache and the state window instead of replaying the accepted prefix, which also
+makes the per-step recurrent snapshot unnecessary.
 
 ---
 

@@ -132,6 +132,7 @@ struct Generator : LeakChecked<Generator> {
   // Lossless multi-token MTP: commit the accepted prefix without a replay forward by cropping the
   // KV cache + position to new_length and the recurrent state to that position's window slot.
   bool CanCropRecurrentState() const;
+  int64_t RecurrentStateWindow() const;
   void CropToAccepted(size_t new_length, size_t recurrent_position);
   void SetHiddenStates(std::shared_ptr<Tensor> hidden_states);  // Stage hidden_states input for next step (MTP head)
   DeviceSpan<float> GetLogits();

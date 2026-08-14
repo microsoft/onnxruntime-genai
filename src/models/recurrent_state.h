@@ -32,6 +32,7 @@ struct RecurrentState {
   // accepted length by copying slot `position` into slot W-1 -- no full-cost main-model replay
   // forward, and no extra graph outputs to bind or keep alive across CUDA-graph capture.
   bool IsWindowed() const { return state_window_ > 1; }
+  int64_t StateWindow() const { return state_window_; }
   void SetForwardLength(int sequence_length);  // Record this step's seq_len (maps position -> slot).
   void CropToPosition(size_t position);        // Copy window slot for `position` -> slot W-1.
 

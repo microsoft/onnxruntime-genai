@@ -944,6 +944,10 @@ bool Generator::CanCropRecurrentState() const {
   return state_->HasCroppableRecurrentState();
 }
 
+int64_t Generator::RecurrentStateWindow() const {
+  return state_->RecurrentStateWindow();
+}
+
 void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (new_length > search_->GetSequenceLength())
