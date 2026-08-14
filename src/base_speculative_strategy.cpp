@@ -21,10 +21,10 @@ int32_t RowArgmax(std::span<const float> logits) {
   return static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
 }
 
-void SampleDraftToken(std::span<const float> logits, int index, bool greedy,
-                      int top_k, float top_p, float temperature, int vocab_size,
-                      SampledCategorical& sampled, std::mt19937& rng,
-                      SpeculativeDecodingStrategy::Proposal& proposal) {
+void SampleWithRoundRng(std::span<const float> logits, int index, bool greedy,
+                        int top_k, float top_p, float temperature, int vocab_size,
+                        SampledCategorical& sampled, std::mt19937& round_rng,
+                        SpeculativeDecodingStrategy::Proposal& proposal) {
   if (greedy) {
     proposal.tokens[index] = RowArgmax(logits);
     return;
@@ -34,7 +34,7 @@ void SampleDraftToken(std::span<const float> logits, int index, bool greedy,
   proposal.probs[index] = ScatterToFullVocab(sampled, vocab_size);
   std::discrete_distribution<int> distribution(proposal.probs[index].begin(),
                                                proposal.probs[index].end());
-  proposal.tokens[index] = static_cast<int32_t>(distribution(rng));
+  proposal.tokens[index] = static_cast<int32_t>(distribution(round_rng));
 }
 
 }  // namespace
@@ -103,11 +103,6 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     proposal.probs.resize(K);
 
   SampledCategorical sampled;
-  auto sample_with_round_rng = [&](std::span<const float> logits, int index) {
-    SampleDraftToken(logits, index, greedy, search.top_k, search.top_p,
-                     search.temperature, vocab_size, sampled, round_rng, proposal);
-  };
-
   auto single_buf = params.p_device->Allocate<int32_t>(1);
 
   if (guidance_active) {
@@ -132,8 +127,10 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         guidance_buf.CopyCpuToDevice();
         draft_grammar->ProcessLogits(guidance_buf);
         auto masked = guidance_buf.CopyDeviceToCpu();
-        sample_with_round_rng(
-            {masked.data(), static_cast<size_t>(vocab_size)}, i);
+        SampleWithRoundRng(
+          {masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
+          search.top_k, search.top_p, search.temperature, vocab_size,
+          sampled, round_rng, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
           CommitGuidanceProposalToken(*draft_grammar, chosen, ff_queue);
@@ -154,8 +151,10 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   }
 
   // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
-  sample_with_round_rng(
-      penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix), 0);
+    SampleWithRoundRng(
+      penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix), 0,
+      greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+      sampled, round_rng, proposal);
   for (int i = 1; i < K; i++) {
     if (penalty_processor.IsActive())
       prefix.push_back(proposal.tokens[i - 1]);
@@ -164,10 +163,11 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     auto lgt = spec_state_.draft_state().Run(seed_length + i, single_buf, {});
     draft_runs_++;
     auto cpu = lgt.CopyDeviceToCpu();
-    sample_with_round_rng(
+    SampleWithRoundRng(
         penalty_processor.Apply(
             {cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
-        i);
+      i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+      sampled, round_rng, proposal);
   }
 
   return proposal;

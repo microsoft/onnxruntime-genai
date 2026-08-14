@@ -191,7 +191,7 @@ void SpeculativeDecodingStrategy::Reset() {
   DiscardPendingTokens();
   ClearPendingExternalLogits();
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
   round_.kind = RoundState::Kind::kStandard;
   ff_carry_.clear();
   adaptive_k_.Reset();
@@ -215,7 +215,7 @@ void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
   DiscardPendingTokens();
   ClearPendingExternalLogits();
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
   round_.kind = RoundState::Kind::kStandard;
   ff_carry_.clear();
 
@@ -312,7 +312,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::GetFloatVerifyLogits(
 void SpeculativeDecodingStrategy::PrepareForCooldownStep(Generator& g) {
   if (!round_.NeedsReconciliation())
     return;
-  if (round_.phase != RoundState::Phase::kReconcilePending || !pending_anchor_token_)
+  if (round_.phase != RoundPhase::kReconcilePending || !pending_anchor_token_)
     throw std::runtime_error(
         "Speculative cooldown cannot reconcile a dirty round without a pending anchor token.");
 
@@ -333,7 +333,7 @@ void SpeculativeDecodingStrategy::PrepareForCooldownStep(Generator& g) {
   g.SetLogits(target_logits);
 
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
 }
 
 void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted, size_t queued,
@@ -341,7 +341,7 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
                                              bool filled_proposal_budget,
                                              float propose_ms, float target_ms,
                                              RoundState::Kind kind) {
-  if (round_.IsActive() || round_.phase == RoundState::Phase::kFinalizing)
+  if (round_.IsActive() || round_.phase == RoundPhase::kFinalizing)
     throw std::runtime_error("Speculative decoding started a round before the previous round was settled.");
   if (queued == 0)
     throw std::runtime_error("Speculative decoding produced a round with no output tokens.");
@@ -352,7 +352,7 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   draft_evaluated_ += static_cast<size_t>(evaluated);
   draft_accepted_ += static_cast<size_t>(accepted);
   tokens_queued_ += queued;
-  round_.phase = RoundState::Phase::kDraining;
+  round_.phase = RoundPhase::kDraining;
   round_.kind = kind;
   round_.discarded = false;
   round_.evaluated = evaluated;
@@ -368,8 +368,8 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   }
 }
 
-void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
-  if (!round_.IsActive() && round_.phase != RoundState::Phase::kFinalizing)
+void SpeculativeDecodingStrategy::FinishRound(RoundPhase final_phase) {
+  if (!round_.IsActive() && round_.phase != RoundPhase::kFinalizing)
     return;
   if (!round_.pending.empty())
     throw std::runtime_error("Speculative decoding settled a round while output tokens were still buffered.");
@@ -393,7 +393,7 @@ void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
         round_.k, round_.evaluated, round_.accepted, round_.emitted,
         round_.filled_proposal_budget, round_.propose_ms, round_.target_ms);
   }
-  round_.phase = round_.discarded ? RoundState::Phase::kReconcilePending : final_phase;
+  round_.phase = round_.discarded ? RoundPhase::kReconcilePending : final_phase;
   round_.discarded = false;
   round_.evaluated = 0;
   round_.accepted = 0;
@@ -412,7 +412,7 @@ void SpeculativeDecodingStrategy::DiscardPendingTokens() {
   }
   round_.pending_rng_states.clear();
   round_.uses_rng_checkpoints = false;
-  FinishRound(RoundState::Phase::kReconcilePending);
+  FinishRound(RoundPhase::kReconcilePending);
 }
 
 // Rewinds both inner caches to floor and replays the committed tokens back to the current length,
@@ -518,7 +518,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       reanchor_runs_++;
       total_reanchor_ms_ += reanchor_ms;
       pending_anchor_token_.reset();
-      round_.phase = RoundState::Phase::kIdle;
+      round_.phase = RoundPhase::kIdle;
     }
     total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
     RunStandardDecodingStep(g);
@@ -589,7 +589,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.RunUnchunked(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
@@ -815,7 +815,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   if (g.search_->IsDone() || g.search_->GetSequenceLength() >= max_length) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     g.computed_logits_ = false;
     return;
   }
@@ -835,7 +835,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   if (g.search_->IsDone() || g.search_->GetSequenceLength() >= max_length) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     return;
   }
 
@@ -843,7 +843,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
       g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     return;
   }
 
@@ -858,10 +858,10 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   // Last token of the round just went out: re-anchor now. (Deferring it to here means an EOS
   // partway through the round skips the re-anchor and its wasted target pass.)
   if (round_.pending.empty() && round_.IsActive()) {
-    round_.phase = RoundState::Phase::kFinalizing;
+    round_.phase = RoundPhase::kFinalizing;
     ClearPendingExternalLogits();
     const auto finalize_start = clock::now();
-    const RoundState::Phase final_phase = FinalizeRound(g);
+    const RoundPhase final_phase = FinalizeRound(g);
     round_.target_ms += ms_f(clock::now() - finalize_start).count();
     FinishRound(final_phase);
   }
@@ -875,28 +875,28 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
 //   * legacy path (K==1 / pruned target): run it through the target now. This keeps K==1
 //     byte-for-byte identical to plain greedy decoding.
 // Either way we then advance the draft model. Runs once the round's tokens have all been emitted.
-SpeculativeDecodingStrategy::RoundState::Phase
+SpeculativeDecodingStrategy::RoundPhase
 SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
-  if (round_.phase != RoundState::Phase::kFinalizing)
+  if (round_.phase != RoundPhase::kFinalizing)
     throw std::runtime_error("Speculative decoding finalized a round from an invalid phase.");
 
   // Guidance round - hand off to FinalizeGuidanceRound.
   if (round_.kind == RoundState::Kind::kGuidance) {
     if (g.search_->IsDone()) {
       g.computed_logits_ = false;
-      return RoundState::Phase::kReconcilePending;
+      return RoundPhase::kReconcilePending;
     }
     g.SetLogits(FinalizeGuidanceRound(g));
     round_.kind = RoundState::Kind::kStandard;
-    return RoundState::Phase::kIdle;
+    return RoundPhase::kIdle;
   }
 
   if (g.search_->IsDone()) {
     g.computed_logits_ = false;
-    return RoundState::Phase::kReconcilePending;
+    return RoundPhase::kReconcilePending;
   }
 
   const auto& params = *g.search_->params_;
@@ -945,7 +945,7 @@ SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 
   // Non-fold re-anchored the target to the committed length (caches match); the fold leaves the
   // target one token behind -> it stays dirty until the next round / PrepareForAppend.
-  return fold ? RoundState::Phase::kReconcilePending : RoundState::Phase::kIdle;
+  return fold ? RoundPhase::kReconcilePending : RoundPhase::kIdle;
 }
 
 // Runs one guidance round over the K proposal tokens - mask the target with the grammar,
@@ -995,7 +995,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.RunUnchunked(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
