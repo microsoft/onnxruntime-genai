@@ -42,7 +42,7 @@ struct PagedKeyValueCache {
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
-  StepPlanningResult PlanStepResources(StepPlan& plan, size_t committed_request_count) const;
+  StepPlanningResult PlanStepResources(StepPlan& plan) const;
 
   // Returns the K, V cache.
   std::vector<std::pair<OrtValue*, OrtValue*>> Cache();

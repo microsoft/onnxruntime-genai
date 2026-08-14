@@ -101,6 +101,16 @@ def get_target_pip_package_version(target_pip_package_name_list):
     return pkg_name, pkg_version
 
 
+def aggregate_measurements(measurements, aggregation):
+    if not measurements:
+        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
+    if aggregation == "mean":
+        return float(np.mean(measurements))
+    if aggregation == "median":
+        return float(np.median(measurements))
+    raise ValueError(f"Unsupported aggregation: {aggregation}")
+
+
 def save_results(args, results, filename, print_memory_usage=False):
     columns = [
         "Batch Size",
@@ -151,6 +161,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
+        record.config.customized["aggregation"] = args.aggregation
         record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
@@ -410,48 +421,50 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if generator:
         del generator
 
+    aggregation_label = "Average" if args.aggregation == "mean" else "Median"
+
     # Calculate tokenization metrics
-    avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
-    avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
-    avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
-    avg_tokenization_thrpt = batch_size * (1000 / avg_per_token_tokenization_latency_ms)
-    print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
-    print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
+    tokenization_latency_s = aggregate_measurements(tokenize_times, args.aggregation)
+    tokenization_latency_ms = tokenization_latency_s * 1000
+    per_token_tokenization_latency_ms = tokenization_latency_ms / prompt_length
+    tokenization_thrpt = batch_size * (1000 / per_token_tokenization_latency_ms)
+    print(f"{aggregation_label} Tokenization Latency (per token): {per_token_tokenization_latency_ms} ms")
+    print(f"{aggregation_label} Tokenization Throughput (per token): {tokenization_thrpt} tps")
 
     # Calculate prompt processing metrics
-    avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
-    avg_prompt_latency_ms = avg_prompt_latency_s * 1000
-    avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
-    avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
+    prompt_latency_s = aggregate_measurements(prompt_times, args.aggregation)
+    prompt_latency_ms = prompt_latency_s * 1000
+    per_token_prompt_latency_ms = prompt_latency_ms / prompt_length
+    per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
 
     # Time to first token = prompt prefill + first-token sampling
     ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
-    avg_ttft_ms = float(np.mean(ttft_times)) * 1000
+    ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
     std_ttft_ms = float(np.std(ttft_times)) * 1000
-    print(f"Average Time to First Token: {avg_ttft_ms} ms")
+    print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
     print(f"Time to First Token StdDev: {std_ttft_ms} ms")
-    print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
-    print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
+    print(f"{aggregation_label} Prompt Processing Latency (per token): {per_token_prompt_latency_ms} ms")
+    print(f"{aggregation_label} Prompt Processing Throughput (per token): {per_token_prompt_thrpt} tps")
 
     # Calculate token generation input prep metrics
-    avg_token_gen_latency_s = sum(token_gen_times) / len(token_gen_times)
-    avg_token_gen_latency_ms = avg_token_gen_latency_s * 1000
-    avg_token_gen_thrpt = batch_size * (1 / avg_token_gen_latency_s)
-    print(f"Average Token Generation Latency (per token): {avg_token_gen_latency_ms} ms")
-    print(f"Average Token Generation Throughput (per token): {avg_token_gen_thrpt} tps")
+    token_gen_latency_s = aggregate_measurements(token_gen_times, args.aggregation)
+    token_gen_latency_ms = token_gen_latency_s * 1000
+    token_gen_thrpt = batch_size * (1 / token_gen_latency_s)
+    print(f"{aggregation_label} Token Generation Latency (per token): {token_gen_latency_ms} ms")
+    print(f"{aggregation_label} Token Generation Throughput (per token): {token_gen_thrpt} tps")
 
     # Calculate sampling metrics
-    avg_sampling_latency_s = sum(sampling_times) / len(sampling_times)
-    avg_sampling_latency_ms = avg_sampling_latency_s * 1000
-    avg_sampling_thrpt = batch_size * (1 / avg_sampling_latency_s)
-    print(f"Average Sampling Latency (per token): {avg_sampling_latency_ms} ms")
-    print(f"Average Sampling Throughput (per token): {avg_sampling_thrpt} tps")
+    sampling_latency_s = aggregate_measurements(sampling_times, args.aggregation)
+    sampling_latency_ms = sampling_latency_s * 1000
+    sampling_thrpt = batch_size * (1 / sampling_latency_s)
+    print(f"{aggregation_label} Sampling Latency (per token): {sampling_latency_ms} ms")
+    print(f"{aggregation_label} Sampling Throughput (per token): {sampling_thrpt} tps")
 
     # Calculate wall clock time
-    avg_wall_clock_time = sum(wall_clock_times) / len(wall_clock_times)
-    avg_wall_clock_thrpt = batch_size * (max_length / avg_wall_clock_time)
-    print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
-    print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
+    wall_clock_time = aggregate_measurements(wall_clock_times, args.aggregation)
+    wall_clock_thrpt = batch_size * (max_length / wall_clock_time)
+    print(f"{aggregation_label} Wall Clock Time: {wall_clock_time} s")
+    print(f"{aggregation_label} Wall Clock Throughput: {wall_clock_thrpt} tps")
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
@@ -464,18 +477,18 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_length,
         generation_length,
         max_length,
-        avg_tokenization_thrpt,
-        avg_tokenization_latency_ms,
-        avg_per_token_prompt_thrpt,
-        avg_per_token_prompt_latency_ms,
-        avg_ttft_ms,
+        tokenization_thrpt,
+        tokenization_latency_ms,
+        per_token_prompt_thrpt,
+        per_token_prompt_latency_ms,
+        ttft_ms,
         std_ttft_ms,
-        avg_token_gen_thrpt,
-        avg_token_gen_latency_ms,
-        avg_sampling_thrpt,
-        avg_sampling_latency_ms,
-        avg_wall_clock_thrpt,
-        avg_wall_clock_time,
+        token_gen_thrpt,
+        token_gen_latency_ms,
+        sampling_thrpt,
+        sampling_latency_ms,
+        wall_clock_thrpt,
+        wall_clock_time,
     ]
     return metrics
 
@@ -592,6 +605,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
     parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
+    parser.add_argument(
+        "--aggregation",
+        choices=["mean", "median"],
+        default="mean",
+        help="Statistic used to aggregate benchmark timings (default: mean)",
+    )
     parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
     parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
     parser.add_argument(

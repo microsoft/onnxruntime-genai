@@ -10,8 +10,9 @@ parameters:
 
 steps:
 - bash: |
-    set -e -x
+    set -e
     python3 -m pip install requests
+    dockerBuildArgs="--build-arg BUILD_UID=$(id -u)"
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       cudaDockerVer='${{ parameters.cuda_version }}'
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
@@ -19,14 +20,20 @@ steps:
       fi
       dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_${cudaDockerVer}"
     elif [ '${{ parameters.arch }}' = 'arm64' ]; then
+      if [ -z "${PIP_INDEX_URL:-}" ]; then
+        echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the ARM64 image."
+        exit 1
+      fi
       dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
+      dockerBuildArgs="$dockerBuildArgs --secret id=pip_index_url,env=PIP_INDEX_URL"
     else
       dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
     fi
+    set -x
     python3 tools/ci_build/get_docker_image.py \
       --dockerfile "$dockerfile" \
       --context tools/ci_build/github/linux/docker/manylinux \
-      --docker-build-args "--build-arg BUILD_UID=$(id -u)" \
+      --docker-build-args "$dockerBuildArgs" \
       --container-registry onnxruntimebuildcache.azurecr.io \
       --repository "ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
   displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'

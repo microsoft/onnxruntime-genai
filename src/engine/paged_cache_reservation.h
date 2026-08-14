@@ -23,6 +23,9 @@ struct PagedCacheReservationRequest {
   const void* request_id{};
   size_t target_slots{};
   bool newly_admitted{};
+  // Slots the reservation has to own blocks for, which is the whole sequence rather than this
+  // step's target when a prefill is chunked. Clamped up to target_slots when left unset.
+  size_t reserved_slots{};
 };
 
 struct PagedCacheReservationDelta {

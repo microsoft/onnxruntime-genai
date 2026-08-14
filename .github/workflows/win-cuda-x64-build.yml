@@ -17,7 +17,8 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
-  binaryDir: 'build/cuda/win-x64'
+  buildRoot: 'build/cuda/win-x64'
+  binaryDir: 'build/cuda/win-x64/Release'
   ORT_NIGHTLY_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
@@ -85,7 +86,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
+          key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
           restore-keys: |
             sccache-win-cuda-
 
@@ -102,22 +103,34 @@ jobs:
           echo $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & "$binDir\sccache.exe" --version
 
-      - name: Configure CMake
+      - name: Build with build.py
         run: |
           $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
           # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
-          # time and memory usage manageable. The full SM list in CMakePresets.json
-          # is intended for release packaging, not CI validation.
-          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=True -DTEST_QWEN_2_5=True -DENABLE_JAVA=ON -DUSE_GUIDANCE=ON `
-            -DCMAKE_CUDA_ARCHITECTURES=86-real `
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-
-      - name: Build with CMake
-        run: |
-          $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
-          cmake --build --preset windows_x64_cuda_release --parallel
-          cmake --build --preset windows_x64_cuda_release --target PyPackageBuild
+          # time and memory usage manageable.
+          python -m pip install -r requirements-dev.txt
+          python build.py `
+            --config Release `
+            --build_dir $env:buildRoot `
+            --parallel `
+            --build_java `
+            --use_cuda `
+            --cuda_home "${{ env.cuda_dir }}\v${{ env.cuda_version }}" `
+            --use_guidance `
+            --update --build `
+            --skip_examples `
+            --cmake_extra_defines `
+              TEST_PHI2=False `
+              TEST_QWEN_2_5=True `
+              CMAKE_CUDA_ARCHITECTURES=86-real `
+              CMAKE_C_COMPILER_LAUNCHER=sccache `
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache `
+              'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
+              'CMAKE_C_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CXX_FLAGS=/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG' `
+              'CMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=" /MP /guard:cf /Qspectre " -allow-unsupported-compiler'
 
       - name: Show sccache stats
         run: sccache --show-stats
@@ -129,7 +142,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ github.workspace }}\sccache
-          key: sccache-win-cuda-${{ hashFiles('**/CMakePresets.json', '**/CMakeLists.txt') }}
+          key: sccache-win-cuda-${{ hashFiles('.github/workflows/win-cuda-x64-build.yml', 'build.py', '**/CMakeLists.txt', 'cmake/**/*.cmake') }}
 
       - name: Add CUDA to PATH
         run: |
@@ -151,6 +164,10 @@ jobs:
           python -m pip install -r test\python\cuda\torch\requirements.txt
           python -m pip install -r test\python\cuda\ort\requirements.txt
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+      - name: Run the synthetic Engine Python tests
+        run: |
+          python -m pytest -sv test/python/test_onnxruntime_genai_engine.py
 
       - name: Run the Java tests
         run: |

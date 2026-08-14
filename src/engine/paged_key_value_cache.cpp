@@ -5,6 +5,8 @@
 
 #include <numeric>
 
+#include "sequence_positions.h"
+
 namespace Generators {
 
 namespace {
@@ -182,14 +184,17 @@ PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheRese
   return PagedCacheReservation{*block_pool_, block_tables_, requests};
 }
 
-StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
-                                                         size_t committed_request_count) const {
-  if (committed_request_count != block_tables_.size() ||
-      committed_request_count > plan.requests.size()) {
-    throw std::runtime_error("Step plan does not contain the committed paged cache requests.");
-  }
+StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
+  const size_t committed_request_count = block_tables_.size();
   if (committed_request_count > max_batch_size_) {
     throw std::runtime_error("Committed paged cache requests exceed the configured batch size.");
+  }
+  const size_t scheduled_request_limit =
+      plan.scheduled_request_limit == 0
+          ? max_batch_size_
+          : plan.scheduled_request_limit;
+  if (scheduled_request_limit > max_batch_size_) {
+    throw std::runtime_error("Step plan request limit exceeds the configured batch size.");
   }
 
   const size_t available_blocks = block_pool_->AvailableBlocks();
@@ -204,19 +209,23 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
     size_t proposed_blocks{};
     size_t new_blocks{};
   };
+  // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
+  // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
+  // first chunk and then losing the rest of the pool to another request would stall it part way
+  // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
     const size_t committed_slots = table ? table->committed_slots : 0;
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
     if (entry.target_cache_slots < committed_slots) {
       throw std::runtime_error("Step plan target precedes the committed cache boundary.");
     }
 
+    const size_t reserved_slots =
+        std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
-        entry.target_cache_slots > committed_capacity
-            ? entry.target_cache_slots - committed_capacity
-            : 0;
+        reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
     return CacheGrowth{committed_blocks + new_blocks, new_blocks};
   };
@@ -227,6 +236,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
   };
   const auto select = [&](size_t request_index,
                           const CacheGrowth& growth) {
+    // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
+    // pending with their committed block tables untouched and can be reconsidered next Step().
     planned_blocks += growth.new_blocks;
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
@@ -243,34 +254,25 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
                                  });
     return it == block_tables_.end() ? nullptr : &*it;
   };
-  for (size_t i = 0; i < committed_request_count; ++i) {
-    const auto& entry = plan.requests[i];
-    const auto& table = block_tables_[i];
-    if (entry.newly_admitted || entry.request_id != table.request_id) {
-      throw std::runtime_error("Step plan order does not match the committed block table order.");
-    }
-
-    const auto growth = calculate_growth(entry, &table);
-    if (permanently_unserviceable(growth)) {
-      if (!unserviceable_request_id) {
-        unserviceable_request_id = entry.request_id;
-      }
-      continue;
-    }
-    if (planned_blocks + growth.new_blocks > available_blocks) {
-      capacity_deferred = true;
-      continue;
-    }
-    select(i, growth);
-  }
-
-  for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
+  std::vector<const void*> request_ids;
+  request_ids.reserve(plan.requests.size());
+  for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& candidate = plan.requests[i];
-    if (!candidate.newly_admitted || find_table(candidate.request_id)) {
+    if (std::find(request_ids.begin(), request_ids.end(),
+                  candidate.request_id) != request_ids.end()) {
+      throw std::runtime_error("Step plan contains a duplicate request.");
+    }
+    request_ids.push_back(candidate.request_id);
+
+    const auto* table = find_table(candidate.request_id);
+    if (candidate.newly_admitted && table) {
       throw std::runtime_error("New step plan request already belongs to the paged cache.");
     }
+    if (!candidate.newly_admitted && !table) {
+      throw std::runtime_error("Step plan resident membership does not match the committed cache.");
+    }
 
-    const auto growth = calculate_growth(candidate, nullptr);
+    const auto growth = calculate_growth(candidate, table);
     if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;
@@ -278,14 +280,19 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan,
       continue;
     }
 
-    if (committed_request_count + selected_new_requests >= max_batch_size_ ||
+    if (selected_requests >= scheduled_request_limit ||
+        (candidate.newly_admitted &&
+         committed_request_count + selected_new_requests >= max_batch_size_) ||
         planned_blocks + growth.new_blocks > available_blocks) {
       capacity_deferred = true;
       continue;
     }
 
+    const bool newly_admitted = candidate.newly_admitted;
     select(i, growth);
-    ++selected_new_requests;
+    if (newly_admitted) {
+      ++selected_new_requests;
+    }
   }
   plan.requests.resize(selected_requests);
 

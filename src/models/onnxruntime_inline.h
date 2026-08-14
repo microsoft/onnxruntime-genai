@@ -438,6 +438,12 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline Ort::Allocator* OrtEnv::GetSharedAllocator(const OrtMemoryInfo& mem_info) const {
+  OrtAllocator* p = nullptr;
+  Ort::ThrowOnError(Ort::api->GetSharedAllocator(const_cast<OrtEnv*>(this), &mem_info, &p));
+  return static_cast<Ort::Allocator*>(p);  // env-owned; may be nullptr if no match
+}
+
 inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
                                 const std::vector<OrtValue*>& dst_tensors,
                                 OrtSyncStream* stream) const {
