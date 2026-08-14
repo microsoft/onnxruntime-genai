@@ -5,7 +5,6 @@
 
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include "../models/decoder_only.h"
@@ -28,8 +27,6 @@ class ModelExecutionError : public std::runtime_error {
  private:
   ExecutionFailureKind failure_kind_;
 };
-
-ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message);
 
 /**
  * @struct ModelExecutor

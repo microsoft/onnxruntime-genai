@@ -4,9 +4,12 @@
 #include "model_executor.h"
 #include "decoders/simple_decoder.h"
 
+#include <string_view>
 #include <typeinfo>
 
 namespace Generators {
+
+namespace {
 
 ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
   if (message.find("Failed to allocate memory for requested buffer") !=
@@ -15,8 +18,6 @@ ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
   }
   return ExecutionFailureKind::Unknown;
 }
-
-namespace {
 
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
