@@ -10,7 +10,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -18,32 +17,19 @@
 #include "ort_genai.h"
 
 #include "scenarios/utils.h"
-#include "scenarios/decode_baseline.h"
+#include "scenarios/scenario_base.h"
+#include "scenarios/decode_baseline.h"  // Included so its self-registration runs; not referenced directly.
 
 namespace fs = std::filesystem;
 
 namespace engine_benchmark {
 namespace {
 
-std::string GetGenAIVersion() {
-#ifdef ORT_GENAI_BENCH_GENAI_VERSION
-  return ORT_GENAI_BENCH_GENAI_VERSION;
-#else
-  return "unknown";
-#endif
-}
-
 // versions.json is written next to the executable when the build stages the benchmark dependencies.
 nlohmann::json ReadStagedVersions() {
-  std::error_code ec;
-  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-  if (ec) {
-    return nlohmann::json::object();
-  }
-
-  std::ifstream file(exe.parent_path() / "versions.json", std::ios::binary);
+  std::ifstream file("build/Linux/RelWithDebInfo/benchmark/engine/versions.json", std::ios::binary);
   if (!file) {
-    return nlohmann::json::object();
+    throw std::runtime_error("versions.json not found; expected the build to stage it under benchmark/engine.");
   }
 
   nlohmann::json versions;
@@ -52,39 +38,25 @@ nlohmann::json ReadStagedVersions() {
 }
 
 std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
-  std::vector<nlohmann::json> entries;
-  if (root.is_array()) {
-    for (const auto& e : root) {
-      entries.push_back(e);
-    }
-  } else if (root.contains("entries") && root["entries"].is_array()) {
-    for (const auto& e : root["entries"]) {
-      entries.push_back(e);
-    }
-  } else if (root.contains("scenarios") && root["scenarios"].is_array()) {
-    for (const auto& e : root["scenarios"]) {
-      entries.push_back(e);
-    }
-  } else if (root.is_object()) {
-    entries.push_back(root);
-  } else {
-    throw std::runtime_error("Unsupported config.json shape.");
-  }
-
   std::vector<ScenarioConfig> configs;
-  configs.reserve(entries.size());
-  for (const auto& e : entries) {
-    ScenarioConfig config;
-    config.scenario = e.value("scenario", config.scenario);
-    config.concurrency = e.value("concurrency", config.concurrency);
-    config.prompt_length_k = e.value("prompt_length_k", config.prompt_length_k);
-    config.synthetic = e.value("synthetic", config.synthetic);
-    config.model_path = e.value("model_path", std::string{});
-    config.execution_provider = e.value("execution_provider", config.execution_provider);
-    config.execution_provider_library = e.value("execution_provider_library", std::string{});
-    config.generation_tokens = e.value("generation_tokens", config.generation_tokens);
-    config.measured_runs = e.value("measured_runs", config.measured_runs);
-    configs.push_back(std::move(config));
+  try {
+    configs.reserve(root.size());
+    for (const auto& e : root) {
+      ScenarioConfig config;
+      config.scenario = e.value("scenario", config.scenario);
+      config.concurrency = e.value("concurrency", config.concurrency);
+      config.prompt_length_k = e.value("prompt_length_k", config.prompt_length_k);
+      config.synthetic = e.value("synthetic", config.synthetic);
+      config.model_path = e.value("model_path", std::string{});
+      config.execution_provider = e.value("execution_provider", config.execution_provider);
+      config.execution_provider_library = e.value("execution_provider_library", std::string{});
+      config.generation_tokens = e.value("generation_tokens", config.generation_tokens);
+      config.warmup_runs = e.value("warmup_runs", config.warmup_runs);
+      config.measured_runs = e.value("measured_runs", config.measured_runs);
+      configs.push_back(std::move(config));
+    }
+  } catch (const std::exception&) {
+    throw std::runtime_error("Error parsing config.");
   }
 
   return configs;
@@ -95,13 +67,9 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
   std::set<std::string> registered;
 
   for (const auto& config : configs) {
-    if (config.execution_provider != "cuda") {
-      continue;
-    }
-
     if (config.execution_provider_library.empty()) {
       throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is 'cuda'");
+          "execution_provider_library is required when execution_provider is 'cuda' or 'webgpu'");
     }
 
     const fs::path provider_library = fs::absolute(config.execution_provider_library);
@@ -117,12 +85,6 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
               << provider_library.string() << std::endl;
     OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
   }
-}
-
-std::string MakeResultFilename(const std::string& scenario_name, size_t id) {
-  std::ostringstream oss;
-  oss << scenario_name << "_results_" << std::setw(3) << std::setfill('0') << id << ".json";
-  return oss.str();
 }
 
 void WriteJsonFile(const fs::path& path, const nlohmann::json& json) {
@@ -145,8 +107,8 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
 
   nlohmann::json root;
   config_file >> root;
-
   const auto configs = ParseScenarioConfigs(root);
+
   if (configs.empty()) {
     throw std::runtime_error("No scenarios found in config.");
   }
@@ -156,23 +118,25 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   RegisterExecutionProviderLibraries(configs);
 
   const nlohmann::json staged_versions = ReadStagedVersions();
-
+  
   BenchmarkContext context;
-  context.genai_version = GetGenAIVersion();
   context.ort_version = staged_versions.value("ort_version", std::string{"unknown"});
   context.cuda_plugin_ep_version = staged_versions.value("cuda_plugin_ep_version", std::string{"unknown"});
+  context.genai_version = ORT_GENAI_BENCH_GENAI_VERSION; // ORT_GENAI_BENCH_GENAI_VERSION is a compiler -D macro, set in CMakeLists.txt
 
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
 
-    if (cfg.scenario != "decode_baseline") {
-      throw std::runtime_error("Only decode_baseline is implemented in the MVP. Found: " + cfg.scenario);
+    const auto scenario = ScenarioBase::Create(cfg.scenario);
+    if (!scenario) {
+      throw std::runtime_error("Unknown scenario: " + cfg.scenario);
     }
 
-    DecodeBaselineScenario scenario;
-    const nlohmann::json result = scenario.Run(cfg, context);
+    const nlohmann::json result = scenario->Run(cfg, context);
 
-    WriteJsonFile(out_dir / MakeResultFilename(cfg.scenario, i + 1), result);
+    std::ostringstream results_file_name;
+    results_file_name << cfg.scenario << "_results_" << std::setw(3) << std::setfill('0') << i + 1 << ".json";
+    WriteJsonFile(out_dir / results_file_name.str(), result);
   }
 
   return 0;

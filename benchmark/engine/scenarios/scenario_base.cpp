@@ -7,6 +7,17 @@
 
 namespace engine_benchmark {
 
+std::map<std::string, ScenarioBase::Factory>& ScenarioBase::Factories() {
+  static std::map<std::string, Factory> factories;
+  return factories;
+}
+
+std::unique_ptr<ScenarioBase> ScenarioBase::Create(const std::string& name) {
+  auto& factories = Factories();
+  const auto it = factories.find(name);
+  return it != factories.end() ? it->second() : nullptr;
+}
+
 void ScenarioBase::ValidateConfig(const ScenarioConfig& config) const {
   if (config.model_path.empty()) {
     throw std::invalid_argument("model_path must be provided.");

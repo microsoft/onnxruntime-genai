@@ -3,8 +3,8 @@
 Native benchmark harness for the ONNX Runtime GenAI engine. Scenarios are described in a JSON config
 and results are written to per-scenario JSON files.
 
-See [benchmark-design.md](benchmark-design.md) for the architecture and
-[benchmark-requirements.md](benchmark-requirements.md) for the metrics contract.
+See [benchmark-design.md](docs/benchmark-design.md) for the architecture and
+[benchmark-requirements.md](docs/benchmark-requirements.md) for the metrics contract.
 
 ## Build
 
@@ -56,7 +56,8 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
     "execution_provider": "cuda",
     "execution_provider_library": "build/Linux/RelWithDebInfo/libonnxruntime_providers_cuda.so",
     "generation_tokens": 128,
-    "measured_runs": 2
+    "warmup_runs": 2,
+    "measured_runs": 10
   }
 ]
 ```
@@ -71,7 +72,22 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
-| `measured_runs` | Number of measured repetitions. |
+| `warmup_runs` | Runs executed and discarded before measurement. Default 2. |
+| `measured_runs` | Number of measured repetitions. Default 10. |
+
+## Adding a scenario
+
+Scenarios self-register with `ScenarioBase::Create`, so the dispatcher needs no changes:
+
+1. Create `scenarios/my_scenario.h`/`.cpp` with a class inheriting `ScenarioBase` (see
+   `decode_baseline.h`/`.cpp` for reference).
+2. At file scope in the `.cpp`, add:
+   ```cpp
+   static const ScenarioBase::Registrar<MyScenario> kRegistrar("my_scenario");
+   ```
+3. Add both files to `engine_benchmark_srcs` in `CMakeLists.txt`.
+
+A config entry with `"scenario": "my_scenario"` will then dispatch to it automatically.
 
 ## Output
 

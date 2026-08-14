@@ -5,9 +5,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -23,7 +27,8 @@ struct ScenarioConfig {
   std::string execution_provider{"cuda"};
   std::string execution_provider_library;
   int generation_tokens{128};
-  int measured_runs{1};
+  int warmup_runs{2};
+  int measured_runs{10};
 };
 
 struct BenchmarkContext {
@@ -65,5 +70,40 @@ inline double Percentile(std::vector<double> values, double p) {
   const double t = rank - static_cast<double>(lo);
   return values[lo] + (values[hi] - values[lo]) * t;
 }
+
+/// Polls device and host memory usage on a background thread.
+///
+/// Device usage is read from NVML, which is loaded lazily so the benchmark still runs on machines
+/// without an NVIDIA driver; usage attributed to this process is preferred and the device-wide
+/// delta from the pre-load baseline is used when the driver does not report per-process numbers.
+/// All values are 0 when no source is available.
+class MemorySampler {
+ public:
+  explicit MemorySampler(std::chrono::milliseconds interval = std::chrono::milliseconds(100));
+  ~MemorySampler();
+
+  MemorySampler(const MemorySampler&) = delete;
+  MemorySampler& operator=(const MemorySampler&) = delete;
+
+  /// Records the pre-load baseline and starts sampling. Call before the model is created.
+  void Start();
+  void Stop();
+
+  uint64_t PeakDeviceBytes() const;
+  /// Mean of the trailing samples, i.e. usage once allocations have settled.
+  uint64_t SteadyStateDeviceBytes() const;
+  uint64_t PeakHostBytes() const;
+
+ private:
+  void Loop();
+
+  std::chrono::milliseconds interval_;
+  std::vector<uint64_t> samples_;
+  uint64_t baseline_device_bytes_{0};
+  bool running_{false};
+  mutable std::mutex mutex_;
+  std::condition_variable stop_signal_;
+  std::thread thread_;
+};
 
 }  // namespace engine_benchmark

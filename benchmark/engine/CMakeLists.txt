@@ -13,8 +13,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(engine_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/scenario_dispatcher.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/utils.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/memory_sampler.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/memory_sampler.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/utils.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.h
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/decode_baseline.h

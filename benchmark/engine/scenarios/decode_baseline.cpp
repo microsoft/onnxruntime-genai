@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "ort_genai.h"
-#include "scenarios/memory_sampler.h"
 #include "scenarios/utils.h"
 
 namespace fs = std::filesystem;
@@ -37,7 +36,7 @@ std::string ResolveModelPath(const std::string& model_path) {
   return fs::absolute(path).string();
 }
 
-std::string BuildPromptText(int prompt_length_k) {
+std::unique_ptr<OgaSequences> BuildPromptTokens(int prompt_length_k, const OgaTokenizer& tokenizer) {
   std::string prompt = "Summarize the following benchmark context:\n";
   const int target_words = prompt_length_k * 750;
   prompt.reserve(static_cast<size_t>(target_words) * 8);
@@ -49,10 +48,16 @@ std::string BuildPromptText(int prompt_length_k) {
   }
 
   prompt += "\nAnswer concisely.";
-  return prompt;
+
+  auto prompt_tokens = OgaSequences::Create();
+  tokenizer.Encode(prompt.c_str(), *prompt_tokens);
+  return prompt_tokens;
 }
 
 }  // namespace
+
+// Self-registers with ScenarioBase::Create so the dispatcher picks this up automatically.
+static const ScenarioBase::Registrar<DecodeBaselineScenario> kRegistrar("decode_baseline");
 
 void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
@@ -79,34 +84,31 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
 
-  // Started before the model is created so the baseline excludes this process's device allocations.
   MemorySampler memory;
   memory.Start();
 
   auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
-  oga_config->ClearProviders();
-  oga_config->AppendProvider(config.execution_provider.c_str());
-
   auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto engine = OgaEngine::Create(*model);
 
-  const std::string prompt = BuildPromptText(config.prompt_length_k);
+  auto prompt_tokens = BuildPromptTokens(config.prompt_length_k, *tokenizer);
 
-  auto prompt_sequences = OgaSequences::Create();
-  tokenizer->Encode(prompt.c_str(), *prompt_sequences);
-
-  const size_t prompt_token_count = prompt_sequences->SequenceCount(0);
+  const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
   std::cout << tag << "Prompt token count: " << prompt_token_count << std::endl;
 
   ScenarioExecutionOutput output;
   std::vector<double> ttft_values;
   std::vector<double> inter_token_latency_values;
-  nlohmann::json outputs = nlohmann::json::array();
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
 
-  for (int run = 0; run < config.measured_runs; ++run) {
+  const int total_runs = config.warmup_runs + config.measured_runs;
+  int measured_run_index = 0;
+
+  for (int run = 0; run < total_runs; ++run) {
+    const bool is_warmup = run < config.warmup_runs;
+
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
@@ -123,10 +125,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           "max_length", static_cast<double>(max_length));
 
       request_tokens[static_cast<size_t>(i)].assign(
-          prompt_sequences->SequenceData(0), prompt_sequences->SequenceData(0) + prompt_token_count);
+          prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
       requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*prompt_sequences);
+      requests.back()->AddTokens(*prompt_tokens);
       requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
       engine->Add(*requests.back());
     }
@@ -173,11 +175,17 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     const double run_elapsed_ms = std::chrono::duration<double, std::milli>(run_end - run_start).count();
     const double tokens_per_s = static_cast<double>(generated_tokens) / std::max(0.001, run_elapsed_ms / 1000.0);
 
-    std::cout << tag << "Run " << run + 1 << "/" << config.measured_runs
+    std::cout << tag << (is_warmup ? "Warmup run " : "Run ")
+              << (is_warmup ? run + 1 : measured_run_index + 1) << "/"
+              << (is_warmup ? config.warmup_runs : config.measured_runs)
               << " complete: generated_tokens=" << generated_tokens
               << ", elapsed_ms=" << run_elapsed_ms
               << ", tokens_per_s=" << tokens_per_s
               << std::endl;
+
+    if (is_warmup) {
+      continue;
+    }
 
     e2e_ms_values.push_back(run_elapsed_ms);
     tokens_per_s_values.push_back(tokens_per_s);
@@ -185,22 +193,11 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     for (int i = 0; i < config.concurrency; ++i) {
       const double ttft_ms = std::max(0.0, first_token_ms[static_cast<size_t>(i)]);
       ttft_values.push_back(ttft_ms);
-      output.requests.push_back({run * config.concurrency + i, ttft_ms, Percentile(inter_token_latency_values, 50.0)});
-
-      const auto& tokens = request_tokens[static_cast<size_t>(i)];
-      const size_t output_tokens = tokens.size() > prompt_token_count ? tokens.size() - prompt_token_count : 0;
-      std::string output_text;
-      if (output_tokens > 0) {
-        const auto decoded = tokenizer->Decode(tokens.data() + prompt_token_count, output_tokens);
-        output_text = static_cast<const char*>(decoded);
-      }
-
-      outputs.push_back({
-          {"run_index", run},
-          {"request_id", run * config.concurrency + i},
-          {"text", output_text},
-      });
+      output.requests.push_back(
+          {measured_run_index * config.concurrency + i, ttft_ms, Percentile(inter_token_latency_values, 50.0)});
     }
+
+    ++measured_run_index;
   }
 
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
@@ -213,7 +210,6 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
 
   output.scenario_metrics = {
-      {"outputs", std::move(outputs)},
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
       {"prompt_tokens", prompt_token_count},
