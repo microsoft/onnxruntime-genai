@@ -6,6 +6,7 @@
 #include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
 #include "span.h"
@@ -33,6 +34,12 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
+  virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
+    assert(size_in_bytes == size_in_bytes_);
+    AllocateCpu();
+    std::memcpy(p_cpu_, source, size_in_bytes);
+    CopyCpuToDevice();
+  }
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -74,6 +81,11 @@ struct DeviceSpan {
 
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+
+  void CopyFromCpu(std::span<const T> source) {
+    assert(source.size() == size());
+    p_device_memory_->CopyFromCpu(source.data(), source.size_bytes());
+  }
 
   // Zero out the device memory
   void Zero() { p_device_memory_->Zero(); }

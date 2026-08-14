@@ -68,3 +68,13 @@ def test_quantized_main_model_does_not_get_int4_defaults():
 def test_unknown_head_quant_type_is_rejected():
     with pytest.raises(ValueError, match="mtp_head_quant_type must be one of"):
         _resolve({"enable_mtp": True, "mtp_head_quant_type": "fp8"})
+
+
+def test_mtp_original_nvfp4_path_is_limited_to_shared_lm_head():
+    model = object.__new__(Qwen35MoeTextModel)
+    model.is_mtp_head = True
+
+    assert model._nvfp4_dense_key_for_matmul("/lm_head/MatMul") == "lm_head"
+    assert model._nvfp4_dense_key_for_matmul(
+        "/model/layers.0/shared_expert/gate_proj/MatMul"
+    ) is None

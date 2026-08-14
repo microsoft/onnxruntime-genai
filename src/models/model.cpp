@@ -8,8 +8,11 @@
 #include <climits>
 #include <filesystem>
 #include <functional>
+#include <fstream>
+#include <mutex>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -49,6 +52,24 @@ namespace {
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
 constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+struct SharedInitializerEntry {
+  DeviceSpan<uint8_t> device_data;
+  std::unique_ptr<OrtValue> shared_view;
+};
+
+std::mutex g_shared_initializers_mutex;
+std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_initializers;
+
+std::string SharedInitializerFileIdentity(const fs::path& path) {
+#ifndef _WIN32
+  struct stat file_info{};
+  if (::stat(path.c_str(), &file_info) == 0) {
+    return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
+  }
+#endif
+  return path.string();
+}
 
 // Session-option config keys whose values are file/folder path references. When a model is loaded
 // from a package these may be sha256: shared-asset URIs or relative paths, so their values are
@@ -613,6 +634,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
@@ -642,6 +664,62 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+}
+
+void Model::AddSharedInitializers() {
+  for (const auto& initializer : config_->model.decoder.shared_initializers) {
+    if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
+        initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+      throw std::runtime_error("Invalid shared initializer metadata for '" + initializer.name + "'.");
+    }
+
+    const fs::path data_path = config_->ResolvePath(initializer.data_file);
+    const std::string data_path_string = data_path.string();
+    const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
+    const size_t length = static_cast<size_t>(std::stoull(initializer.length));
+    const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
+    auto memory_info = p_device_->GetMemoryInfo();
+
+    std::ostringstream key;
+    key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
+        << initializer.data_type << ':'
+        << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+    for (int64_t dimension : initializer.shape) {
+      key << ':' << dimension;
+    }
+
+    std::shared_ptr<SharedInitializerEntry> entry;
+    {
+      std::lock_guard lock{g_shared_initializers_mutex};
+      if (auto it = g_shared_initializers.find(key.str()); it != g_shared_initializers.end()) {
+        entry = it->second.lock();
+      }
+
+      if (!entry) {
+        std::ifstream input{data_path_string, std::ios::binary};
+        if (!input) {
+          throw std::runtime_error("Failed to open shared initializer data file: " + data_path_string);
+        }
+        input.seekg(static_cast<std::streamoff>(offset));
+        std::vector<uint8_t> bytes(length);
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(length));
+        if (input.gcount() != static_cast<std::streamsize>(length)) {
+          throw std::runtime_error("Failed to read shared initializer '" + initializer.name + "' from " +
+                                   data_path_string);
+        }
+
+        entry = std::make_shared<SharedInitializerEntry>();
+        entry->device_data = p_device_->Allocate<uint8_t>(length);
+        entry->device_data.CopyFromCpu(bytes);
+        entry->shared_view = OrtValue::CreateTensor(
+            *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
+        g_shared_initializers[key.str()] = entry;
+      }
+    }
+
+    session_options_->AddInitializer(initializer.name.c_str(), *entry->shared_view);
+    shared_initializer_entries_.push_back(std::move(entry));
+  }
 }
 
 Model::~Model() {
