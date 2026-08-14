@@ -18,6 +18,10 @@
 
 namespace engine_benchmark {
 
+constexpr int kDefaultWarmupRuns = 5;
+constexpr int kDefaultMeasuredRuns = 20;
+constexpr int kDefaultGenerationTokens = 64;
+
 struct ScenarioConfig {
   std::string scenario{"decode_baseline"};
   int concurrency{1};
@@ -26,9 +30,9 @@ struct ScenarioConfig {
   std::string model_path;
   std::string execution_provider{"cuda"};
   std::string execution_provider_library;
-  int generation_tokens{128};
-  int warmup_runs{2};
-  int measured_runs{10};
+  int generation_tokens{kDefaultGenerationTokens};
+  int warmup_runs{kDefaultWarmupRuns};
+  int measured_runs{kDefaultMeasuredRuns};
 };
 
 struct BenchmarkContext {

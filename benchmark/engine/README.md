@@ -78,9 +78,7 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
     "model_path": "/models/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
     "execution_provider_library": "build/Linux/RelWithDebInfo/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 128,
-    "warmup_runs": 2,
-    "measured_runs": 10
+    "generation_tokens": 64
   }
 ]
 ```
@@ -95,8 +93,6 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
-| `warmup_runs` | Runs executed and discarded before measurement. Default 2. |
-| `measured_runs` | Number of measured repetitions. Default 10. |
 
 ## Adding a scenario
 
