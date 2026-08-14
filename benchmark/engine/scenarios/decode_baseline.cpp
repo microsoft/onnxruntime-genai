@@ -28,12 +28,12 @@ bool IsAllowedConcurrency(int concurrency) {
 }
 
 std::string ResolveModelPath(const std::string& model_path) {
-  fs::path path(model_path);
+  fs::path path = fs::absolute(model_path);
   if (!fs::exists(path)) {
     throw std::invalid_argument("model_path does not exist: " + model_path);
   }
 
-  return fs::absolute(path).string();
+  return path.string();
 }
 
 std::unique_ptr<OgaSequences> BuildPromptTokens(int prompt_length_k, const OgaTokenizer& tokenizer) {
