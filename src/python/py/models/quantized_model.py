@@ -1743,7 +1743,8 @@ class ModeloptModel(QuantizedModel):
         if getattr(self, "_open_handles", None):
             self.close()
 
-    def repack_nvfp4_weight_codes(self, packed_nk2):
+    @classmethod
+    def repack_nvfp4_weight_codes(cls, packed_nk2):
         """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes."""
         if packed_nk2.dtype != torch.uint8:
             packed_nk2 = packed_nk2.to(torch.uint8)
@@ -1764,7 +1765,8 @@ class ModeloptModel(QuantizedModel):
         high = codes_kn[:, 1::2] & 0x0F
         return ((high << 4) | low).contiguous()
 
-    def _dequant_nvfp4(self, weight_u8, block_scale_e4m3, global_scale, name=""):
+    @classmethod
+    def _dequant_nvfp4(cls, weight_u8, block_scale_e4m3, global_scale, name=""):
         """Reconstruct a BF16 weight from Model Optimizer NVFP4 tensors."""
         if block_scale_e4m3 is None:
             raise ValueError(
@@ -1778,8 +1780,8 @@ class ModeloptModel(QuantizedModel):
                 f"NVFP4 tensor '{name}' block scales must be float8_e4m3fn (or raw uint8 bytes), "
                 f"got {block_scale_e4m3.dtype}."
             )
-        codes = self.repack_nvfp4_weight_codes(weight_u8).long()
-        mag = self._FP4_E2M1_LUT[codes & 0x7]
+        codes = cls.repack_nvfp4_weight_codes(weight_u8).long()
+        mag = cls._FP4_E2M1_LUT[codes & 0x7]
         values = torch.where((codes & 0x8) > 0, -mag, mag)
         block_scales = block_scale_e4m3.to(torch.float32)
         n, k = codes.shape
