@@ -107,7 +107,10 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   shape_[1] = new_kv_length;
-  output_raw_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+  const int max_cap = state_.params_->max_graph_capture_length;
+  const bool use_static = state_.params_->use_graph_capture && shape_[1] >= 1 && shape_[1] <= max_cap;
+  const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * shape_[2] * Ort::SizeOf(type_) : 0;
+  output_raw_->CreateTensor(shape_, use_static, static_cap_bytes);
   state_.outputs_[output_index_] = output_raw_->GetOrtTensor();
 }
 

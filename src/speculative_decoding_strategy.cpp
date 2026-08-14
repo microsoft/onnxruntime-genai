@@ -28,23 +28,23 @@ void ValidateProposal(const SpeculativeDecodingStrategy::Proposal& proposal,
       if (!target_uses_greedy)
         throw std::runtime_error(
             "Speculative decoding received a greedy-match proposal for sampling verification.");
-      if (!proposal.probs.empty())
+      if (!proposal.distributions.empty())
         throw std::runtime_error(
-            "Speculative decoding greedy-match proposals must not contain probability rows.");
+            "Speculative decoding greedy-match proposals must not contain distribution rows.");
       return;
     case ProposalMode::kDraftSampling:
       if (target_uses_greedy)
         throw std::runtime_error(
             "Speculative decoding received a draft-sampling proposal for greedy verification.");
-      if (static_cast<int>(proposal.probs.size()) != proposal_length)
+      if (static_cast<int>(proposal.distributions.size()) != proposal_length)
         throw std::runtime_error(
-            "Speculative draft returned " + std::to_string(proposal.probs.size()) +
-            " probability rows, expected " + std::to_string(proposal_length) + ".");
+            "Speculative draft returned " + std::to_string(proposal.distributions.size()) +
+            " distribution rows, expected " + std::to_string(proposal_length) + ".");
       return;
     case ProposalMode::kDeterministic:
-      if (!proposal.probs.empty())
+      if (!proposal.distributions.empty())
         throw std::runtime_error(
-            "Deterministic speculative proposals must not contain probability rows.");
+            "Deterministic speculative proposals must not contain distribution rows.");
       return;
     case ProposalMode::kUnset:
       throw std::runtime_error("Speculative decoding proposer did not set a proposal mode.");
@@ -699,10 +699,6 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   int n_evaluated = 0;
   int32_t final_token = -1;
 
-  // Draft-sampling scratch, lazily sized. Densification expands one truncated row into a full
-  // vocab vector; correction_buf holds the built correction distribution.
-  std::vector<float> dense_row;
-  std::vector<float> correction_buf;
   std::vector<std::mt19937> rng_states_after_output;
   if (!target_uses_greedy)
     rng_states_after_output.reserve(static_cast<size_t>(K + 1));
@@ -728,7 +724,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         accepted = (target.greedy_token == proposal.tokens[i]);
       } else {
         const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
-        const float p_d = proposal.probs[i][proposal.tokens[i]];
+        const auto& draft = proposal.distributions[i];
+        const float p_d = GetTargetTokenProbability(draft, proposal.tokens[i]);
         accepted = (uni(round_rng) < ComputeAcceptProb(p_t, p_d));
       }
 
@@ -740,15 +737,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         if (target_uses_greedy) {
           final_token = target.greedy_token;
         } else {
-          std::vector<float>& dense_t =
-              DensifyTargetTokenSelection(target, vocab_size, dense_row);
-          if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-          BuildCorrectionDistribution(
-              {dense_t.data(), static_cast<size_t>(vocab_size)},
-              {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-              {correction_buf.data(), static_cast<size_t>(vocab_size)});
-          std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-          final_token = dist(round_rng);
+          const auto& draft = proposal.distributions[i];
+          final_token = SampleCorrectionToken(target.indices, target.probs,
+                                              draft.indices, draft.probs, round_rng);
           rng_states_after_output.push_back(round_rng);
         }
         corrections_++;
@@ -762,10 +753,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       if (target_uses_greedy) {
         final_token = bonus_target.greedy_token;
       } else {
-        std::vector<float>& dense_last =
-            DensifyTargetTokenSelection(bonus_target, vocab_size, dense_row);
-        std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
-        final_token = dist(round_rng);
+        final_token = SampleSparseToken(
+            bonus_target.indices, bonus_target.probs, round_rng);
         rng_states_after_output.push_back(round_rng);
       }
       bonuses_++;
@@ -1045,8 +1034,6 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       !target_uses_greedy && proposal.mode == ProposalMode::kDeterministic;
   const auto& search = params.search;
   std::uniform_real_distribution<float> uni(0.f, 1.f);
-  std::vector<float> correction_buf;  // reject path: max(0, p_target - p_draft), then normalized
-  std::vector<float> dense_target;    // reject path: dense target distribution from sparse selection
   TargetTokenSelection target_selection;
   SampledCategorical sampled_target;
   std::vector<std::mt19937> sampling_rng_states;
@@ -1158,8 +1145,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       // Sampling - speculative sampling on the masked distributions. Accept with min(1, p_t/p_d), else
       // draw the correction from the leftover max(0, p_t - p_d).
       const int32_t dtok = proposal.tokens[i];
+      const auto& draft = proposal.distributions[i];
       const float accept_p = ComputeAcceptProb(GetTargetTokenProbability(target_selection, dtok),
-                                               proposal.probs[i][static_cast<size_t>(dtok)]);
+                                               GetTargetTokenProbability(draft, dtok));
       if (uni(round_rng) < accept_p) {
         AppendGuidanceSamplingOutput(
             committed, sampling_rng_states, dtok, round_rng);
@@ -1173,14 +1161,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         for (int32_t fwd : CommitGuidanceToken(proc, dtok)) pending_forced.push_back(fwd);
       } else {
         rejected = true;
-        if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-        std::vector<float>& p_t =
-            DensifyTargetTokenSelection(target_selection, vocab_size, dense_target);
-        BuildCorrectionDistribution({p_t.data(), static_cast<size_t>(vocab_size)},
-                                    {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-                                    {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-        const int32_t ctok = static_cast<int32_t>(dist(round_rng));
+        const int32_t ctok = SampleCorrectionToken(
+            target_selection.indices, target_selection.probs,
+            draft.indices, draft.probs, round_rng);
         AppendGuidanceSamplingOutput(
             committed, sampling_rng_states, ctok, round_rng);
         corrections_++;

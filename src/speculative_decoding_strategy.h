@@ -257,8 +257,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     kDeterministic,
   };
 
-  // Proposer output. The mode defines how verification interprets the tokens; probability storage
-  // is data for draft-model sampling, not an implicit behavior signal.
+  // Proposer output. The mode defines how verification interprets the tokens; sparse distribution
+  // storage is data for draft-model sampling, not an implicit behavior signal.
   struct Proposal {
     Proposal() = default;
     explicit Proposal(ProposalMode proposal_mode) : mode{proposal_mode} {}
@@ -267,7 +267,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
     ProposalMode mode{ProposalMode::kUnset};
     std::vector<int32_t> tokens;
-    std::vector<std::vector<float>> probs;
+    std::vector<TargetTokenSelection> distributions;
   };
 
   enum class RoundPhase {

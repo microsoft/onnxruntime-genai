@@ -210,10 +210,13 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
       rollback_transaction();
-      if (error.FailureKind() == ExecutionFailureKind::RetryableAbort) {
+      if (error.FailureKind() == ExecutionFailureKind::RetryableAbort ||
+          error.FailureKind() == ExecutionFailureKind::CapacityExceeded) {
         ++transaction_metrics_.retryable_aborts;
         throw EngineStepError{
-            {StepOutcomeKind::RetryableBatchAbort,
+            {error.FailureKind() == ExecutionFailureKind::CapacityExceeded
+                 ? StepOutcomeKind::ExecutionCapacityExceeded
+                 : StepOutcomeKind::RetryableBatchAbort,
              step_plan_.transaction_id,
              nullptr},
             error.what(),

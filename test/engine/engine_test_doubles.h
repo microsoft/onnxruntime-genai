@@ -260,6 +260,7 @@ enum class ScriptedExecutionFailure {
   None,
   RetryableBeforeExecution,
   RetryableDuringExecution,
+  CapacityExceeded,
   Fatal,
   PostProcessing,
 };
@@ -296,6 +297,10 @@ struct RecordingModelExecutor : ModelExecutor {
     if (failure == ScriptedExecutionFailure::RetryableDuringExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable in-execution failure."};
+    }
+    if (failure == ScriptedExecutionFailure::CapacityExceeded) {
+      throw ModelExecutionError{ExecutionFailureKind::CapacityExceeded,
+                                "Injected execution capacity failure."};
     }
     if (failure == ScriptedExecutionFailure::Fatal) {
       throw std::runtime_error("Injected fatal execution failure.");

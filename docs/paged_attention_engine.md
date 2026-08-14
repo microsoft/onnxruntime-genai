@@ -395,14 +395,14 @@ The dynamic path separates failures into recoverable batch failures and fatal en
 
 ### Recoverable rollback
 
-Request validation and post-processing failures are treated as retryable batch aborts. Model execution can also explicitly report a retryable failure.
+Request validation and post-processing failures are treated as retryable batch aborts. Model execution can also explicitly report a retryable failure. A recognized execution-memory capacity failure follows the same rollback path but has its own outcome.
 
 Rollback performs both parts:
 
 1. Restore request search state and sampler state from their checkpoints.
 2. Release every block held by the paged-cache reservation.
 
-After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with `RetryableBatchAbort` and can call `Step()` again.
+After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
 
 The model may have written data into reserved cache memory before the failure. Releasing the reservation is still safe because those blocks were never added to committed block tables. Future users of those blocks overwrite the relevant slots before treating them as valid cache contents.
 
@@ -429,6 +429,7 @@ The engine stores the fatal error and rethrows it on later `Step()` calls. Conti
 | `UnserviceableRequest` | A request cannot fit the configured cache even at full availability |
 | `Committed` | An executable plan was produced and is expected to commit |
 | `RetryableBatchAbort` | The transaction was rolled back and may be retried |
+| `ExecutionCapacityExceeded` | Execution exceeded available memory; the transaction was rolled back and the engine remains healthy |
 | `ExecutionContractFailure` | Collaborators disagreed about planned or committed state |
 | `FatalExecutionFailure` | Execution or rollback failed in a way that makes continued use unsafe |
 

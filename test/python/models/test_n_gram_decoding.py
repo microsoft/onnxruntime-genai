@@ -15,11 +15,16 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
-
+from _test_utils import assert_cross_shape_output_compatible
 
 _PROMPT = [785, 3838, 374, 279, 6722, 315, 9625, 30]
 _REPETITIVE_PROMPT = [785, 3838, 374, 785, 3838]
 _CHAINED_QWEN_PROMPT = [785, 3838, 374, 785, 3838, 374]
+
+
+def _assert_cross_shape_equal(actual, expected, model_path, prompt):
+    assert_cross_shape_output_compatible(
+        actual, expected, os.path.abspath(model_path), tuple(prompt))
 
 
 @pytest.fixture(scope="module")
@@ -1468,7 +1473,8 @@ class TestNGramDecoding:
             ngram_chained_lookup=True,
         )
 
-        assert actual == expected
+        _assert_cross_shape_equal(
+            actual, expected, qwen3_model_path, _CHAINED_QWEN_PROMPT)
         assert stats["rounds"] > 0
         assert stats["draft_tokens_proposed"] > 0
         assert stats["draft_forward_passes"] == 0
@@ -2191,7 +2197,8 @@ class TestNGramDecoding:
             }
             return sequence, counters
 
-        assert run(True) == run(False)
+        _assert_cross_shape_equal(
+            run(True), run(False), qwen3_model_path, _REPETITIVE_PROMPT)
 
     def test_set_logits_reanchors_before_continuing(self, qwen3_model_path):
         max_length = len(_REPETITIVE_PROMPT) + 16
@@ -2211,7 +2218,8 @@ class TestNGramDecoding:
         expected, _ = _generate(
             qwen3_model_path, committed, max_length,
             ngram_size=3, max_draft_tokens=4)
-        assert actual == expected
+        _assert_cross_shape_equal(
+            actual, expected, qwen3_model_path, _REPETITIVE_PROMPT)
 
     def test_interleaved_generators_do_not_share_lookup_state(
             self, qwen3_model_path):
