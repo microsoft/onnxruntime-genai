@@ -144,7 +144,8 @@ void DynamicBatchScheduler::ReapCompletedRequests() {
   }
 }
 
-StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
+StepPlanningResult DynamicBatchScheduler::PlanStep(
+    StepPlan& plan, const StepPlanningLimits& limits) {
   // Completed requests release their blocks before admission, making that capacity available to
   // requests waiting in Assigned state during this same planning pass.
   ReapCompletedRequests();
@@ -213,19 +214,59 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   for (const auto& candidate : candidates)
     budget_candidates.push_back(candidate.budget);
   const auto order = DecodeFirstCandidateOrder(budget_candidates);
+  const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
+  const size_t max_scheduled_tokens = std::min(
+      dynamic_batching.max_scheduled_tokens,
+      limits.max_scheduled_tokens.value_or(
+          dynamic_batching.max_scheduled_tokens));
+  const size_t max_prefill_requests = std::min(
+      dynamic_batching.max_batch_size,
+      limits.max_prefill_requests.value_or(
+          dynamic_batching.max_batch_size));
+  if (max_scheduled_tokens == 0) {
+    throw std::invalid_argument("The step token limit must be positive.");
+  }
+  const bool has_decode_candidate = std::any_of(
+      candidates.begin(), candidates.end(),
+      [](const Candidate& candidate) {
+        return !candidate.budget.is_prefill;
+      });
+  if (max_prefill_requests == 0 && !has_decode_candidate) {
+    throw std::invalid_argument(
+        "A zero prefill limit requires runnable decode work.");
+  }
+
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
     plan.requests.push_back(candidates[candidate_index].entry);
   }
 
-  const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
   plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
-      dynamic_batching.max_scheduled_tokens,
+      max_scheduled_tokens,
       dynamic_batching.max_batch_size);
 
   auto result = cache_manager_->PlanStepResources(plan);
   if (!result.executable) {
     return result;
+  }
+
+  size_t selected_prefill_requests = 0;
+  const auto first_deferred = std::remove_if(
+      plan.requests.begin(), plan.requests.end(),
+      [&selected_prefill_requests,
+       max_prefill_requests](const RequestStepPlan& entry) {
+        if (!entry.is_prefill) {
+          return false;
+        }
+        if (selected_prefill_requests < max_prefill_requests) {
+          ++selected_prefill_requests;
+          return false;
+        }
+        return true;
+      });
+  if (first_deferred != plan.requests.end()) {
+    plan.requests.erase(first_deferred, plan.requests.end());
+    result.capacity_deferred = true;
   }
 
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
@@ -241,7 +282,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     selected_candidates.push_back(candidate->budget);
   }
   const auto token_counts = AllocateDecodeFirstTokenBudget(
-      selected_candidates, dynamic_batching.max_scheduled_tokens);
+      selected_candidates, max_scheduled_tokens);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row

@@ -402,7 +402,9 @@ Rollback performs both parts:
 1. Restore request search state and sampler state from their checkpoints.
 2. Release every block held by the paged-cache reservation.
 
-After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
+After a successful rollback, committed request state and committed cache state match the state before the step began. For an execution-capacity failure that included prefill work, the Engine makes one internal attempt with fewer prefill tokens and requests. The retry uses a new transaction and does not change request configuration. If no smaller plan exists or the smaller attempt also exceeds capacity, the caller receives `ExecutionCapacityExceeded` and the engine remains healthy.
+
+Decode-only capacity failures, unrelated execution failures, validation failures, and rollback failures are not retried. The bounded retry applies only to execution-capacity failures that reach the Engine as typed exceptions; it cannot recover a process or device failure that prevents control from returning to the Engine.
 
 The model may have written data into reserved cache memory before the failure. Releasing the reservation is still safe because those blocks were never added to committed block tables. Future users of those blocks overwrite the relevant slots before treating them as valid cache contents.
 

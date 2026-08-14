@@ -52,7 +52,8 @@ struct Scheduler {
    */
   virtual ScheduledRequests Schedule() = 0;
 
-  virtual StepPlanningResult PlanStep(StepPlan&) {
+  virtual StepPlanningResult PlanStep(
+      StepPlan&, const StepPlanningLimits& = {}) {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }
 
@@ -106,7 +107,8 @@ struct DynamicBatchScheduler : Scheduler {
 
   ScheduledRequests Schedule() override;
 
-  StepPlanningResult PlanStep(StepPlan& plan) override;
+  StepPlanningResult PlanStep(
+      StepPlan& plan, const StepPlanningLimits& limits = {}) override;
 
   bool HasPendingRequests() const override;
 
