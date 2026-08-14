@@ -107,6 +107,6 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const State& state);
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
-  const Model& model, std::shared_ptr<const GeneratorParams> params);
+    const Model& model, std::shared_ptr<const GeneratorParams> params);
 
 }  // namespace Generators

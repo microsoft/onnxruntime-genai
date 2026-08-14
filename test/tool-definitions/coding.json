@@ -1,0 +1,64 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a UTF-8 text file in the coding workspace before deciding how to change it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path"
+                    }
+                },
+                "required": [
+                    "path"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace one exact, unique text fragment in a UTF-8 file in the coding workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path"
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text currently in the file"
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text"
+                    }
+                },
+                "required": [
+                    "path",
+                    "old_text",
+                    "new_text"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Run the Python unittest suite in the coding workspace and return its output.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }
+    }
+]
