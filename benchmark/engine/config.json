@@ -2,26 +2,6 @@
   {
     "scenario": "decode_baseline",
     "concurrency": 1,
-    "prompt_length_k": 1,
-    "synthetic": true,
-    "model_path": "~/qwen2.5-0.5b-instruct",
-    "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 64
-  },
-  {
-    "scenario": "decode_baseline",
-    "concurrency": 1,
-    "prompt_length_k": 2,
-    "synthetic": true,
-    "model_path": "~/qwen2.5-0.5b-instruct",
-    "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 64
-  },
-  {
-    "scenario": "decode_baseline",
-    "concurrency": 1,
     "prompt_length_k": 4,
     "synthetic": true,
     "model_path": "~/qwen2.5-0.5b-instruct",
@@ -31,8 +11,8 @@
   },
   {
     "scenario": "decode_baseline",
-    "concurrency": 2,
-    "prompt_length_k": 1,
+    "concurrency": 4,
+    "prompt_length_k": 4,
     "synthetic": true,
     "model_path": "~/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
@@ -41,8 +21,8 @@
   },
   {
     "scenario": "decode_baseline",
-    "concurrency": 2,
-    "prompt_length_k": 2,
+    "concurrency": 8,
+    "prompt_length_k": 4,
     "synthetic": true,
     "model_path": "~/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
