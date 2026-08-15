@@ -38,8 +38,7 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from .cuda_quantizer import CudaQuantizer
-from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
+from quantization import CudaQuantizer, QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
@@ -89,6 +88,11 @@ class Model:
             if hasattr(config, "num_hidden_layers")
             else config.num_layers
         )
+        self.layer_types = (
+            config.layer_types
+            if hasattr(config, "layer_types")
+            else ["full_attention"] * self.num_layers
+        )
         self.vocab_size = config.vocab_size
         self.activation = (
             config.hidden_activation
@@ -121,7 +125,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
+            opset_imports={"": 22, "com.microsoft": 1},
             name="main_graph",
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
@@ -148,14 +152,15 @@ class Model:
         # Initialize EP-specific expansions
         self.make_ep_expansions_init()
 
+        # TODO: add conv and recurrent defaults to inputs and outputs
         # Map input names to their types and shapes
         self.input_names = {
             "input_ids": "input_ids",
             "attention_mask": "attention_mask",
             "position_ids": "position_ids",
             "inputs_embeds": "inputs_embeds",
-            "past_key_values.key": [f"past_key_values.{i}.key" for i in range(self.num_layers)],
-            "past_key_values.value": [f"past_key_values.{i}.value" for i in range(self.num_layers)],
+            "past_key_values.key": {i: f"past_key_values.{i}.key" for i in range(self.num_layers)},
+            "past_key_values.value": {i: f"past_key_values.{i}.value" for i in range(self.num_layers)},
             "block_table": "block_table",                                                                        # For paged attention models
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
@@ -171,7 +176,7 @@ class Model:
             "block_table": ir.DataType.INT32,                                                                    # For paged attention models
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
-            "attention_metadata": ir.DataType.INT32,                                                              # For paged attention models
+            "attention_metadata": ir.DataType.INT32,                                                             # For paged attention models
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -191,8 +196,8 @@ class Model:
         self.output_names = {
             "hidden_states": "hidden_states",                                                                    # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": "logits",                                                                                  # For standard models
-            "present.key": [f"present.{i}.key" for i in range(self.num_layers)],                                 # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": [f"present.{i}.value" for i in range(self.num_layers)],                             # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "present.key": {i: f"present.{i}.key" for i in range(self.num_layers)},                              # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": {i: f"present.{i}.value" for i in range(self.num_layers)},                          # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
@@ -285,14 +290,13 @@ class Model:
             "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
             "mrope_layout": 0,                               # M-RoPE layout: 0 = sectioned (contiguous T/H/W chunks), 1 = interleaved, 2 = blocked
             "mrope_section": [],                             # M-RoPE sections: list of section sizes for the rotary embeddings
-            "cast": {                   # Casting RoPE-specific variables
-                "use_fp32": False,      # Use float32 precision to compute RoPE
-                "root_input": False,    # Cast root_input
-                "output_0": False,      # Cast output_0
+            "cast": {                                        # Casting RoPE-specific variables
+                "use_fp32": False,                           # Use float32 precision to compute RoPE
+                "root_input": False,                         # Cast root_input
+                "output_0": False,                           # Cast output_0
             },
         }
-        if rope_params is not None:
-            self.make_rope_init(config)
+        self.make_rope_init(config)
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         attn_softcap = config.attn_logit_softcapping if getattr(config, "attn_logit_softcapping", None) is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
@@ -301,6 +305,7 @@ class Model:
             "q_path": "",                                    # Q path to attention
             "k_path": "",                                    # K path to attention
             "v_path": "",                                    # V path to attention
+            "o_path": "",                                    # O path to attention
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
             "softcap": attn_softcap,                         # Softcap value to prevent values from exploding in attention
@@ -665,6 +670,7 @@ class Model:
     def make_quantized_kv_cache_init(self):
         if self.attention_attrs["op_type"] not in {"GroupQueryAttention", "PagedAttention"}:
             raise ValueError("Quantized KV cache requires GroupQueryAttention or PagedAttention.")
+
         if self.ep not in {"cpu", "cuda"}:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
@@ -692,6 +698,7 @@ class Model:
             cache_dtype = ir.DataType.UINT8
         else:
             cache_dtype = ir.DataType.INT8
+
         self.input_types["past_key_values.key"] = cache_dtype
         self.input_types["past_key_values.value"] = cache_dtype
         self.output_types["present.key"] = cache_dtype
@@ -892,6 +899,7 @@ class Model:
             "",
         )
 
+    # TODO: make conv and recurrent caches auto populate here
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         config = AutoConfig.from_pretrained(
@@ -937,6 +945,10 @@ class Model:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
             inputs["past_value_names"] = "past_key_values.%d.value"
+        if "past.conv" in self.input_names:
+            inputs["past_conv_names"] = self.input_names["past.conv"]
+        if "past.recurrent" in self.input_names:
+            inputs["past_recurrent_names"] = self.input_names["past.recurrent"]
 
         # Create outputs dict
         outputs = {}
@@ -946,6 +958,10 @@ class Model:
             outputs["present_key_names"] = "present.%d.key"
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
+        if "present.conv" in self.output_names:
+            outputs["present_conv_names"] = self.output_names["present.conv"]
+        if "present.recurrent" in self.output_names:
+            outputs["present_recurrent_names"] = self.output_names["present.recurrent"]
 
         bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
         eos_token_id = config.eos_token_id
@@ -1418,11 +1434,14 @@ class Model:
             dtype = self.input_types[key]
             shape = self.input_shapes[key]
 
-            if type(name) == list:
-                # KV cache inputs
-                for i, kv_name in enumerate(name):
-                    kv_shape = self.make_key_value_cache_shape(i, shape)
-                    inputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
+            if type(name) == dict:
+                # Cache inputs
+                for i, cache_name in name.items():
+                    if key in {"past_key_values.key", "past_key_values.value"}:
+                        cache_shape = self.make_key_value_cache_shape(i, shape)
+                    else:
+                        cache_shape = shape
+                    inputs.append(self.make_value(cache_name, dtype=dtype, shape=cache_shape))
             else:
                 inputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
@@ -1433,11 +1452,14 @@ class Model:
             dtype = self.output_types[key]
             shape = self.output_shapes[key]
 
-            if type(name) == list:
-                # KV cache outputs
-                for i, kv_name in enumerate(name):
-                    kv_shape = self.make_key_value_cache_shape(i, shape)
-                    outputs.append(self.make_value(kv_name, dtype=dtype, shape=kv_shape))
+            if type(name) == dict:
+                # Cache outputs
+                for i, cache_name in name.items():
+                    if key in {"present.key", "present.value"}:
+                        cache_shape = self.make_key_value_cache_shape(i, shape)
+                    else:
+                        cache_shape = shape
+                    outputs.append(self.make_value(cache_name, dtype=dtype, shape=cache_shape))
             else:
                 outputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
@@ -1657,6 +1679,49 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Conv", inputs=inputs, outputs=[output], name=name, **kwargs)
         self.make_value(output, dtype, shape=shape)
+
+    def make_causal_conv_with_state(self, name, **kwargs):
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        output = f"{name}/output_0"
+
+        self.make_node(
+            "CausalConvWithState",
+            inputs=inputs,
+            outputs=[output, kwargs["present_conv_state"]],
+            name=name,
+            domain="com.microsoft",
+            ndim=kwargs.get("ndim", 1),
+            activation=kwargs.get("activation", "silu"),
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", self.linear_conv_dim, "sequence_length"])
+
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+        output = f"{name}/output_0"
+        self.make_node(
+            "GatedRMSNorm",
+            inputs=[root_input, scale, gate],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            epsilon=epsilon,
+        )
+        self.make_value(output, self.io_dtype, shape=shape)
+
+    def make_gated_add(self, name, root_input, scaled_input, gate, shape):
+        output = f"{name}/output_0"
+        self.make_node(
+            "GatedAdd",
+            inputs=[root_input, scaled_input, gate],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+        )
+        self.make_value(output, self.io_dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
         if hasattr(matmul, "base_layer"):
@@ -3200,28 +3265,6 @@ class Model:
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
 
-    def make_causal_conv_with_state(self, name, **kwargs):
-        inputs = [
-            kwargs["root_input"],
-            kwargs["weight"],
-            kwargs["bias"],
-            kwargs["past_conv_state"],
-        ]
-        output = f"{name}/output_0"
-        present_conv = kwargs["present_conv_state"]
-        outputs = [output, present_conv]
-        self.make_node(
-            "CausalConvWithState",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            ndim=kwargs.get("ndim", 1),
-            activation=kwargs.get("activation", "silu"),
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
-
     def make_linear_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
@@ -3232,12 +3275,11 @@ class Model:
             kwargs["beta"],
         ]
         output = f"{name}/output_0"
-        present_recurrent = kwargs["present_recurrent_state"]
-        outputs = [output, present_recurrent]
+
         self.make_node(
             "LinearAttention",
             inputs=inputs,
-            outputs=outputs,
+            outputs=[output, kwargs["present_recurrent_state"]],
             name=name,
             domain="com.microsoft",
             q_num_heads=kwargs["q_num_heads"],
@@ -3245,8 +3287,20 @@ class Model:
             update_rule=kwargs.get("update_rule", "gated_delta"),
             scale=kwargs.get("scale", 1.0),
         )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
+        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
+
+    def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
+        decay = f"{name}/output_0"
+        beta = f"{name}/output_1"
+        self.make_node(
+            "LinearAttentionGate",
+            inputs=[a, dt_bias, decay_scale, b],
+            outputs=[decay, beta],
+            name=name,
+            domain="com.microsoft",
+        )
+        self.make_value(decay, self.io_dtype, shape=shape)
+        self.make_value(beta, self.io_dtype, shape=shape)
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
@@ -3373,9 +3427,9 @@ class Model:
         #                  QKV_MatMul                     seqlens_k  total_seq_len  past_key  past_value
         #                       |                            |            |           |          |
         #                  QKV_Add (packed)                  +------------+-----------+----------+
-        #                       |                                          |
-        #                  Q_Rotary / K_Rotary (in-attn or external)       |
-        #                       |                                          |
+        #                       |                                         |
+        #                  Q_Rotary / K_Rotary (in-attn or external)      |
+        #                       |                                         |
         #                  GroupQueryAttention----------------------------+
         #                       |
         #                   O_MatMul
@@ -3395,8 +3449,8 @@ class Model:
         #             Q_Norm   K_Norm   V             seqlens_k  total_seq_len  past_key  past_value
         #                |       |      |                 |            |           |          |
         #            Q_Rotary  K_Rotary V                 +------------+-----------+----------+
-        #                  \     |     /                                |
-        #                  GroupQueryAttention----------------------------+
+        #                  \     |     /                               |
+        #                  GroupQueryAttention-------------------------+
         #                       |
         #                   O_MatMul
         #                       |
@@ -3627,11 +3681,9 @@ class Model:
             qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
             **kwargs,
         )
+        self.attention_attrs["o_path"] = f"{attn_name}/output_0"
 
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
-        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
-        attn_output = f"{attn_name}/output_0"
-
         # Make MatMul node (output projection weight node)
         o_proj = (
             "o_proj" if hasattr(attention, "o_proj")
@@ -3640,7 +3692,7 @@ class Model:
         )
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
         o_weight = getattr(attention, o_proj)
-        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, attn_output)
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, root_input=self.attention_attrs["o_path"])
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = getattr(attention, o_proj).bias is not None
@@ -4606,14 +4658,20 @@ class Model:
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> output_layernorm --> MLP
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        self.make_attention(layer_id, self.get_attn_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
-        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+        self.make_mlp(layer_id, self.get_mlp_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+    def get_attn_module(self, layer_id, layer):
+        return layer.self_attn
+
+    def get_mlp_module(self, layer_id, layer):
+        return layer.mlp
 
     def load_weights(self, input_path):
         # Load weights of original model

@@ -25,14 +25,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+QUANTIZATION_DIR = (
+    Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
+)
 
 
 def _load_calibration_module():
     sys.modules.setdefault("models", types.ModuleType("models"))
-    spec = importlib.util.spec_from_file_location("models.kv_cache_calibration", MODELS_DIR / "kv_cache_calibration.py")
+    module_name = "models.quantization.kv_cache_calibration"
+    spec = importlib.util.spec_from_file_location(module_name, QUANTIZATION_DIR / "kv_cache_calibration.py")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["models.kv_cache_calibration"] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 

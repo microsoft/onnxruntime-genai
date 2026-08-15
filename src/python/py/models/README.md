@@ -585,7 +585,7 @@ The scale file is produced by the `kv_cache_calibration` module, which runs a ba
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
 
 # 2. Calibrate the scales:
-python -m onnxruntime_genai.models.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
+python -m onnxruntime_genai.models.quantization.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
 ```
 
 Then rebuild with the quantized KV cache:

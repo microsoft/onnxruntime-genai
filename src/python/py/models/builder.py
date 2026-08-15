@@ -53,7 +53,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.quant_config import KV_CACHE_QUANT_TYPES
+from quantization import KV_CACHE_QUANT_TYPES
 from transformers import AutoConfig
 
 
@@ -539,10 +539,18 @@ def create_model(
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_vl_text"
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen35MoETextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_moe_text"

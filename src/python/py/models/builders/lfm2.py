@@ -43,6 +43,7 @@ class LFM2Model(Model):
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
 
+    # TODO: fix this to reconcile with base class changes
     def make_inputs_and_outputs(self):
         # Replace the base class's all-layer KV lists with attention-layer-only lists,
         # then add conv cache entries as additional scalar (non-list) entries.
@@ -50,10 +51,10 @@ class LFM2Model(Model):
         conv_indices = [i for i, t in enumerate(self.layer_types) if t == "conv"]
 
         # Rewrite KV names to only include attention layers
-        self.input_names["past_key_values.key"] = [f"past_key_values.{i}.key" for i in attn_indices]
-        self.input_names["past_key_values.value"] = [f"past_key_values.{i}.value" for i in attn_indices]
-        self.output_names["present.key"] = [f"present.{i}.key" for i in attn_indices]
-        self.output_names["present.value"] = [f"present.{i}.value" for i in attn_indices]
+        self.input_names["past_key_values.key"] = {i: f"past_key_values.{i}.key" for i in attn_indices}
+        self.input_names["past_key_values.value"] = {i: f"past_key_values.{i}.value" for i in attn_indices}
+        self.output_names["present.key"] = {i: f"present.{i}.key" for i in attn_indices}
+        self.output_names["present.value"] = {i: f"present.{i}.value" for i in attn_indices}
 
         # Add conv cache entries as individual (non-list) inputs/outputs
         conv_cache_shape = ["batch_size", self.hidden_size, self.conv_L_cache]
@@ -74,10 +75,10 @@ class LFM2Model(Model):
         # The base class indexes the filtered KV lists by layer_id, but our lists
         # only contain attention layers. Map layer_id to its position in the filtered list.
         attn_index = self.kv_layer_indices.index(layer_id)
-        past_k = self.input_names["past_key_values.key"][attn_index]
-        past_v = self.input_names["past_key_values.value"][attn_index]
-        present_k = self.output_names["present.key"][attn_index]
-        present_v = self.output_names["present.value"][attn_index]
+        past_k = self.input_names["past_key_values.key"][layer_id]
+        past_v = self.input_names["past_key_values.value"][layer_id]
+        present_k = self.output_names["present.key"][layer_id]
+        present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
     def make_past_key_subgraph(self, basename):
@@ -110,15 +111,15 @@ class LFM2Model(Model):
         b_out = f"{split_name}/output_0"
         c_out = f"{split_name}/output_1"
         x_out = f"{split_name}/output_2"
-        self.make_node(
-            "Split",
+        split_shape = ["batch_size", self.hidden_size, "sequence_length"]
+        self.make_split(
+            split_name,
             inputs=[f"{transpose_1_name}/output_0", split_tensor_name],
             outputs=[b_out, c_out, x_out],
-            name=split_name,
+            dtypes=[self.io_dtype] * 3,
+            shapes=[split_shape] * 3,
             axis=1,
         )
-        for out_val in [b_out, c_out, x_out]:
-            self.make_value(out_val, self.io_dtype, shape=["batch_size", self.hidden_size, "sequence_length"])
 
         # Element-wise multiply: bx = b * x
         mul_1_name = f"{basename}/Mul_1"

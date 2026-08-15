@@ -353,6 +353,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_names") {
+      v_.past_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -390,6 +392,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_names") {
+      v_.present_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {

@@ -32,7 +32,7 @@ import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
@@ -57,7 +57,7 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
     # real, dependency-free modules rather than the catch-all above.
     builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
@@ -219,7 +219,7 @@ def test_quantized_kv_cache_init_rejects_unsupported_ep(ep):
 
 def test_kv_cache_quant_types_constant_matches_builder_validation():
     # `check_extra_options` in builder.py is the single place that validates the option and
-    # reads this constant from `builders.quant_config`, which is the source of truth.
+    # reads this constant from `quantization`, which is the source of truth.
     assert set(builder_module.KV_CACHE_QUANT_TYPES) == {
         "none",
         "int8_per_tensor",

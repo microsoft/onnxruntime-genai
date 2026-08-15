@@ -90,7 +90,7 @@ def _stub_missing_builder_dependencies():
 _stub_missing_builder_dependencies()
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
@@ -107,7 +107,7 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
-cuda_quantizer_module = sys.modules["models.builders.cuda_quantizer"]
+cuda_quantizer_module = sys.modules["quantization.cuda_quantizer"]
 qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
@@ -122,7 +122,7 @@ def _load_builder_cli_module(monkeypatch):
         "Gemma3Model",
         "GemmaModel",
         "GPTOSSModel",
-        "GraniteMoeHybridModel",
+        "GraniteMoEHybridModel",
         "GraniteModel",
         "HunyuanDenseV1Model",
         "InternLM2Model",
@@ -142,7 +142,7 @@ def _load_builder_cli_module(monkeypatch):
         "Phi4MMModel",
         "PhiModel",
         "Qwen25VLTextModel",
-        "Qwen35MoeTextModel",
+        "Qwen35MoETextModel",
         "Qwen35TextModel",
         "Qwen3Model",
         "Qwen3VLTextModel",
@@ -152,7 +152,7 @@ def _load_builder_cli_module(monkeypatch):
         "WhisperModel",
     ):
         setattr(builders_module, class_name, type(class_name, (), {}))
-    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
     # real, dependency-free modules rather than the class stubs above.
     builders_module.__path__ = [str(BUILDERS_DIR)]
     monkeypatch.setitem(sys.modules, "builders", builders_module)
