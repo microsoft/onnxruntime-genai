@@ -14,104 +14,65 @@ from models.builders.base import Model
 from models.builders.qwen import Qwen35MoeTextModel
 
 
-def test_modelopt_e4m3_bytes_accepts_float8_and_preserves_shape():
+@pytest.fixture
+def model():
+    return object.__new__(Model)
+
+
+def test_modelopt_e4m3_bytes_accepts_float8_and_preserves_shape(model):
     scales = torch.ones((4, 2), dtype=torch.float8_e4m3fn)
 
-    raw = Qwen35MoeTextModel._modelopt_e4m3_bytes(scales, "scales", (4, 2))
+    raw = model.modelopt_e4m3_bytes(scales, "scales", (4, 2))
 
     assert raw.dtype == torch.uint8
     assert raw.shape == scales.shape
 
 
-def test_modelopt_e4m3_bytes_rejects_wrong_dtype():
+def test_modelopt_e4m3_bytes_rejects_wrong_dtype(model):
     with pytest.raises(ValueError, match="must contain E4M3 bytes"):
-        Qwen35MoeTextModel._modelopt_e4m3_bytes(torch.ones((4, 2)), "scales", (4, 2))
+        model.modelopt_e4m3_bytes(torch.ones((4, 2)), "scales", (4, 2))
 
 
-def test_modelopt_e4m3_bytes_rejects_wrong_shape():
+def test_modelopt_e4m3_bytes_rejects_wrong_shape(model):
     with pytest.raises(ValueError, match=r"expected \(4, 2\)"):
-        Qwen35MoeTextModel._modelopt_e4m3_bytes(torch.ones((2, 4), dtype=torch.uint8), "scales", (4, 2))
+        model.modelopt_e4m3_bytes(torch.ones((2, 4), dtype=torch.uint8), "scales", (4, 2))
 
 
 @pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
-def test_modelopt_positive_scalar_rejects_invalid_values(value):
+def test_modelopt_positive_scalar_rejects_invalid_values(model, value):
     with pytest.raises(ValueError, match="finite and positive"):
-        Qwen35MoeTextModel._modelopt_positive_scalar(torch.tensor(value), "global_scale")
-
-
-def test_close_nvfp4_handles_closes_every_cached_file():
-    closed = []
-    model = object.__new__(Qwen35MoeTextModel)
-    model._nvfp4_handles = {
-        "a": SimpleNamespace(__exit__=lambda *args: closed.append("a")),
-        "b": SimpleNamespace(__exit__=lambda *args: closed.append("b")),
-    }
-    model._nvfp4_handle_keys = {"a": {"x"}, "b": {"y"}}
-
-    model._close_nvfp4_handles()
-
-    assert closed == ["a", "b"]
-    assert model._nvfp4_handles == {}
-    assert model._nvfp4_handle_keys == {}
-
-
-def test_make_model_closes_nvfp4_handles_when_graph_build_fails(monkeypatch):
-    model = object.__new__(Qwen35MoeTextModel)
-    closed = []
-    model._close_nvfp4_handles = lambda: closed.append(True)
-    monkeypatch.setattr(Model, "make_model", lambda self, input_path: (_ for _ in ()).throw(RuntimeError("boom")))
-
-    with pytest.raises(RuntimeError, match="boom"):
-        model.make_model("checkpoint")
-
-    assert closed == [True]
+        model.modelopt_positive_scalar(torch.tensor(value), "global_scale")
 
 
 def test_native_fp8_rejects_non_fp8_weight():
-    model = object.__new__(Qwen35MoeTextModel)
-    model.use_original_fp8_weights = True
-    model._fp8_weight_key_for_matmul = lambda basename: "attention"
-    tensors = {
-        "attention.weight": torch.ones((4, 4), dtype=torch.bfloat16),
-        "attention.weight_scale": torch.tensor(1.0),
-    }
-    model._load_nvfp4_tensor = lambda name: tensors[name]
+    model = object.__new__(Model)
 
     with pytest.raises(ValueError, match="must be float8_e4m3fn"):
-        model._make_fp8_attention_matmul("/attention/MatMul", "input")
+        model.make_matmul_block_quantized_fp8_weight(
+            "/attention/MatMul", "input", torch.ones((4, 4), dtype=torch.bfloat16), torch.tensor(1.0)
+        )
 
 
 def test_native_nvfp4_rejects_non_nvfp4_weight():
-    model = object.__new__(Qwen35MoeTextModel)
-    model.use_original_nvfp4_weights = True
-    model._nvfp4_dense_key_for_matmul = lambda basename: "lm_head"
-    tensors = {
-        "lm_head.weight": torch.ones((4, 4), dtype=torch.bfloat16),
-        "lm_head.weight_scale": torch.ones((4, 1), dtype=torch.float8_e4m3fn),
-        "lm_head.weight_scale_2": torch.tensor(1.0),
-    }
-    model._load_nvfp4_tensor = lambda name: tensors[name]
+    model = object.__new__(Model)
 
-    with pytest.raises(ValueError, match="packed uint8 NVFP4 codes"):
-        model._make_matmul_nvfp4("/lm_head/MatMul", "input")
+    with pytest.raises(ValueError, match="packed uint8 codes"):
+        model.make_matmul_block_quantized_nvfp4_weight(
+            "/lm_head/MatMul", "input", torch.ones((4, 4)), torch.ones((4, 1)), 1.0
+        )
 
 
 def test_nvfp4_qmoe_rejects_mismatched_gate_up_global_scales():
     model = object.__new__(Qwen35MoeTextModel)
-    model.moe_attrs = {"num_experts": 1}
-    prefix = "model.language_model.layers.0.mlp.experts.0"
-    tensors = {
-        f"{prefix}.gate_proj.weight": torch.zeros((16, 8), dtype=torch.uint8),
-        f"{prefix}.up_proj.weight": torch.zeros((16, 8), dtype=torch.uint8),
-        f"{prefix}.down_proj.weight": torch.zeros((16, 8), dtype=torch.uint8),
-        f"{prefix}.gate_proj.weight_scale": torch.ones((16, 1), dtype=torch.float8_e4m3fn),
-        f"{prefix}.up_proj.weight_scale": torch.ones((16, 1), dtype=torch.float8_e4m3fn),
-        f"{prefix}.down_proj.weight_scale": torch.ones((16, 1), dtype=torch.float8_e4m3fn),
-        f"{prefix}.gate_proj.weight_scale_2": torch.tensor(0.5),
-        f"{prefix}.up_proj.weight_scale_2": torch.tensor(0.25),
-        f"{prefix}.down_proj.weight_scale_2": torch.tensor(0.5),
-    }
-    model._load_nvfp4_tensor = lambda name: tensors[name]
+
+    def projection(scale):
+        return SimpleNamespace(
+            weight=torch.zeros((16, 8), dtype=torch.uint8),
+            weight_scale=torch.ones((16, 1), dtype=torch.float8_e4m3fn),
+            weight_scale_2=torch.tensor(scale),
+        )
+
+    experts = [SimpleNamespace(gate_proj=projection(0.5), up_proj=projection(0.25), down_proj=projection(0.5))]
 
     with pytest.raises(ValueError, match="gate/up global scales must match"):
-        model.make_nvfp4_moe_initializers(0, "gw", "gs", "gg", "dw", "ds", "dg")
+        model.make_nvfp4_moe_initializers(experts, "gw", "gs", "gg", "dw", "ds", "dg")

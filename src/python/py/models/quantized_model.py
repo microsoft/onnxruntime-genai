@@ -1677,6 +1677,14 @@ class ModeloptDecoderLayer:
         return self.input_layernorm.weight is None
 
 
+class ModeloptLinearModule(TensorModule):
+    def __init__(self):
+        super().__init__()
+        self.weight_scale = None
+        self.weight_scale_2 = None
+        self.input_scale = None
+
+
 class ModeloptModel(QuantizedModel):
     """Loader for NVIDIA Model Optimizer NVFP4 + FP8 mixed-precision checkpoints.
 
@@ -1684,8 +1692,6 @@ class ModeloptModel(QuantizedModel):
     eager integer-checkpoint loading path. This loader instead streams tensors on
     demand and dequantizes only the non-routed weights to BF16.
     """
-
-    _FP4_E2M1_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         import json
@@ -1696,6 +1702,7 @@ class ModeloptModel(QuantizedModel):
             cfg = json.load(f)
         text_config = cfg.get("text_config", cfg)
         num_layers = num_layers or text_config.get("num_hidden_layers")
+        self._num_experts = text_config.get("num_experts", text_config.get("num_local_experts"))
         super().__init__(
             quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=False
         )
@@ -1723,10 +1730,10 @@ class ModeloptModel(QuantizedModel):
         try:
             self.layers.extend(self._build_layer(layer_id) for layer_id in range(num_layers))
 
-            # Globals: embeddings + final norm are BF16; lm_head is NVFP4.
+            # Globals: embeddings + final norm are BF16; lm_head retains its native NVFP4 tensors.
             self.embedding.weight = self._get("model.language_model.embed_tokens.weight")
             self.final_norm.weight = self._get("model.language_model.norm.weight")
-            self.lm_head.weight = self._dequant_linear("lm_head")
+            self.lm_head = self._linear_module("lm_head")
         finally:
             # Every tensor is materialized above; do not hold file descriptors open for
             # the rest of the (long) export. `_get` re-opens lazily if it is called again.
@@ -1742,58 +1749,6 @@ class ModeloptModel(QuantizedModel):
     def __del__(self):
         if getattr(self, "_open_handles", None):
             self.close()
-
-    def repack_nvfp4_weight_codes(self, packed_nk2):
-        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes."""
-        if packed_nk2.dtype != torch.uint8:
-            packed_nk2 = packed_nk2.to(torch.uint8)
-        low = packed_nk2 & 0x0F
-        high = packed_nk2 >> 4
-        n = packed_nk2.shape[0]
-        return torch.stack((low, high), dim=-1).reshape(n, -1).contiguous()
-
-    def pack_nvfp4_codes_for_qmoe(self, codes_nk):
-        """Pack e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout."""
-        if codes_nk.dtype != torch.uint8:
-            codes_nk = codes_nk.to(torch.uint8)
-        n = codes_nk.shape[0]
-        if n % 2 != 0:
-            raise ValueError(f"NVFP4 QMoE packing requires an even N={n} for nibble packing.")
-        codes_kn = codes_nk.T.contiguous()
-        low = codes_kn[:, 0::2] & 0x0F
-        high = codes_kn[:, 1::2] & 0x0F
-        return ((high << 4) | low).contiguous()
-
-    def _dequant_nvfp4(self, weight_u8, block_scale_e4m3, global_scale, name=""):
-        """Reconstruct a BF16 weight from Model Optimizer NVFP4 tensors."""
-        if block_scale_e4m3 is None:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' has 'weight_scale_2' but no 'weight_scale' (FP8-E4M3 block scales). "
-                "The Model Optimizer checkpoint is incomplete."
-            )
-        if block_scale_e4m3.dtype == torch.uint8:
-            block_scale_e4m3 = block_scale_e4m3.view(torch.float8_e4m3fn)
-        elif block_scale_e4m3.dtype != torch.float8_e4m3fn:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' block scales must be float8_e4m3fn (or raw uint8 bytes), "
-                f"got {block_scale_e4m3.dtype}."
-            )
-        codes = self.repack_nvfp4_weight_codes(weight_u8).long()
-        mag = self._FP4_E2M1_LUT[codes & 0x7]
-        values = torch.where((codes & 0x8) > 0, -mag, mag)
-        block_scales = block_scale_e4m3.to(torch.float32)
-        n, k = codes.shape
-        if block_scales.shape[0] != n or block_scales.shape[1] == 0 or k % block_scales.shape[1] != 0:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' block scales {tuple(block_scales.shape)} are not a block-wise split of the "
-                f"[{n}, {k}] weight."
-            )
-        block_scales = block_scales.repeat_interleave(k // block_scales.shape[1], dim=1)
-        return (values * block_scales * float(global_scale)).to(torch.bfloat16)
-
-    def _dequant_fp8(self, weight_f8, weight_scale):
-        """Reconstruct a BF16 weight from an FP8 (E4M3) weight and per-tensor scale."""
-        return (weight_f8.to(torch.float32) * float(weight_scale)).to(torch.bfloat16)
 
     # -- raw tensor access ------------------------------------------------------
     def _get(self, name):
@@ -1812,25 +1767,54 @@ class ModeloptModel(QuantizedModel):
                 return handle.get_tensor(name)
         return None
 
-    # -- dequantized linear weight ---------------------------------------------
-    def _dequant_linear(self, base):
+    def _validate_positive_scalar(self, tensor, name):
+        if tensor is None or tensor.numel() != 1:
+            shape = None if tensor is None else tuple(tensor.shape)
+            raise ValueError(f"ModelOpt tensor '{name}' must be a scalar, got shape {shape}.")
+        value = tensor.float()
+        if not torch.isfinite(value).item() or value.item() <= 0:
+            raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive, got {value.item()}.")
+
+    def _validate_linear(self, module, base):
+        if module.weight_scale_2 is not None:
+            if module.weight.dtype != torch.uint8 or module.weight.ndim != 2 or module.weight.shape[1] % 8 != 0:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight' must be packed uint8 [N, K/2] with K divisible by 16, "
+                    f"got dtype={module.weight.dtype} shape={tuple(module.weight.shape)}."
+                )
+            expected_shape = (int(module.weight.shape[0]), int(module.weight.shape[1]) // 8)
+            if module.weight_scale is None:
+                raise ValueError(
+                    f"NVFP4 tensor '{base}' has 'weight_scale_2' but no 'weight_scale' "
+                    "(FP8-E4M3 block scales). The Model Optimizer checkpoint is incomplete."
+                )
+            if module.weight_scale.dtype not in {torch.uint8, torch.float8_e4m3fn}:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight_scale' must contain E4M3 bytes, "
+                    f"got {module.weight_scale.dtype}."
+                )
+            if tuple(module.weight_scale.shape) != expected_shape:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight_scale' has shape {tuple(module.weight_scale.shape)}, "
+                    f"expected {expected_shape}."
+                )
+            self._validate_positive_scalar(module.weight_scale_2, f"{base}.weight_scale_2")
+        elif module.weight.dtype == torch.float8_e4m3fn:
+            self._validate_positive_scalar(module.weight_scale, f"{base}.weight_scale")
+            if module.input_scale is not None:
+                self._validate_positive_scalar(module.input_scale, f"{base}.input_scale")
+
+    def _linear_module(self, base):
         weight = self._get(f"{base}.weight")
         if weight is None:
             return None
-        weight_scale_2 = self._get(f"{base}.weight_scale_2")
-        weight_scale = self._get(f"{base}.weight_scale")
-        if weight_scale_2 is not None:  # NVFP4 (block-16 E2M1 + E4M3 block scale + global)
-            return self._dequant_nvfp4(weight, weight_scale, weight_scale_2, name=base)
-        if weight_scale is not None and weight.dtype == torch.float8_e4m3fn:  # FP8 (per-tensor scale)
-            return self._dequant_fp8(weight, weight_scale)
-        return weight.to(torch.bfloat16)
-
-    def _linear_module(self, base):
-        weight = self._dequant_linear(base)
-        if weight is None:
-            return None
-        module = TensorModule()
+        module = ModeloptLinearModule()
         module.weight = weight
+        module.weight_scale = self._get(f"{base}.weight_scale")
+        module.weight_scale_2 = self._get(f"{base}.weight_scale_2")
+        if ".self_attn." in base:
+            module.input_scale = self._get(f"{base}.input_scale")
+        self._validate_linear(module, base)
         bias = self._get(f"{base}.bias")
         if bias is not None:
             module.bias = bias
@@ -1884,9 +1868,14 @@ class ModeloptModel(QuantizedModel):
         shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
         mlp.shared_expert = shared
         mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
-        # Routed experts are streamed from raw safetensors by the builder's
-        # make_nvfp4_moe_initializers(); nothing to materialize here.
-        mlp.experts = None
+        mlp.experts = []
+        for expert_id in range(self._num_experts):
+            expert_prefix = f"{p}.mlp.experts.{expert_id}"
+            expert = ns()
+            expert.gate_proj = self._linear_module(f"{expert_prefix}.gate_proj")
+            expert.up_proj = self._linear_module(f"{expert_prefix}.up_proj")
+            expert.down_proj = self._linear_module(f"{expert_prefix}.down_proj")
+            mlp.experts.append(expert)
         layer.mlp = mlp
         return layer
 

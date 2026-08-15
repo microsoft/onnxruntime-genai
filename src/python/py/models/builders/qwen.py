@@ -7,16 +7,11 @@
 # Portions of this file consist of AI generated content.
 
 import json
-import math
 import os
-import re
-from pathlib import Path
 
 import numpy as np
 import onnx_ir as ir
 import torch
-from huggingface_hub import snapshot_download
-from safetensors import safe_open
 from transformers import (
     AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -1013,17 +1008,16 @@ class Qwen35TextModel(Model):
         else:
             self.layer_types = ["full_attention"] * num_layers
 
-        # FP8 (E4M3) KV cache to match the ModelOpt checkpoint (kv_cache_quant_algo=FP8).
-        # `fp8_kv_cache=true` is a shorthand for `kv_cache_quant_type=fp8_per_tensor`. Without a
-        # calibration file it keeps the legacy export shape: one shared unit `kv_cache_scale`
-        # initializer for all layers (see get_kv_cache_scale_inputs). Only the full-attention
-        # layers own a KV cache; the linear-attention conv/recurrent states are unaffected.
-        # Requires ORT built with onnxruntime_USE_FP8_KV_CACHE=ON (default) and SM89+ at runtime.
-        self.fp8_kv_cache = str(extra_options.get("fp8_kv_cache", "false")).lower() in ("1", "true", "yes")
-        self._legacy_fp8_kv_cache = self.fp8_kv_cache and not extra_options.get("kv_cache_scale_file", None)
+        # ModelOpt's FP8 KV-cache metadata maps to the generic fp8_per_tensor path in builder.py.
+        # Without a calibration file, preserve the checkpoint's shared unit-scale convention.
+        quantization_config = getattr(config, "quantization_config", {})
+        self.fp8_kv_cache = extra_options.get("kv_cache_quant_type", "none") == "fp8_per_tensor"
+        self._legacy_fp8_kv_cache = (
+            quantization_config.get("quant_method") == "modelopt"
+            and self.fp8_kv_cache
+            and not extra_options.get("kv_cache_scale_file", None)
+        )
         self._kv_cache_scale_created = False
-        if self.fp8_kv_cache and extra_options.get("kv_cache_quant_type", "none") == "none":
-            extra_options["kv_cache_quant_type"] = "fp8_per_tensor"
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -1085,9 +1079,7 @@ class Qwen35TextModel(Model):
         # tensors of a few thousand elements. The fused kernels keep the same float32 intermediates
         # in registers and cut that to 2 launches, which also returns the per-node CUDA-graph replay
         # overhead of the ~9 removed nodes per layer. Set false for A/B or for EPs without the ops.
-        self.fuse_linear_attn_gates = str(
-            extra_options.get("fuse_linear_attn_gates", "true" if self.ep == "cuda" else "false")
-        ).lower() in ("1", "true", "yes")
+        self.fuse_linear_attn_gates = self.ep == "cuda"
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1154,7 +1146,7 @@ class Qwen35TextModel(Model):
         self.output_names["present.value"] = filtered_value_outputs
 
     def get_kv_cache_scale_inputs(self, **kwargs):
-        # Legacy `fp8_kv_cache=true`: every layer shares ONE unit PER_TENSOR scale initializer
+        # ModelOpt compatibility mode: every layer shares ONE unit PER_TENSOR scale initializer
         # named `kv_cache_scale`, created lazily at the first GroupQueryAttention node. The
         # ModelOpt checkpoint exports no calibrated k/v scale, so this is a straight E4M3
         # round-trip of the KV cache. Keeping the shared name and the lazy creation point keeps
@@ -1167,7 +1159,7 @@ class Qwen35TextModel(Model):
         return super().get_kv_cache_scale_inputs(**kwargs)
 
     def extend_with_optional_inputs(self, inputs, optional_inputs):
-        # The legacy `fp8_kv_cache` export emitted all four trailing optional GroupQueryAttention
+        # The ModelOpt compatibility export emits all four trailing optional GroupQueryAttention
         # inputs (k_scale, v_scale, q_norm_weight, k_norm_weight), including empty placeholders,
         # rather than trimming the unused trailing ones. Reproduce that byte-for-byte.
         if self._legacy_fp8_kv_cache and any(optional_inputs):
@@ -2241,20 +2233,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # to fp16 and re-quantizing to int4/int8. Both the self-attention q/k/v/o projections
         # and the GatedDeltaNet (linear-attention) ``in_proj_qkv`` / ``in_proj_z`` / ``out_proj``
         # projections are emitted as the weight-only ``MatMulBlockQuantizedFp8Weight`` contrib op.
-        self.use_original_fp8_weights = str(extra_options.get("use_original_fp8_weights", "false")).lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-
-        # Self-attention uses the checkpoint's calibrated per-tensor activation scale (W8A8).
-        # GatedDeltaNet projections remain weight-only (W8A16), which is more accurate and avoids
-        # activation-quantization launches. Equal self-attention scales share one initializer.
-        self._fp8_attention_activation_cache = {}
-
-        # FP8 (E4M3) KV cache to match the ModelOpt checkpoint (kv_cache_quant_algo=FP8) is
-        # handled in Qwen35TextModel.__init__, which maps `fp8_kv_cache=true` onto the generic
-        # `kv_cache_quant_type=fp8_per_tensor` machinery before the base class initializes.
+        # ModelOpt FP8 KV-cache metadata is mapped onto the generic
+        # `kv_cache_quant_type=fp8_per_tensor` machinery before this model is initialized.
 
         # Keep the checkpoint's original NVFP4 (E2M1) *dense* weights instead of dequantizing
         # them to fp16 and re-quantizing to int4/int8. The shared-expert MLP and lm_head
@@ -2262,12 +2242,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # the ModelOpt tensors (E2M1 codes + E4M3 block scale + fp32 global scale). NOTE: the
         # NVFP4 *routed MoE experts* are controlled separately by ``moe_quant_type=nvfp4``
         # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
-        self.use_original_nvfp4_weights = str(extra_options.get("use_original_nvfp4_weights", "false")).lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-
         # The base builder derives the GenAI model.type by stripping the suffix
         # after "For" and lowercasing, matching Qwen3.5 text-only export.
         self.model_type = (
@@ -2319,275 +2293,11 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 # BF16 in the checkpoint (and only 32 elements wide), so they stay fp16. The
                 # remaining projections are replaced by ``MatMulBlockQuantizedFp8Weight`` and
                 # never reach the int4/int8 quantizer.
-                if self.use_original_fp8_weights:
+                if self.quant_type == "modelopt":
                     for proj in ("in_proj_a", "in_proj_b"):
                         linear_node = f"/model/layers.{i}/linear_attn/{proj}/MatMul"
                         if linear_node not in nodes_to_exclude:
                             nodes_to_exclude.append(linear_node)
-
-    def _gemmfloat8_output_dtype_attr(self):
-        if self.io_dtype == ir.DataType.FLOAT16:
-            return 10  # TensorProto.FLOAT16
-        if self.io_dtype == ir.DataType.BFLOAT16:
-            return 16  # TensorProto.BFLOAT16
-        if self.io_dtype == ir.DataType.FLOAT:
-            return 1  # TensorProto.FLOAT
-        # GemmFloat8 supports float/float16/bfloat16 outputs. Fall back to fp16.
-        return 10
-
-    def _fp8_weight_key_for_matmul(self, basename):
-        m = re.match(r"^/model/layers\.(\d+)/(attn|linear_attn)/([^/]+)/MatMul$", basename)
-        if not m:
-            return None
-        layer_id = int(m.group(1))
-        attn_kind = m.group(2)
-        proj = m.group(3)
-
-        if attn_kind == "attn":
-            if proj not in {"q_proj", "k_proj", "v_proj", "o_proj"}:
-                return None
-            return f"model.language_model.layers.{layer_id}.self_attn.{proj}"
-
-        # GatedDeltaNet: only in_proj_qkv / in_proj_z / out_proj are stored as FP8 in the
-        # ModelOpt checkpoint (they carry .input_scale + .weight_scale). in_proj_a / in_proj_b
-        # are BF16 and only 32 elements wide, so they stay on the float path.
-        if proj not in {"in_proj_qkv", "in_proj_z", "out_proj"}:
-            return None
-        return f"model.language_model.layers.{layer_id}.linear_attn.{proj}"
-
-    def _fp8_attention_input_scale(self, basename):
-        """Return the checkpoint's calibrated static per-tensor FP8 activation scale, or ``None``.
-
-        ``MatMulBlockQuantizedFp8Weight`` consumes the activation in FP16/BF16 and takes an
-        optional fp32 *scalar* ``a_scale``; when present it statically quantizes the activation
-        to FP8 E4M3 and dequantizes it back inside the kernel (``a_deq = fp8(A / a_scale) *
-        a_scale``), reproducing the checkpoint's W8A8 numerics. No ONNX-level quantization
-        subgraph is therefore needed.
-
-        GatedDeltaNet projections deliberately return ``None`` and run weight-only (W8A16).
-        Self-attention falls back to weight-only when the checkpoint has no ``input_scale``.
-        """
-        key_prefix = self._fp8_weight_key_for_matmul(basename)
-        if key_prefix is None:
-            return None
-        if ".linear_attn." in key_prefix:
-            return None
-        scale = self._load_nvfp4_tensor(f"{key_prefix}.input_scale", required=False)
-        if scale is None:
-            return None
-        return self._modelopt_positive_scalar(scale, f"{key_prefix}.input_scale")
-
-    def _make_fp8_activation_scale_initializer(self, basename, scale_val):
-        """Create (or reuse) the fp32 scalar ``a_scale`` initializer for an FP8 attention matmul.
-
-        Q/K/V consume the same activation and commonly have the same calibrated input scale, so
-        reuse one initializer for every module with the same scale value.
-        """
-        cached = self._fp8_attention_activation_cache.get(scale_val)
-        if cached is not None:
-            return cached
-        name = f"model.fp8_attn_input_scale.{len(self._fp8_attention_activation_cache)}"
-        self.make_initializer(torch.tensor([scale_val], dtype=torch.float32), name, to=ir.DataType.FLOAT)
-        self._fp8_attention_activation_cache[scale_val] = name
-        return name
-
-    def _prepare_matmul_block_quantized_scales(self, weight_scale, out_features, block_count):
-        # MatMulBlockQuantizedFp8Weight expects b_scale of shape [N, ceil(K / block_size)] = [out_features, block_count].
-        scale = weight_scale.float()
-        if scale.numel() == 1:
-            return scale.reshape(1, 1).expand(out_features, block_count).contiguous()
-        if scale.ndim >= 2 and scale.shape[0] == out_features:
-            scale = scale.reshape(out_features, -1)
-            if scale.shape[1] == block_count:
-                return scale.contiguous()
-        if scale.ndim >= 2 and scale.shape[0] == block_count:
-            scale = scale.reshape(block_count, -1)
-            if scale.shape[1] == out_features:
-                return scale.transpose(0, 1).contiguous()
-        if scale.ndim == 1 and scale.numel() == out_features * block_count:
-            return scale.view(out_features, block_count).contiguous()
-        return None
-
-    @staticmethod
-    def _modelopt_e4m3_bytes(tensor, tensor_name, expected_shape):
-        if tensor.dtype not in {torch.uint8, torch.float8_e4m3fn}:
-            raise ValueError(
-                f"ModelOpt tensor '{tensor_name}' must contain E4M3 bytes as uint8 or float8_e4m3fn, "
-                f"got {tensor.dtype}."
-            )
-        if tuple(tensor.shape) != tuple(expected_shape):
-            raise ValueError(
-                f"ModelOpt tensor '{tensor_name}' has shape {tuple(tensor.shape)}, expected {tuple(expected_shape)}."
-            )
-        return tensor.view(torch.uint8).contiguous()
-
-    @staticmethod
-    def _modelopt_positive_scalar(tensor, tensor_name):
-        if tensor.numel() != 1:
-            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be a scalar, got shape {tuple(tensor.shape)}.")
-        value = float(tensor.float().item())
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be finite and positive, got {value}.")
-        return value
-
-    def _load_modelopt_nvfp4_codes(self, tensor_name):
-        packed = self._load_nvfp4_tensor(tensor_name)
-        if packed.dtype != torch.uint8 or packed.ndim != 2 or packed.shape[1] % 8 != 0:
-            raise ValueError(
-                f"ModelOpt tensor '{tensor_name}' must be packed uint8 [N, K/2] with K divisible by 16, "
-                f"got dtype={packed.dtype} shape={tuple(packed.shape)}."
-            )
-        return self.repack_modelopt_nvfp4_weight_codes(packed)
-
-    def _make_fp8_attention_matmul(self, basename, root_input, **kwargs):
-        if not self.use_original_fp8_weights:
-            return None
-
-        key_prefix = self._fp8_weight_key_for_matmul(basename)
-        if key_prefix is None:
-            return None
-
-        weight = self._load_nvfp4_tensor(f"{key_prefix}.weight")
-        weight_scale = self._load_nvfp4_tensor(f"{key_prefix}.weight_scale")
-
-        if weight.dtype != torch.float8_e4m3fn:
-            raise ValueError(
-                f"ModelOpt tensor '{key_prefix}.weight' must be float8_e4m3fn, got {weight.dtype}."
-            )
-        if weight.ndim != 2:
-            raise ValueError(
-                f"ModelOpt tensor '{key_prefix}.weight' must have shape [N, K], got {tuple(weight.shape)}."
-            )
-
-        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
-        seq_dim = kwargs.get("seq_dim", "sequence_length")
-        in_features = int(weight.shape[1])
-        out_features = int(weight.shape[0])
-
-        # Per-tensor weight scale: block_size == K, so ceil(K / block_size) == 1 K-block.
-        # The source ModelOpt checkpoint quantizes these projections with a per-tensor FP8
-        # weight scale and a per-tensor activation ``input_scale``, so a single block matches
-        # the original W8A8 scheme exactly.
-        block_size = in_features
-        block_count = 1
-
-        scale_b = self._prepare_matmul_block_quantized_scales(weight_scale, out_features, block_count)
-        if scale_b is None:
-            raise ValueError(
-                f"ModelOpt tensor '{key_prefix}.weight_scale' has shape {tuple(weight_scale.shape)}, "
-                f"expected a scalar or [{out_features}, {block_count}]."
-            )
-
-        # MatMulBlockQuantizedFp8Weight takes B as [N, K] (row-major weight), so the checkpoint
-        # weight (already [N, K] = [out, in]) is fed through without transposition.
-        weight_name = f"{basename[1:].replace('/', '.')}.fp8_weight"
-        self.make_initializer(weight.contiguous(), weight_name)
-
-        scale_b_name = f"{basename[1:].replace('/', '.')}.fp8_weight_scale"
-        self.make_initializer(scale_b, scale_b_name, to=ir.DataType.FLOAT)
-
-        # The activation is passed through unquantized; the op applies the optional scalar
-        # ``a_scale`` internally. Output type follows A, so no bf16 -> io_dtype cast is needed.
-        inputs = [root_input, weight_name, scale_b_name]
-        static_scale_val = self._fp8_attention_input_scale(basename)
-        if static_scale_val is not None:
-            inputs.append(self._make_fp8_activation_scale_initializer(basename, static_scale_val))
-
-        self.make_node(
-            "MatMulBlockQuantizedFp8Weight",
-            inputs=inputs,
-            outputs=[output],
-            name=basename,
-            domain="com.microsoft",
-            block_size=block_size,
-        )
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
-        return basename
-
-    def _nvfp4_dense_key_for_matmul(self, basename):
-        """Map a dense MatMul basename to its ModelOpt NVFP4 checkpoint key prefix.
-
-        Only the modules stored as NVFP4 in the checkpoint (the shared-expert MLP
-        projections and the lm_head) are eligible for the ``MatMulBlockQuantizedFp4Weight`` op.
-        """
-        if basename == "/lm_head/MatMul":
-            return "lm_head"
-        m = re.match(r"^/model/layers\.(\d+)/shared_expert/(gate_proj|up_proj|down_proj)/MatMul$", basename)
-        if m:
-            layer_id = int(m.group(1))
-            proj = m.group(2)
-            return f"model.language_model.layers.{layer_id}.mlp.shared_expert.{proj}"
-        return None
-
-    def _make_matmul_nvfp4(self, basename, root_input, **kwargs):
-        """Emit a weight-only ``MatMulBlockQuantizedFp4Weight`` node from the raw ModelOpt NVFP4 tensors.
-
-        The checkpoint stores these projections as packed NVFP4: ``weight`` uint8 ``[N, K/2]``
-        (two E2M1 codes per byte, low nibble first), ``weight_scale`` E4M3 ``[N, K/16]`` block
-        scales, and a scalar ``weight_scale_2`` fp32 global scale -- exactly the layout the
-        ``MatMulBlockQuantizedFp4Weight`` op consumes, so the tensors are fed through unmodified. Returns the node
-        name, or ``None`` to use the standard path when the option is off or the module is not
-        NVFP4-eligible. Missing or malformed tensors are errors when native NVFP4 export is enabled.
-        """
-        if not self.use_original_nvfp4_weights:
-            return None
-
-        key_prefix = self._nvfp4_dense_key_for_matmul(basename)
-        if key_prefix is None:
-            return None
-
-        weight = self._load_nvfp4_tensor(f"{key_prefix}.weight")
-        weight_scale = self._load_nvfp4_tensor(f"{key_prefix}.weight_scale")
-        weight_scale_2 = self._load_nvfp4_tensor(f"{key_prefix}.weight_scale_2")
-
-        if weight.dtype != torch.uint8:
-            raise ValueError(f"ModelOpt tensor '{key_prefix}.weight' must contain packed uint8 NVFP4 codes, got {weight.dtype}.")
-        if weight.ndim != 2 or weight.shape[1] % 8 != 0:
-            raise ValueError(
-                f"ModelOpt tensor '{key_prefix}.weight' must have shape [N, K/2] with K divisible by 16, "
-                f"got {tuple(weight.shape)}."
-            )
-
-        out_features = int(weight.shape[0])  # N
-        block_size = 16
-        scale_shape = (out_features, int(weight.shape[1]) // 8)
-        scale_bytes = self._modelopt_e4m3_bytes(weight_scale, f"{key_prefix}.weight_scale", scale_shape)
-        global_scale = self._modelopt_positive_scalar(weight_scale_2, f"{key_prefix}.weight_scale_2")
-
-        seq_dim = kwargs.get("seq_dim", "sequence_length")
-        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
-
-        prefix = basename[1:].replace("/", ".")
-        weight_name = f"{prefix}.nvfp4_weight"
-        self.make_initializer(weight.to(torch.uint8), weight_name)
-
-        scale_name = f"{prefix}.nvfp4_weight_scale"
-        self.make_initializer(scale_bytes, scale_name)
-
-        global_scale_name = f"{prefix}.nvfp4_weight_scale_2"
-        self.make_initializer(torch.tensor([global_scale], dtype=torch.float32), global_scale_name)
-
-        # ``N`` and ``K`` are derived by the op from the weight shape (N = B.shape[0],
-        # K = 2 * B.shape[1]), so only ``block_size`` is passed as an attribute.
-        self.make_node(
-            "MatMulBlockQuantizedFp4Weight",
-            inputs=[root_input, weight_name, scale_name, global_scale_name],
-            outputs=[output],
-            name=basename,
-            domain="com.microsoft",
-            block_size=block_size,
-        )
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
-        return basename
-
-    def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        fp8_name = self._make_fp8_attention_matmul(basename, root_input, **kwargs)
-        if fp8_name is not None:
-            return fp8_name
-        nvfp4_name = self._make_matmul_nvfp4(basename, root_input, **kwargs)
-        if nvfp4_name is not None:
-            return nvfp4_name
-        return super().make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
@@ -2650,7 +2360,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
             down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
             self.make_nvfp4_moe_initializers(
-                layer_id,
+                mlp.experts,
                 gate_up_proj_weight,
                 gate_up_proj_scales,
                 gate_up_proj_global_scales,
@@ -2717,87 +2427,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
-    # ------------------------------------------------------------------
-    # NVFP4 (Model Optimizer) pre-quantized expert loading
-    # ------------------------------------------------------------------
-    def _nvfp4_snapshot_dir(self):
-        """Locate the source checkpoint directory (local dir or HF snapshot)."""
-        cached = getattr(self, "_nvfp4_snapshot_dir_cache", None)
-        if cached is not None:
-            return cached
-
-        model_path = Path(self.model_name_or_path)
-        if model_path.is_dir():
-            self._nvfp4_snapshot_dir_cache = model_path
-            return model_path
-
-        self._nvfp4_snapshot_dir_cache = Path(
-            snapshot_download(
-                self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, local_files_only=True
-            )
-        )
-        return self._nvfp4_snapshot_dir_cache
-
-    def _nvfp4_weight_map(self):
-        cached = getattr(self, "_nvfp4_weight_map_cache", "unset")
-        if cached != "unset":
-            return cached
-
-        index_path = self._nvfp4_snapshot_dir() / "model.safetensors.index.json"
-        if index_path.exists():
-            with open(index_path, encoding="utf-8") as index_file:
-                self._nvfp4_weight_map_cache = json.load(index_file)["weight_map"]
-        else:
-            self._nvfp4_weight_map_cache = None
-        return self._nvfp4_weight_map_cache
-
-    def _load_nvfp4_tensor(self, tensor_name, required=True):
-        """Read a raw tensor from the source safetensors (bypasses transformers)."""
-        snapshot_dir = self._nvfp4_snapshot_dir()
-        weight_map = self._nvfp4_weight_map()
-        handles = getattr(self, "_nvfp4_handles", None)
-        if handles is None:
-            handles = self._nvfp4_handles = {}
-            self._nvfp4_handle_keys = {}
-        if weight_map is not None:
-            filename = weight_map.get(tensor_name)
-            if filename is None:
-                if required:
-                    raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
-                return None
-            files = [snapshot_dir / filename]
-        else:
-            files = sorted(snapshot_dir.glob("*.safetensors"))
-        for f in files:
-            key = str(f)
-            handle = handles.get(key)
-            if handle is None:
-                handle = handles[key] = safe_open(f, framework="pt", device="cpu")
-                self._nvfp4_handle_keys[key] = set(handle.keys())
-            if tensor_name in self._nvfp4_handle_keys[key]:
-                return handle.get_tensor(tensor_name)
-        if required:
-            raise RuntimeError(f"NVFP4 tensor '{tensor_name}' not found under {snapshot_dir}.")
-        return None
-
-    def _close_nvfp4_handles(self):
-        handles = getattr(self, "_nvfp4_handles", None)
-        if not handles:
-            return
-        for handle in handles.values():
-            handle.__exit__(None, None, None)
-        handles.clear()
-        self._nvfp4_handle_keys.clear()
-
-    def make_model(self, input_path):
-        try:
-            super().make_model(input_path)
-        finally:
-            self._close_nvfp4_handles()
-
     def make_nvfp4_moe_initializers(
         self,
-        layer_id,
+        experts,
         gate_up_weight_name,
         gate_up_scales_name,
         gate_up_global_name,
@@ -2812,20 +2444,17 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         E2M1 codes into the CUDA QMoE ``[E, K, N/2]`` layout, and interleaves gate/up
         along N for ``swiglu_fusion=1``. gate and up share one per-expert global scale.
         """
-        num_experts = self.moe_attrs["num_experts"]
-        prefix = f"model.language_model.layers.{layer_id}.mlp.experts"
-
         gate_up_qw, gate_up_sc, gate_up_g = [], [], []
         down_qw, down_sc, down_g = [], [], []
-        for e in range(num_experts):
-            gate_prefix = f"{prefix}.{e}.gate_proj"
-            up_prefix = f"{prefix}.{e}.up_proj"
-            down_prefix = f"{prefix}.{e}.down_proj"
-            g_codes = self._load_modelopt_nvfp4_codes(f"{gate_prefix}.weight")
-            u_codes = self._load_modelopt_nvfp4_codes(f"{up_prefix}.weight")
+        for expert_id, expert in enumerate(experts):
+            gate_prefix = f"expert.{expert_id}.gate_proj"
+            up_prefix = f"expert.{expert_id}.up_proj"
+            down_prefix = f"expert.{expert_id}.down_proj"
+            g_codes = self.repack_modelopt_nvfp4_weight_codes(expert.gate_proj.weight)
+            u_codes = self.repack_modelopt_nvfp4_weight_codes(expert.up_proj.weight)
             if g_codes.shape != u_codes.shape:
                 raise ValueError(
-                    f"ModelOpt expert {e} gate/up weights must have matching shapes, "
+                    f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
                     f"got {tuple(g_codes.shape)} and {tuple(u_codes.shape)}."
                 )
             inter = g_codes.shape[0]
@@ -2833,39 +2462,39 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
 
             scale_shape = (inter, g_codes.shape[1] // 16)
-            g_sc = self._modelopt_e4m3_bytes(
-                self._load_nvfp4_tensor(f"{gate_prefix}.weight_scale"), f"{gate_prefix}.weight_scale", scale_shape
+            g_sc = self.modelopt_e4m3_bytes(
+                expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape
             )
-            u_sc = self._modelopt_e4m3_bytes(
-                self._load_nvfp4_tensor(f"{up_prefix}.weight_scale"), f"{up_prefix}.weight_scale", scale_shape
+            u_sc = self.modelopt_e4m3_bytes(
+                expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape
             )
             gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
-            gate_global = self._modelopt_positive_scalar(
-                self._load_nvfp4_tensor(f"{gate_prefix}.weight_scale_2"), f"{gate_prefix}.weight_scale_2"
+            gate_global = self.modelopt_positive_scalar(
+                expert.gate_proj.weight_scale_2, f"{gate_prefix}.weight_scale_2"
             )
-            up_global = self._modelopt_positive_scalar(
-                self._load_nvfp4_tensor(f"{up_prefix}.weight_scale_2"), f"{up_prefix}.weight_scale_2"
+            up_global = self.modelopt_positive_scalar(
+                expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2"
             )
             if gate_global != up_global:
                 raise ValueError(
-                    f"ModelOpt expert {e} gate/up global scales must match for fused QMoE, "
+                    f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
                     f"got {gate_global} and {up_global}."
                 )
             gate_up_g.append(gate_global)
 
-            d_codes = self._load_modelopt_nvfp4_codes(f"{down_prefix}.weight")
+            d_codes = self.repack_modelopt_nvfp4_weight_codes(expert.down_proj.weight)
             down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))  # [inter, hidden/2]
             down_scale_shape = (d_codes.shape[0], d_codes.shape[1] // 16)
             down_sc.append(
-                self._modelopt_e4m3_bytes(
-                    self._load_nvfp4_tensor(f"{down_prefix}.weight_scale"),
+                self.modelopt_e4m3_bytes(
+                    expert.down_proj.weight_scale,
                     f"{down_prefix}.weight_scale",
                     down_scale_shape,
                 )
             )
             down_g.append(
-                self._modelopt_positive_scalar(
-                    self._load_nvfp4_tensor(f"{down_prefix}.weight_scale_2"), f"{down_prefix}.weight_scale_2"
+                self.modelopt_positive_scalar(
+                    expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2"
                 )
             )
 

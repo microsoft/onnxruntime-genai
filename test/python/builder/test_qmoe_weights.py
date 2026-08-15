@@ -165,9 +165,14 @@ def _load_builder_cli_module(monkeypatch):
     return module
 
 
-def _parse_extra_options(builder, extra_options, precision="int4", execution_provider="cuda"):
+def _parse_extra_options(builder, extra_options, precision="int4", execution_provider="cuda", quantization_config=None):
     # Parser validation in these tests should not depend on remote/model IO.
-    builder.get_hf_details = lambda *args, **kwargs: {"hf_config": types.SimpleNamespace(tie_word_embeddings=True)}
+    builder.get_hf_details = lambda *args, **kwargs: {
+        "hf_config": types.SimpleNamespace(
+            tie_word_embeddings=True,
+            quantization_config=quantization_config or {},
+        )
+    }
     return builder.parse_extra_options(
         "dummy-model",
         "",
@@ -203,40 +208,39 @@ def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
         _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 
-@pytest.mark.parametrize(
-    "option",
-    [
-        "fp8_kv_cache",
-        "fuse_linear_attn_gates",
-        "use_original_fp8_weights",
-        "use_original_nvfp4_weights",
-    ],
-)
-@pytest.mark.parametrize("value,expected", [("true", True), ("false", False)])
-def test_qwen_boolean_extra_options_are_parsed(monkeypatch, option, value, expected):
+@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32"])
+def test_moe_quant_type_nvfp4_accepts_floating_graph_precision(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(builder, ["moe_quant_type=nvfp4"], precision, "cuda")
 
-    options = _parse_extra_options(builder, [f"{option}={value}"])
-
-    assert options[option] is expected
+    assert options["moe_quant_type"] == "nvfp4"
 
 
-@pytest.mark.parametrize(
-    "option",
-    ["fp8_kv_cache", "fuse_linear_attn_gates", "use_original_fp8_weights", "use_original_nvfp4_weights"],
-)
-def test_qwen_cuda_only_options_reject_other_execution_providers(monkeypatch, option):
+def test_modelopt_selects_native_quantization_from_metadata(monkeypatch):
+    builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(
+        builder,
+        [],
+        quantization_config={"quant_method": "modelopt", "kv_cache_quant_algo": "FP8"},
+    )
+
+    assert options["moe_quant_type"] == "nvfp4"
+    assert options["kv_cache_quant_type"] == "fp8_per_tensor"
+
+
+def test_modelopt_rejects_non_cuda_execution_provider(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
 
     with pytest.raises(ValueError, match="only supported on the CUDA EP"):
-        _parse_extra_options(builder, [f"{option}=true"], execution_provider="cpu")
+        _parse_extra_options(builder, [], execution_provider="cpu", quantization_config={"quant_method": "modelopt"})
 
 
-def test_fp8_kv_cache_rejects_conflicting_quant_type(monkeypatch):
+@pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32", "int4"])
+def test_modelopt_native_quantization_is_independent_of_graph_precision(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
+    options = _parse_extra_options(builder, [], precision=precision, quantization_config={"quant_method": "modelopt"})
 
-    with pytest.raises(ValueError, match="shorthand for kv_cache_quant_type=fp8_per_tensor"):
-        _parse_extra_options(builder, ["fp8_kv_cache=true", "kv_cache_quant_type=int8_per_tensor"])
+    assert options["moe_quant_type"] == "nvfp4"
 
 
 def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():

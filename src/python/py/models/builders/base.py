@@ -350,6 +350,7 @@ class Model:
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
         if moe_descriptor.kind == "mx":
+            moe_op_type = "QMoE"
             qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
             qmoe_quant_type = "int"
@@ -1655,6 +1656,30 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
+        if getattr(self, "quant_type", None) == "modelopt":
+            weight_scale = getattr(matmul, "weight_scale", None)
+            weight_scale_2 = getattr(matmul, "weight_scale_2", None)
+            if weight_scale_2 is not None:
+                out_features = int(matmul.weight.shape[0])
+                scale_shape = (out_features, int(matmul.weight.shape[1]) // 8)
+                scale_bytes = self.modelopt_e4m3_bytes(weight_scale, f"{basename}.weight_scale", scale_shape)
+                global_scale = self.modelopt_positive_scalar(weight_scale_2, f"{basename}.weight_scale_2")
+                return self.make_matmul_block_quantized_nvfp4_weight(
+                    basename, root_input, matmul.weight, scale_bytes, global_scale, **kwargs
+                )
+            if matmul.weight.dtype == torch.float8_e4m3fn:
+                if weight_scale is None:
+                    raise ValueError(f"ModelOpt FP8 weight '{basename}' is missing its weight_scale tensor.")
+                input_scale_tensor = getattr(matmul, "input_scale", None)
+                input_scale = (
+                    self.modelopt_positive_scalar(input_scale_tensor, f"{basename}.input_scale")
+                    if input_scale_tensor is not None
+                    else None
+                )
+                return self.make_matmul_block_quantized_fp8_weight(
+                    basename, root_input, matmul.weight, weight_scale, input_scale, **kwargs
+                )
+
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
@@ -1664,6 +1689,127 @@ class Model:
                 return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
+
+    def modelopt_e4m3_bytes(self, tensor, tensor_name, expected_shape):
+        if tensor is None or tensor.dtype not in {torch.uint8, torch.float8_e4m3fn}:
+            dtype = None if tensor is None else tensor.dtype
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' must contain E4M3 bytes as uint8 or float8_e4m3fn, got {dtype}."
+            )
+        if tuple(tensor.shape) != tuple(expected_shape):
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' has shape {tuple(tensor.shape)}, expected {tuple(expected_shape)}."
+            )
+        return tensor.view(torch.uint8).contiguous()
+
+    def modelopt_positive_scalar(self, tensor, tensor_name):
+        if tensor.numel() != 1:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be a scalar, got shape {tuple(tensor.shape)}.")
+        value = float(tensor.float().item())
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be finite and positive, got {value}.")
+        return value
+
+    def prepare_matmul_block_quantized_scales(self, weight_scale, out_features, block_count):
+        scale = weight_scale.float()
+        if scale.numel() == 1:
+            return scale.reshape(1, 1).expand(out_features, block_count).contiguous()
+        if scale.ndim >= 2 and scale.shape[0] == out_features:
+            scale = scale.reshape(out_features, -1)
+            if scale.shape[1] == block_count:
+                return scale.contiguous()
+        if scale.ndim >= 2 and scale.shape[0] == block_count:
+            scale = scale.reshape(block_count, -1)
+            if scale.shape[1] == out_features:
+                return scale.transpose(0, 1).contiguous()
+        if scale.ndim == 1 and scale.numel() == out_features * block_count:
+            return scale.view(out_features, block_count).contiguous()
+        return None
+
+    def make_fp8_activation_scale_initializer(self, scale):
+        cache = getattr(self, "_fp8_activation_scale_cache", None)
+        if cache is None:
+            cache = self._fp8_activation_scale_cache = {}
+        if scale in cache:
+            return cache[scale]
+
+        name = f"model.fp8_input_scale.{len(cache)}"
+        self.make_initializer(torch.tensor([scale], dtype=torch.float32), name, to=ir.DataType.FLOAT)
+        cache[scale] = name
+        return name
+
+    def make_matmul_block_quantized_fp8_weight(
+        self, basename, root_input, weight, weight_scale, input_scale=None, **kwargs
+    ):
+        if weight.dtype != torch.float8_e4m3fn:
+            raise ValueError(f"FP8 weight for '{basename}' must be float8_e4m3fn, got {weight.dtype}.")
+        if weight.ndim != 2:
+            raise ValueError(f"FP8 weight for '{basename}' must have shape [N, K], got {tuple(weight.shape)}.")
+
+        out_features = int(weight.shape[0])
+        block_size = int(weight.shape[1])
+        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, 1)
+        if scale is None:
+            raise ValueError(
+                f"FP8 weight scale for '{basename}' has shape {tuple(weight_scale.shape)}, "
+                f"expected a scalar or [{out_features}, 1]."
+            )
+
+        prefix = basename[1:].replace("/", ".")
+        weight_name = f"{prefix}.fp8_weight"
+        self.make_initializer(weight.contiguous(), weight_name)
+        scale_name = f"{prefix}.fp8_weight_scale"
+        self.make_initializer(scale, scale_name, to=ir.DataType.FLOAT)
+
+        inputs = [root_input, weight_name, scale_name]
+        if input_scale is not None:
+            inputs.append(self.make_fp8_activation_scale_initializer(input_scale))
+
+        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
+        self.make_node(
+            "MatMulBlockQuantizedFp8Weight",
+            inputs=inputs,
+            outputs=[output],
+            name=basename,
+            domain="com.microsoft",
+            block_size=block_size,
+        )
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        return basename
+
+    def make_matmul_block_quantized_nvfp4_weight(
+        self, basename, root_input, weight, weight_scale, global_scale, **kwargs
+    ):
+        if weight.dtype != torch.uint8:
+            raise ValueError(f"NVFP4 weight for '{basename}' must contain packed uint8 codes, got {weight.dtype}.")
+        if weight.ndim != 2 or weight.shape[1] % 8 != 0:
+            raise ValueError(
+                f"NVFP4 weight for '{basename}' must have shape [N, K/2] with K divisible by 16, "
+                f"got {tuple(weight.shape)}."
+            )
+
+        out_features = int(weight.shape[0])
+        prefix = basename[1:].replace("/", ".")
+        weight_name = f"{prefix}.nvfp4_weight"
+        self.make_initializer(weight, weight_name)
+        scale_name = f"{prefix}.nvfp4_weight_scale"
+        self.make_initializer(weight_scale, scale_name)
+        global_scale_name = f"{prefix}.nvfp4_weight_scale_2"
+        self.make_initializer(torch.tensor([global_scale], dtype=torch.float32), global_scale_name)
+
+        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
+        self.make_node(
+            "MatMulBlockQuantizedFp4Weight",
+            inputs=[root_input, weight_name, scale_name, global_scale_name],
+            outputs=[output],
+            name=basename,
+            domain="com.microsoft",
+            block_size=16,
+        )
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        return basename
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
@@ -3932,8 +4078,7 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
-    @staticmethod
-    def repack_modelopt_nvfp4_weight_codes(packed_nk2):
+    def repack_modelopt_nvfp4_weight_codes(self, packed_nk2):
         """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes.
 
         ``packed_nk2`` is uint8 ``[N, K/2]`` where each byte holds two adjacent K-axis
@@ -3948,8 +4093,7 @@ class Model:
         codes = torch.stack((low, high), dim=-1).reshape(n, -1)  # [N, K]
         return codes.contiguous()
 
-    @staticmethod
-    def pack_nvfp4_codes_for_qmoe(codes_nk):
+    def pack_nvfp4_codes_for_qmoe(self, codes_nk):
         """Pack per-element e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout.
 
         The QMoE FP4 kernel reads weights as ``[E, K, N/2]`` with each byte holding two

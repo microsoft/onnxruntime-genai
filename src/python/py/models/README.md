@@ -352,18 +352,12 @@ This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized
 
 ```bash
 # From source:
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options moe_quant_type=nvfp4 use_original_nvfp4_weights=true use_original_fp8_weights=true
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda -c cache_dir_to_store_temp_files
 ```
 
-The relevant extra options are:
+When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. If the checkpoint declares `kv_cache_quant_algo=FP8`, the KV cache is exported as FP8 as well. CUDA linear-attention gate fusion is enabled automatically.
 
-* `moe_quant_type=nvfp4` — emit the routed experts as a native NVFP4 `QMoE` op (E2M1 codes with E4M3 block scales, block size 16) built straight from the checkpoint tensors.
-* `use_original_nvfp4_weights=true|false` (default `false`) — emit all eligible dense NVFP4 modules (shared expert, `lm_head`) as the weight-only `MatMulBlockQuantizedFp4Weight` contrib op.
-* `use_original_fp8_weights=true|false` (default `false`) — emit self-attention `q/k/v/o` projections as W8A8 `MatMulBlockQuantizedFp8Weight` nodes using the checkpoint's calibrated per-tensor activation scales. GatedDeltaNet `in_proj_qkv` / `in_proj_z` / `out_proj` projections use the same operator in weight-only W8A16 mode. Equal Q/K/V activation scales share one initializer.
-* `fp8_kv_cache=true|false` (default `false`) — shorthand for `kv_cache_quant_type=fp8_per_tensor`. Without `kv_cache_scale_file`, it preserves the legacy shared unit scale; with a calibration file it uses calibrated per-layer scales. See [kv_cache_calibration.py](kv_cache_calibration.py) for producing the scale file.
-* `fuse_linear_attn_gates=true|false` (default `true` on CUDA and `false` elsewhere) — collapse the float32 gate glue around `LinearAttention` into the fused `com.microsoft::LinearAttentionGate` and `com.microsoft::GatedRMSNorm` ops. Set to `false` for execution providers that lack those kernels.
-
-These options require an ONNX Runtime build that provides the corresponding contrib ops.
+The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops.
 
 #### Enable WebGPU Graph Capture
 

@@ -3,82 +3,36 @@
 
 import sys
 from pathlib import Path
-from types import MethodType
 
 import onnx_ir as ir
-import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.base import Model
 
 
-def _make_model(scales):
-    """Build a minimal Qwen35MoeTextModel stub that records emitted initializers.
-
-    ``MatMulBlockQuantizedFp8Weight`` takes the FP16/BF16 activation directly plus an
-    optional fp32 *scalar* ``a_scale``, so the builder no longer emits an FP8 quantization
-    subgraph -- only a scalar initializer per distinct calibrated scale.
-    """
-    model = object.__new__(Qwen35MoeTextModel)
+def _make_model():
+    model = object.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
-    model._fp8_attention_activation_cache = {}
-    model._fp8_weight_key_for_matmul = MethodType(lambda self, basename: basename, model)
-
-    def load_scale(self, key, required=True):
-        basename = key.removesuffix(".input_scale")
-        if basename not in scales:
-            if not required:
-                return None
-            raise RuntimeError(f"missing {key}")
-        return torch.tensor(scales[basename])
-
-    model._load_nvfp4_tensor = MethodType(load_scale, model)
+    model._fp8_activation_scale_cache = {}
 
     initializers = []
 
-    def record_initializer(self, tensor, name, **kwargs):
+    def record_initializer(tensor, name, **kwargs):
         initializers.append((name, tensor))
         return name
 
-    model.make_initializer = MethodType(record_initializer, model)
+    model.make_initializer = record_initializer
     return model, initializers
 
 
-def test_static_input_scale_is_read_from_checkpoint():
-    model, _ = _make_model({"q": 0.125})
-
-    assert model._fp8_attention_input_scale("q") == 0.125
-
-
-def test_static_input_scale_falls_back_to_weight_only_when_missing():
-    model, _ = _make_model({})
-
-    assert model._fp8_attention_input_scale("q") is None
-
-
-@pytest.mark.parametrize("scale", [0.0, -0.125, float("inf"), float("nan")])
-def test_static_input_scale_rejects_non_positive_or_non_finite_values(scale):
-    model, _ = _make_model({"q": scale})
-
-    with pytest.raises(ValueError, match="finite and positive"):
-        model._fp8_attention_input_scale("q")
-
-
-def test_static_input_scale_rejects_non_scalar_tensor():
-    model, _ = _make_model({"q": [0.125, 0.25]})
-
-    with pytest.raises(ValueError, match="must be a scalar"):
-        model._fp8_attention_input_scale("q")
-
-
 def test_scale_initializer_is_shared_for_matching_qkv_scales():
-    model, initializers = _make_model({"q": 0.125, "k": 0.125, "v": 0.125})
+    model, initializers = _make_model()
 
-    q_name = model._make_fp8_activation_scale_initializer("/q", 0.125)
-    k_name = model._make_fp8_activation_scale_initializer("/k", 0.125)
-    v_name = model._make_fp8_activation_scale_initializer("/v", 0.125)
+    q_name = model.make_fp8_activation_scale_initializer(0.125)
+    k_name = model.make_fp8_activation_scale_initializer(0.125)
+    v_name = model.make_fp8_activation_scale_initializer(0.125)
 
     assert k_name == q_name
     assert v_name == q_name
@@ -88,10 +42,10 @@ def test_scale_initializer_is_shared_for_matching_qkv_scales():
 
 
 def test_scale_initializer_is_not_shared_when_scale_differs():
-    model, initializers = _make_model({"q": 0.125, "o": 0.25})
+    model, initializers = _make_model()
 
-    q_name = model._make_fp8_activation_scale_initializer("/q", 0.125)
-    o_name = model._make_fp8_activation_scale_initializer("/o", 0.25)
+    q_name = model.make_fp8_activation_scale_initializer(0.125)
+    o_name = model.make_fp8_activation_scale_initializer(0.25)
 
     assert o_name != q_name
     assert len(initializers) == 2
