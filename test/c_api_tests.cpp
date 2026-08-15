@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -46,6 +47,46 @@ TEST(CAPITests, Config) {
   config->SetDecoderProviderOptionsHardwareDeviceId("DML", 2);
   config->SetDecoderProviderOptionsHardwareVendorId("DML", 1);
 #endif
+}
+
+// Verifies that a config parse failure does not disclose file contents
+// (e.g. JSON key names) in the error message, while still naming the file.
+TEST(CAPITests, ConfigParseErrorDoesNotLeakContent) {
+  const auto unique_suffix = std::to_string(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
+  auto tmp_dir = std::filesystem::temp_directory_path() /
+                 ("genai_config_leak_test_" + unique_suffix);
+  std::filesystem::create_directories(tmp_dir);
+
+  const char* secret_key = "SUPER_SECRET_KEY";
+  {
+    std::ofstream out(tmp_dir / "genai_config.json", std::ios::binary);
+    out << "{\"model\":{\"" << secret_key << "\":\"value\"}}";
+  }
+
+  bool threw = false;
+  try {
+    OgaConfig::Create(tmp_dir.string().c_str());
+  } catch (const std::exception& e) {
+    threw = true;
+    const std::string message = e.what();
+    // Ensure we actually exercised the parse-error path (not, e.g., a
+    // file-open failure), so the leak assertion below is meaningful.
+    EXPECT_NE(message.find("Error encountered while parsing"), std::string::npos);
+    // The failing file is still identified...
+    EXPECT_NE(message.find("genai_config.json"), std::string::npos);
+    // ...but in release builds the file's contents (the key name) are not
+    // echoed back. Debug builds intentionally include the parser detail to aid
+    // diagnosis, so only assert the no-leak guarantee when NDEBUG is defined.
+#if defined(NDEBUG)
+    EXPECT_EQ(message.find(secret_key), std::string::npos);
+#endif
+  }
+  EXPECT_TRUE(threw);
+
+  // Best-effort cleanup; ignore errors so cleanup never fails the test.
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(tmp_dir, cleanup_ec);
 }
 
 // Regression test: appending CPU provider should not throw.
