@@ -6,6 +6,7 @@
 #include "request.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
+#include "recompute_preemption_policy.h"
 #include "step_plan.h"
 
 /**
@@ -15,6 +16,18 @@
  */
 
 namespace Generators {
+
+// Counters describing how often the dynamic scheduler had to reclaim resident cache capacity to
+// admit waiting work, and what that cost. They are pure observations: nothing in the scheduler
+// reads them back to make a decision.
+struct SchedulerPreemptionMetrics {
+  uint64_t block_starved_passes{};  // Passes where free blocks alone held a request back.
+  uint64_t preemption_passes{};     // Passes that suspended at least one resident.
+  uint64_t preemptions{};           // Residents suspended.
+  uint64_t declined_preemptions{};  // Starved passes no eligible victim set could relieve.
+  uint64_t reclaimed_blocks{};      // Blocks returned to the pool by those suspensions.
+  uint64_t recomputed_tokens{};     // Committed key-value tokens discarded and queued for rebuild.
+};
 
 struct Scheduler {
   /**
@@ -112,12 +125,30 @@ struct DynamicBatchScheduler : Scheduler {
 
   bool HasPendingRequests() const override;
 
+  const SchedulerPreemptionMetrics& PreemptionMetrics() const {
+    return preemption_metrics_;
+  }
+
  private:
   void ReapCompletedRequests();
+
+  // One complete planning attempt over the current residents and waiting requests. Requests listed
+  // in suspended_this_step_ are skipped so a request suspended by this engine step cannot take back
+  // the capacity the step just reclaimed for someone else.
+  StepPlanningResult PlanStepOnce(StepPlan& plan, const StepPlanningLimits& limits);
+
+  // Suspends residents until the blocked request's shortfall is covered. Returns the number of
+  // residents suspended, which is zero when no eligible victim set could unblock it.
+  size_t PreemptForBlockShortfall(const BlockCapacityShortfall& shortfall);
+
+  static size_t CountNewAdmissions(const StepPlan& plan);
 
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
+  RecomputePreemptionSettings preemption_settings_;
+  SchedulerPreemptionMetrics preemption_metrics_;
+  std::vector<const void*> suspended_this_step_;
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);

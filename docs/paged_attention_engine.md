@@ -17,6 +17,7 @@ The main implementation is under `src/engine/`:
 | Top-level orchestration and transaction handling | `engine.h`, `engine.cpp` |
 | Request lifecycle and per-request search state | `request.h`, `request.cpp` |
 | Batch planning and request admission | `scheduler.h`, `scheduler.cpp`, `decode_first_scheduler_policy.*` |
+| Recompute preemption policy | `recompute_preemption_policy.h`, `recompute_preemption_policy.cpp` |
 | KV-cache capacity planning and ownership | `cache_manager.h`, `cache_manager.cpp`, `paged_key_value_cache.h`, `paged_key_value_cache.cpp` |
 | Speculative cache reservation | `paged_cache_reservation.h`, `paged_cache_reservation.cpp` |
 | Packed model inputs and logits selection | `decoders/varlen_decoder_io.h`, `decoders/varlen_decoder_io.cpp` |
@@ -77,6 +78,8 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+Recompute preemption is configured by four further `engine.dynamic_batching` values and is off by default; see [Recompute preemption](#recompute-preemption).
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Request lifecycle
@@ -93,7 +96,10 @@ The important request states are:
 
 ```text
 Unassigned -> Assigned -> InProgress -> Completed
-     ^           |            |            |
+     ^           |            |  ^         |
+     |           |            v  |         |
+     |           |        Suspended        |
+     |           |            |            |
      +-----------+------------+------------+
                   Remove()
 ```
@@ -112,11 +118,17 @@ Assignment moves the prompt into the request's `Search`, creates the host-side t
 
 The request has completed at least one committed engine transaction and belongs to the active engine workload. It normally has one unprocessed token at the beginning of a decode step: the token sampled by the previous step.
 
+### `Suspended`
+
+The request was resident and was preempted to reclaim its paged-cache blocks. It keeps its complete logical token sequence, its `Search` and sampler state, the tokens the application has already seen, and its generation limits, but it owns no cache blocks and its processed cursor is back at the beginning of the sequence.
+
+A suspended request waits in the scheduler pool alongside `Assigned` requests and is re-admitted the same way. Its whole sequence is prefill work again, so the ordinary chunked-prefill path rebuilds its key-value entries before it decodes. `AddTokens()` is rejected while suspended, exactly as it is while `InProgress`.
+
 ### `Completed`
 
 The search has reached an end condition, such as an EOS token or maximum length. The request can be returned to the caller immediately, but its cache blocks are normally reclaimed by `DynamicBatchScheduler::ReapCompletedRequests()` at the beginning of the next planning pass.
 
-`Remove()` is legal from `Assigned`, `InProgress`, and `Completed`, and returns the request to `Unassigned`. On the dynamic path, removal immediately erases scheduler membership and releases committed paged-cache ownership.
+`Remove()` is legal from `Assigned`, `InProgress`, `Suspended`, and `Completed`, and returns the request to `Unassigned`. On the dynamic path, removal immediately erases scheduler membership and releases committed paged-cache ownership; a suspended request already owns none.
 
 This removal does not purge an entry already placed in `Engine::ready_requests_`. Because `Engine::Step()` drains that queue before scheduling new work, a removed request that was already ready can still be returned by a later `Step()` call.
 
@@ -191,7 +203,7 @@ Completed requests that still own paged-cache blocks are deallocated and removed
 
 The scheduler snapshots all requests that already belong to the paged cache. These requests are expected to be `InProgress`.
 
-It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates.
+It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` or `Suspended` and are marked as newly admitted candidates. Both own no cache blocks, so they are admitted the same way; a suspended request differs only in that its sequence already contains generated tokens.
 
 The scheduler orders candidates with decodes first. Order remains stable among
 decodes and among prefills. Each candidate initially contributes one provisional
@@ -241,6 +253,8 @@ The planner distinguishes temporary capacity pressure from a request that can ne
 
 - `CapacityDeferred` means the request could run later if capacity becomes available.
 - `UnserviceableRequest` means the request would exceed the total cache or supported block-table width even if the cache were otherwise empty.
+
+The planner also reports, separately for waiting requests and for residents, the first request it deferred *only* because the block pool was short of free blocks, together with how many more blocks that request needs. Row limits and residency limits are excluded from that report, because returning blocks to the pool does not relieve either of them. `Engine` does not use these values; the scheduler uses them to decide whether recompute preemption would unblock anything.
 
 If at least one request fits, the step is executable even when other requests were deferred or found unserviceable. This allows useful work to continue instead of letting one request block the whole engine.
 
@@ -457,7 +471,9 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 - The number of slots containing committed tokens.
 - The ordered physical blocks used by the request.
 
-Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
+Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, consistency between request progress and cache progress, and that a suspended request owns nothing.
+
+`PagedKeyValueCache::Reclaim()` is the single way a request's committed ownership is released without the request leaving the engine. `Remove()` is implemented in terms of it, and `PagedCacheManager::ReclaimRequestCache()` exposes it through the `CacheManager` interface so the scheduler never reaches into the cache's block tables directly.
 
 ## Prefill, decode, and mixed batches
 
@@ -528,9 +544,84 @@ The current ordering policy is:
 2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
 3. Give every feasible selected row one token before expanding selected prefills in stable order.
 
-Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Phase 1 does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
+Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. The ordering policy does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work unless recompute preemption is enabled.
 
 If no request can run because of temporary capacity, `StepDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
+
+## Recompute preemption
+
+Recompute preemption lets the scheduler take a resident request's paged-cache blocks back so a request that free blocks alone are holding up can run. The victim is suspended rather than dropped: it keeps everything except its cache residency and rebuilds its key-value entries later through the ordinary chunked-prefill path. Nothing is swapped to host memory or disk.
+
+It is off by default. When `engine.dynamic_batching.enable_recompute_preemption` is absent or false the engine behaves exactly as it did before: a blocked request waits.
+
+### Configuration
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `enable_recompute_preemption` | `false` | Turns the whole mechanism on |
+| `max_preemptions_per_step` | `1` | Victims one planning pass may suspend |
+| `max_preemptions_per_request` | `0` (unbounded) | Suspensions one request may accumulate |
+| `min_decode_steps_before_preemption` | `8` | Committed decode steps a resident earns before it can be suspended again |
+
+Enabling preemption with a cache manager that cannot release one request's blocks independently of the batch, or on the static batching path, is rejected at construction. There is no silent fallback that reports a preemption that did not happen.
+
+### When it triggers
+
+Preemption runs during planning, after the first planning attempt, and only in two situations:
+
+- A resident cannot grow, no other request can run, and the step would otherwise report `CapacityDeferred`. Suspending another resident keeps the engine making progress instead of stalling.
+- No resident is short of blocks, and a waiting request was deferred only because the block pool is short of free blocks. This is the head-of-line case the feature exists for: short requests arriving behind long residents.
+
+A starved resident is considered before any waiting request, so it would take the reclaimed blocks first. When one exists and the step can still run other work, nothing is preempted: capacity that cannot reach the waiting request is not worth a resident's committed key-value entries. Row limits and residency limits are left alone for the same reason, and a resident is never its own victim.
+
+The pass that preempts admits at most one more request than the attempt before it did. Without that cap, surplus reclaimed capacity could pull in several waiting requests and push the victim further back in the queue for blocks it released itself.
+
+Admission remains first-come-first-served, so the reclaimed capacity is guaranteed to reach blocked work but not necessarily the exact request whose shortfall was measured: an earlier waiting request held back by the residency limit can take it once the victim leaves the cache.
+
+### Choosing a victim
+
+`SelectRecomputeVictims()` in `recompute_preemption_policy.*` takes plain counters, so the policy is unit-testable without a model or a cache. A resident is a candidate when it is `InProgress`, past prefill, owns at least one block, has not reached `max_preemptions_per_request`, has committed at least `min_decode_steps_before_preemption` decode steps since it was admitted, and its committed cache slots agree with its committed sequence length.
+
+Every one of those conditions derives from counters that only a committed transaction advances, so a resident never becomes a victim on the strength of work that has not committed. The last one is a consistency gate: a resident whose cache and sequence already disagree is left alone so the invariant checks report the disagreement instead of the scheduler rewinding on bad accounting.
+
+Candidates are ordered by:
+
+1. Fewest previous preemptions first, so no request is suspended twice while a resident that has never been suspended still holds capacity. This is what bounds unfairness between requests.
+2. Latest resident position first, preserving the accumulated work of the requests that have been resident longest.
+
+Victims are taken in that order until their combined blocks cover the shortfall, bounded by `max_preemptions_per_step`. If the eligible candidates within that bound cannot cover the shortfall, nothing is preempted: discarding committed key-value entries without unblocking anything is the churn the policy exists to avoid.
+
+### What suspension changes
+
+For the victim, in this order:
+
+1. `CacheManager::ReclaimRequestCache()` releases every block table the cache holds for the request and reports the blocks and slots that returned to the pool. Doing this first means a pool that rejects the release leaves the request untouched. The scheduler then checks the released slot count against the request's committed sequence length, so a cache and a request that disagree fail loudly instead of diverging.
+2. `Request::SuspendForRecompute()` moves the processed cursor to zero, marks the whole current sequence as prefill work, resets the request's decode-step credit, increments its preemption count, and sets the status to `Suspended`. It cannot fail, because the eligibility check already established its preconditions.
+
+The `Search` is not touched, so the token sequence, the random stream, the logits-processor history, the completion state, and the maximum-length bookkeeping all survive. The token the last committed step sampled is still the final token of the sequence, so the last recompute chunk ends exactly where the interrupted decode step would have, and the request resumes from the identical logical context.
+
+The guarantee is context equivalence, not bitwise output equality. A resume replays tokens that were previously single-token decodes as a multi-token prefill query, which changes the query length the attention operator sees, disables decode graph capture for those steps, and can select a different attention backend. On a provider whose results do not depend on query length or batch composition the emitted tokens are identical, and the deterministic tests assert exactly that; on a provider where they do, a near-tied logit can resolve differently. If bit-exact output across a suspension is required, this mechanism is the wrong one - it recomputes rather than preserving the original activations.
+
+Victims are excluded from the whole engine step that suspended them, including the capacity-retry planning attempts inside `Engine::StepDynamic()`, so a retry cannot hand the reclaimed capacity straight back to the request the step just suspended.
+
+Waiting requests are considered suspended-first and then in arrival order within each group, so a victim is ahead of every request that has never been admitted.
+
+### Relationship to the transaction
+
+Preemption happens at a step boundary, during planning, before `BeginTransaction()` checkpoints anything. It is therefore a complete, self-consistent state change of its own and is never undone by a transaction rollback. A step that preempts a resident and then fails during execution leaves the victim suspended, the newly admitted request unchanged, and the reclaimed blocks free.
+
+### Metrics
+
+`DynamicBatchScheduler::PreemptionMetrics()` counts block-starved planning passes, passes that preempted, victims suspended, declined preemptions, blocks reclaimed, and tokens queued for recomputation. Each `Request` also reports its own `PreemptionCount()` and `RecomputedTokenCount()`, and its snapshot carries both.
+
+### Limits
+
+- Only the dynamic paged path supports it.
+- Only whole-request reclamation is supported; partial reclamation of a sequence's blocks is not.
+- The invariant validator still expects one block table per request. `PagedKeyValueCache::Reclaim()` deliberately releases every table it holds for a request rather than the first, so a future windowed layout that splits a sequence across tables reclaims correctly, but that layout is not present on this branch and is not covered by the invariant checks. Releasing several tables is not atomic; a pool that rejected the second release would leave the first one freed.
+- A suspended request is re-admitted ahead of never-admitted requests, but it can still wait behind requests already admitted with the capacity it released. That wait is bounded by those requests completing, not by a deadline.
+- Nothing is swapped to host memory or disk, so the cost of a suspension is exactly the recomputation of the victim's sequence.
+- This is not context shifting. No prompt token is ever discarded and the model sees the same context after a resume as before the suspension.
 
 ## Static engine path
 
@@ -577,4 +668,4 @@ The document needs review when a change affects any of the following:
 
 Prefer describing current behavior directly. If a design is proposed but not implemented, label it clearly as future work or keep it in a separate design document. Remove or revise statements that stop matching the code.
 
-Tests under `test/engine/` provide focused coverage for scheduler planning, paged-cache resources, request and cache invariants, transaction rollback, fatal failures, and ready-result draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.
+Tests under `test/engine/` provide focused coverage for scheduler planning, paged-cache resources, request and cache invariants, transaction rollback, fatal failures, and ready-result draining. `recompute_preemption_tests.cpp` covers victim selection, reclamation, rebuild by chunked prefill, token-stream continuity across a suspension, fairness, rollback behavior, cancellation while suspended, and default-off compatibility. `recompute_preemption_benchmark.cpp` compares the wait-only and preemptive policies on a fixed key-value budget; it drives the production scheduler and cache but fabricates model output, so its unit of time is one engine tick rather than wall-clock latency. When behavior changes, update both the tests and this document so they continue to describe the same contract.

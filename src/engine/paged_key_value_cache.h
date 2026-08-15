@@ -15,6 +15,12 @@
 
 namespace Generators {
 
+// What a request returned to the block pool when it gave up its cache residency.
+struct ReclaimedCacheOwnership {
+  size_t released_blocks{};
+  size_t released_slots{};
+};
+
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
  * The cache is divided into blocks, each containing a fixed number of slots. Each slot holds
@@ -38,6 +44,15 @@ struct PagedKeyValueCache {
   void AppendTokens(std::shared_ptr<Request> request);
 
   void Remove(std::shared_ptr<Request> request);
+
+  // Releases every block the request owns and reports what went back to the pool. The request's
+  // logical sequence is untouched; only its cache residency ends, so the caller can either drop the
+  // request or have it rebuild its key-value entries later.
+  //
+  // The cache is free to spread one request over several block tables -- a windowed layout keeps a
+  // sliding region separate from the rest of the sequence -- so this releases every table held for
+  // the request rather than assuming there is exactly one.
+  ReclaimedCacheOwnership Reclaim(const std::shared_ptr<Request>& request);
 
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
 

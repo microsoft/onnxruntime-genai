@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -76,6 +77,43 @@ struct RecordingCacheManager : CacheManager {
     return supports_dynamic_batching_;
   }
 
+  bool SupportsRecomputePreemption() const override {
+    return supports_recompute_preemption_;
+  }
+
+  // Mirrors the paged manager: the request's blocks go back to the pool and it stops being
+  // resident. Each allocated request is modelled as owning `blocks_per_request_` blocks.
+  ReclaimedCacheOwnership ReclaimRequestCache(
+      const std::shared_ptr<Request>& request) override {
+    reclaim_calls++;
+    if (trace_) trace_->Record("ReclaimRequestCache");
+    const auto it = std::find(allocated_.begin(), allocated_.end(), request);
+    if (it == allocated_.end())
+      throw std::runtime_error("Recording cache cannot reclaim an unallocated request.");
+    allocated_.erase(it);
+    return ReclaimedCacheOwnership{
+        blocks_per_request_,
+        static_cast<size_t>(request->ProcessedSequenceLength()),
+    };
+  }
+
+  PagedCacheSnapshot Snapshot() const override {
+    PagedCacheSnapshot snapshot;
+    snapshot.block_size = 1;
+    snapshot.total_blocks = capacity_ * blocks_per_request_;
+    size_t next_block_id = 0;
+    for (const auto& request : allocated_) {
+      RequestBlockSnapshot request_snapshot;
+      request_snapshot.request_id = request.get();
+      for (size_t i = 0; i < blocks_per_request_; ++i)
+        request_snapshot.block_ids.push_back(next_block_id++);
+      request_snapshot.used_slots = blocks_per_request_;
+      snapshot.requests.push_back(std::move(request_snapshot));
+    }
+    snapshot.free_blocks = snapshot.total_blocks - next_block_id;
+    return snapshot;
+  }
+
   size_t MaxBatchSize() const override { return capacity_; }
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
@@ -83,10 +121,13 @@ struct RecordingCacheManager : CacheManager {
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
     const size_t request_limit =
         plan.scheduled_request_limit == 0 ? capacity_ : plan.scheduled_request_limit;
+    const size_t new_admission_limit =
+        plan.new_admission_limit == 0 ? capacity_ : plan.new_admission_limit;
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
     bool capacity_deferred = false;
     const void* unserviceable_request_id = nullptr;
+    BlockCapacityShortfall blocked_admission;
     std::vector<const void*> request_ids;
     request_ids.reserve(plan.requests.size());
     for (size_t i = 0; i < plan.requests.size(); ++i) {
@@ -105,11 +146,22 @@ struct RecordingCacheManager : CacheManager {
         unserviceable_request_id = unserviceable_request_id_;
         continue;
       }
+      // Stands in for a waiting request that only the block pool is holding up, which is the one
+      // deferral reason reclaiming a resident's blocks can relieve.
+      if (entry.newly_admitted && entry.request_id == admission_blocked_request_id_) {
+        capacity_deferred = true;
+        if (!blocked_admission.Any()) {
+          blocked_admission =
+              BlockCapacityShortfall{admission_blocked_request_id_, admission_block_shortfall_};
+        }
+        continue;
+      }
       if (entry.request_id == capacity_deferred_request_id_ ||
           selected_requests >= request_limit ||
           (entry.newly_admitted &&
            (!can_allocate_verdict_ ||
-            allocated_.size() + selected_new_requests >= capacity_))) {
+            allocated_.size() + selected_new_requests >= capacity_ ||
+            selected_new_requests >= new_admission_limit))) {
         capacity_deferred = true;
         continue;
       }
@@ -129,6 +181,8 @@ struct RecordingCacheManager : CacheManager {
           true,
           capacity_deferred,
           unserviceable_request_id,
+          blocked_admission,
+          {},
           {StepOutcomeKind::Committed, plan.transaction_id, nullptr},
       };
     }
@@ -137,6 +191,8 @@ struct RecordingCacheManager : CacheManager {
           false,
           capacity_deferred,
           unserviceable_request_id,
+          blocked_admission,
+          {},
           {StepOutcomeKind::UnserviceableRequest,
            plan.transaction_id,
            unserviceable_request_id},
@@ -146,6 +202,8 @@ struct RecordingCacheManager : CacheManager {
         false,
         capacity_deferred,
         nullptr,
+        blocked_admission,
+        {},
         {capacity_deferred ? StepOutcomeKind::CapacityDeferred : StepOutcomeKind::NoWork,
          plan.transaction_id,
          nullptr},
@@ -195,6 +253,20 @@ struct RecordingCacheManager : CacheManager {
   void SetCapacityDeferredRequest(const std::shared_ptr<Request>& request) {
     capacity_deferred_request_id_ = request.get();
   }
+  // Reports `request` as a waiting admission that only free blocks are holding up, needing
+  // `shortfall` more of them.
+  void SetAdmissionBlockedRequest(const std::shared_ptr<Request>& request, size_t shortfall) {
+    admission_blocked_request_id_ = request.get();
+    admission_block_shortfall_ = shortfall;
+  }
+  void ClearAdmissionBlockedRequest() {
+    admission_blocked_request_id_ = nullptr;
+    admission_block_shortfall_ = 0;
+  }
+  void SetSupportsRecomputePreemption(bool supported) {
+    supports_recompute_preemption_ = supported;
+  }
+  void SetBlocksPerRequest(size_t blocks) { blocks_per_request_ = blocks; }
   size_t AllocatedCount() const { return allocated_.size(); }
 
   // Recorded call counts.
@@ -202,6 +274,7 @@ struct RecordingCacheManager : CacheManager {
   int allocate_calls{0};
   int deallocate_calls{0};
   int step_calls{0};
+  int reclaim_calls{0};
 
  private:
   size_t capacity_;
@@ -209,7 +282,11 @@ struct RecordingCacheManager : CacheManager {
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
   const void* capacity_deferred_request_id_{};
+  const void* admission_blocked_request_id_{};
+  size_t admission_block_shortfall_{};
   bool supports_dynamic_batching_{true};
+  bool supports_recompute_preemption_{true};
+  size_t blocks_per_request_{1};
   std::vector<std::shared_ptr<Request>> allocated_;
 };
 
@@ -221,11 +298,26 @@ struct ScriptedDecoderIO : DecoderIO {
   ScriptedDecoderIO(std::shared_ptr<Model> model, ScheduledRequests& scheduled_requests,
                     std::shared_ptr<CacheManager> cache_manager, int32_t forced_token,
                     bool fail_process_logits = false)
+      : ScriptedDecoderIO(model, scheduled_requests, cache_manager,
+                          std::vector<int32_t>(scheduled_requests.size(), forced_token),
+                          fail_process_logits) {}
+
+  // Per-request variant: row i's logits peak at forced_tokens[i], so a test can make the "model"
+  // output depend on what each request actually fed in this step.
+  ScriptedDecoderIO(std::shared_ptr<Model> model, ScheduledRequests& scheduled_requests,
+                    std::shared_ptr<CacheManager> cache_manager,
+                    const std::vector<int32_t>& forced_tokens,
+                    bool fail_process_logits = false)
       : DecoderIO(model, scheduled_requests, cache_manager),
         vocab_size_{static_cast<int64_t>(model->config_->model.vocab_size)},
         fail_process_logits_{fail_process_logits} {
-    if (forced_token < 0 || forced_token >= vocab_size_) {
-      throw std::runtime_error("ScriptedDecoderIO: forced_token out of vocabulary range");
+    if (forced_tokens.size() != scheduled_requests.size()) {
+      throw std::runtime_error("ScriptedDecoderIO: one forced token per scheduled request is required");
+    }
+    for (const int32_t forced_token : forced_tokens) {
+      if (forced_token < 0 || forced_token >= vocab_size_) {
+        throw std::runtime_error("ScriptedDecoderIO: forced_token out of vocabulary range");
+      }
     }
     const int64_t batch_size = static_cast<int64_t>(scheduled_requests.size());
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
@@ -235,7 +327,7 @@ struct ScriptedDecoderIO : DecoderIO {
     auto cpu_span = device_span.CpuSpan();
     std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
     for (int64_t row = 0; row < batch_size; ++row) {
-      cpu_span[row * vocab_size_ + forced_token] = 100.0f;
+      cpu_span[row * vocab_size_ + forced_tokens[static_cast<size_t>(row)]] = 100.0f;
     }
     device_span.CopyCpuToDevice();
   }
@@ -311,11 +403,24 @@ struct RecordingModelExecutor : ModelExecutor {
     if (failure == ScriptedExecutionFailure::Fatal) {
       throw std::runtime_error("Injected fatal execution failure.");
     }
+    std::vector<int32_t> forced_tokens;
+    forced_tokens.reserve(scheduled_requests.size());
+    for (const auto& request : scheduled_requests) {
+      forced_tokens.push_back(next_token_selector_ ? next_token_selector_(*request)
+                                                   : forced_token_);
+    }
     scheduled_requests.AddDecoderState(
         std::make_unique<ScriptedDecoderIO>(
-            model_, scheduled_requests, cache_manager_, forced_token_,
+            model_, scheduled_requests, cache_manager_, forced_tokens,
             failure == ScriptedExecutionFailure::PostProcessing));
     static_cast<void>(context);
+  }
+
+  // Replaces the single forced token with a per-request choice, so a test can make the fabricated
+  // "model" output depend on the tokens a request actually pushed through this step.
+  using NextTokenSelector = std::function<int32_t(Request&)>;
+  void SetNextTokenSelector(NextTokenSelector selector) {
+    next_token_selector_ = std::move(selector);
   }
 
   void SetNextFailure(ScriptedExecutionFailure failure) {
@@ -339,6 +444,7 @@ struct RecordingModelExecutor : ModelExecutor {
   int32_t forced_token_;
   std::shared_ptr<CallTrace> trace_;
   std::deque<ScriptedExecutionFailure> failures_;
+  NextTokenSelector next_token_selector_;
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those
@@ -366,6 +472,35 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
   auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
 
   return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
+}
+
+// An Engine wired with the production paged cache manager and dynamic scheduler, with only model
+// execution replaced. Admission, block accounting, reservation, commit, and preemption all run
+// through the real code, so capacity pressure in a test is real block pressure.
+struct PagedDoublesEngine {
+  std::shared_ptr<Engine> engine;
+  std::shared_ptr<PagedCacheManager> cache;
+  DynamicBatchScheduler* scheduler;
+  RecordingModelExecutor* executor;
+};
+
+inline PagedDoublesEngine MakePagedEngine(std::shared_ptr<Model> model, int32_t forced_token) {
+  if (!model->config_->engine.dynamic_batching)
+    throw std::runtime_error("MakePagedEngine requires engine.dynamic_batching to be configured.");
+
+  auto cache = std::make_shared<PagedCacheManager>(model);
+  auto scheduler = std::make_unique<DynamicBatchScheduler>(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token);
+
+  DynamicBatchScheduler* scheduler_observer = scheduler.get();
+  RecordingModelExecutor* executor_observer = executor.get();
+  std::shared_ptr<PagedCacheManager> cache_observer = cache;
+
+  EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+
+  return PagedDoublesEngine{std::move(engine), std::move(cache_observer), scheduler_observer,
+                            executor_observer};
 }
 
 }  // namespace test

@@ -48,6 +48,19 @@ struct CacheManager {
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
+  // True when the manager can end one request's cache residency independently of the rest of the
+  // batch, which is what recompute preemption needs. A cache that allocates and releases the batch
+  // as a unit cannot, and says so instead of pretending the reclamation happened.
+  virtual bool SupportsRecomputePreemption() const { return false; }
+
+  // Releases everything the request owns in the cache and reports what returned to the pool. The
+  // request's logical sequence, search state, and lifecycle counters are not touched here: the
+  // caller moves the request to its suspended boundary.
+  virtual ReclaimedCacheOwnership ReclaimRequestCache(const std::shared_ptr<Request>&) {
+    throw std::logic_error(
+        "Cache manager does not support reclaiming a single request's committed cache.");
+  }
+
   virtual bool SupportsDynamicBatching() const = 0;
 
   virtual size_t MaxBatchSize() const { return 4; }
@@ -112,6 +125,11 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  bool SupportsRecomputePreemption() const override { return true; }
+
+  ReclaimedCacheOwnership ReclaimRequestCache(
+      const std::shared_ptr<Request>& request) override;
 
   bool SupportsDynamicBatching() const override;
 

@@ -171,13 +171,25 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
-  for (auto request_it = block_tables_.begin(); request_it != block_tables_.end(); ++request_it) {
-    if (request_it->request_id == request.get()) {
-      block_pool_->Free(request_it->blocks);
-      block_tables_.erase(request_it);
-      return;
+  Reclaim(request);
+}
+
+ReclaimedCacheOwnership PagedKeyValueCache::Reclaim(
+    const std::shared_ptr<Request>& request) {
+  ReclaimedCacheOwnership reclaimed;
+  const void* request_id = request.get();
+  for (auto table_it = block_tables_.begin(); table_it != block_tables_.end();) {
+    if (table_it->request_id != request_id) {
+      ++table_it;
+      continue;
     }
+
+    reclaimed.released_blocks += table_it->blocks.size();
+    reclaimed.released_slots += table_it->committed_slots;
+    block_pool_->Free(table_it->blocks);
+    table_it = block_tables_.erase(table_it);
   }
+  return reclaimed;
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
@@ -196,6 +208,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   if (scheduled_request_limit > max_batch_size_) {
     throw std::runtime_error("Step plan request limit exceeds the configured batch size.");
   }
+  const size_t new_admission_limit =
+      plan.new_admission_limit == 0 ? max_batch_size_ : plan.new_admission_limit;
 
   const size_t available_blocks = block_pool_->AvailableBlocks();
   size_t planned_blocks = 0;
@@ -204,6 +218,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   size_t max_blocks_per_request = 0;
   bool capacity_deferred = false;
   const void* unserviceable_request_id = nullptr;
+  BlockCapacityShortfall blocked_admission;
+  BlockCapacityShortfall blocked_resident;
 
   struct CacheGrowth {
     size_t proposed_blocks{};
@@ -282,9 +298,28 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
 
     if (selected_requests >= scheduled_request_limit ||
         (candidate.newly_admitted &&
-         committed_request_count + selected_new_requests >= max_batch_size_) ||
+         (committed_request_count + selected_new_requests >= max_batch_size_ ||
+          selected_new_requests >= new_admission_limit)) ||
         planned_blocks + growth.new_blocks > available_blocks) {
       capacity_deferred = true;
+      // Record the first request of each kind that only the block pool is holding up. Reclaiming
+      // blocks from a resident can run it; it cannot relieve the scheduled-row limit, the residency
+      // limit, or the per-plan admission limit, so those deferrals deliberately leave this unset.
+      const bool row_limited = selected_requests >= scheduled_request_limit;
+      const bool residency_limited =
+          candidate.newly_admitted &&
+          (committed_request_count + selected_new_requests >= max_batch_size_ ||
+           selected_new_requests >= new_admission_limit);
+      if (!row_limited && !residency_limited) {
+        auto& shortfall =
+            candidate.newly_admitted ? blocked_admission : blocked_resident;
+        if (!shortfall.Any()) {
+          shortfall = BlockCapacityShortfall{
+              candidate.request_id,
+              planned_blocks + growth.new_blocks - available_blocks,
+          };
+        }
+      }
       continue;
     }
 
@@ -312,6 +347,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         true,
         capacity_deferred,
         unserviceable_request_id,
+        blocked_admission,
+        blocked_resident,
         {StepOutcomeKind::Committed, plan.transaction_id, nullptr},
     };
   }
@@ -320,6 +357,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         false,
         capacity_deferred,
         unserviceable_request_id,
+        blocked_admission,
+        blocked_resident,
         {StepOutcomeKind::UnserviceableRequest, plan.transaction_id, unserviceable_request_id},
     };
   }
@@ -328,6 +367,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         false,
         true,
         nullptr,
+        blocked_admission,
+        blocked_resident,
         {StepOutcomeKind::CapacityDeferred, plan.transaction_id, nullptr},
     };
   }
@@ -335,6 +376,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
       false,
       false,
       nullptr,
+      {},
+      {},
       {StepOutcomeKind::NoWork, plan.transaction_id, nullptr},
   };
 }
