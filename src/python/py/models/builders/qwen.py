@@ -2248,7 +2248,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                       dtype=self.io_dtype,
                       shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
 
-        gate_up_mul_name = f"{basename}/Mul"
+        gate_up_mul_name = f"{basename}/gate_up/Mul"
         self.make_mul(gate_up_mul_name,
                       [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
                       dtype=self.io_dtype,
