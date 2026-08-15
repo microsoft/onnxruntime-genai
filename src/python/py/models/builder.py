@@ -663,6 +663,11 @@ def get_args():
                 nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                quant_config = Structured per-node quantization overrides, as inline JSON or a path to a JSON file.
+                    The JSON is either a list of override objects or an object with an "overrides" key, e.g.
+                    quant_config=[{"match": {"name": "/lm_head/MatMul"}, "type": "int8"}]
+                    Each override sets the bit width of the matched node; the MoE, block size and algorithm
+                    knobs still come from the flat extra_options above.
                 algo_config = Base method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported base methods are: 'default', 'rtn', 'k_quant'.
                     - default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
