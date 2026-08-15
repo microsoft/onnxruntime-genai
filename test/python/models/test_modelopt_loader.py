@@ -136,6 +136,7 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         )
 
         assert isinstance(model, QM.QuantizedModel)
+        assert isinstance(model.lm_head, QM.ModeloptLinearModule)
         mods = model.modules()
         assert mods[0] is model.embedding and mods[-1] is model.lm_head
         assert len(model.layers) == 2

@@ -221,12 +221,21 @@ class QuantizedDecoderLayer:
 
 class QuantizedModel:
     def __init__(
-        self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=True
+        self,
+        quant_type,
+        input_path,
+        quant_attrs,
+        q_size,
+        kv_size,
+        intermediate_size,
+        num_layers,
+        load_weights=True,
+        lm_head=None,
     ):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
-        self.lm_head = TensorModule()
+        self.lm_head = lm_head if lm_head is not None else TensorModule()
         self.layers = {} if load_weights else []
         self.num_layers = num_layers
         if not load_weights:
@@ -1704,7 +1713,15 @@ class ModeloptModel(QuantizedModel):
         num_layers = num_layers or text_config.get("num_hidden_layers")
         self._num_experts = text_config.get("num_experts", text_config.get("num_local_experts"))
         super().__init__(
-            quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers, load_weights=False
+            quant_type,
+            input_path,
+            quant_attrs,
+            q_size,
+            kv_size,
+            intermediate_size,
+            num_layers,
+            load_weights=False,
+            lm_head=ModeloptLinearModule(),
         )
         self._input_path = input_path
         self._safe_open = safe_open
@@ -1733,7 +1750,7 @@ class ModeloptModel(QuantizedModel):
             # Globals: embeddings + final norm are BF16; lm_head retains its native NVFP4 tensors.
             self.embedding.weight = self._get("model.language_model.embed_tokens.weight")
             self.final_norm.weight = self._get("model.language_model.norm.weight")
-            self.lm_head = self._linear_module("lm_head")
+            self._linear_module("lm_head", self.lm_head)
         finally:
             # Every tensor is materialized above; do not hold file descriptors open for
             # the rest of the (long) export. `_get` re-opens lazily if it is called again.
@@ -1804,11 +1821,11 @@ class ModeloptModel(QuantizedModel):
             if module.input_scale is not None:
                 self._validate_positive_scalar(module.input_scale, f"{base}.input_scale")
 
-    def _linear_module(self, base):
+    def _linear_module(self, base, module=None):
         weight = self._get(f"{base}.weight")
         if weight is None:
             return None
-        module = ModeloptLinearModule()
+        module = module if module is not None else ModeloptLinearModule()
         module.weight = weight
         module.weight_scale = self._get(f"{base}.weight_scale")
         module.weight_scale_2 = self._get(f"{base}.weight_scale_2")
