@@ -71,6 +71,17 @@ struct CacheManager {
     throw std::logic_error("Cache manager does not support transactional reservation.");
   }
 
+  // Longest run of leading prompt tokens already resident in the cache, so a newly admitted request
+  // can adopt those blocks and only compute the remainder. Caches without content-addressed blocks
+  // return an empty match, and the caller then admits the request exactly as it does today.
+  virtual std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request&) { return nullptr; }
+
+  // Gives every block that filled up during the committed step a content identity. Called once the
+  // step's reservation is committed.
+  virtual void SealCommittedBlocks(const StepPlan&) {}
+
+  virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
+
   virtual ~CacheManager() = default;
 
  protected:
@@ -130,6 +141,14 @@ struct PagedCacheManager : CacheManager {
   }
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
+
+  std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request& request) override;
+
+  void SealCommittedBlocks(const StepPlan& plan) override;
+
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return &key_value_cache_->PrefixMetrics();
+  }
 
  private:
   std::shared_ptr<GeneratorParams> params_;

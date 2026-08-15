@@ -36,22 +36,39 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     violations.push_back(InvariantViolation{std::move(message)});
   };
 
-  // Total accounting: every block is free, transaction-reserved, or committed to one Request.
-  const size_t allocated = cache.AllocatedBlocks();
-  const size_t transaction_reserved = cache.TransactionReservedBlocks();
+  // Total accounting: every physical block is either free or owned by at least one holder, and the
+  // block listing enumerates exactly the owned ones. Requests can share a block, so the sum of
+  // per-Request table lengths is no longer the physical block count.
+  std::unordered_map<size_t, const CachedBlockSnapshot*> owned_blocks;
+  for (const auto& block : cache.blocks) {
+    if (block.block_id >= cache.total_blocks) {
+      add("Cache owns out-of-range block id " + std::to_string(block.block_id) + " (total_blocks " +
+          std::to_string(cache.total_blocks) + ").");
+      continue;
+    }
+    if (!owned_blocks.emplace(block.block_id, &block).second) {
+      add("Cache lists block id " + std::to_string(block.block_id) + " more than once.");
+    }
+    if (block.ref_count == 0) {
+      add("Cache owns block id " + std::to_string(block.block_id) + " with no references.");
+    }
+  }
+
   if (cache.free_blocks > cache.total_blocks) {
     add("free_blocks (" + std::to_string(cache.free_blocks) + ") exceeds total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
-  if (cache.free_blocks + transaction_reserved + allocated != cache.total_blocks) {
-    add("free (" + std::to_string(cache.free_blocks) + ") + transaction_reserved (" +
-        std::to_string(transaction_reserved) + ") + allocated (" +
-        std::to_string(allocated) + ") != total_blocks (" +
+  if (cache.free_blocks + owned_blocks.size() != cache.total_blocks) {
+    add("free (" + std::to_string(cache.free_blocks) + ") + owned (" +
+        std::to_string(owned_blocks.size()) + ") != total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
 
-  // Single ownership: a physical block id appears in at most one Request's table.
-  std::unordered_map<size_t, const void*> owner_of_block;
+  // Reference accounting: a block's count has to equal the number of holders that actually list it,
+  // so neither a shared adoption nor a rolled back transaction can leak or drop a reference.
+  std::unordered_map<size_t, size_t> holders;
+  const auto count_holder = [&holders](size_t block_id) { ++holders[block_id]; };
+
   std::unordered_set<const void*> seen_requests;
   size_t max_blocks_per_request = 0;
 
@@ -59,16 +76,18 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     max_blocks_per_request = std::max(max_blocks_per_request, request.block_ids.size());
 
     // Each Request appears in the block-table listing at most once. A repeated row would let the
-    // same Request re-list a physical block without tripping the single-ownership check below.
+    // same Request re-list a physical block without tripping the checks below.
     if (!seen_requests.insert(request.request_id).second) {
       add("Request " + PtrId(request.request_id) + " appears in more than one block table.");
     }
 
     std::unordered_set<size_t> seen_within_request;
     for (const size_t block_id : request.block_ids) {
-      if (block_id >= cache.total_blocks) {
-        add("Request " + PtrId(request.request_id) + " owns out-of-range block id " +
-            std::to_string(block_id) + " (total_blocks " + std::to_string(cache.total_blocks) + ").");
+      const auto owned = owned_blocks.find(block_id);
+      if (owned == owned_blocks.end()) {
+        add("Request " + PtrId(request.request_id) + " owns block id " + std::to_string(block_id) +
+            " that the cache does not list as allocated.");
+        continue;
       }
 
       if (!seen_within_request.insert(block_id).second) {
@@ -76,10 +95,11 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
             " more than once.");
       }
 
-      const auto [it, inserted] = owner_of_block.emplace(block_id, request.request_id);
-      if (!inserted && it->second != request.request_id) {
-        add("Block id " + std::to_string(block_id) + " is owned by more than one Request (" +
-            PtrId(it->second) + " and " + PtrId(request.request_id) + ").");
+      count_holder(block_id);
+      // Only a full block is ever safe to share: it is never written again, so no owner can
+      // diverge from another.
+      if (owned->second->ref_count > 1 && !owned->second->full) {
+        add("Block id " + std::to_string(block_id) + " is shared while it is only partially filled.");
       }
     }
 
@@ -101,15 +121,57 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
 
   std::unordered_set<size_t> reserved_blocks;
   for (const size_t block_id : cache.transaction_reserved_block_ids) {
-    if (block_id >= cache.total_blocks) {
-      add("Transaction reserves out-of-range block id " + std::to_string(block_id) + ".");
+    if (owned_blocks.find(block_id) == owned_blocks.end()) {
+      add("Transaction reserves block id " + std::to_string(block_id) +
+          " that the cache does not list as allocated.");
+      continue;
     }
     if (!reserved_blocks.insert(block_id).second) {
       add("Transaction reserves block id " + std::to_string(block_id) + " more than once.");
     }
-    if (owner_of_block.find(block_id) != owner_of_block.end()) {
+    count_holder(block_id);
+    // A freshly reserved block is exclusively the transaction's until it commits.
+    if (owned_blocks[block_id]->ref_count != 1) {
       add("Transaction-reserved block id " + std::to_string(block_id) +
-          " is also committed to a Request.");
+          " is also held by another owner.");
+    }
+  }
+
+  // An adopted block is deliberately shared with the Request that already owns it, so unlike a
+  // reserved block it is expected to appear in a committed table as well.
+  for (const size_t block_id : cache.transaction_adopted_block_ids) {
+    const auto owned = owned_blocks.find(block_id);
+    if (owned == owned_blocks.end()) {
+      add("Transaction adopts block id " + std::to_string(block_id) +
+          " that the cache does not list as allocated.");
+      continue;
+    }
+    count_holder(block_id);
+    if (!owned->second->full) {
+      add("Transaction adopts block id " + std::to_string(block_id) + " that is not full.");
+    }
+    if (!owned->second->indexed) {
+      add("Transaction adopts block id " + std::to_string(block_id) +
+          " that the prefix cache does not index.");
+    }
+  }
+
+  for (const auto& block : cache.blocks) {
+    if (block.indexed) {
+      if (!block.full) {
+        add("Prefix cache indexes block id " + std::to_string(block.block_id) +
+            " that is not full.");
+      }
+      count_holder(block.block_id);
+    }
+  }
+
+  for (const auto& [block_id, block] : owned_blocks) {
+    const auto holder = holders.find(block_id);
+    const size_t holder_count = holder == holders.end() ? 0 : holder->second;
+    if (holder_count != block->ref_count) {
+      add("Block id " + std::to_string(block_id) + " has " + std::to_string(block->ref_count) +
+          " reference(s) but " + std::to_string(holder_count) + " owner(s).");
     }
   }
 
@@ -139,6 +201,15 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
         add("Transaction-reserved block id " + std::to_string(block_id) +
             " is assigned to more than one Request delta.");
       }
+    }
+    // The adopted prefix has to line up with the slots the admission starts from, so the request
+    // never skips a token whose keys and values are not genuinely resident.
+    if (cache.block_size != 0 &&
+        reservation.adopted_block_ids.size() * cache.block_size != reservation.committed_slots &&
+        !reservation.adopted_block_ids.empty()) {
+      add("Request " + PtrId(reservation.request_id) + " adopts " +
+          std::to_string(reservation.adopted_block_ids.size()) +
+          " block(s) but starts from " + std::to_string(reservation.committed_slots) + " slot(s).");
     }
   }
   if (blocks_assigned_to_delta != reserved_blocks) {

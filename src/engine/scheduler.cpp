@@ -162,16 +162,31 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   };
   std::vector<Candidate> candidates;
 
-  const auto add_candidate = [&candidates](const std::shared_ptr<Request>& request,
-                                           bool newly_admitted) {
+  const auto add_candidate = [&](const std::shared_ptr<Request>& request,
+                                 bool newly_admitted) {
     const auto snapshot = request->Snapshot();
     const RequestStatus expected_status =
         newly_admitted ? RequestStatus::Assigned : RequestStatus::InProgress;
     if (snapshot.status != expected_status) {
       throw std::runtime_error("Request status is invalid for dynamic step planning.");
     }
+
+    // A request being admitted can start from a prefix another sequence already computed. Nothing
+    // is mutated here: the match only reaches the request once cache planning has selected it.
+    std::shared_ptr<const PrefixCacheMatch> prefix_match;
+    if (newly_admitted) {
+      // A request that reaches planning as a new admission owns no committed block table, so any
+      // cursor left staged by a step that never committed is stale by definition. Clearing it keeps
+      // planning idempotent however the previous attempt unwound.
+      request->RollbackPrefixAdoption();
+      prefix_match = cache_manager_->MatchPrefix(*request);
+    }
+    const size_t processed_sequence_length =
+        prefix_match ? prefix_match->token_count
+                     : static_cast<size_t>(snapshot.processed_sequence_length);
+
     const auto remaining_token_count =
-        snapshot.current_sequence_length - snapshot.processed_sequence_length;
+        snapshot.current_sequence_length - static_cast<int64_t>(processed_sequence_length);
     if (remaining_token_count <= 0) {
       throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
     }
@@ -181,10 +196,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
     candidate.entry.unprocessed_token_count = 1;
-    candidate.entry.target_cache_slots = RequiredSlots(
-        static_cast<size_t>(snapshot.processed_sequence_length), 1);
+    candidate.entry.target_cache_slots = RequiredSlots(processed_sequence_length, 1);
     candidate.entry.whole_sequence_cache_slots =
         SlotsForWholeSequence(snapshot.current_sequence_length);
+    candidate.entry.prefix_match = std::move(prefix_match);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
     candidate.budget = DecodeFirstBudgetCandidate{
@@ -192,8 +207,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         static_cast<size_t>(remaining_token_count),
         request->SearchOptions().chunk_size,
     };
-    candidate.processed_sequence_length =
-        static_cast<size_t>(snapshot.processed_sequence_length);
+    candidate.processed_sequence_length = processed_sequence_length;
     candidates.push_back(std::move(candidate));
   };
 
@@ -258,8 +272,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     if (candidate == candidates.end())
       throw std::logic_error("Cache planning selected an unknown request.");
     entry.unprocessed_token_count = token_counts[i];
+    // Cache planning can drop a prefix match when adopting it would not fit, so the request's
+    // starting point is read back from the plan rather than from what planning was offered.
+    const size_t processed_sequence_length =
+        entry.newly_admitted
+            ? (entry.prefix_match ? entry.prefix_match->token_count : 0)
+            : candidate->processed_sequence_length;
     entry.target_cache_slots = RequiredSlots(
-        candidate->processed_sequence_length,
+        processed_sequence_length,
         entry.unprocessed_token_count);
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
@@ -268,6 +288,25 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     plan.token_count += entry.unprocessed_token_count;
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == 1;
+  }
+
+  // Moving a request's processed cursor is the last thing planning does, so nothing after it can
+  // throw and leave a request claiming progress it was never given. Only the requests cache
+  // planning actually selected move: a request deferred for capacity is left exactly as it was and
+  // reconsidered, prefix match included, next step.
+  size_t staged = 0;
+  try {
+    for (; staged < plan.requests.size(); ++staged) {
+      const auto& entry = plan.requests[staged];
+      if (entry.prefix_match && !entry.prefix_match->Empty()) {
+        entry.request->StagePrefixAdoption(entry.prefix_match->token_count);
+      }
+    }
+  } catch (...) {
+    for (size_t i = 0; i < plan.requests.size(); ++i) {
+      plan.requests[i].request->RollbackPrefixAdoption();
+    }
+    throw;
   }
   return result;
 }

@@ -7,6 +7,7 @@
 // violations are (and are not) reported.
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,47 @@ const void* const kRequestB = &kRequestStorageB;
 
 constexpr size_t kBlockSize = 4;
 
+// Rebuilds the physical block listing PagedKeyValueCache::Snapshot() produces, deriving each
+// block's reference count from the owners that list it and its fill level from the owning request's
+// used-slot count. Hand-built snapshots stay internally consistent this way, so a test that wants a
+// specific violation can break exactly one thing afterwards.
+void RebuildBlockListing(PagedCacheSnapshot& cache,
+                         const std::vector<size_t>& indexed_blocks = {}) {
+  std::map<size_t, CachedBlockSnapshot> blocks;
+  const auto hold = [&blocks](size_t block_id) -> CachedBlockSnapshot& {
+    auto& block = blocks[block_id];
+    block.block_id = block_id;
+    ++block.ref_count;
+    return block;
+  };
+
+  for (const auto& request : cache.requests) {
+    for (size_t index = 0; index < request.block_ids.size(); ++index) {
+      auto& block = hold(request.block_ids[index]);
+      const size_t filled_through = (index + 1) * cache.block_size;
+      block.used_slots = std::min(cache.block_size,
+                                  request.used_slots > index * cache.block_size
+                                      ? request.used_slots - index * cache.block_size
+                                      : 0);
+      block.full = request.used_slots >= filled_through;
+    }
+  }
+  for (const size_t block_id : cache.transaction_reserved_block_ids) {
+    hold(block_id);
+  }
+  for (const size_t block_id : cache.transaction_adopted_block_ids) {
+    hold(block_id);
+  }
+  for (const size_t block_id : indexed_blocks) {
+    hold(block_id).indexed = true;
+  }
+
+  cache.blocks.clear();
+  for (const auto& [block_id, block] : blocks) {
+    cache.blocks.push_back(block);
+  }
+}
+
 // A consistent two-request cache: A owns blocks {0,1} (full + one used slot), B owns block {2}
 // (fully used); one block free. Helpers below mutate copies to violate a single invariant at a time.
 PagedCacheSnapshot MakeValidCache() {
@@ -39,6 +81,7 @@ PagedCacheSnapshot MakeValidCache() {
       RequestBlockSnapshot{kRequestA, {0, 1}, /*used=*/kBlockSize + 1, /*empty=*/kBlockSize - 1},
       RequestBlockSnapshot{kRequestB, {2}, /*used=*/kBlockSize, /*empty=*/0},
   };
+  RebuildBlockListing(cache);
   return cache;
 }
 
@@ -82,6 +125,7 @@ TEST(InvariantValidatorTest, ValidTransactionReservationBalancesAccounting) {
           /*reserved_block_ids=*/{3},
       },
   };
+  RebuildBlockListing(cache);
 
   EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
   EXPECT_EQ(cache.free_blocks + cache.TransactionReservedBlocks() +
@@ -98,6 +142,7 @@ TEST(InvariantValidatorTest, InitialAdmissionReservationValidatesWithoutCommitte
   cache.reservations = {
       RequestReservationSnapshot{kRequestA, 0, 1, 0, {0}},
   };
+  RebuildBlockListing(cache);
 
   EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
 }
@@ -108,6 +153,7 @@ TEST(InvariantValidatorTest, InitialAdmissionRequiresEveryReservedBlockInADelta)
   cache.total_blocks = 1;
   cache.free_blocks = 0;
   cache.transaction_reserved_block_ids = {0};
+  RebuildBlockListing(cache);
 
   const auto violations = ValidateCacheInvariants(cache);
 
@@ -126,6 +172,7 @@ TEST(InvariantValidatorTest, InitialAdmissionRejectsUnreservedDeltaBlock) {
   cache.reservations = {
       RequestReservationSnapshot{kRequestA, 0, 1, 0, {1}},
   };
+  RebuildBlockListing(cache);
 
   const auto violations = ValidateCacheInvariants(cache);
 
@@ -151,6 +198,7 @@ TEST(InvariantValidatorTest, ReservedBlockCannotAlsoBeCommitted) {
   cache.reservations = {
       RequestReservationSnapshot{kRequestB, 4, 5, 0, {2}},
   };
+  RebuildBlockListing(cache);
 
   EXPECT_FALSE(ValidateCacheInvariants(cache).empty());
 }
@@ -159,6 +207,7 @@ TEST(InvariantValidatorTest, EveryReservedBlockNeedsOneRequestDelta) {
   auto cache = MakeValidCache();
   cache.free_blocks = 0;
   cache.transaction_reserved_block_ids = {3};
+  RebuildBlockListing(cache);
 
   const auto violations = ValidateCacheInvariants(cache);
   ASSERT_EQ(violations.size(), 1u);
@@ -184,6 +233,7 @@ TEST(InvariantValidatorTest, OutOfRangeBlockIdReported) {
   cache.requests[1].block_ids = {9};  // id 9 >= total_blocks (4)
   // Keep accounting otherwise sound so the out-of-range id is the reported problem.
   cache.free_blocks = 1;
+  RebuildBlockListing(cache);
   const auto violations = ValidateCacheInvariants(cache);
   ASSERT_FALSE(violations.empty());
 }
@@ -191,25 +241,88 @@ TEST(InvariantValidatorTest, OutOfRangeBlockIdReported) {
 TEST(InvariantValidatorTest, DuplicateBlockWithinRequestReported) {
   auto cache = MakeValidCache();
   cache.requests[0].block_ids = {0, 0};  // same block listed twice within request A
+  RebuildBlockListing(cache);
   EXPECT_FALSE(ValidateCacheInvariants(cache).empty());
 }
 
-TEST(InvariantValidatorTest, BlockOwnedByTwoRequestsReported) {
-  auto cache = MakeValidCache();
-  cache.requests[1].block_ids = {1};  // block 1 already owned by request A
-  cache.free_blocks = 2;              // keep total accounting consistent (A:2 + B:1 - shared)
+// Two requests pointing at the same full block is the whole point of prefix caching: a full block
+// is never written again, so neither owner can diverge from the other.
+TEST(InvariantValidatorTest, FullBlockSharedByTwoRequestsIsValid) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 4;
+  cache.free_blocks = 1;
+  cache.block_table_columns = 2;
+  cache.requests = {
+      RequestBlockSnapshot{kRequestA, {0, 1}, /*used=*/kBlockSize + 1, /*empty=*/kBlockSize - 1},
+      RequestBlockSnapshot{kRequestB, {0, 2}, /*used=*/kBlockSize + 2, /*empty=*/kBlockSize - 2},
+  };
+  RebuildBlockListing(cache, /*indexed_blocks=*/{0});
+
+  EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+}
+
+// A partially filled block is still being written, so sharing it would let one request's tokens
+// land in another request's key-value data.
+TEST(InvariantValidatorTest, PartiallyFilledBlockSharedByTwoRequestsReported) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 2;
+  cache.free_blocks = 1;
+  cache.block_table_columns = 1;
+  cache.requests = {
+      RequestBlockSnapshot{kRequestA, {0}, /*used=*/1, /*empty=*/kBlockSize - 1},
+      RequestBlockSnapshot{kRequestB, {0}, /*used=*/1, /*empty=*/kBlockSize - 1},
+  };
+  RebuildBlockListing(cache);
+
   const auto violations = ValidateCacheInvariants(cache);
-  bool found_shared = false;
-  for (const auto& v : violations) {
-    if (v.message.find("more than one Request") != std::string::npos) found_shared = true;
-  }
-  EXPECT_TRUE(found_shared);
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("only partially filled") != std::string::npos;
+                         }),
+            violations.end());
+}
+
+// A reference the block still holds but no owner claims is a leak: exactly what a rolled back
+// adoption would produce if it forgot to release the prefix blocks it took.
+TEST(InvariantValidatorTest, LeakedBlockReferenceReported) {
+  auto cache = MakeValidCache();
+  cache.blocks[0].ref_count += 1;
+
+  const auto violations = ValidateCacheInvariants(cache);
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("owner(s)") != std::string::npos;
+                         }),
+            violations.end());
+}
+
+// An adoption has to line up exactly with the slots the admission starts from, so the request never
+// skips a token whose keys and values are not genuinely resident.
+TEST(InvariantValidatorTest, AdoptedPrefixMustCoverTheCommittedSlots) {
+  auto cache = MakeValidCache();
+  cache.transaction_adopted_block_ids = {0};
+  cache.reservations = {
+      RequestReservationSnapshot{kRequestB, /*committed_slots=*/kBlockSize + 1,
+                                 /*target_slots=*/kBlockSize + 2, 0, {}, {0}},
+  };
+  RebuildBlockListing(cache, /*indexed_blocks=*/{0});
+  cache.free_blocks = 1;
+
+  const auto violations = ValidateCacheInvariants(cache);
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("but starts from") != std::string::npos;
+                         }),
+            violations.end());
 }
 
 TEST(InvariantValidatorTest, DuplicateRequestBlockTableReported) {
   auto cache = MakeValidCache();
   // Request A appears twice in the block-table listing (a malformed/duplicated row).
   cache.requests.push_back(cache.requests[0]);
+  RebuildBlockListing(cache);
   const auto violations = ValidateCacheInvariants(cache);
   bool found_duplicate_row = false;
   for (const auto& v : violations) {

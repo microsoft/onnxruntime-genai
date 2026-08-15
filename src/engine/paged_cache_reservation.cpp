@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace Generators {
@@ -24,7 +25,8 @@ PagedCacheBlockTable* FindTable(std::vector<PagedCacheBlockTable>& tables, const
 PagedCacheReservation::PagedCacheReservation(
     BlockPool& block_pool,
     std::vector<PagedCacheBlockTable>& committed_tables,
-    std::span<const PagedCacheReservationRequest> requests)
+    std::span<const PagedCacheReservationRequest> requests,
+    BlockReclaimer* reclaimer)
     : block_pool_{&block_pool},
       committed_tables_{&committed_tables} {
   deltas_.reserve(requests.size());
@@ -47,8 +49,37 @@ PagedCacheReservation::PagedCacheReservation(
       throw std::runtime_error("Paged cache reservation request membership does not match the committed cache.");
     }
 
-    const size_t committed_slots = committed_table ? committed_table->committed_slots : 0;
-    const size_t committed_blocks = committed_table ? committed_table->blocks.size() : 0;
+    const PrefixCacheMatch* match = request.prefix_match;
+    if (match && match->Empty()) {
+      match = nullptr;
+    }
+    if (match && !request.newly_admitted) {
+      throw std::runtime_error("Only a newly admitted request can adopt a cached prefix.");
+    }
+
+    size_t adopted_block_offset = adopted_blocks_.size();
+    size_t adopted_block_count = 0;
+    if (match) {
+      // Only a full block is ever safe to share: it is never written again, so no owner can diverge
+      // from another. Reject anything else loudly rather than letting one request write into
+      // another request's key-value data.
+      for (const auto& block : match->blocks) {
+        if (!block || !block->IsFull()) {
+          throw std::runtime_error("A cached prefix can only adopt full blocks.");
+        }
+      }
+      if (match->token_count != match->blocks.size() * block_pool.BlockSize()) {
+        throw std::runtime_error("A cached prefix must cover whole blocks.");
+      }
+      if (match->token_count > request.target_slots) {
+        throw std::runtime_error("A cached prefix cannot exceed the request's target slots.");
+      }
+      adopted_block_count = match->blocks.size();
+    }
+
+    const size_t committed_slots = committed_table ? committed_table->committed_slots
+                                                   : (match ? match->token_count : 0);
+    const size_t committed_blocks = committed_table ? committed_table->blocks.size() : adopted_block_count;
     if (request.target_slots < committed_slots) {
       throw std::runtime_error("Paged cache reservation cannot reduce committed slots.");
     }
@@ -70,6 +101,8 @@ PagedCacheReservation::PagedCacheReservation(
         std::min(growth, tail_capacity),
         reserved_block_count,
         new_blocks,
+        adopted_block_offset,
+        adopted_block_count,
         request.newly_admitted,
     });
     reserved_block_count += new_blocks;
@@ -79,16 +112,42 @@ PagedCacheReservation::PagedCacheReservation(
     } else {
       PagedCacheBlockTable table;
       table.request_id = request.request_id;
-      table.blocks.reserve(new_blocks);
+      table.blocks.reserve(adopted_block_count + new_blocks);
+      if (match) {
+        // The adopted blocks are already sealed, so the table starts with them committed and only
+        // the tokens after them still have to be computed.
+        table.blocks = match->blocks;
+        table.committed_slots = match->token_count;
+        table.sealed_blocks = adopted_block_count;
+        table.sealed_identity = match->blocks.back()->IdentityPtr();
+        adopted_blocks_.insert(adopted_blocks_.end(), match->blocks.begin(), match->blocks.end());
+      }
       new_tables_.push_back(std::move(table));
     }
   }
 
-  if (reserved_block_count > block_pool.AvailableBlocks()) {
-    throw std::runtime_error("Not enough free blocks for the complete paged cache reservation.");
+  // Take the adopted references before reclaiming, so a retained block this reservation is about to
+  // adopt is no longer a candidate for eviction.
+  if (!adopted_blocks_.empty()) {
+    block_pool.AddRef(adopted_blocks_);
   }
 
-  reserved_blocks_ = block_pool.ReserveBlocks(reserved_block_count * block_pool.BlockSize());
+  try {
+    if (reclaimer && reserved_block_count > block_pool.AvailableBlocks()) {
+      reclaimer->Reclaim(reserved_block_count - block_pool.AvailableBlocks());
+    }
+    if (reserved_block_count > block_pool.AvailableBlocks()) {
+      throw std::runtime_error("Not enough free blocks for the complete paged cache reservation.");
+    }
+    reserved_blocks_ = block_pool.ReserveBlocks(reserved_block_count * block_pool.BlockSize());
+  } catch (...) {
+    // Nothing is reserved yet, so undoing the adopted references leaves the pool exactly as it was.
+    for (const auto& block : adopted_blocks_) {
+      block_pool.Release(block);
+    }
+    adopted_blocks_.clear();
+    throw;
+  }
   state_ = PagedCacheReservationState::Reserved;
 }
 
@@ -96,6 +155,7 @@ PagedCacheReservation::PagedCacheReservation(PagedCacheReservation&& other) noex
     : block_pool_{std::exchange(other.block_pool_, nullptr)},
       committed_tables_{std::exchange(other.committed_tables_, nullptr)},
       reserved_blocks_{std::move(other.reserved_blocks_)},
+      adopted_blocks_{std::move(other.adopted_blocks_)},
       deltas_{std::move(other.deltas_)},
       new_tables_{std::move(other.new_tables_)},
       state_{std::exchange(other.state_, PagedCacheReservationState::Released)} {}
@@ -110,7 +170,7 @@ size_t PagedCacheReservation::RequiredBlockTableColumns() const {
   size_t columns = 0;
   for (const auto& delta : deltas_) {
     const auto* table = FindCommittedTable(delta.request_id);
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_blocks = table ? table->blocks.size() : delta.adopted_block_count;
     columns = std::max(columns, committed_blocks + delta.reserved_block_count);
   }
   return columns;
@@ -140,6 +200,13 @@ void PagedCacheReservation::FillBlockTable(std::span<const void* const> request_
     if (table) {
       for (const auto& block : table->blocks) {
         output[row * columns + column++] = static_cast<int32_t>(block->Id());
+      }
+    } else {
+      // A newly admitted request's adopted prefix blocks come first: the model reads its cached
+      // tokens out of them at absolute positions [0, adopted blocks * block size).
+      for (size_t i = 0; i < delta.adopted_block_count; ++i) {
+        output[row * columns + column++] =
+            static_cast<int32_t>(adopted_blocks_[delta.adopted_block_offset + i]->Id());
       }
     }
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
@@ -171,6 +238,8 @@ void PagedCacheReservation::Commit() {
   }
 
   reserved_blocks_.clear();
+  // The adopted references now belong to the committed block tables.
+  adopted_blocks_.clear();
   new_tables_.clear();
   state_ = PagedCacheReservationState::Committed;
 }
@@ -183,8 +252,18 @@ void PagedCacheReservation::Release() {
     throw std::logic_error("Cannot release a committed paged cache reservation.");
   }
 
-  block_pool_->Free(reserved_blocks_);
+  // Release one block at a time. The single-block path allocates nothing, so a rollback -- which
+  // may already be running because the process is out of memory -- cannot fail here, and it also
+  // handles the same shared prefix block appearing once per request that adopted it.
+  for (const auto& block : reserved_blocks_) {
+    block_pool_->Release(block);
+  }
   reserved_blocks_.clear();
+  // A rolled back step must not leave a reference on a shared prefix block behind.
+  for (const auto& block : adopted_blocks_) {
+    block_pool_->Release(block);
+  }
+  adopted_blocks_.clear();
   new_tables_.clear();
   state_ = PagedCacheReservationState::Released;
 }
@@ -210,6 +289,15 @@ void PagedCacheReservation::AdvanceCommittedSlots(PagedCacheBlockTable& table, s
   size_t block_index = table.committed_slots / block_pool_->BlockSize();
   while (remaining > 0) {
     auto& block = table.blocks.at(block_index++);
+    // Sharing is restricted to full blocks, and a full block is never written again, so this never
+    // fires under the prefix cache's own policy. It is the backstop that makes that policy an
+    // enforced invariant instead of an assumption: a writer must take a private copy of a block
+    // another owner still references (PagedKeyValueCache::MakeTailBlockExclusive) rather than
+    // diverge into that owner's key-value data.
+    if (block->IsShared()) {
+      throw std::runtime_error("Cannot write into paged cache block " + std::to_string(block->Id()) +
+                               " while another owner still references it.");
+    }
     const size_t slots = std::min(remaining, block->EmptySlots());
     block->AddSlots(slots);
     remaining -= slots;

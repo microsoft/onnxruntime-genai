@@ -176,6 +176,40 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
+std::span<const int32_t> Request::SequenceTokensCpu() const {
+  return std::span<const int32_t>{tokens_host_};
+}
+
+void Request::StagePrefixAdoption(size_t adopted_slots) {
+  if (status_ != RequestStatus::Assigned) {
+    throw std::runtime_error("Only a request awaiting admission can adopt a cached prefix.");
+  }
+  if (prefix_adoption_staged_ || processed_sequence_length_ != 0) {
+    throw std::runtime_error("A request can only adopt a cached prefix before it processes a token.");
+  }
+  // The last token always has to go through the model: its logits are what select the next token.
+  if (adopted_slots == 0 ||
+      static_cast<int64_t>(adopted_slots) >= CurrentSequenceLength()) {
+    throw std::runtime_error("An adopted prefix must be shorter than the request's sequence.");
+  }
+  if (adopted_slots > tokens_host_.size()) {
+    throw std::runtime_error("An adopted prefix cannot exceed the request's token mirror.");
+  }
+
+  processed_sequence_length_ = static_cast<int64_t>(adopted_slots);
+  adopted_prefix_length_ = processed_sequence_length_;
+  prefix_adoption_staged_ = true;
+}
+
+void Request::RollbackPrefixAdoption() noexcept {
+  if (!prefix_adoption_staged_) {
+    return;
+  }
+  processed_sequence_length_ = 0;
+  adopted_prefix_length_ = 0;
+  prefix_adoption_staged_ = false;
+}
+
 bool Request::IsDone() const {
   return status_ == RequestStatus::Completed;
 }
@@ -271,6 +305,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
     tokens_host_.push_back(result.token);
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
+  // The step committed, so the adopted prefix is now part of the request's committed progress and
+  // no longer something a rollback can undo.
+  prefix_adoption_staged_ = false;
   status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;
 }
 

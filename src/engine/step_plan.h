@@ -14,6 +14,7 @@
 namespace Generators {
 
 struct Request;
+struct PrefixCacheMatch;
 
 using StepTransactionId = uint64_t;
 
@@ -56,6 +57,10 @@ struct RequestStepPlan {
   size_t logits_row_index{};            // Last packed row; its logits produce this request's next token.
   size_t target_cache_slots{};          // Committed KV slots required after the model run succeeds.
   size_t whole_sequence_cache_slots{};  // KV slots the whole sequence needs; admitted and reserved on this.
+  // Resident blocks this request adopts for the leading tokens of its prompt, so chunked prefill
+  // only computes the uncached remainder. Set at admission and consumed by the cache reservation;
+  // null when nothing matched or when prefix caching is off.
+  std::shared_ptr<const PrefixCacheMatch> prefix_match;
   bool is_prefill{};
   bool newly_admitted{};
 };

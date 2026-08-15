@@ -191,7 +191,7 @@ Completed requests that still own paged-cache blocks are deallocated and removed
 
 The scheduler snapshots all requests that already belong to the paged cache. These requests are expected to be `InProgress`.
 
-It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates.
+It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates. When prefix caching is enabled, each newly admitted candidate is offered to the prefix cache, which returns the longest run of block-aligned leading prompt tokens that is already resident. The query mutates nothing; the match is carried in the plan and only reaches the request in step 3.
 
 The scheduler orders candidates with decodes first. Order remains stable among
 decodes and among prefills. Each candidate initially contributes one provisional
@@ -204,6 +204,7 @@ For each candidate, the scheduler records a `RequestStepPlan` containing:
 - The sequence length before the transaction.
 - The provisional number of unprocessed tokens.
 - The number of cache slots required after the model run.
+- The resident prefix blocks the request would adopt, if any.
 - Whether the work is prefill.
 - Whether the request is newly admitted.
 
@@ -215,8 +216,9 @@ At this point, the plan contains candidates. It has not yet been reduced to the 
 
 - The configured maximum batch size.
 - The provisional scheduled-row limit.
-- The number of free physical blocks.
+- The number of free physical blocks, plus retained prefix blocks that can be reclaimed on demand.
 - Blocks already committed to active requests.
+- Blocks a newly admitted request would adopt from the prefix cache, which widen its block table without drawing on the free pool.
 - Additional blocks each request needs for this step.
 - The maximum block-table width supported by graph-capture buffers, when graph capture is enabled.
 
@@ -236,6 +238,8 @@ Selected entries are compacted to the beginning of the plan. Deferred entries re
 - An existing request keeps its current block table and stays `InProgress`.
 - A new request stays `Assigned` and owns no cache blocks.
 - Both can be considered again by the next engine step.
+
+Only requests that cache planning actually selected move their processed cursor. A selected request carrying a prefix match calls `Request::StagePrefixAdoption()`, which advances `processed_sequence_length_` to the end of the adopted prefix so the rest of the step -- token budget, packed layout, `past_sequence_lengths`, and cache target -- treats those tokens as already computed. The adoption is staged, not committed: a rolled back step restores the cursor.
 
 The planner distinguishes temporary capacity pressure from a request that can never fit:
 
@@ -281,14 +285,17 @@ The scheduler also marks whether the step is eligible for CUDA graph capture. A 
 The reservation:
 
 - Reserves every new physical block required by the selected plan.
+- Takes a reference on every resident prefix block a newly admitted request adopts, so a rolled back step cannot leak one.
+- Reclaims retained prefix blocks, least recently used first, when the free pool is short of what the plan needs.
 - Records how far each request's committed slot count would advance.
-- Creates provisional block tables for newly admitted requests.
+- Creates provisional block tables for newly admitted requests, seeded with their adopted prefix blocks.
 - Leaves the committed block tables and allocated-request list unchanged.
 
-Reservation is all-or-nothing. If all planned blocks cannot be reserved, the engine treats that as an execution contract failure because planning had already declared the step executable.
+Reservation is all-or-nothing. If all planned blocks cannot be reserved, the engine treats that as an execution contract failure because planning had already declared the step executable. Adopted references are released if any part of the reservation fails, so the pool is left exactly as it was.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
+- Blocks a newly admitted request adopted from the prefix cache.
 - Blocks already committed to each active request.
 - Blocks held by this transaction's reservation.
 
@@ -370,12 +377,13 @@ The commit order in `Engine::StepDynamic()` is deliberate:
 1. Commit the request search checkpoints and sampler checkpoint.
 2. Commit the paged-cache reservation.
 3. Commit each request's lightweight bookkeeping.
-4. Publish the staged ready list.
+4. Give every block that filled up during the step a content identity.
+5. Publish the staged ready list.
 
 Committing the cache reservation:
 
 - Adds reserved blocks to existing block tables.
-- Adds provisional block tables for newly admitted requests.
+- Adds provisional block tables for newly admitted requests, including any adopted prefix blocks.
 - Advances committed cache-slot counts.
 - Adds newly admitted requests to the cache manager's allocated-request list.
 
@@ -384,6 +392,8 @@ Committing request bookkeeping:
 - Appends the staged token to the host token mirror.
 - Sets `processed_sequence_length_` to the sequence length that existed before sampling.
 - Changes the status to `InProgress` or `Completed`.
+
+Blocks are content-addressed only after request bookkeeping commits, because that is the point at which each request's host token mirror covers exactly the slots the cache now holds for it.
 
 For a newly admitted request, this commit is the point where it moves directly from `Assigned` to `InProgress` or `Completed`. The dynamic transaction path does not need a separate visible scheduling state between those two states.
 
@@ -397,10 +407,11 @@ The dynamic path separates failures into recoverable batch failures and fatal en
 
 Request validation and post-processing failures are treated as retryable batch aborts. Model execution can also explicitly report a retryable failure. A recognized execution-memory capacity failure follows the same rollback path but has its own outcome.
 
-Rollback performs both parts:
+Rollback performs three parts:
 
 1. Restore request search state and sampler state from their checkpoints.
-2. Release every block held by the paged-cache reservation.
+2. Undo any staged prefix adoption, so a retried step re-matches from scratch instead of starting from a prefix the released reservation never gave it.
+3. Release every block held by the paged-cache reservation, including references taken on adopted prefix blocks.
 
 After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
 
@@ -437,7 +448,8 @@ When some requests fit and others are deferred, the step still executes the fitt
 
 ## Paged KV-cache ownership
 
-The paged cache has three useful ownership states:
+A physical block is reference counted. Several owners can hold the same block at once, and it only
+returns to the pool when the last of them releases it. The useful ownership states are:
 
 ### Free blocks
 
@@ -445,7 +457,7 @@ The block pool owns these blocks. They can be reserved by a future transaction.
 
 ### Transaction-reserved blocks
 
-A `PagedCacheReservation` temporarily owns these blocks. They can appear in model-facing block tables for the current run, but they are not part of committed request ownership.
+A `PagedCacheReservation` temporarily owns these blocks. They can appear in model-facing block tables for the current run, but they are not part of committed request ownership. A reserved block is exclusively the transaction's until it commits.
 
 ### Committed request blocks
 
@@ -454,8 +466,58 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 - The request identity.
 - The number of slots containing committed tokens.
 - The ordered physical blocks used by the request.
+- How many leading blocks the prefix cache has already given a content identity, and the identity the next one chains from.
 
-Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
+Eviction takes a chain's tail before its head: the head is what every longer match starts from, so losing it would orphan everything chained behind it.
+
+### Prefix-cache retained blocks
+
+The prefix cache holds a reference of its own on every block it indexes, so an indexed block outlives the request that produced it. Retention is bounded and always reclaimable: `PrefixCache::Reclaim()` gives blocks back to the pool in least-recently-used order, skipping any block a request still holds.
+
+Every physical block is either free or held by at least one of these owners. The invariant helpers under `engine_invariants.*` validate total accounting, reference accounting (a block's count must equal the number of owners that list it, so neither a shared adoption nor a rolled back transaction can leak or drop a reference), that only full blocks are shared, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
+
+## Prefix caching
+
+Serving and agent traffic resends large identical prefixes every turn: system prompts, tool schemas, retrieved context, and the conversation so far. Prefix caching lets a new request point at key-value blocks another sequence already computed instead of recomputing them.
+
+It is **off by default**. Enable it with `engine.dynamic_batching.prefix_caching`.
+
+### Content-addressed blocks
+
+Once a block fills up and its step commits, `PagedKeyValueCache::SealCommittedBlocks()` gives it an identity that chains the identity of the block before it, so a block only matches when the whole token sequence from the start of the prompt through the end of that block matches too. A hash match is never treated as proof of a match: the block's exact tokens are compared, and its parent is compared as the identity object it was computed behind rather than as a hash of it. That means no combination of hash collisions -- including a collision on an ancestor that has since been evicted -- can splice a block onto a prefix it was not computed behind. A collision costs a missed hit and nothing else.
+
+Only full blocks are indexed. A full block is never written again, which is what makes it safe for several requests to point at the same physical block. A request's partially filled tail block stays private to it.
+
+Blocks in a windowed or ring-buffer pool, where entries are overwritten in place, are **not** safely shareable and must never be indexed. Nothing in this design assumes a single uniform block table; a second pool with different overwrite semantics simply gets no prefix cache.
+
+### Admission-time adoption
+
+`DynamicBatchScheduler::PlanStep()` asks the cache manager for a match when a request is admitted. Nothing is mutated by the query: the match only reaches the request once cache planning has selected it, so a request deferred for capacity is left exactly as it was and is reconsidered next step.
+
+A selected request calls `Request::StagePrefixAdoption()`, which moves `processed_sequence_length_` to the end of the adopted prefix. Everything downstream -- `UnprocessedTokens()`, the packed input layout, `past_sequence_lengths`, and the cache target -- already derives from that cursor, so no parallel path exists. The match is always a whole number of blocks and always leaves at least the final token to compute, because that token's logits are what select the next one.
+
+The reservation seeds the new request's block table with the adopted blocks, sets its committed slots to the adopted token count, and reserves only the remainder. The adopted blocks lead the block-table row, so the step writes token `j` at absolute position `adopted + j`, which lands in the first block after them.
+
+### Retention and eviction
+
+A finished request's indexed blocks keep the cache's reference and stay resident, so the next turn of the same conversation can adopt them. `prefix_cache_pool_fraction` (or `prefix_cache_max_blocks`) bounds how many blocks the index may hold, and `PlanStepResources()` counts reclaimable retained blocks as available capacity while charging the ones an adoption claims, so adoption is capacity-neutral: every adopted block removes one from the blocks a step still has to take and adds one back here. Retention therefore never defers a request that could otherwise run, and a prefix hit never makes a request harder to admit than recomputing it would. When a reservation needs more blocks than are free, it reclaims exactly the shortfall in least-recently-used order before taking anything.
+
+### Copy-on-write divergence
+
+`MakeTailBlockExclusive()` gives a request a private copy of the block a step is about to write into when another owner still references it: it takes a fresh block, copies the shared block's key and value data across every layer, swaps it into the request's table, and drops the shared reference. Under the policy above this never fires, because sharing is restricted to full blocks that are never written again. It exists so that "a shared block is never written" is an enforced property rather than an assumption, and `PagedCacheReservation::AdvanceCommittedSlots()` throws rather than writing into a block another owner holds.
+
+### Configuration
+
+| Key (under `engine.dynamic_batching`) | Default | Meaning |
+| --- | --- | --- |
+| `prefix_caching` | `false` | Reuse resident blocks whose token prefix matches a new prompt. |
+| `prefix_cache_pool_fraction` | `0.5` | Share of the block pool the index may hold. |
+| `prefix_cache_max_blocks` | unset | Absolute ceiling on indexed blocks; overrides the fraction. |
+| `prefix_cache_min_blocks` | `1` | Shortest match worth adopting, in blocks. |
+
+### Unsupported configurations
+
+Prefix caching applies only to the dynamic paged path. Static batching keeps a single contiguous cache with no content-addressed blocks and reports no prefix cache rather than pretending a hit occurred. Beam search is rejected by `Request` up front. A model that keeps its own recurrent or hybrid state outside the paged cache has no sound notion of a cached prefix, and the engine does not bind such state today.
 
 ## Prefill, decode, and mixed batches
 
