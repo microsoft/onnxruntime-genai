@@ -4,8 +4,10 @@
 #include "prefix_cache.h"
 
 #include <algorithm>
+#include <memory>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace Generators {
 

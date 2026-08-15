@@ -7,6 +7,7 @@
 // they run deterministically without a GPU or a real model.
 
 #include <array>
+#include <memory>
 #include <numeric>
 #include <vector>
 

@@ -7,6 +7,9 @@
 
 #include <array>
 #include <memory>
+#include <span>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>

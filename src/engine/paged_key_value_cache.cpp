@@ -3,7 +3,12 @@
 
 #include "cache_manager.h"
 
+#include <algorithm>
+#include <memory>
 #include <numeric>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "sequence_positions.h"
 

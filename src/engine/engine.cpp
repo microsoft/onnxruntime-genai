@@ -3,6 +3,10 @@
 
 #include "engine.h"
 
+#include <memory>
+#include <string>
+#include <utility>
+
 namespace Generators {
 
 namespace {

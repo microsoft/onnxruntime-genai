@@ -3,7 +3,10 @@
 
 #include "cache_manager.h"
 
+#include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace Generators {
 
