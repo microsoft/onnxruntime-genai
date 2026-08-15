@@ -6,7 +6,7 @@
 import onnx_ir as ir
 import pytest
 
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35DenseMtpHead, Qwen35MoeTextModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -68,6 +68,75 @@ def test_quantized_main_model_does_not_get_int4_defaults():
 def test_unknown_head_quant_type_is_rejected():
     with pytest.raises(ValueError, match="mtp_head_quant_type must be one of"):
         _resolve({"enable_mtp": True, "mtp_head_quant_type": "fp8"})
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("none", []),
+        ("fc", ["/model/mtp/fc/MatMul"]),
+        (
+            "fc_attn",
+            [
+                "/model/mtp/fc/MatMul",
+                "/model/layers.0/attn/q_proj/MatMul",
+                "/model/layers.0/attn/k_proj/MatMul",
+                "/model/layers.0/attn/v_proj/MatMul",
+                "/model/layers.0/attn/o_proj/MatMul",
+            ],
+        ),
+        (
+            "all",
+            [
+                "/model/mtp/fc/MatMul",
+                "/model/layers.0/attn/q_proj/MatMul",
+                "/model/layers.0/attn/k_proj/MatMul",
+                "/model/layers.0/attn/v_proj/MatMul",
+                "/model/layers.0/attn/o_proj/MatMul",
+                "/model/layers.0/mlp/gate_proj/MatMul",
+                "/model/layers.0/mlp/up_proj/MatMul",
+                "/model/layers.0/mlp/down_proj/MatMul",
+            ],
+        ),
+    ],
+)
+def test_dense_mtp_fp16_exclusion_modes(mode, expected):
+    model = object.__new__(Qwen35DenseMtpHead)
+    model.onnx_dtype = ir.DataType.INT8
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    model._apply_fp16_exclusions({"mtp_head_fp16_exclude": mode})
+
+    assert model.quant_attrs["nodes_to_exclude"] == expected
+
+
+def test_dense_mtp_fp16_exclusions_preserve_existing_nodes():
+    model = object.__new__(Qwen35DenseMtpHead)
+    model.onnx_dtype = ir.DataType.INT8
+    model.quant_attrs = {"nodes_to_exclude": ["existing"]}
+
+    model._apply_fp16_exclusions({"mtp_head_fp16_exclude": "fc"})
+    model._apply_fp16_exclusions({"mtp_head_fp16_exclude": "fc"})
+
+    assert model.quant_attrs["nodes_to_exclude"] == ["existing", "/model/mtp/fc/MatMul"]
+
+
+def test_unknown_dense_mtp_fp16_exclusion_mode_is_rejected():
+    model = object.__new__(Qwen35DenseMtpHead)
+    model.onnx_dtype = ir.DataType.INT8
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    with pytest.raises(ValueError, match="mtp_head_fp16_exclude must be one of"):
+        model._apply_fp16_exclusions({"mtp_head_fp16_exclude": "attention"})
+
+
+def test_dense_mtp_fp16_exclusions_require_quantized_head():
+    model = object.__new__(Qwen35DenseMtpHead)
+    model.onnx_dtype = ir.DataType.FLOAT16
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    with pytest.raises(ValueError, match="requires a quantized MTP head"):
+        model._apply_fp16_exclusions({"mtp_head_fp16_exclude": "fc"})
 
 
 def test_mtp_original_nvfp4_path_is_limited_to_shared_lm_head():

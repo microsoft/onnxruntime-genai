@@ -234,6 +234,22 @@ models without an MTP head are unaffected.
 
 [`qwen-3.6-mtp.py`](qwen-3.6-mtp.py) runs the built-in in-engine `og.MtpGenerator` by default:
 
+For a packaged one-directory model containing both `text.onnx` and `mtp.onnx`:
+
+```bash
+python qwen-3.6-mtp.py \
+  --model_path <model-dir> \
+  --max_draft_tokens 3 \
+  -n 128 \
+  -p "Describe the main causes of the fall of the Roman Empire."
+```
+
+The example derives the second session from `model.mtp` in `genai_config.json`. It does not
+overlay the `shared_initializers` array because `Config.overlay` appends arrays; the already
+parsed decoder manifest is retained for both sessions.
+
+For legacy exports with separate main and MTP model directories:
+
 ```bash
 python qwen-3.6-mtp.py \
     -m <output-dir> \              # main model folder (model.onnx + genai_config.json)

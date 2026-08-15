@@ -241,6 +241,20 @@ def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
     assert options["include_hidden_states"] is True
 
 
+@pytest.mark.parametrize("quant_type", ["none", "int8_per_channel"])
+def test_mtp_kv_cache_quant_type_is_normalized(monkeypatch, quant_type):
+    options = {"mtp_kv_cache_quant_type": quant_type.upper()}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_kv_cache_quant_type"] == quant_type
+
+
+def test_unknown_mtp_kv_cache_quant_type_is_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="mtp_kv_cache_quant_type must be one of"):
+        _run_check_extra_options(monkeypatch, {"mtp_kv_cache_quant_type": "int3"})
+
+
 def test_recurrent_state_window_must_be_non_negative(monkeypatch):
     with pytest.raises(ValueError, match="non-negative integer"):
         _run_check_extra_options(monkeypatch, {"recurrent_state_window": "-1"})

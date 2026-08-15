@@ -47,6 +47,7 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35MoeTextModel,
+    Qwen35NativeQuantTextModel,
     Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
@@ -173,6 +174,7 @@ def check_extra_options(
         "fuse_shared_expert_gate",
         "use_original_fp8_weights",
         "use_original_nvfp4_weights",
+        "quantize_bf16_linear_attn",
         "enable_mtp",
     ]
 
@@ -316,6 +318,20 @@ def check_extra_options(
                 f"Got execution_provider='{execution_provider}'."
             )
         extra_options["kv_cache_quant_type"] = quant_type
+
+    if "mtp_kv_cache_quant_type" in extra_options:
+        quant_type = extra_options["mtp_kv_cache_quant_type"].lower()
+        if quant_type not in KV_CACHE_QUANT_TYPES:
+            raise ValueError(
+                f"mtp_kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
+                f"got '{extra_options['mtp_kv_cache_quant_type']}'"
+            )
+        if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
+            raise ValueError(
+                "Quantized MTP KV cache is only supported for the CPU and CUDA execution providers. "
+                f"Got execution_provider='{execution_provider}'."
+            )
+        extra_options["mtp_kv_cache_quant_type"] = quant_type
 
     if extra_options.get("fp8_kv_cache", False):
         quant_type = extra_options.get("kv_cache_quant_type", "none")
@@ -608,7 +624,9 @@ def create_model(
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen35NativeQuantTextModel(
+            config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options
+        )
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
         onnx_model = Qwen35MoeTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
@@ -845,6 +863,8 @@ def get_args():
                     When true, self-attention uses the checkpoint's calibrated W8A8 scales and GatedDeltaNet uses
                     weight-only W8A16 MatMulBlockQuantizedFp8Weight directly from the checkpoint.
                     Requires CUDA and an ONNX Runtime build with the FP8 contrib operator.
+                quantize_bf16_linear_attn = Quantize BF16 GatedDeltaNet in_proj_a/in_proj_b weights with the requested int4/int8 precision.
+                    Default is false. Intended for memory-constrained dense Qwen3.5/Qwen3.8 deployments that accept the accuracy tradeoff.
                 fp8_kv_cache = Use the legacy Qwen3.6 FP8 KV-cache shorthand. Default is false.
                     Equivalent to kv_cache_quant_type=fp8_per_tensor. Without kv_cache_scale_file, uses one shared unit scale.
                 fuse_linear_attn_gates = Fuse Qwen3.6 LinearAttention gate glue into contrib operators.
@@ -863,6 +883,8 @@ def get_args():
                 kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_type is enabled.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...optional model layer IDs...]}.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
+                mtp_kv_cache_quant_type = Override the MTP head KV-cache quantization scheme.
+                    Defaults to kv_cache_quant_type. Set to none to export an FP16-KV MTP head for calibration while the main model keeps quantized KV.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

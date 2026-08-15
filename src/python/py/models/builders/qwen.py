@@ -2431,6 +2431,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self._mtp_ep = ep
             self._mtp_cache_dir = cache_dir
             self._mtp_extra_options = copy.deepcopy(extra_options)
+            if "mtp_kv_cache_quant_type" in self._mtp_extra_options:
+                self._mtp_extra_options["kv_cache_quant_type"] = self._mtp_extra_options[
+                    "mtp_kv_cache_quant_type"
+                ]
             self._resolve_mtp_head_quantization(extra_options)
 
     def _resolve_mtp_head_quantization(self, extra_options):
@@ -2819,6 +2823,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         shared_names = [
             "model.embed_tokens.weight",
             "lm_head.MatMul.weight",
+            "lm_head.MatMul.fp8_weight",
+            "lm_head.MatMul.fp8_weight_scale",
             "lm_head.MatMul.nvfp4_weight",
             "lm_head.MatMul.nvfp4_weight_scale",
             "lm_head.MatMul.nvfp4_weight_scale_2",
@@ -3284,6 +3290,159 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         return f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"
 
 
+class Qwen35NativeQuantTextModel(Qwen35MoeTextModel):
+    """Dense Qwen3.5 text model that preserves mixed ModelOpt NVFP4/FP8 weights."""
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.use_original_fp8_weights = str(
+            extra_options.get("use_original_fp8_weights", "false")
+        ).lower() in ("1", "true", "yes")
+        self.use_original_nvfp4_weights = str(
+            extra_options.get("use_original_nvfp4_weights", "false")
+        ).lower() in ("1", "true", "yes")
+        self.quantize_bf16_linear_attn = str(
+            extra_options.get("quantize_bf16_linear_attn", "false")
+        ).lower() in ("1", "true", "yes")
+        self._fp8_attention_activation_cache = {}
+
+        if (
+            self.use_original_fp8_weights
+            and not self.quantize_bf16_linear_attn
+            and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.INT8}
+        ):
+            nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
+            for layer_id, layer_type in enumerate(self.layer_types):
+                if layer_type != "linear_attention":
+                    continue
+                for projection in ("in_proj_a", "in_proj_b"):
+                    node_name = f"/model/layers.{layer_id}/linear_attn/{projection}/MatMul"
+                    if node_name not in nodes_to_exclude:
+                        nodes_to_exclude.append(node_name)
+
+        self.mtp_head = None
+        self.mtp_shared_initializers = []
+        self.enable_mtp = str(extra_options.get("enable_mtp", "false")).lower() in ("1", "true", "yes")
+        if self.enable_mtp:
+            include_hidden_states = str(extra_options.get("include_hidden_states", "false")).lower() in (
+                "1", "true", "yes",
+            )
+            exclude_lm_head = str(extra_options.get("exclude_lm_head", "false")).lower() in ("1", "true", "yes")
+            if not include_hidden_states:
+                raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
+            if exclude_lm_head:
+                raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
+            self._mtp_config = copy.deepcopy(config)
+            self._mtp_io_dtype = io_dtype
+            self._mtp_onnx_dtype = onnx_dtype
+            self._mtp_ep = ep
+            self._mtp_cache_dir = cache_dir
+            self._mtp_extra_options = copy.deepcopy(extra_options)
+            if "mtp_kv_cache_quant_type" in self._mtp_extra_options:
+                self._mtp_extra_options["kv_cache_quant_type"] = self._mtp_extra_options[
+                    "mtp_kv_cache_quant_type"
+                ]
+            self._resolve_mtp_head_quantization(extra_options)
+
+    def _load_native_tensor_exact(self, tensor_name, required=False):
+        return Qwen35MoeTextModel._load_nvfp4_tensor(self, tensor_name, required=required)
+
+    def _load_nvfp4_tensor(self, tensor_name, required=True):
+        tensor = self._load_native_tensor_exact(tensor_name, required=False)
+        if tensor is not None:
+            return tensor
+
+        aliases = {
+            ".weight": ".weight_packed",
+            ".weight_scale_2": ".weight_global_scale",
+        }
+        for suffix, replacement in aliases.items():
+            if tensor_name.endswith(suffix):
+                alias = tensor_name[: -len(suffix)] + replacement
+                tensor = self._load_native_tensor_exact(alias, required=False)
+                if tensor is not None:
+                    if suffix == ".weight_scale_2":
+                        tensor = torch.reciprocal(tensor)
+                    return tensor
+                break
+
+        if required:
+            raise RuntimeError(f"ModelOpt tensor '{tensor_name}' was not found in the source checkpoint.")
+        return None
+
+    def _fp8_weight_key_for_matmul(self, basename):
+        key_prefix = Qwen35MoeTextModel._fp8_weight_key_for_matmul(self, basename)
+        if key_prefix is None:
+            if basename == "/lm_head/MatMul":
+                key_prefix = "lm_head"
+            else:
+                match = re.match(
+                    r"^/model/layers\.(\d+)/mlp/(gate_proj|up_proj|down_proj)/MatMul$", basename
+                )
+                if match:
+                    key_prefix = (
+                        f"model.language_model.layers.{int(match.group(1))}.mlp.{match.group(2)}"
+                    )
+        if key_prefix is None:
+            return None
+        weight = self._load_native_tensor_exact(f"{key_prefix}.weight", required=False)
+        return key_prefix if weight is not None and weight.dtype == torch.float8_e4m3fn else None
+
+    def _nvfp4_dense_key_for_matmul(self, basename):
+        if basename == "/lm_head/MatMul":
+            key_prefix = "lm_head"
+        else:
+            match = re.match(
+                r"^/model/layers\.(\d+)/mlp/(gate_proj|up_proj|down_proj)/MatMul$", basename
+            )
+            if not match:
+                return None
+            key_prefix = f"model.language_model.layers.{int(match.group(1))}.mlp.{match.group(2)}"
+
+        weight = self._load_native_tensor_exact(f"{key_prefix}.weight", required=False)
+        if weight is None:
+            weight = self._load_native_tensor_exact(f"{key_prefix}.weight_packed", required=False)
+        return key_prefix if weight is not None and weight.dtype == torch.uint8 else None
+
+    def make_layer(self, layer_id, layer):
+        return Qwen35TextModel.make_layer(self, layer_id, layer)
+
+    def save_model(self, out_dir):
+        return Qwen35TextModel.save_model(self, out_dir)
+
+    def make_model(self, input_path):
+        try:
+            Qwen35TextModel.make_model(self, input_path)
+        finally:
+            self._close_nvfp4_handles()
+
+        if self.enable_mtp:
+            print("Building dense MTP (multi-token prediction) head -> mtp.onnx")
+            mtp_extra_options = self._mtp_extra_options
+            mtp_extra_options.pop("enable_mtp", None)
+            mtp_extra_options["exclude_embeds"] = False
+            mtp_extra_options["filename"] = "mtp.onnx"
+            mtp_extra_options.pop("include_hidden_states", None)
+            mtp_extra_options.pop("exclude_lm_head", None)
+            self.mtp_head = Qwen35DenseMtpHead(
+                self._mtp_config,
+                self._mtp_io_dtype,
+                self._mtp_onnx_dtype,
+                self._mtp_ep,
+                self._mtp_cache_dir,
+                mtp_extra_options,
+            )
+            self.mtp_head.make_model(input_path)
+
+    def save_model(self, out_dir):
+        Qwen35TextModel.save_model(self, out_dir)
+        if self.mtp_head is not None:
+            self.mtp_head.save_model(out_dir)
+            self.mtp_shared_initializers = self._share_mtp_embedding_lm_head(
+                out_dir, main_file=self.filename, mtp_file=self.mtp_head.filename
+            )
+
+
 class _LinearWeight:
     """Lightweight stand-in for ``nn.Linear`` exposing only ``weight`` (and a
     ``None`` bias), so ``make_matmul`` / ``make_lm_head`` can consume a raw weight
@@ -3403,13 +3562,9 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         del self._mtp_layer
 
     def _load_mtp_weights(self, input_path):
-        try:
-            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
-        except ImportError as exc:
-            raise ImportError(
-                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
-            ) from exc
         import safetensors.torch as safetensors_torch
+
+        mtp_layer = self._make_mtp_decoder_layer()
 
         model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
         shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
@@ -3447,6 +3602,8 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
                         lm_head_weight_scale = f.get_tensor(key)
                     elif key == "lm_head.weight_scale_2":
                         lm_head_weight_scale_2 = f.get_tensor(key)
+                    elif key == "lm_head.weight_global_scale":
+                        lm_head_weight_scale_2 = torch.reciprocal(f.get_tensor(key))
 
         if not mtp_state:
             raise ValueError(
@@ -3484,9 +3641,6 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         self._pre_fc_norm_hidden_weight = mtp_state["mtp.pre_fc_norm_hidden.weight"]
         self._mtp_norm_weight = mtp_state["mtp.norm.weight"]
 
-        # Build the single MTP decoder layer (full-attention + MoE) and load its
-        # weights from the ``mtp.layers.0.*`` entries.
-        mtp_layer = Qwen3_5MoeDecoderLayer(self._mtp_layer_config, layer_idx=0)
         layer_state = {
             key[len("mtp.layers.0."):]: value
             for key, value in mtp_state.items()
@@ -3499,6 +3653,15 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             print(f"Warning: missing keys when loading the MTP decoder layer: {missing}")
         mtp_layer.eval()
         self._mtp_layer = mtp_layer
+
+    def _make_mtp_decoder_layer(self):
+        try:
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
+        except ImportError as exc:
+            raise ImportError(
+                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
+            ) from exc
+        return Qwen3_5MoeDecoderLayer(self._mtp_layer_config, layer_idx=0)
 
     def _make_offset_rmsnorm(self, name, root_input, weight_tensor):
         """Build a non-skip SimplifiedLayerNormalization with the ``(1 + weight)``
@@ -3557,3 +3720,104 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         # fc: [2H -> H]
         fc_name = self.make_matmul(_LinearWeight(self._fc_weight), f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+
+class Qwen35DenseMtpHead(Qwen35MtpHead):
+    """Dense Qwen3.5/Qwen3.8 MTP head using one full-attention decoder layer."""
+
+    _FP16_EXCLUSION_GROUPS = {
+        "fc": ("/model/mtp/fc/MatMul",),
+        "attention": tuple(
+            f"/model/layers.0/attn/{projection}_proj/MatMul"
+            for projection in ("q", "k", "v", "o")
+        ),
+        "mlp": tuple(
+            f"/model/layers.0/mlp/{projection}_proj/MatMul"
+            for projection in ("gate", "up", "down")
+        ),
+    }
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.is_mtp_head = True
+
+        config = copy.deepcopy(config)
+        text_config = getattr(config, "text_config", config)
+        text_config.num_hidden_layers = 1
+        text_config.layer_types = ["full_attention"]
+        config.num_hidden_layers = 1
+        config.layer_types = ["full_attention"]
+
+        self._mtp_layer_config = copy.deepcopy(text_config)
+        self._mtp_layer_config.layer_types = ["full_attention"]
+        self._mtp_layer_config.num_hidden_layers = 1
+
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["num_hidden_layers"] = 1
+        Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self._apply_fp16_exclusions(extra_options)
+
+        self.use_original_fp8_weights = str(
+            extra_options.get("use_original_fp8_weights", "false")
+        ).lower() in ("1", "true", "yes")
+        self.use_original_nvfp4_weights = False
+        self._fp8_attention_activation_cache = {}
+        self.model_type = "Qwen3_5_textForCausalLM"
+
+        self.input_names["hidden_states"] = "hidden_states"
+        self.input_types["hidden_states"] = self.io_dtype
+        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+
+    def _apply_fp16_exclusions(self, extra_options):
+        mode = str(extra_options.get("mtp_head_fp16_exclude", "none")).lower()
+        groups_by_mode = {
+            "none": (),
+            "fc": ("fc",),
+            "fc_attn": ("fc", "attention"),
+            "all": ("fc", "attention", "mlp"),
+        }
+        if mode not in groups_by_mode:
+            raise ValueError(
+                "mtp_head_fp16_exclude must be one of "
+                f"{sorted(groups_by_mode)}, got '{mode}'."
+            )
+        if mode == "none":
+            return
+        if self.onnx_dtype not in {
+            ir.DataType.INT4,
+            ir.DataType.UINT4,
+            ir.DataType.INT8,
+            ir.DataType.UINT8,
+        }:
+            raise ValueError("mtp_head_fp16_exclude requires a quantized MTP head.")
+
+        nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
+        for group in groups_by_mode[mode]:
+            for node_name in self._FP16_EXCLUSION_GROUPS[group]:
+                if node_name not in nodes_to_exclude:
+                    nodes_to_exclude.append(node_name)
+
+    def _load_native_tensor_exact(self, tensor_name, required=False):
+        return Qwen35MoeTextModel._load_nvfp4_tensor(self, tensor_name, required=required)
+
+    def _load_nvfp4_tensor(self, tensor_name, required=True):
+        return Qwen35NativeQuantTextModel._load_nvfp4_tensor(self, tensor_name, required=required)
+
+    def _fp8_weight_key_for_matmul(self, basename):
+        if basename != "/lm_head/MatMul":
+            return None
+        return Qwen35NativeQuantTextModel._fp8_weight_key_for_matmul(self, basename)
+
+    def _make_mtp_decoder_layer(self):
+        try:
+            from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
+        except ImportError as exc:
+            raise ImportError(
+                "Building the dense Qwen3.8 MTP head requires the 'qwen3_5' modeling code in transformers."
+            ) from exc
+        return Qwen3_5DecoderLayer(self._mtp_layer_config, layer_idx=0)
+
+    def make_layer(self, layer_id, layer):
+        return Qwen35TextModel.make_layer(self, layer_id, layer)
+
+    def save_model(self, out_dir):
+        return Qwen35TextModel.save_model(self, out_dir)

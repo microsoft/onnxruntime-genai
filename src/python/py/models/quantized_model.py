@@ -1794,8 +1794,8 @@ class ModeloptModel(QuantizedModel):
         return (values * block_scales * float(global_scale)).to(torch.bfloat16)
 
     def _dequant_fp8(self, weight_f8, weight_scale):
-        """Reconstruct a BF16 weight from an FP8 (E4M3) weight and per-tensor scale."""
-        return (weight_f8.to(torch.float32) * float(weight_scale)).to(torch.bfloat16)
+        """Reconstruct a BF16 weight from an FP8 (E4M3) weight and broadcastable scale."""
+        return (weight_f8.to(torch.float32) * weight_scale.to(torch.float32)).to(torch.bfloat16)
 
     # -- raw tensor access ------------------------------------------------------
     def _get(self, name):
@@ -1818,8 +1818,14 @@ class ModeloptModel(QuantizedModel):
     def _dequant_linear(self, base):
         weight = self._get(f"{base}.weight")
         if weight is None:
+            weight = self._get(f"{base}.weight_packed")
+        if weight is None:
             return None
         weight_scale_2 = self._get(f"{base}.weight_scale_2")
+        if weight_scale_2 is None:
+            weight_global_scale = self._get(f"{base}.weight_global_scale")
+            if weight_global_scale is not None:
+                weight_scale_2 = torch.reciprocal(weight_global_scale)
         weight_scale = self._get(f"{base}.weight_scale")
         if weight_scale_2 is not None:  # NVFP4 (block-16 E2M1 + E4M3 block scale + global)
             return self._dequant_nvfp4(weight, weight_scale, weight_scale_2, name=base)
@@ -1879,16 +1885,21 @@ class ModeloptModel(QuantizedModel):
             )
 
         mlp = ns()
-        mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")
-        shared = ns()
-        shared.gate_proj = self._linear_module(f"{p}.mlp.shared_expert.gate_proj")
-        shared.up_proj = self._linear_module(f"{p}.mlp.shared_expert.up_proj")
-        shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
-        mlp.shared_expert = shared
-        mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
-        # Routed experts are streamed from raw safetensors by the builder's
-        # make_nvfp4_moe_initializers(); nothing to materialize here.
-        mlp.experts = None
+        if self._get(f"{p}.mlp.gate.weight") is not None:
+            mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")
+            shared = ns()
+            shared.gate_proj = self._linear_module(f"{p}.mlp.shared_expert.gate_proj")
+            shared.up_proj = self._linear_module(f"{p}.mlp.shared_expert.up_proj")
+            shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
+            mlp.shared_expert = shared
+            mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
+            # Routed experts are streamed from raw safetensors by the builder's
+            # make_nvfp4_moe_initializers(); nothing to materialize here.
+            mlp.experts = None
+        else:
+            mlp.gate_proj = self._linear_module(f"{p}.mlp.gate_proj")
+            mlp.up_proj = self._linear_module(f"{p}.mlp.up_proj")
+            mlp.down_proj = self._linear_module(f"{p}.mlp.down_proj")
         layer.mlp = mlp
         return layer
 
@@ -1909,7 +1920,7 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
-        elif quant_type == "modelopt":
+        elif quant_type in {"modelopt", "compressed-tensors"}:
             model = ModeloptModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
