@@ -204,8 +204,8 @@ struct PagedKeyValueCache {
   //   M = block_size per block
 
   std::shared_ptr<Model> model_;
-  std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
-  std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
+  std::vector<LayerCache> cache_;          // Pair of key and value caches for all layers
+  std::unique_ptr<BlockPool> block_pool_;  // Allocator for blocks
   // Declared after the pool so it releases its retained references before the pool goes away.
   std::unique_ptr<PrefixCache> prefix_cache_;       // Content-addressed index over filled blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache

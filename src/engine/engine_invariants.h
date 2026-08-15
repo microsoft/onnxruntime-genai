@@ -59,10 +59,10 @@ struct RequestReservationSnapshot {
 // Immutable view of one physical block the cache currently owns.
 struct CachedBlockSnapshot {
   size_t block_id{};
-  size_t ref_count{};   // Owners holding the block: request tables, the transaction, the index.
+  size_t ref_count{};  // Owners holding the block: request tables, the transaction, the index.
   size_t used_slots{};
   bool full{};
-  bool indexed{};       // The prefix cache holds one of the references and can give it back.
+  bool indexed{};  // The prefix cache holds one of the references and can give it back.
 };
 
 // Immutable view of the paged cache's block accounting. Produced by PagedKeyValueCache::Snapshot().

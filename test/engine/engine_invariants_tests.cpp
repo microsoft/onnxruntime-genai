@@ -305,7 +305,10 @@ TEST(InvariantValidatorTest, AdoptedPrefixMustCoverTheCommittedSlots) {
   cache.transaction_adopted_block_ids = {0};
   cache.reservations = {
       RequestReservationSnapshot{kRequestB, /*committed_slots=*/kBlockSize + 1,
-                                 /*target_slots=*/kBlockSize + 2, 0, {}, {0}},
+                                 /*target_slots=*/kBlockSize + 2,
+                                 0,
+                                 {},
+                                 {0}},
   };
   RebuildBlockListing(cache, /*indexed_blocks=*/{0});
   cache.free_blocks = 1;

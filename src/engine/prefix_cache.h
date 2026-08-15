@@ -60,15 +60,15 @@ struct PrefixCacheMatch {
 };
 
 struct PrefixCacheMetrics {
-  uint64_t lookups{};                 // Prompts offered to the index.
-  uint64_t hits{};                    // Prompts that adopted at least one block.
-  uint64_t queried_tokens{};          // Prompt tokens eligible for adoption across all lookups.
-  uint64_t matched_tokens{};          // Prompt tokens actually adopted (prefill work skipped).
-  uint64_t registered_blocks{};       // Blocks given a content identity.
+  uint64_t lookups{};                  // Prompts offered to the index.
+  uint64_t hits{};                     // Prompts that adopted at least one block.
+  uint64_t queried_tokens{};           // Prompt tokens eligible for adoption across all lookups.
+  uint64_t matched_tokens{};           // Prompt tokens actually adopted (prefill work skipped).
+  uint64_t registered_blocks{};        // Blocks given a content identity.
   uint64_t duplicate_registrations{};  // Blocks whose content was already indexed elsewhere.
-  uint64_t hash_collisions{};         // Distinct contents that hashed to an indexed identity.
-  uint64_t evictions{};               // Indexed blocks dropped to make room.
-  uint64_t retention_refusals{};      // Registrations skipped because nothing was evictable.
+  uint64_t hash_collisions{};          // Distinct contents that hashed to an indexed identity.
+  uint64_t evictions{};                // Indexed blocks dropped to make room.
+  uint64_t retention_refusals{};       // Registrations skipped because nothing was evictable.
 };
 
 /**
