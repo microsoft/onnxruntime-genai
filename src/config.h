@@ -516,6 +516,17 @@ struct Config {
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
+      // Recompute preemption suspends a resident request, returns its key-value blocks to the pool,
+      // and rebuilds them later through chunked prefill. It is off by default because it trades
+      // recomputation for admission latency; without it the engine keeps waiting for capacity.
+      bool enable_recompute_preemption{false};
+      size_t max_preemptions_per_step{1};     // Victims one planning pass may suspend.
+      size_t max_preemptions_per_request{0};  // Suspensions allowed per request; 0 is unbounded.
+      // Committed decode steps a resident earns before it can be suspended again. Raising it damps
+      // residency churn between requests competing for the same blocks, at the cost of admission
+      // latency for the requests waiting behind them. Eight keeps most of the admission-latency
+      // benefit at roughly a fifth of the recomputation a quantum of one produces.
+      size_t min_decode_steps_before_preemption{8};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 

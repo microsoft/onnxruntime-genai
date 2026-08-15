@@ -177,6 +177,21 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
         ") exceeds current length (" + std::to_string(request.current_sequence_length) + ").");
   }
 
+  // A suspended Request gave up its cache residency: nothing of its sequence is in the cache, and
+  // every token it holds has to go back through the model as prefill before it can decode again.
+  if (request.status == RequestStatus::Suspended) {
+    if (request.processed_sequence_length != 0) {
+      add("Suspended Request " + id + " still reports processed length (" +
+          std::to_string(request.processed_sequence_length) + ").");
+    }
+    if (request.current_sequence_length > 0 && !request.is_prefill) {
+      add("Suspended Request " + id + " is not marked as prefill work.");
+    }
+    if (request.preemption_count == 0) {
+      add("Suspended Request " + id + " has no recorded preemption.");
+    }
+  }
+
   return violations;
 }
 
@@ -192,13 +207,20 @@ std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cac
   // Block tables exist only for known Requests: every block-owning id must be a Request we were
   // handed. (The reverse does not hold: an Assigned-but-unallocated Request owns no blocks yet.)
   std::set<const void*> known_requests;
+  std::set<const void*> suspended_requests;
   for (const auto& request : requests) {
     known_requests.insert(request.request_id);
+    if (request.status == RequestStatus::Suspended)
+      suspended_requests.insert(request.request_id);
   }
   for (const auto& owner : cache.requests) {
     if (known_requests.find(owner.request_id) == known_requests.end()) {
       violations.push_back(InvariantViolation{
           "Cache holds a block table for unknown Request " + PtrId(owner.request_id) + "."});
+    }
+    if (suspended_requests.find(owner.request_id) != suspended_requests.end()) {
+      violations.push_back(InvariantViolation{
+          "Cache still holds a block table for suspended Request " + PtrId(owner.request_id) + "."});
     }
   }
 

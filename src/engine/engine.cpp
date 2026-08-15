@@ -258,6 +258,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
         if (!capacity_retry_used) {
           if (auto retry_limits = CreateCapacityRetryLimits(step_plan_)) {
             planning_limits = *retry_limits;
+            planning_limits->retry_of_current_step = true;
             capacity_retry_used = true;
             capacity_retry_in_progress = true;
             ++transaction_metrics_.capacity_retry_attempts;

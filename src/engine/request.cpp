@@ -53,6 +53,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
 
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
   processed_sequence_length_ = 0;
+  decode_steps_since_admission_ = 0;
   search_->AppendTokens(device_tokens);
   prompt_sequence_length_ = CurrentSequenceLength();
   seen_sequence_length_ = CurrentSequenceLength();
@@ -93,12 +94,15 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
 
   if (status_ == RequestStatus::Unassigned) {
     std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
-  } else if (status_ == RequestStatus::InProgress) {
+  } else if (status_ == RequestStatus::InProgress || status_ == RequestStatus::Suspended) {
     throw std::runtime_error("Cannot add tokens to a request that is in progress.");
   } else if (status_ == RequestStatus::Completed) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
     prompt_sequence_length_ = CurrentSequenceLength();
+    // Continuing the conversation re-admits the request, so it has to earn its residency again
+    // rather than carry over the service credit of the turn that just finished.
+    decode_steps_since_admission_ = 0;
     tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   }
 }
@@ -116,6 +120,8 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.processed_sequence_length = processed_sequence_length_;
   snapshot.seen_sequence_length = seen_sequence_length_;
   snapshot.is_prefill = IsPrefill();
+  snapshot.preemption_count = preemption_count_;
+  snapshot.recomputed_token_count = recomputed_token_count_;
   return snapshot;
 }
 
@@ -182,6 +188,37 @@ bool Request::IsDone() const {
 
 bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
+}
+
+bool Request::IsPreemptible() const {
+  // A prefilling request owns blocks for a prompt it has not finished pushing through the model.
+  // Suspending it would discard that in-flight work and immediately ask for the same blocks back,
+  // so only requests that have reached the decode phase are eligible.
+  return status_ == RequestStatus::InProgress && !IsPrefill() &&
+         processed_sequence_length_ > 0;
+}
+
+void Request::SuspendForRecompute() {
+  if (status_ != RequestStatus::InProgress) {
+    throw std::runtime_error(
+        "Only an in-progress request can be suspended for recompute.");
+  }
+  if (processed_sequence_length_ <= 0) {
+    throw std::runtime_error(
+        "Cannot suspend a request that has no committed key-value entries.");
+  }
+
+  // The search keeps the whole sequence, the random stream, and the completion state. Only the
+  // cache cursor moves: every committed token becomes prefill work again, so the trailing token
+  // sampled by the last committed step still ends the final recompute chunk and the request
+  // resumes decoding exactly where it left off.
+  recomputed_token_count_ += static_cast<size_t>(processed_sequence_length_);
+  processed_sequence_length_ = 0;
+  prompt_sequence_length_ = CurrentSequenceLength();
+  scheduled_token_count_ = 0;
+  decode_steps_since_admission_ = 0;
+  ++preemption_count_;
+  status_ = RequestStatus::Suspended;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
@@ -269,6 +306,11 @@ void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
+  }
+  // A step that finished the (re)build of this request's key-value entries is the one that leaves
+  // prefill; only the steps after that count as service delivered by its residency.
+  if (!IsPrefill() && result.token_appended) {
+    ++decode_steps_since_admission_;
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
   status_ = result.done ? RequestStatus::Completed : RequestStatus::InProgress;

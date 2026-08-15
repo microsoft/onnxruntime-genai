@@ -233,6 +233,15 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
+ReclaimedCacheOwnership PagedCacheManager::ReclaimRequestCache(
+    const std::shared_ptr<Request>& request) {
+  const auto reclaimed = key_value_cache_->Reclaim(request);
+  cache_allocated_requests_.erase(
+      std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
+      cache_allocated_requests_.end());
+  return reclaimed;
+}
+
 std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;
 }

@@ -37,6 +37,8 @@ struct RequestStateSnapshot {
   int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
   int64_t seen_sequence_length{};       // Tokens already streamed to (seen by) the application.
   bool is_prefill{};
+  size_t preemption_count{};        // Times the Request was suspended to reclaim cache capacity.
+  size_t recomputed_token_count{};  // Committed tokens discarded by those suspensions.
 };
 
 // Immutable view of one Request's block ownership within the paged cache.

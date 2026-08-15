@@ -19,6 +19,10 @@ enum class RequestStatus {
                // This is the state of a request when it is first created.
   Assigned,    // The request has been added to the engine and is waiting to be scheduled.
   InProgress,  // The request has been scheduled and is currently being processed.
+  Suspended,   // The request was resident, was preempted to free key-value cache capacity, and is
+               // waiting to be re-admitted. It keeps its complete logical token sequence, search
+               // and sampler state, and lifecycle counters, but owns no cache blocks: the engine
+               // rebuilds its key-value entries through chunked prefill before decoding resumes.
   Completed,   // The request has been completed successfully.
 };
 

@@ -133,6 +133,49 @@ struct Request : std::enable_shared_from_this<Request>,
   void CompleteGeneration();
 
   /**
+   * @brief Suspends a resident request so its committed key-value blocks can be reclaimed.
+   *
+   * The request keeps its complete logical token sequence, its Search and sampler state (including
+   * the random stream), the tokens the application has already seen, and its generation limits. It
+   * loses only its cache residency: the processed cursor returns to the beginning of the sequence
+   * and the whole sequence becomes prefill work again, so the ordinary chunked-prefill path rebuilds
+   * the key-value entries before decoding resumes.
+   *
+   * The caller is responsible for releasing the request's cache ownership; this call only moves the
+   * request's own state to the suspended boundary. Only an `InProgress` request can be suspended.
+   */
+  void SuspendForRecompute();
+
+  /**
+   * @brief True when suspending this request would free durable capacity and make progress.
+   *
+   * A request that is still building its key-value entries (its first prefill, or a recompute that
+   * has not finished) is excluded: discarding it would restart work that is already in flight
+   * without leaving the freed capacity available for long, which is how preemption starts to churn.
+   */
+  bool IsPreemptible() const;
+
+  /**
+   * @brief Number of times this request has been suspended for recompute.
+   */
+  size_t PreemptionCount() const { return preemption_count_; }
+
+  /**
+   * @brief Total tokens whose key-value entries were discarded by suspensions and must be, or have
+   *        been, recomputed.
+   */
+  size_t RecomputedTokenCount() const { return recomputed_token_count_; }
+
+  /**
+   * @brief Decode steps this request has committed since it was last admitted to the cache.
+   *
+   * Only CommitStep advances it and only for a step that produced a token past prefill, so it
+   * describes service the engine has actually delivered rather than work it planned. Suspension
+   * resets it, because the request has to earn its residency again.
+   */
+  size_t DecodeStepsSinceAdmission() const { return decode_steps_since_admission_; }
+
+  /**
    * @brief Checks if the termination condition for the request has been met.
    * @return True if the request is done, false otherwise.
    */
@@ -276,9 +319,14 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t seen_sequence_length_{};
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
-  // request is still prefilling while processed_sequence_length_ has not caught up with it.
+  // request is still prefilling while processed_sequence_length_ has not caught up with it. A
+  // suspended request moves this to its whole committed sequence, because every one of those tokens
+  // has to go back through the model before the request can decode again.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  size_t preemption_count_{};
+  size_t recomputed_token_count_{};
+  size_t decode_steps_since_admission_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;

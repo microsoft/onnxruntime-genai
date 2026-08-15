@@ -1507,6 +1507,23 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_scheduled_tokens must be > 0");
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
+    } else if (name == "enable_recompute_preemption") {
+      v_->enable_recompute_preemption = JSON::Get<bool>(value);
+    } else if (name == "max_preemptions_per_step") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_preemptions_per_step must be > 0");
+      v_->max_preemptions_per_step = static_cast<size_t>(parsed_value);
+    } else if (name == "max_preemptions_per_request") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("max_preemptions_per_request must be >= 0");
+      v_->max_preemptions_per_request = static_cast<size_t>(parsed_value);
+    } else if (name == "min_decode_steps_before_preemption") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("min_decode_steps_before_preemption must be >= 0");
+      v_->min_decode_steps_before_preemption = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
