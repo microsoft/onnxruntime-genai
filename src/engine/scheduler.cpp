@@ -268,6 +268,17 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(
     plan.requests.erase(first_deferred, plan.requests.end());
     result.capacity_deferred = true;
   }
+  if (plan.requests.empty()) {
+    result.executable = false;
+    result.outcome = {
+        result.unserviceable_request_id
+            ? StepOutcomeKind::UnserviceableRequest
+            : StepOutcomeKind::CapacityDeferred,
+        plan.transaction_id,
+        result.unserviceable_request_id,
+    };
+    return result;
+  }
 
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
   selected_candidates.reserve(plan.requests.size());

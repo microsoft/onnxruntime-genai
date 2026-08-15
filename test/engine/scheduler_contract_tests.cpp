@@ -167,6 +167,27 @@ TEST_F(SchedulerContractTest, TemporaryPrefillLimitKeepsLaterFittingRequest) {
   EXPECT_EQ(plan.requests[0].request, fitting);
 }
 
+TEST_F(SchedulerContractTest, ZeroPrefillLimitDefersEmptyPlan) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto decode = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, decode);
+  auto prefill = Assigned(20);
+  scheduler.AddRequest(prefill);
+  cache->SetCapacityDeferredRequest(decode);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(
+      plan, StepPlanningLimits{/*max_scheduled_tokens=*/1,
+                               /*max_prefill_requests=*/0});
+
+  EXPECT_FALSE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  EXPECT_EQ(result.outcome.kind, StepOutcomeKind::CapacityDeferred);
+  EXPECT_TRUE(plan.requests.empty());
+}
+
 TEST_F(SchedulerContractTest, DynamicHonorsCapacityBackpressure) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/2);
   DynamicBatchScheduler scheduler(model_, cache);
