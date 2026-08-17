@@ -400,8 +400,8 @@ std::string Tokenizer::ApplyChatTemplateWithOptions(const char* template_str, co
                                                     const char* template_kwargs, bool add_generation_prompt) const {
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
   CheckResult(OrtxApplyChatTemplateWithOptions(tokenizer_, template_str, messages, tools, template_kwargs,
-                                              templated_text.ToBeAssigned(), add_generation_prompt,
-                                              false /*tokenize*/));
+                                               templated_text.ToBeAssigned(), add_generation_prompt,
+                                               false /*tokenize*/));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
