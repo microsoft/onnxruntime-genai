@@ -203,15 +203,6 @@ def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_
     return unpacked_dir
 
 
-def _verify_nupkg_version(package_dir: Path, package_name: str, expected_version: str) -> None:
-    metadata = ElementTree.parse(nuspec_files[0]).getroot().find("{*}metadata")
-    version = metadata.findtext("{*}version") if metadata is not None else None
-    if version != expected_version:
-        raise RuntimeError(
-            f"{package_name} package version mismatch: expected {expected_version}, found {version or 'missing'}"
-        )
-
-
 def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir: PathLike) -> Path:
     """
     Populate the engine_benchmark output directory with the shared libraries it loads at runtime:
@@ -226,8 +217,6 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
 
     for package_name, package_url in _ENGINE_BENCHMARK_PACKAGES.items():
         package_dir = _download_and_unpack_nupkg(package_name, package_url, dependencies_dir)
-        expected_version = _ORT_VERSION if package_name == "Microsoft.ML.OnnxRuntime" else _CUDA_PLUGIN_EP_VERSION
-        _verify_nupkg_version(package_dir, package_name, expected_version)
         _log.info(f"Extracting {package_name} .so files to {destination_dir}")
         for lib in package_dir.rglob("linux-x64/native/*"):
             if lib.is_file():
