@@ -28,35 +28,5 @@
     "execution_provider": "cuda",
     "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
     "generation_tokens": 64
-  },
-  {
-    "scenario": "decode_baseline",
-    "concurrency": 1,
-    "prompt_length_k": 4,
-    "synthetic": true,
-    "model_path": "~/qwen2.5-0.5b-instruct",
-    "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 128
-  },
-  {
-    "scenario": "decode_baseline",
-    "concurrency": 4,
-    "prompt_length_k": 4,
-    "synthetic": true,
-    "model_path": "~/qwen2.5-0.5b-instruct",
-    "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 128
-  },
-  {
-    "scenario": "decode_baseline",
-    "concurrency": 8,
-    "prompt_length_k": 4,
-    "synthetic": true,
-    "model_path": "~/qwen2.5-0.5b-instruct",
-    "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
-    "generation_tokens": 128
   }
 ]
