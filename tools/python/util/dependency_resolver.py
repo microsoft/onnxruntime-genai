@@ -186,13 +186,13 @@ _ENGINE_BENCHMARK_PACKAGES = {
 }
 
 
-def _download_and_unpack_nupkg(package_name: str, package_url: str, destination_dir: Path) -> Path:
+def _download_and_unpack_nupkg(package_name: str, version: str, package_url: str, destination_dir: Path) -> Path:
     unpacked_dir = destination_dir / package_name
     if unpacked_dir.exists():
         _log.info(f"Package {package_name} already downloaded")
         return unpacked_dir
 
-    _log.info(f"Downloading {package_name} from {package_url}")
+    _log.info(f"Downloading {package_name} {version} from {package_url}")
     response = requests.get(package_url)
     response.raise_for_status() # raises a 4xx or 5xx (client/server error) if encountered
     package_path = destination_dir / f"{package_name}.zip"
@@ -216,7 +216,8 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     dependencies_dir.mkdir(parents=True, exist_ok=True)
 
     for package_name, package_url in _ENGINE_BENCHMARK_PACKAGES.items():
-        package_dir = _download_and_unpack_nupkg(package_name, package_url, dependencies_dir)
+        version = _ORT_VERSION if package_name == "Microsoft.ML.OnnxRuntime" else _CUDA_PLUGIN_EP_VERSION
+        package_dir = _download_and_unpack_nupkg(package_name, version, package_url, dependencies_dir)
         _log.info(f"Extracting {package_name} .so files to {destination_dir}")
         for lib in package_dir.rglob("linux-x64/native/*"):
             if lib.is_file():
