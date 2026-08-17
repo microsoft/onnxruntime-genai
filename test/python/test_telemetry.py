@@ -1250,6 +1250,45 @@ class TestSerializationHelper(unittest.TestCase):
         self.assertEqual(envelope["data"], {"key": "value"})
 
 
+class TestHttpTransport(unittest.TestCase):
+    def test_success_does_not_read_response_body(self):
+        import urllib.request
+
+        from telemetry.library.transport import HttpJsonPostTransport
+
+        response = MagicMock(status=204)
+        response.getcode.return_value = 204
+        context = MagicMock()
+        context.__enter__.return_value = response
+        request = urllib.request.Request("https://example.invalid", data=b"{}", method="POST")
+
+        with patch("telemetry.library.transport.urllib.request.urlopen", return_value=context) as urlopen:
+            self.assertEqual(HttpJsonPostTransport._do_request(request, 1.0), (True, 204))
+
+        urlopen.assert_called_once()
+        response.read.assert_not_called()
+
+    def test_retry_shares_one_timeout_budget(self):
+        import urllib.error
+        import urllib.request
+
+        from telemetry.library.transport import HttpJsonPostTransport
+
+        request = urllib.request.Request("https://example.invalid", data=b"{}", method="POST")
+        with (
+            patch(
+                "telemetry.library.transport.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("offline"),
+            ) as urlopen,
+            patch("telemetry.library.transport.time.monotonic", side_effect=[10.0, 10.0, 10.75]),
+        ):
+            self.assertEqual(HttpJsonPostTransport._do_request(request, 1.0), (False, None))
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertAlmostEqual(urlopen.call_args_list[0].kwargs["timeout"], 1.0)
+        self.assertAlmostEqual(urlopen.call_args_list[1].kwargs["timeout"], 0.25)
+
+
 class TestPayloadBuilder(unittest.TestCase):
     """Test payload builder."""
 
@@ -1354,8 +1393,25 @@ class TestOfflineEventStore(unittest.TestCase):
         s.store(b'{"a":1}')
         s.store(b'{"b":2}')
         ids = [i for i, _ in s.get_batch(10)]
-        s.delete(ids[:1])
+        self.assertTrue(s.delete(ids[:1]))
         self.assertEqual(s.count(), 1)
+
+    def test_failed_delete_rolls_back(self):
+        s = self._new_store()
+        s.store(b'{"a":1}')
+        row_id = s.get_batch(1)[0][0]
+        s._conn.execute(
+            "CREATE TRIGGER fail_delete BEFORE DELETE ON events "
+            "BEGIN SELECT RAISE(FAIL, 'blocked'); END"
+        )
+        s._conn.commit()
+
+        self.assertFalse(s.delete([row_id]))
+        self.assertEqual(s.count(), 1)
+        s._conn.execute("DROP TRIGGER fail_delete")
+        s._conn.commit()
+        self.assertTrue(s.delete([row_id]))
+        self.assertEqual(s.count(), 0)
 
     def test_trim_to_watermark(self):
         s = self._new_store(max_records=8)
@@ -1442,6 +1498,36 @@ class TestUploaderDrainLogic(unittest.TestCase):
         delivered, left = uploader.drain_once()
         self.assertEqual((delivered, left), (1, 0))
         self.assertEqual(store.count(), 0)
+
+    def test_delete_failure_retries_without_reposting(self):
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        uploader._transport.send = MagicMock(return_value=(True, 204))
+        original_delete = store.delete
+        delete_attempts = 0
+
+        def flaky_delete(ids):
+            nonlocal delete_attempts
+            delete_attempts += 1
+            return False if delete_attempts == 1 else original_delete(ids)
+
+        store.delete = flaky_delete
+
+        self.assertEqual(uploader.drain_once(), (0, 1))
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(uploader.drain_once(), (1, 0))
+        self.assertEqual(store.count(), 0)
+        uploader._transport.send.assert_called_once()
+
+    def test_drain_uses_only_remaining_deadline(self):
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        uploader._transport.send = MagicMock(return_value=(False, None))
+
+        with patch("telemetry.uploader.time.monotonic", return_value=100.75):
+            self.assertEqual(uploader.drain_once(deadline=101.0), (0, 1))
+
+        self.assertAlmostEqual(uploader._transport.send.call_args.args[1], 0.25)
 
     def test_request_drain_only_wakes_lock_holder(self):
         _, uploader = self._setup()

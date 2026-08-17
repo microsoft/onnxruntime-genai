@@ -12,6 +12,7 @@ telemetry pipeline has no third-party dependency.
 from __future__ import annotations
 
 import gzip
+import time
 import urllib.error
 import urllib.request
 import zlib
@@ -105,10 +106,13 @@ class HttpJsonPostTransport(ITransport):
     @staticmethod
     def _do_request(request: urllib.request.Request, timeout_sec: float) -> tuple[bool, int | None]:
         """Perform the request, retrying once on a transient connection error."""
+        deadline = time.monotonic() + max(0.0, timeout_sec)
         for attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return (False, None)
             try:
-                with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-                    response.read()
+                with urllib.request.urlopen(request, timeout=remaining) as response:
                     status = getattr(response, "status", response.getcode())
                     return (200 <= status < 300, status)
             except urllib.error.HTTPError as http_err:

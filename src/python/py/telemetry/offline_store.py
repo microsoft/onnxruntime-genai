@@ -100,13 +100,17 @@ class OfflineEventStore:
 
     def store(self, payload: bytes) -> bool:
         """Append one serialized event; trims the oldest rows if over capacity."""
+        return self.store_with_id(payload) is not None
+
+    def store_with_id(self, payload: bytes) -> int | None:
+        """Append one serialized event and return its row id."""
         if not payload:
-            return False
+            return None
         with self._lock:
             if self._conn is None:
-                return False
+                return None
             try:
-                self._conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(payload),))
+                cursor = self._conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(payload),))
                 count = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
                 if count > self._max_records:
                     self._conn.execute(
@@ -115,9 +119,11 @@ class OfflineEventStore:
                     )
                 self._conn.commit()
                 self._harden_permissions()
-                return True
+                return int(cursor.lastrowid)
             except Exception:
-                return False
+                with suppress(Exception):
+                    self._conn.rollback()
+                return None
 
     def get_batch(self, max_count: int) -> list[tuple[int, bytes]]:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
@@ -133,17 +139,41 @@ class OfflineEventStore:
             except Exception:
                 return []
 
-    def delete(self, ids: list[int]) -> None:
-        """Remove rows by id (after a successful upload or a permanent drop)."""
-        if not ids:
-            return
+    def replace(self, row_id: int, payload: bytes) -> bool:
+        """Replace a queued payload if it has not already been drained."""
+        if not payload:
+            return False
         with self._lock:
             if self._conn is None:
-                return
+                return False
+            try:
+                cursor = self._conn.execute(
+                    "UPDATE events SET payload=? WHERE id=?",
+                    (sqlite3.Binary(payload), row_id),
+                )
+                self._conn.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                with suppress(Exception):
+                    self._conn.rollback()
+                return False
+
+    def delete(self, ids: list[int]) -> bool:
+        """Remove rows by id (after a successful upload or a permanent drop)."""
+        if not ids:
+            return True
+        with self._lock:
+            if self._conn is None:
+                return False
             # Failed deletes leave rows durable for a later drain attempt.
-            with suppress(Exception):
+            try:
                 self._conn.executemany("DELETE FROM events WHERE id=?", [(i,) for i in ids])
                 self._conn.commit()
+                return True
+            except Exception:
+                with suppress(Exception):
+                    self._conn.rollback()
+                return False
 
     def count(self) -> int:
         with self._lock:

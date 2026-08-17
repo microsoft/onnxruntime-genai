@@ -64,6 +64,7 @@ class EventUploader:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._pending_delete_ids: list[int] = []
 
     # ----- control -------------------------------------------------------
 
@@ -118,13 +119,20 @@ class EventUploader:
 
     # ----- draining ------------------------------------------------------
 
-    def drain_once(self) -> tuple[int, int]:
+    def drain_once(self, deadline: float | None = None) -> tuple[int, int]:
         """Attempt to upload one batch. Returns (delivered_count, left_count).
 
         ``left_count`` is non-zero only when a transient failure leaves rows on
         disk for a later retry; permanently-rejected rows are dropped (counted as
         delivered for loop-termination purposes since they leave the queue).
         """
+        if self._pending_delete_ids:
+            pending_ids = self._pending_delete_ids
+            if not self._store.delete(pending_ids):
+                return (0, len(pending_ids))
+            self._pending_delete_ids = []
+            return (len(pending_ids), 0)
+
         batch = self._store.get_batch(self._max_items)
         if not batch:
             return (0, 0)
@@ -137,24 +145,33 @@ class EventUploader:
         for row_id, payload in batch:
             if not builder.can_add(payload):
                 if builder.is_empty:
-                    self._store.delete([row_id])
+                    self._pending_delete_ids = [row_id]
+                    if not self._store.delete(self._pending_delete_ids):
+                        return (0, 1)
+                    self._pending_delete_ids = []
                     return (1, 0)
                 break
             builder.add(payload)
             included.append(row_id)
         payload_bytes = builder.build()
 
+        timeout = self._send_timeout
+        if deadline is not None:
+            timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+            if timeout <= 0.0:
+                return (0, len(included))
+
         try:
-            success, status = self._transport.send(payload_bytes, self._send_timeout, item_count=len(included))
+            success, status = self._transport.send(payload_bytes, timeout, item_count=len(included))
         except Exception:
             success, status = (False, None)
 
-        if success:
-            self._store.delete(included)
-            return (len(included), 0)
-        if not HttpJsonPostTransport.is_retryable(status):
+        if success or not HttpJsonPostTransport.is_retryable(status):
             # Permanent rejection (e.g. 4xx): drop so it can't block the queue.
-            self._store.delete(included)
+            self._pending_delete_ids = included
+            if not self._store.delete(included):
+                return (0, len(included))
+            self._pending_delete_ids = []
             return (len(included), 0)
         # Transient failure: leave the rows for the next attempt.
         return (0, len(included))
@@ -172,7 +189,7 @@ class EventUploader:
         try:
             deadline = time.monotonic() + max(0.0, max_seconds)
             while time.monotonic() < deadline:
-                delivered, left = self.drain_once()
+                delivered, left = self.drain_once(deadline)
                 if delivered == 0 and left == 0:
                     return  # queue empty
                 if left:
