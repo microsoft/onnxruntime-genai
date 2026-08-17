@@ -57,10 +57,9 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
 
     nlohmann::json raw_requests = nlohmann::json::array();
     for (const auto& request : output.requests) {
-      raw_requests.push_back({
-          {"request_id", request.request_id},
-          {"ttft_ms", request.ttft_ms},
-          {"inter_token_latency_ms", request.inter_token_latency_ms}});
+      raw_requests.push_back({{"request_id", request.request_id},
+                              {"ttft_ms", request.ttft_ms},
+                              {"inter_token_latency_ms", request.inter_token_latency_ms}});
     }
 
     result["status"] = "success";

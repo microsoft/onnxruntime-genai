@@ -118,12 +118,14 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   RegisterExecutionProviderLibraries(configs);
 
   const nlohmann::json staged_versions = ReadStagedVersions();
-  
+
   BenchmarkContext context;
   context.ort_version = staged_versions.value("ort_version", std::string{"unknown"});
   context.cuda_plugin_ep_version = staged_versions.value("cuda_plugin_ep_version", std::string{"unknown"});
-  context.genai_version = ORT_GENAI_BENCH_GENAI_VERSION; // ORT_GENAI_BENCH_GENAI_VERSION is a compiler -D macro, set in CMakeLists.txt
+  context.genai_version = ORT_GENAI_BENCH_GENAI_VERSION;  // ORT_GENAI_BENCH_GENAI_VERSION is a compiler -D macro,
+                                                          // set in CMakeLists.txt
 
+  bool any_scenario_failed = false;
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
 
@@ -133,13 +135,14 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
     }
 
     const nlohmann::json result = scenario->Run(cfg, context);
+    any_scenario_failed |= result.value("status", "failed") != "success";
 
     std::ostringstream results_file_name;
     results_file_name << cfg.scenario << "_results_" << std::setw(3) << std::setfill('0') << i + 1 << ".json";
     WriteJsonFile(out_dir / results_file_name.str(), result);
   }
 
-  return 0;
+  return any_scenario_failed ? 1 : 0;
 }
 
 }  // namespace engine_benchmark

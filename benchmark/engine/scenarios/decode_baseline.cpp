@@ -24,6 +24,8 @@ namespace fs = std::filesystem;
 namespace engine_benchmark {
 namespace {
 
+constexpr int kRandomSeed = 42;
+
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 1 || concurrency == 2 || concurrency == 4 || concurrency == 8;
 }
@@ -135,6 +137,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       const size_t max_length = prompt_token_count + static_cast<size_t>(config.generation_tokens);
       params.back()->SetSearchOption(
           "max_length", static_cast<double>(max_length));
+      params.back()->SetSearchOption("random_seed", kRandomSeed);
 
       request_tokens[static_cast<size_t>(i)].assign(
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
