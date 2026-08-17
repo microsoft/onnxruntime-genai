@@ -23,7 +23,7 @@ int32_t RowArgmax(std::span<const float> logits) {
 }
 
 void SelectProposalToken(std::span<const float> logits, int index, bool greedy,
-                         int top_k, float top_p, float temperature, int vocab_size,
+                         int top_k, float top_p, float temperature,
                          SampledCategorical& sampled, std::mt19937& rng,
                          SpeculativeDecodingStrategy::Proposal& proposal) {
   if (greedy) {
@@ -32,10 +32,10 @@ void SelectProposalToken(std::span<const float> logits, int index, bool greedy,
   }
 
   ComputeSampledCategorical(logits, top_k, top_p, temperature, sampled);
-  proposal.probs[index] = ScatterToFullVocab(sampled, vocab_size);
-  std::discrete_distribution<int> distribution(proposal.probs[index].begin(),
-                                               proposal.probs[index].end());
-  proposal.tokens[index] = static_cast<int32_t>(distribution(rng));
+  auto& distribution = proposal.distributions[index];
+  distribution.indices.assign(sampled.indices.begin(), sampled.indices.end());
+  distribution.probs.assign(sampled.probs.begin(), sampled.probs.end());
+  proposal.tokens[index] = SampleSparseToken(distribution.indices, distribution.probs, rng);
 }
 
 }  // namespace
@@ -98,8 +98,8 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
   Proposal proposal;
   proposal.tokens.resize(K);
   if (!greedy)
-    // greedy-match leaves probs empty
-    proposal.probs.resize(K);
+    // greedy-match leaves distributions empty
+    proposal.distributions.resize(K);
 
   SampledCategorical sampled;
 
@@ -119,7 +119,10 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         // forced token: no draft prediction, no distribution
         proposal.tokens[i] = ff_queue.front();
         ff_queue.pop_front();
-        if (!greedy) proposal.probs[i].clear();
+        if (!greedy) {
+          proposal.distributions[i].indices.clear();
+          proposal.distributions[i].probs.clear();
+        }
       } else {
         auto row = penalty_processor.Apply({pending.data(), pending.size()}, seed_length + i, prefix);
         auto gb = guidance_buf.CpuSpan();
@@ -128,7 +131,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
         draft_grammar->ProcessLogits(guidance_buf);
         auto masked = guidance_buf.CopyDeviceToCpu();
         SelectProposalToken({masked.data(), static_cast<size_t>(vocab_size)}, i, greedy,
-                            search.top_k, search.top_p, search.temperature, vocab_size,
+                            search.top_k, search.top_p, search.temperature,
                             sampled, rng_, proposal);
         const int32_t chosen = proposal.tokens[i];
         if (std::find(eos_ids.begin(), eos_ids.end(), chosen) == eos_ids.end()) {
@@ -153,7 +156,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
 
   // Non-guidance path - d_0 from the carried-over pending logits, then chain d_1..d_{K-1}.
   SelectProposalToken(penalty_processor.Apply(spec_state_.draft_pending_logits(), seed_length, prefix),
-                      0, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+                      0, greedy, search.top_k, search.top_p, search.temperature,
                       sampled, rng_, proposal);
   for (int i = 1; i < K; i++) {
     if (penalty_processor.IsActive())
@@ -165,7 +168,7 @@ SpeculativeDecodingStrategy::Proposal BaseSpeculativeStrategy::Propose(
     auto cpu = lgt.CopyDeviceToCpu();
     SelectProposalToken(
         penalty_processor.Apply({cpu.data(), static_cast<size_t>(vocab_size)}, seed_length + i, prefix),
-        i, greedy, search.top_k, search.top_p, search.temperature, vocab_size,
+        i, greedy, search.top_k, search.top_p, search.temperature,
         sampled, rng_, proposal);
   }
 

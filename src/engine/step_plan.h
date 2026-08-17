@@ -23,12 +23,14 @@ enum class StepOutcomeKind {
   UnserviceableRequest,
   Committed,
   RetryableBatchAbort,
+  ExecutionCapacityExceeded,
   ExecutionContractFailure,
   FatalExecutionFailure,
 };
 
 enum class ExecutionFailureKind {
   RetryableAbort,
+  CapacityExceeded,
   Unknown,
 };
 

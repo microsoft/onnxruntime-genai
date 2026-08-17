@@ -61,5 +61,9 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
                            int num_return_sequences,
                            const int* cache_indir_data);
 
+// Copies window slot `src_slot` onto slot `dst_slot` for each of `count` state tensors described
+// by `descs` (device memory, {base, slot_bytes} pairs). One launch replaces `count` memcpys.
+void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream);
+
 }  // namespace cuda
 }  // namespace Generators
