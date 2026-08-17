@@ -27,6 +27,7 @@ import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
+from telemetry_utils import emit_benchmark_telemetry
 from telemetry_utils import get_telemetry as _get_telemetry
 from telemetry_utils import normalize_execution_provider, sanitize_model_identifier
 from tqdm import tqdm
@@ -505,26 +506,24 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     # Emit telemetry for this benchmark run
     with suppress(Exception):
-        telemetry = _get_telemetry()
-        telemetry.log_benchmark(
-            model_name=sanitize_model_identifier(args.model_name),
+        emit_benchmark_telemetry(
+            model_name=args.model_name,
             precision=args.precision,
-            backend="onnxruntime-genai",
-            device=normalize_execution_provider(args.execution_provider),
+            execution_provider=args.execution_provider,
             batch_size=batch_size,
             prompt_length=prompt_length,
             tokens_generated=generation_length,
-            tokenization_latency_ms=avg_tokenization_latency_ms,
-            tokenization_throughput=avg_tokenization_thrpt,
-            prompt_processing_latency_ms=avg_prompt_latency_ms,
-            prompt_processing_throughput=avg_per_token_prompt_thrpt,
-            token_generation_latency_ms=avg_token_gen_latency_ms,
-            token_generation_throughput=avg_token_gen_thrpt,
-            sampling_latency_ms=avg_sampling_latency_ms,
-            sampling_throughput=avg_sampling_thrpt,
-            wall_clock_time_ms=avg_wall_clock_time * 1000,
-            wall_clock_throughput=avg_wall_clock_thrpt,
-            time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
+            tokenization_latency_ms=tokenization_latency_ms,
+            tokenization_throughput=tokenization_thrpt,
+            prompt_processing_latency_ms=prompt_latency_ms,
+            prompt_processing_throughput=per_token_prompt_thrpt,
+            token_generation_latency_ms=token_gen_latency_ms,
+            token_generation_throughput=token_gen_thrpt,
+            sampling_latency_ms=sampling_latency_ms,
+            sampling_throughput=sampling_thrpt,
+            wall_clock_time_ms=wall_clock_time * 1000,
+            wall_clock_throughput=wall_clock_thrpt,
+            time_to_first_token_ms=ttft_ms,
             peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
             peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
             session_id=model_session_id,

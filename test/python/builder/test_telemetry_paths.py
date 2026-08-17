@@ -11,6 +11,8 @@ MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 def _load_builder_entrypoint_module():
     builders_stub = types.ModuleType("builders")
     builders_stub.__file__ = str(MODELS_DIR / "builders" / "__init__.py")
+    builders_stub.__path__ = [str(MODELS_DIR / "builders")]
+    builders_stub.__package__ = "builders"
 
     def _getattr(name):
         return type(name, (), {})

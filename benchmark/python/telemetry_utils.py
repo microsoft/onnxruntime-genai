@@ -42,4 +42,58 @@ def get_telemetry():
     return GenAITelemetry()
 
 
-__all__ = ["get_telemetry", "normalize_execution_provider", "sanitize_model_identifier"]
+def emit_benchmark_telemetry(
+    *,
+    model_name,
+    precision,
+    execution_provider,
+    batch_size,
+    prompt_length,
+    tokens_generated,
+    tokenization_latency_ms,
+    tokenization_throughput,
+    prompt_processing_latency_ms,
+    prompt_processing_throughput,
+    token_generation_latency_ms,
+    token_generation_throughput,
+    sampling_latency_ms,
+    sampling_throughput,
+    wall_clock_time_ms,
+    wall_clock_throughput,
+    time_to_first_token_ms,
+    peak_memory_gpu_mb,
+    peak_memory_cpu_mb,
+    session_id,
+):
+    """Emit one benchmark event using already-aggregated benchmark metrics."""
+    get_telemetry().log_benchmark(
+        model_name=sanitize_model_identifier(model_name),
+        precision=precision,
+        backend="onnxruntime-genai",
+        device=normalize_execution_provider(execution_provider),
+        batch_size=batch_size,
+        prompt_length=prompt_length,
+        tokens_generated=tokens_generated,
+        tokenization_latency_ms=tokenization_latency_ms,
+        tokenization_throughput=tokenization_throughput,
+        prompt_processing_latency_ms=prompt_processing_latency_ms,
+        prompt_processing_throughput=prompt_processing_throughput,
+        token_generation_latency_ms=token_generation_latency_ms,
+        token_generation_throughput=token_generation_throughput,
+        sampling_latency_ms=sampling_latency_ms,
+        sampling_throughput=sampling_throughput,
+        wall_clock_time_ms=wall_clock_time_ms,
+        wall_clock_throughput=wall_clock_throughput,
+        time_to_first_token_ms=time_to_first_token_ms,
+        peak_memory_gpu_mb=peak_memory_gpu_mb,
+        peak_memory_cpu_mb=peak_memory_cpu_mb,
+        session_id=session_id,
+    )
+
+
+__all__ = [
+    "emit_benchmark_telemetry",
+    "get_telemetry",
+    "normalize_execution_provider",
+    "sanitize_model_identifier",
+]

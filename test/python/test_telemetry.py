@@ -401,6 +401,48 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         mock_exists.assert_not_called()
 
+    def test_emits_current_mean_and_median_metrics(self):
+        import statistics
+
+        for aggregation, aggregate in (("mean", statistics.fmean), ("median", statistics.median)):
+            with self.subTest(aggregation=aggregation):
+                module = self._load_helper()
+                telemetry = MagicMock()
+                module.get_telemetry = MagicMock(return_value=telemetry)
+                tokenization_latency_ms = aggregate([1.0, 3.0, 20.0])
+                prompt_latency_ms = aggregate([2.0, 4.0, 30.0])
+                ttft_ms = aggregate([3.0, 7.0, 50.0])
+
+                module.emit_benchmark_telemetry(
+                    model_name=r"C:\Users\alice\models\model.onnx",
+                    precision="fp16",
+                    execution_provider="NvTensorRtRtx",
+                    batch_size=2,
+                    prompt_length=16,
+                    tokens_generated=8,
+                    tokenization_latency_ms=tokenization_latency_ms,
+                    tokenization_throughput=100.0,
+                    prompt_processing_latency_ms=prompt_latency_ms,
+                    prompt_processing_throughput=200.0,
+                    token_generation_latency_ms=5.0,
+                    token_generation_throughput=300.0,
+                    sampling_latency_ms=6.0,
+                    sampling_throughput=400.0,
+                    wall_clock_time_ms=7.0,
+                    wall_clock_throughput=500.0,
+                    time_to_first_token_ms=ttft_ms,
+                    peak_memory_gpu_mb=8.0,
+                    peak_memory_cpu_mb=9.0,
+                    session_id=10,
+                )
+
+                attributes = telemetry.log_benchmark.call_args.kwargs
+                self.assertEqual(attributes["model_name"], "[path]")
+                self.assertEqual(attributes["device"], "trt-rtx")
+                self.assertEqual(attributes["tokenization_latency_ms"], tokenization_latency_ms)
+                self.assertEqual(attributes["prompt_processing_latency_ms"], prompt_latency_ms)
+                self.assertEqual(attributes["time_to_first_token_ms"], ttft_ms)
+
     def test_source_telemetry_loader_restores_sys_path(self):
         import types
 
