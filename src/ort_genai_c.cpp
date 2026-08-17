@@ -967,8 +967,17 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
 }
 
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
+  return OgaTokenizerApplyChatTemplateWithOptions(tokenizer, template_str, messages, tools, nullptr,
+                                                  add_generation_prompt, out_string);
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer* tokenizer, const char* template_str,
+                                                                 const char* messages, const char* tools,
+                                                                 const char* template_kwargs, bool add_generation_prompt,
+                                                                 const char** out_string) {
   OGA_TRY
-  *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));
+  *out_string = AllocOgaString(tokenizer->ApplyChatTemplateWithOptions(template_str, messages, tools,
+                                                                       template_kwargs, add_generation_prompt));
   return nullptr;
   OGA_CATCH
 }
