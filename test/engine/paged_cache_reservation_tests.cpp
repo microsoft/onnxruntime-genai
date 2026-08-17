@@ -223,9 +223,7 @@ TEST(PagedCacheReservationTest, CommittedWindowBlocksCanBeRemovedAndReused) {
   ASSERT_EQ(tables.size(), 1u);
   const auto first_window_blocks = tables[0].window_blocks;
 
-  pool.Free(tables[0].blocks);
-  window_pool.Free(tables[0].window_blocks);
-  tables.erase(tables.begin());
+  RemovePagedCacheBlockTable(pool, &window_pool, tables, kRequestA);
 
   const std::array request_b{
       PagedCacheReservationRequest{kRequestB, 1, true},

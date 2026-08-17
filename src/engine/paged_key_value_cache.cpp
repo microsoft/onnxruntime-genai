@@ -269,16 +269,8 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
-  for (auto request_it = block_tables_.begin(); request_it != block_tables_.end(); ++request_it) {
-    if (request_it->request_id == request.get()) {
-      block_pool_->Free(request_it->blocks);
-      if (Windowed()) {
-        window_block_pool_->Free(request_it->window_blocks);
-      }
-      block_tables_.erase(request_it);
-      return;
-    }
-  }
+  RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
+                             block_tables_, request.get());
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {

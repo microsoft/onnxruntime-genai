@@ -41,6 +41,11 @@ struct PagedCacheReservationDelta {
   bool newly_admitted{};
 };
 
+void RemovePagedCacheBlockTable(BlockPool& block_pool,
+                                BlockPool* window_block_pool,
+                                std::vector<PagedCacheBlockTable>& committed_tables,
+                                const void* request_id);
+
 enum class PagedCacheReservationState {
   Reserved,
   Committed,
