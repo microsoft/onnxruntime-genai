@@ -53,6 +53,14 @@ class Model:
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
+        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
+        # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
+        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+        # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
+        # 0 means "use the EP default at runtime"; set explicitly to override.
+        # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
+        # CPU  optimal: 16 (amortises O(C) shift traffic; measured minimum at W+16 on EPYC).
+        self.window_kv_cache_slack = 0  # runtime will apply the EP default when this is 0
         self.intermediate_size = config.ffn_hidden_size if hasattr(config, "ffn_hidden_size") else config.intermediate_size
         self.hidden_size = config.hidden_size
         self.num_kv_heads = (
@@ -145,6 +153,7 @@ class Model:
             "block_table": "block_table",                                                                        # For paged attention models
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
+            "attention_metadata": "attention_metadata",                                                          # For paged attention models
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                      # For standard models
@@ -156,6 +165,7 @@ class Model:
             "block_table": ir.DataType.INT32,                                                                    # For paged attention models
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
+            "attention_metadata": ir.DataType.INT32,                                                              # For paged attention models
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -167,6 +177,7 @@ class Model:
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
+            "attention_metadata": [2],                                                                           # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
@@ -244,6 +255,8 @@ class Model:
         rope_theta = (
             config.rope_theta
             if hasattr(config, "rope_theta")
+            else config.rope_parameters.get("rope_theta", 10000)
+            if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict)
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
             else rope_params["rope_theta"]
@@ -326,14 +339,20 @@ class Model:
         moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
+        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
         # (expert_weight_bits, QMoE quant_type):
-        #   "int4"  -> (4, "int")  INT4 QMoE (default)
-        #   "int8"  -> (8, "int")  INT8 QMoE
-        #   "mxfp4" -> (4, "fp4")  MXFP4 QMoE (CUDA-only)
+        #   "int4"  -> (4, "int")    INT4 QMoE (default)
+        #   "int8"  -> (8, "int")    INT8 QMoE
+        #   "mxfp4" -> (4, "fp4")    MXFP4 QMoE (CUDA-only)
+        #   "nvfp4" -> (4, "nvfp4")  NVFP4 QMoE (CUDA-only)
         moe_descriptor = resolve_dtype(self.quant_config.moe.type)
         expert_weight_bits = moe_descriptor.bits
-        qmoe_quant_type = "fp4" if moe_descriptor.kind == "mx" else "int"
+        # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
+        # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        if moe_descriptor.kind == "mx":
+            qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+        else:
+            qmoe_quant_type = "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -353,7 +372,7 @@ class Model:
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8) or "fp4" (MXFP4).
+            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
         }
 
         # LM head-specific variables
@@ -374,7 +393,7 @@ class Model:
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
         self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
-        # QMoE block size (MXFP4 is pinned to a block size of 32 inside MoEConfig).
+        # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig).
         self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
             "accuracy_level": weights_cfg.accuracy_level,
@@ -432,7 +451,7 @@ class Model:
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
         else:
-            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths"]:
+            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths", "attention_metadata"]:
                 del self.input_names[name]
 
     def make_outputs_init(self):
@@ -632,8 +651,8 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_quantized_kv_cache_init(self):
-        if self.attention_attrs["op_type"] != "GroupQueryAttention":
-            raise ValueError("Quantized KV cache requires GroupQueryAttention.")
+        if self.attention_attrs["op_type"] not in {"GroupQueryAttention", "PagedAttention"}:
+            raise ValueError("Quantized KV cache requires GroupQueryAttention or PagedAttention.")
         if self.ep not in {"cpu", "cuda"}:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
@@ -644,6 +663,14 @@ class Model:
         is_fp8 = self.kv_cache_quant_type.startswith("fp8")
         self.kv_cache_bit_width = 4 if is_int4 else 8
         self.kv_quant_type = "PER_CHANNEL" if self.kv_cache_quant_type.endswith("per_channel") else "PER_TENSOR"
+
+        if self.use_paged_attention and is_int4:
+            # PagedAttention's T_CACHE type constraint is {float16, bfloat16, int8, float8e4m3fn};
+            # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
+            raise ValueError(
+                "PagedAttention only supports int8 and fp8 quantized KV caches, "
+                f"got kv_cache_quant_type='{self.kv_cache_quant_type}'."
+            )
 
         if is_fp8:
             # FP8 E4M3: stored one byte per element (no bit-packing), kernel selects the fp8
@@ -705,6 +732,11 @@ class Model:
                 f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
             )
 
+        # PagedAttention validates the per-channel scale shape and requires the canonical
+        # (kv_num_heads, 1, head_size) form, while GroupQueryAttention only looks at the element
+        # count. Emit the canonical shape on the paged path and keep the flat vector elsewhere.
+        scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
+
         def make_scale(per_layer, layer_id):
             scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
             if scale.size != scale_size:
@@ -713,7 +745,7 @@ class Model:
                 )
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
-            return scale
+            return scale.reshape(scale_shape)
 
         for layer_id in range(self.num_layers):
             k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
@@ -888,6 +920,7 @@ class Model:
             inputs["block_table"] = self.input_names["block_table"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
+            inputs["attention_metadata"] = self.input_names["attention_metadata"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -952,7 +985,7 @@ class Model:
             },
         }
 
-        if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
+        if self.ep in self.eps_with_windowed_kv_cache and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
             layer_idxs = [
                 layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)
@@ -963,6 +996,9 @@ class Model:
                 "slide_key_value_cache": False,
                 "slide_inputs": False,
                 "layers": layer_idxs,
+                # Positions kept beyond the window so the runtime can size the cache reproducibly.
+                # Unused by trt-rtx, whose EP evicts internally.
+                "cache_slack": self.window_kv_cache_slack,
             }
 
         if self.ep != "cpu":
@@ -1004,9 +1040,14 @@ class Model:
     def make_key_value_cache_shape(self, layer_id, shape):
         """
         Modifies KV cache shape dimension names for models with alternating attention patterns.
-        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
+        Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
+        unify them with the full-attention layers, whose cache is allocated at max_length.
         """
-        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+        if (
+            self.ep in self.eps_with_windowed_kv_cache
+            and hasattr(self, "is_local")
+            and self.is_local(layer_id)
+        ):
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
@@ -2889,6 +2930,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=self.input_names["block_table"],
+                attention_metadata=self.input_names["attention_metadata"],
                 **kwargs,
             )
         else:
@@ -2952,6 +2994,59 @@ class Model:
             output, self.io_dtype, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads]
         )
 
+    def extend_with_optional_inputs(self, inputs, optional_inputs):
+        # ONNX lets trailing optional inputs be omitted entirely, so drop the unused ones at the
+        # end instead of emitting empty placeholders. Placeholders in the middle are kept because
+        # they reserve the position of the later inputs.
+        while optional_inputs and not optional_inputs[-1]:
+            optional_inputs.pop()
+        inputs.extend(optional_inputs)
+
+    def get_qk_norm_weight_inputs(self, **kwargs):
+        # Shared by GroupQueryAttention and PagedAttention: both fuse the Q/K RMSNorm and both
+        # require the pair to be provided together.
+        q_norm_weight = kwargs.get("q_norm_weight", "")
+        k_norm_weight = kwargs.get("k_norm_weight", "")
+        if bool(q_norm_weight) != bool(k_norm_weight):
+            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
+        return q_norm_weight, k_norm_weight
+
+    def get_kv_cache_scale_inputs(self, **kwargs):
+        # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
+        # initializer names, or empty placeholders when the KV cache is not quantized.
+        if self.kv_cache_quant_type == "none":
+            return "", ""
+        layer_id = kwargs.get("layer_id")
+        if layer_id is None:
+            raise ValueError("layer_id is required for quantized KV cache.")
+        return self.get_kv_cache_scale_names(layer_id)
+
+    def get_attention_op_attributes(self, **kwargs):
+        # Attributes shared by GroupQueryAttention and PagedAttention. Op-specific attributes
+        # (e.g. GQA's `kv_cache_bit_width`) are added by the caller.
+        attributes = {
+            "num_heads": self.num_attn_heads,
+            "kv_num_heads": self.num_kv_heads,
+            "scale": self.attention_attrs["scale"],
+            "local_window_size": self.window_size,
+            "softcap": self.attention_attrs["softcap"],
+            "do_rotary": self.attention_attrs["use_rope_in_attn"],
+            "rotary_interleaved": self.rope_attrs["interleaved"],
+        }
+        if kwargs.get("q_norm_weight", ""):
+            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+
+        if self.kv_cache_quant_type != "none":
+            attributes["k_quant_type"] = self.kv_quant_type
+            attributes["v_quant_type"] = self.kv_quant_type
+
+        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
+            # The past/present buffers of this layer are window-sized rather than max_length-sized,
+            # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
+            attributes["sliding_window_cache"] = 1
+
+        return attributes
+
     def make_group_query_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
@@ -2967,57 +3062,26 @@ class Model:
             "",  # attention_bias
             kwargs.get("sinks", ""),
         ]
-        layer_id = kwargs.get("layer_id")
-        if self.kv_cache_quant_type != "none":
-            if layer_id is None:
-                raise ValueError("layer_id is required for quantized KV cache.")
-            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            inputs.extend(
-                [
-                    k_scale_name,
-                    v_scale_name,
-                ]
-            )
-        q_norm_weight = kwargs.get("q_norm_weight", "")
-        k_norm_weight = kwargs.get("k_norm_weight", "")
-        if bool(q_norm_weight) != bool(k_norm_weight):
-            raise ValueError("q_norm_weight and k_norm_weight must be provided together.")
-        if q_norm_weight:
-            if self.kv_cache_quant_type == "none":
-                inputs.extend(
-                    [
-                        "",  # k_scale
-                        "",  # v_scale
-                    ]
-                )
-            inputs.extend(
-                [
-                    q_norm_weight,
-                    k_norm_weight,
-                ]
-            )
+        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
+        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
+
+        # Optional trailing inputs of GroupQueryAttention, in schema order:
+        #   12: k_scale, 13: v_scale, 14: q_norm_weight, 15: k_norm_weight
+        self.extend_with_optional_inputs(
+            inputs,
+            [
+                k_scale_name,
+                v_scale_name,
+                q_norm_weight,
+                k_norm_weight,
+            ],
+        )
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        attributes = {
-            "num_heads": self.num_attn_heads,
-            "kv_num_heads": self.num_kv_heads,
-            "scale": self.attention_attrs["scale"],
-            "local_window_size": self.window_size,
-            "softcap": self.attention_attrs["softcap"],
-            "do_rotary": self.attention_attrs["use_rope_in_attn"],
-            "rotary_interleaved": self.rope_attrs["interleaved"],
-        }
-        if q_norm_weight:
-            attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
+        attributes = self.get_attention_op_attributes(**kwargs)
         if self.kv_cache_quant_type != "none":
-            attributes.update(
-                {
-                    "k_quant_type": self.kv_quant_type,
-                    "v_quant_type": self.kv_quant_type,
-                    "kv_cache_bit_width": self.kv_cache_bit_width,
-                }
-            )
+            attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -3121,21 +3185,43 @@ class Model:
             kwargs.get("cos_cache", ""),
             kwargs.get("sin_cache", ""),
         ]
+
+        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
+        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
+
+        # Optional trailing inputs of PagedAttention, in schema order:
+        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
+        #   16: attention_metadata
+        # The scheduler-provided slot_mapping is not used here; slots are derived from
+        # past_seqlens / cumulative_sequence_length / block_table by the op.
+        # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
+        # can select a backend and size its launch without a device-to-host readback of the sequence
+        # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
+        self.extend_with_optional_inputs(
+            inputs,
+            [
+                "",  # slot_mapping
+                kwargs.get("sinks", ""),  # head_sink
+                q_norm_weight,
+                k_norm_weight,
+                k_scale_name,
+                v_scale_name,
+                kwargs.get("attention_metadata", ""),
+            ],
+        )
+
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        # PagedAttention derives the cache element type from the tensor itself, so unlike
+        # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
+        attributes = self.get_attention_op_attributes(**kwargs)
         self.make_node(
             "PagedAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            local_window_size=self.window_size,
-            softcap=self.attention_attrs["softcap"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rope_attrs["interleaved"],
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
 
@@ -3833,6 +3919,19 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
+    def make_fp8e4m3_initializer(self, scales_uint8, name):
+        """Register a FLOAT8E4M3FN initializer from raw e4m3 code bytes (uint8).
+
+        NVFP4 block scales are stored as FP8 e4m3 bytes. Build the IR tensor directly
+        from the raw uint8 bytes and tag it FLOAT8E4M3FN (the encoding the CUDA QMoE
+        NVFP4 kernel expects).
+        """
+        arr = scales_uint8.detach().cpu().numpy().astype(np.uint8) if isinstance(scales_uint8, torch.Tensor) else np.asarray(scales_uint8, dtype=np.uint8)
+        ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=ir.DataType.FLOAT8E4M3FN, name=name)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
+        value.const_value = ir_tensor
+        self.model.graph.register_initializer(value)
+
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).
 
@@ -3908,9 +4007,10 @@ class Model:
                 kwargs.get("zero_points3", ""),
             ])
 
-        is_fp4 = self.moe_attrs.get("quant_type") == "fp4"
+        quant_type = self.moe_attrs.get("quant_type")
+        is_fp4 = quant_type in ("fp4", "nvfp4")
         if is_fp4:
-            # The FP4 (MXFP4) QMoE op consumes per-expert float32 global scales at
+            # The FP4 (MXFP4/NVFP4) QMoE op consumes per-expert float32 global scales at
             # fixed input positions 15 (fc1) and 16 (fc2). Positions 11-14 are the
             # optional zero_points (11-13) and router_weights (14). The zero_points
             # block above already appended inputs up to index 13 for non-TRT-RTX EPs
@@ -3931,8 +4031,8 @@ class Model:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
         if is_fp4:
-            # Select the MXFP4 kernel path; integer QMoE leaves quant_type at its default.
-            extra_kwargs["quant_type"] = "fp4"
+            # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
+            extra_kwargs["quant_type"] = quant_type
 
         # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
         # (see make_qmoe_weights, which produces the matching bytes):

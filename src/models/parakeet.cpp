@@ -358,6 +358,7 @@ void ParakeetTdtState::EncodeNextChunk() {
   // ORT typically routes outputs back to CPU via MemcpyToHost. Handle both
   // just in case.
   auto enc_shape = enc_output->GetTensorTypeAndShapeInfo()->GetShape();
+  ValidateParakeetEncoderOutputShape(enc_shape, cfg_.hidden_dim);
   current_enc_time_ = enc_shape[2];
   size_t enc_elems = 1;
   for (auto d : enc_shape) enc_elems *= static_cast<size_t>(d);
@@ -430,6 +431,8 @@ int32_t ParakeetTdtState::EmitNextToken() {
 
     // Decoder output is [1, dec_dim, 1]; reshape to [1, 1, dec_dim] for
     // the joiner via a plain memcpy (layout is identical for contiguous data).
+    auto dec_output_shape = decoder_output_->GetTensorTypeAndShapeInfo()->GetShape();
+    ValidateParakeetDecoderOutputShape(dec_output_shape, dec_dim);
     auto dec_shape = std::array<int64_t, 3>{1, 1, dec_dim};
     if (!decoder_frame_) {
       decoder_frame_ = OrtValue::CreateTensor(cpu_allocator, dec_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);

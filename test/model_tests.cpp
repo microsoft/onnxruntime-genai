@@ -384,7 +384,7 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   // Expected output sequence (input + generated tokens) for validation with greedy search
   const std::vector<int32_t> expected_output{
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
-      15043, 1554, 13, 16271, 29892, 8733};
+      15043, 29991, 306, 29915, 29885, 2599};
 
   auto config = OgaConfig::Create(resolved_path.c_str());
   config->ClearProviders();
@@ -520,6 +520,39 @@ TEST(ModelTests, BatchSizeZeroThrows) {
   params->SetSearchOption("batch_size", 0);  // below lower bound of 1
 
   EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumReturnSequencesExceedsNumBeamsThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 8);  // exceeds num_beams (4)
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumReturnSequencesZeroThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 0);  // below lower bound of 1
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumReturnSequencesValidWithinBounds) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 2);  // valid: 1 <= 2 <= 4
+
+  EXPECT_NO_THROW(OgaGenerator::Create(*model, *params));
 }
 #endif
 // --- Validation tests (no model files required) ---

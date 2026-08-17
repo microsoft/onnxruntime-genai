@@ -45,7 +45,7 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
 
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
+    auto input_ids = request->UnprocessedTokensCpu();
     for (size_t j = 0; j < max_sequence_length; ++j) {
       cpu_span[i * max_sequence_length + j] = (j < input_ids.size()) ? input_ids[j] : model->config_->model.pad_token_id;
     }
@@ -112,11 +112,11 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
 
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokens().CopyDeviceToCpu();
-    auto current_sequence_length = request->IsPrefill() ? 1 : request->CurrentSequenceLength();
+    auto input_ids = request->UnprocessedTokensCpu();
+    const int64_t base_position = request->ProcessedSequenceLength();
 
     for (size_t j = 0; j < max_sequence_length; ++j) {
-      cpu_span[i * max_sequence_length + j] = (j < input_ids.size() && input_ids[j] != model->config_->model.pad_token_id) ? current_sequence_length - 1 + j : 0;
+      cpu_span[i * max_sequence_length + j] = (j < input_ids.size() && input_ids[j] != model->config_->model.pad_token_id) ? base_position + j : 0;
     }
   }
 
@@ -170,14 +170,18 @@ std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
   const std::vector<int64_t> logits_shape{batch_size, vocab_size};
 
   const bool requires_cast = logits_->GetType() != Ort::TypeToTensorType<float>;
+  DeviceSpan<float> logits_fp32_span;
   if (requires_cast) {
     logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_fp32_->CreateTensor(logits_shape);
+    // Wrapped once so that every row below is a subspan of the same allocation: GetDeviceSpan()
+    // wraps the tensor memory afresh on each call, which would leave the rows unrelated.
+    logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
   }
 
   for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
     if (requires_cast) {
-      auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
+      auto logits_of_last_token_fp32 = logits_fp32_span.subspan(i * vocab_size, vocab_size);
       void* src_data = logits_bytes_vector[i].Span().data();
       void* dst_data = logits_of_last_token_fp32.Span().data();
       model_.p_device_inputs_->Cast(src_data, dst_data, logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);

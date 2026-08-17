@@ -5,16 +5,77 @@
 
 #include "engine.h"
 #include "../search.h"
+#include <exception>
 
 namespace Generators {
 
-ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
-                                     std::shared_ptr<Model> model)
-    : requests_{requests}, model_{model} {
+namespace {
+
+// Collapses Request::GenerateNextTokens' dispatch into the single (k, p, temperature) triple that
+// each branch ends up handing to the sampler on CUDA, where SelectTop() is SampleTopKTopP(1, 0, 1),
+// SampleTopK(k, t) is SampleTopKTopP(k, 1, t) and SampleTopP(p, t) is SampleTopKTopP(-1, p, t).
+// Returns nothing for options the per-request path rejects, so that it keeps raising the error.
+std::optional<BatchedSamplingParams> ResolveSampleArgs(const Config::Search& search) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0)
+    return BatchedSamplingParams{1, 0.0f, 1.0f};
+
+  if (search.num_beams != 1 || search.top_p < 0.0f || search.top_p > 1.0f || search.top_k < 0)
+    return std::nullopt;
+
+  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1)
+    return BatchedSamplingParams{search.top_k, search.top_p, search.temperature};
+  if (search.top_k > 1)
+    return BatchedSamplingParams{search.top_k, 1.0f, search.temperature};
+  return BatchedSamplingParams{-1, search.top_p, search.temperature};
 }
 
-std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
-  return OrtRunOptions::Create();
+}  // namespace
+
+ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
+                                     std::shared_ptr<Model> model,
+                                     BatchedSampler* batched_sampler,
+                                     BatchedSamplingPlan* sampling_plan)
+    : requests_{std::move(requests)}, model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+  // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
+  for (auto& request : requests_) {
+    request->ScheduleTokens();
+  }
+}
+
+ScheduledRequests::ScheduledRequests(const StepPlan& plan,
+                                     std::shared_ptr<Model> model,
+                                     BatchedSampler* batched_sampler,
+                                     BatchedSamplingPlan* sampling_plan)
+    : model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+  requests_.reserve(plan.requests.size());
+  std::vector<const void*> request_ids;
+  request_ids.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    if (!entry.request || entry.request_id != entry.request.get() ||
+        std::find(request_ids.begin(), request_ids.end(), entry.request_id) !=
+            request_ids.end()) {
+      throw std::runtime_error("The dynamic step plan contains an invalid request.");
+    }
+    const int64_t remaining =
+        entry.request->CurrentSequenceLength() -
+        entry.request->ProcessedSequenceLength();
+    if (remaining <= 0 || entry.unprocessed_token_count == 0 ||
+        entry.unprocessed_token_count > static_cast<size_t>(remaining)) {
+      throw std::runtime_error(
+          "The dynamic step token count must be positive and no greater than the remaining tokens.");
+    }
+    request_ids.push_back(entry.request_id);
+  }
+  for (const auto& entry : plan.requests) {
+    entry.request->BindScheduledTokenCount(
+        entry.unprocessed_token_count);
+    requests_.push_back(entry.request);
+  }
+}
+
+ExecutionContext& ScheduledRequests::CreateExecutionContext() {
+  execution_context_ = std::make_unique<ExecutionContext>();
+  return *execution_context_;
 }
 
 std::shared_ptr<GeneratorParams> ScheduledRequests::Params() {
@@ -33,16 +94,264 @@ void ScheduledRequests::GenerateNextTokens() {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
 
+  try {
+    auto logits = ProcessLogits();
+
+    if (TryGenerateNextTokensBatched(logits))
+      return;
+
+    // Every request owns an independent single-sequence search, so token selection runs once per
+    // request. Completing each one inline would block the host on the device once per request and
+    // serialize the whole batch; launching all of them first means only the first completion below
+    // actually waits for the device.
+    for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+          requests_[request_idx]->IsChunkComplete()) {
+        requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+      }
+    }
+
+    for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+          requests_[request_idx]->IsChunkComplete()) {
+        requests_[request_idx]->CompleteGeneration();
+      }
+    }
+
+    for (const auto& request : requests_) {
+      if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+        request->AdvanceChunk();
+    }
+  } catch (...) {
+    const auto error = std::current_exception();
+    try {
+      model_->p_device_scoring_->Synchronize();
+    } catch (...) {
+    }
+    std::rethrow_exception(error);
+  }
+}
+
+std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
+  if (!decoder_state_) {
+    throw std::runtime_error("Cannot process logits without the decoder state.");
+  }
+
   std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
   if (logits.size() != requests_.size()) {
     throw std::runtime_error("Logits size does not match the number of requests.");
   }
 
+  return logits;
+}
+
+// Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
+// and groups rows by resolved sampling parameters, while each Request owns its persistent RNG state.
+bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits) {
+  if (!PrepareBatchedSamplingPlan(false))
+    return false;
+
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed) {
-      requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+    if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+        requests_[request_idx]->IsChunkComplete())
+      sampling_plan_->logits.push_back(logits[request_idx]);
+  }
+
+  if (sampling_plan_->requests.empty())
+    return true;
+
+  for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
+    sampling_plan_->requests[request_idx]->PrepareGeneration(sampling_plan_->logits[request_idx]);
+  }
+
+  auto next_tokens = batched_sampler_->Sample(sampling_plan_->logits, sampling_plan_->params,
+                                              sampling_plan_->states,
+                                              model_->config_->model.vocab_size);
+
+  for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
+    if (!sampling_plan_->requests[request_idx]->BindNextTokensSlot(next_tokens.subspan(request_idx, 1)))
+      throw std::runtime_error("The scoring device supports batched sampling but the request search does not.");
+    sampling_plan_->requests[request_idx]->OnNextTokensSampled();
+  }
+
+  next_tokens.CopyDeviceToCpu();
+
+  for (auto* request : sampling_plan_->requests) {
+    request->CompleteGeneration();
+  }
+  for (const auto& request : requests_) {
+    if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+      request->AdvanceChunk();
+  }
+
+  return true;
+}
+
+bool ScheduledRequests::PrepareBatchedSamplingPlan(
+    bool require_transaction_support) {
+  if (!batched_sampler_ || !sampling_plan_ ||
+      (require_transaction_support && !batched_sampler_->SupportsTransactions())) {
+    return false;
+  }
+
+  sampling_plan_->Clear();
+  for (const auto& request : requests_) {
+    if (request->status_ == RequestStatus::Completed || !request->IsChunkComplete())
+      continue;
+
+    const auto args = ResolveSampleArgs(request->SearchOptions());
+    if (!args || !request->SupportsBatchedSampling()) {
+      sampling_plan_->Clear();
+      return false;
+    }
+    sampling_plan_->requests.push_back(request.get());
+    sampling_plan_->params.push_back(*args);
+    sampling_plan_->states.push_back(&request->SamplingState(*batched_sampler_));
+  }
+  return !sampling_plan_->requests.empty();
+}
+
+void ScheduledRequests::BeginTransaction() {
+  if (transaction_checkpoint_count_ != 0 || sampler_checkpoint_active_)
+    throw std::logic_error("Scheduled request transaction is already active.");
+
+  transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
+  try {
+    for (const auto& request : requests_) {
+      if (transaction_uses_batched_sampler_)
+        request->SaveStateForExternalSamplingTransaction();
+      else
+        request->SaveStateForTransaction();
+      ++transaction_checkpoint_count_;
+    }
+    if (transaction_uses_batched_sampler_) {
+      batched_sampler_->SaveStateForTransaction(sampling_plan_->states);
+      sampler_checkpoint_active_ = true;
+    }
+  } catch (...) {
+    const auto error = std::current_exception();
+    try {
+      RestoreStateForTransaction();
+    } catch (...) {
+    }
+    std::rethrow_exception(error);
+  }
+}
+
+void ScheduledRequests::GenerateNextTokensForTransaction(
+    const StepPlan& plan,
+    std::vector<RequestStepResult>& results) {
+  if (plan.requests.size() != requests_.size() ||
+      transaction_checkpoint_count_ != requests_.size()) {
+    throw std::logic_error("Scheduled request transaction does not match the step plan.");
+  }
+
+  auto logits = ProcessLogits();
+  results.assign(requests_.size(), RequestStepResult{});
+  if (transaction_uses_batched_sampler_) {
+    sampling_plan_->logits.clear();
+    size_t sampling_index = 0;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      if (!requests_[i]->IsChunkComplete())
+        continue;
+      if (sampling_index >= sampling_plan_->requests.size() ||
+          sampling_plan_->requests[sampling_index] != requests_[i].get()) {
+        throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
+      }
+      sampling_plan_->logits.push_back(logits[i]);
+      requests_[i]->PrepareGenerationForTransaction(logits[i]);
+      ++sampling_index;
+    }
+    if (sampling_index != sampling_plan_->requests.size())
+      throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
+
+    auto next_tokens = batched_sampler_->Sample(
+        sampling_plan_->logits, sampling_plan_->params,
+        sampling_plan_->states, model_->config_->model.vocab_size);
+    for (size_t i = 0; i < sampling_plan_->requests.size(); ++i) {
+      if (!sampling_plan_->requests[i]->BindNextTokensSlot(next_tokens.subspan(i, 1)))
+        throw std::runtime_error("The request search rejected the batched sampler output.");
+      sampling_plan_->requests[i]->OnNextTokensSampled();
+    }
+    next_tokens.CopyDeviceToCpu();
+    sampling_index = 0;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      if (!requests_[i]->IsChunkComplete())
+        continue;
+      results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      ++sampling_index;
+    }
+    return;
+  }
+
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    if (requests_[i]->IsChunkComplete())
+      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
+  }
+}
+
+void ScheduledRequests::RestoreStateForTransaction() {
+  std::exception_ptr error;
+  try {
+    model_->p_device_scoring_->Synchronize();
+  } catch (...) {
+    error = std::current_exception();
+  }
+
+  if (sampler_checkpoint_active_) {
+    try {
+      batched_sampler_->RestoreStateForTransaction();
+    } catch (...) {
+      error = std::current_exception();
+    }
+    sampler_checkpoint_active_ = false;
+  }
+
+  std::vector<Request*> pending_restore_completion;
+  pending_restore_completion.reserve(transaction_checkpoint_count_);
+  while (transaction_checkpoint_count_ > 0) {
+    auto* request = requests_[--transaction_checkpoint_count_].get();
+    try {
+      request->QueueStateRestoreForTransaction();
+      pending_restore_completion.push_back(request);
+    } catch (...) {
+      if (!error)
+        error = std::current_exception();
     }
   }
+  transaction_uses_batched_sampler_ = false;
+
+  try {
+    model_->p_device_scoring_->Synchronize();
+  } catch (...) {
+    if (!error)
+      error = std::current_exception();
+  }
+  for (auto* request : pending_restore_completion) {
+    try {
+      request->CompleteStateRestoreForTransaction();
+    } catch (...) {
+      if (!error)
+        error = std::current_exception();
+    }
+  }
+  if (error)
+    std::rethrow_exception(error);
+}
+
+void ScheduledRequests::CommitStateForTransaction() {
+  if (transaction_checkpoint_count_ != requests_.size())
+    throw std::logic_error("Scheduled request transaction is not active.");
+
+  for (const auto& request : requests_) {
+    request->CommitStateForTransaction();
+  }
+  transaction_checkpoint_count_ = 0;
+  if (sampler_checkpoint_active_) {
+    batched_sampler_->CommitStateForTransaction();
+    sampler_checkpoint_active_ = false;
+  }
+  transaction_uses_batched_sampler_ = false;
 }
 
 }  // namespace Generators

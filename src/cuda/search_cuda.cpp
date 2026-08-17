@@ -34,17 +34,22 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
   next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
   next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
+}
+
+void GreedySearch_Cuda::EnsureSamplingData() {
+  if (samplingdata_)
+    return;
 
   unsigned long long random_seed = (params_->search.random_seed != -1)
                                        ? params_->search.random_seed
                                        : std::random_device{}();
 
   // Allocate a single buffer for all sampling data
-  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params.search.batch_size, params.config.model.vocab_size, GetStream());
-  sampling_buffer_ = params.p_device->Allocate<uint8_t>(sampling_buffer_size);
+  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params_->search.batch_size, params_->config.model.vocab_size, GetStream());
+  sampling_buffer_ = params_->p_device->Allocate<uint8_t>(sampling_buffer_size);
 
   // Create SamplingData with the externally allocated buffer
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.batch_size, params.config.model.vocab_size, GetStream(),
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
                                                        sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
@@ -71,6 +76,7 @@ BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::ResetDone() {
   *done_cpu_ = false;
+  done_pending_ = false;
   CUDA_CHECK(cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream()));
 }
 
@@ -80,6 +86,75 @@ DeviceSpan<float> Search_Cuda::GetLogits() const {
 
 void Search_Cuda::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
+}
+
+void Search_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  if (!transaction_eos_seen_)
+    transaction_eos_seen_ = CudaMallocArray<bool>(eos_seen_.size());
+
+  if (checkpoint_local_state) {
+    if (!transaction_sequence_lengths_)
+      transaction_sequence_lengths_ = CudaMallocArray<int32_t>(sequence_lengths_.size());
+    CUDA_CHECK(cudaMemcpyAsync(transaction_sequence_lengths_.get(), sequence_lengths_.Span().data(),
+                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sequence_lengths_ = checkpoint_local_state;
+  CUDA_CHECK(cudaMemcpyAsync(transaction_eos_seen_.get(), eos_seen_.data(),
+                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  transaction_done_ = *done_cpu_;
+}
+
+void Search_Cuda::RestoreStateForTransactionImpl() {
+  if (transaction_saved_sequence_lengths_) {
+    CUDA_CHECK(cudaMemcpyAsync(sequence_lengths_.Span().data(), transaction_sequence_lengths_.get(),
+                               sequence_lengths_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  CUDA_CHECK(cudaMemcpyAsync(eos_seen_.data(), transaction_eos_seen_.get(),
+                             eos_seen_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+  transaction_saved_sequence_lengths_ = false;
+}
+
+void Search_Cuda::SynchronizeStateForTransactionImpl() {
+  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+}
+
+void Search_Cuda::CompleteStateRestoreForTransactionImpl() {
+  *done_cpu_ = transaction_done_;
+  done_pending_ = false;
+}
+
+void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state) {
+  Search_Cuda::SaveStateForTransactionImpl(checkpoint_local_state);
+  if (checkpoint_local_state) {
+    EnsureSamplingData();
+    if (!transaction_next_tokens_)
+      transaction_next_tokens_ = CudaMallocArray<int32_t>(next_tokens_.size());
+    if (!transaction_curand_states_)
+      transaction_curand_states_ = CudaMallocArray<curandState>(params_->search.batch_size);
+
+    CUDA_CHECK(cudaMemcpyAsync(transaction_next_tokens_.get(), next_tokens_.data(),
+                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+    CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), samplingdata_->curand_states,
+                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sampling_state_ = checkpoint_local_state;
+}
+
+void GreedySearch_Cuda::RestoreStateForTransactionImpl() {
+  Search_Cuda::RestoreStateForTransactionImpl();
+  if (transaction_saved_sampling_state_) {
+    CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), transaction_next_tokens_.get(),
+                               next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
+    CUDA_CHECK(cudaMemcpyAsync(samplingdata_->curand_states, transaction_curand_states_.get(),
+                               params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
+  }
+  transaction_saved_sampling_state_ = false;
+}
+
+void GreedySearch_Cuda::CompleteStateRestoreForTransactionImpl() {
+  Search_Cuda::CompleteStateRestoreForTransactionImpl();
+  completion_pending_ = false;
+  external_host_copy_ = false;
 }
 
 DeviceSpan<int32_t> GreedySearch_Cuda::GetNextTokens() {
@@ -155,27 +230,99 @@ void BeamSearch_Cuda::SelectTop() {
 }
 
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
+  EnsureSamplingData();
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
   cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
                   params_->search.batch_size, k, p, temperature);
 
+  external_host_copy_ = false;
+  LaunchNextTokensTail();
+
+  if (!defer_completion_)
+    CompleteGeneration();
+}
+
+bool GreedySearch_Cuda::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
+  if (params_->BatchBeamSize() != 1 || slot.size() != 1)
+    return false;
+
+  // Both spans stay alive through the shared_ptr inside DeviceSpan, so a caller that grows its
+  // buffer between steps cannot leave this search writing into freed memory.
+  next_tokens_buffer_ = slot;
+  next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
+  return true;
+}
+
+void GreedySearch_Cuda::OnNextTokensSampled() {
+  external_host_copy_ = true;
+  LaunchNextTokensTail();
+}
+
+// Everything token selection does after the sampler has written next_tokens_, for both the
+// per-search and the batched entry points. Nothing here reads a device result, so the launches
+// for a whole batch of searches can be queued before anyone waits.
+void GreedySearch_Cuda::LaunchNextTokensTail() {
   // Check for EOS
   assert(next_tokens_.size() == eos_seen_.size());
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
-  // Append tokens
-  CUDA_CHECK(cudaStreamSynchronize(GetStream()));
-  if (!*done_cpu_) {
+  // Append tokens. The launch is unconditional so that no device result has to be read back here:
+  // CheckForEOSAndPad has already replaced a finished sequence's token with the pad token, and the
+  // host-side length below is only advanced for sequences that had not finished, so a slot written
+  // for a finished sequence is never read.
+  if (sequences_.GetSequenceLength() < sequences_.max_length_) {
     cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+  }
+
+  completion_pending_ = true;
+  done_pending_ = true;
+}
+
+void GreedySearch_Cuda::CompleteGeneration() {
+  if (!completion_pending_)
+    return;
+
+  // done_cpu_ lives in pinned host memory written by CheckForEOSAndPad, so it is only meaningful
+  // once the stream has drained. When completion is deferred, every search in the batch has already
+  // launched its work by the time the first of these calls runs, so only that first call waits.
+  // Reading the next tokens back here rides along on the same synchronization, which lets callers
+  // use GetNextTokens().CpuSpan() afterwards without another round trip. When the tokens were
+  // sampled into a shared buffer the caller has already done that copy for the whole batch.
+  if (!external_host_copy_)
+    next_tokens_buffer_.CopyDeviceToCpu();
+  completion_pending_ = false;
+  done_pending_ = false;
+
+  if (!*done_cpu_) {
     sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
   }
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+  MarkDoneAtMaxLength();
+}
+
+void GreedySearch_Cuda::AppendTokensToSequences(DeviceSpan<int32_t>& tokens) {
+  cuda::Launch_AppendNextTokensToSequences(tokens.Span(), sequences_.GetSequences().Span(),
+                                           params_->BatchBeamSize(), sequences_.GetSequenceLength(),
+                                           sequences_.max_length_, GetStream());
+  sequences_.AfterAppendNextTokens(tokens, params_->BatchBeamSize());
+}
+
+void GreedySearch_Cuda::MarkDoneAtMaxLength() {
+  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
+}
+
+void GreedySearch_Cuda::CommitToken(int32_t token) {
+  // The caller already selected this generated token, so skip sampling but retain generated-token
+  // EOS, padding, and max-length behavior. Speculative decoding only calls this with batch_size 1.
+  CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+  external_host_copy_ = false;
+  LaunchNextTokensTail();
+  CompleteGeneration();
 }
 
 bool BeamSearch_Cuda::IsDone() const {
@@ -220,18 +367,13 @@ std::span<float> Search_Cuda::GetScores() {
 
 // Set user input tokens (batch_beam_size, sequence_length)
 void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
+  // Caller-provided prompt/continuation tokens are appended as input. Unlike CommitToken, they do
+  // not run generated-token EOS/padding handling, and done state is reset when capacity remains.
   ResetDone();
-
-  auto next_tokens_gpu = next_tokens.Span();
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
-
-  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
-    if (GetLogItems().enabled && GetLogItems().hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
-    *done_cpu_ = true;
+  AppendTokensToSequences(next_tokens);
+  MarkDoneAtMaxLength();
+  if (*done_cpu_)
     return;
-  }
 
   ResetDone();
 }

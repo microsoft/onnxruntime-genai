@@ -20,15 +20,20 @@ namespace Generators {
 namespace cuda {
 
 // Initializes the cuRAND states for each batch item.
-__global__ void InitCurandStates(unsigned long long seed, curandState* states, int batch_size) {
+__global__ void InitCurandStatesKernel(unsigned long long seed, curandState* states, int batch_size) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
   if (index >= batch_size) return;
   curand_init(seed, index, 0, &states[index]);
 }
 
+void LaunchInitCurandState(unsigned long long random_seed, curandState* state, cudaStream_t stream) {
+  InitCurandStatesKernel<<<1, 1, 0, stream>>>(random_seed, state, 1);
+  CUDA_CHECK_LAUNCH();
+}
+
 void SamplingData::ReInitCurandStates(unsigned long long random_seed, int batch_size, cudaStream_t stream) {
   random_seed_ = random_seed;
-  InitCurandStates<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states, batch_size);
+  InitCurandStatesKernel<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states, batch_size);
   CUDA_CHECK_LAUNCH();
 }
 
@@ -84,7 +89,8 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
 // It has been empirically shown to be the most performant approach for k <= 256.
 template <int kBlockSize>
 __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores, const int* indices, int k,
-                                    float p, float temperature, int stride, curandState* curand_states) {
+                                    float p, float temperature, int stride, curandState* curand_states,
+                                    const int* curand_state_indices) {
   const int batch_idx = blockIdx.x;
   const float* batch_scores = scores + batch_idx * stride;
   const int* batch_indices = indices + batch_idx * stride;
@@ -212,7 +218,8 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   if (threadIdx.x == 0) {
     // Use min to prevent multiplying down the random value, which could introduce bias.
     // This robustly handles the case where curand_uniform is exactly 1.0.
-    threshold_smem = min(curand_uniform(&curand_states[batch_idx]), 0.9999999f);
+    const int state_index = curand_state_indices ? curand_state_indices[batch_idx] : batch_idx;
+    threshold_smem = min(curand_uniform(&curand_states[state_index]), 0.9999999f);
     selected_index_smem = k - 1;
   }
   __syncthreads();
@@ -272,11 +279,13 @@ __global__ void FilterOnTopPKernel(float* filtered_logits, const float* original
   }
 }
 
-__global__ void RandomThresholdKernel(curandState* curand_states, float* thresholds, int batch_size) {
+__global__ void RandomThresholdKernel(curandState* curand_states, const int* curand_state_indices,
+                                      float* thresholds, int batch_size) {
   const int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < batch_size) {
     // Use min to prevent multiplying down the random value, which could introduce bias.
-    thresholds[i] = min(curand_uniform(&curand_states[i]), 0.9999999f);
+    const int state_index = curand_state_indices ? curand_state_indices[i] : i;
+    thresholds[i] = min(curand_uniform(&curand_states[state_index]), 0.9999999f);
   }
 }
 
@@ -307,7 +316,7 @@ __global__ void SampleKernel(int32_t* next_token_out, const int* indices, const 
 // A multi-stage sampling pipeline that is more efficient for large k.
 void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
                                   int32_t* next_token_out, int k, int batch_size, float p, float temperature,
-                                  int stride) {
+                                  int stride, curandState* curand_states, const int* curand_state_indices) {
   dim3 grid(batch_size);
   dim3 block(256);
 
@@ -330,8 +339,8 @@ void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const
   CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted, data->prefix_sums, k);
 
   // Stage 6: Generate random thresholds.
-  RandomThresholdKernel<<<CeilDiv(batch_size, 256), block, 0, stream>>>(data->curand_states,
-                                                                        data->thresholds, batch_size);
+  RandomThresholdKernel<<<CeilDiv(batch_size, 256), block, 0, stream>>>(
+      curand_states ? curand_states : data->curand_states, curand_state_indices, data->thresholds, batch_size);
 
   // Stage 7: Sample via Parallel Search.
   SampleKernel<256><<<grid, block, 0, stream>>>(next_token_out, indices, data->prefix_sums, k, stride,
@@ -339,7 +348,8 @@ void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const
 }
 
 void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
-                             int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride) {
+                             int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride,
+                             curandState* curand_states, const int* curand_state_indices) {
   assert(k <= kFusedSamplingMaxK);
   dim3 grid(batch_size);
   constexpr int block_size = 256;
@@ -349,11 +359,13 @@ void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const floa
   constexpr size_t shared_mem_bytes = 2 * block_size * sizeof(float);
 
   FusedSamplingKernel<block_size><<<grid, block, shared_mem_bytes, stream>>>(
-      next_token_out, scores, indices, k, p, temperature, stride, data->curand_states);
+      next_token_out, scores, indices, k, p, temperature, stride,
+      curand_states ? curand_states : data->curand_states, curand_state_indices);
 }
 
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, const float* scores_in,
-               int vocab_size, int batch_size, int k, float p, float temperature) {
+               int vocab_size, int batch_size, int k, float p, float temperature,
+               curandState* external_curand_states, const int* curand_state_indices) {
   if (k <= 0 || k > vocab_size) {
     k = vocab_size;
   }
@@ -366,12 +378,73 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
   // The fused kernel is the most performant approach for k up to 256.
   if (k <= kFusedSamplingMaxK) {
     LaunchFusedSampleKernel(data, stream, topk_scores, topk_indices, next_token_out, k, batch_size, p,
-                            temperature, topk_stride);
+                            temperature, topk_stride, external_curand_states, curand_state_indices);
   } else {
     // Fall back to multi-stage sampling pipeline. This is not a typical use case.
     LaunchMultiStageSampleKernel(data, stream, topk_scores, topk_indices, next_token_out, k, batch_size, p,
-                                 temperature, topk_stride);
+                                 temperature, topk_stride, external_curand_states, curand_state_indices);
   }
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void GatherSamplingRowsKernel(const float* const* rows, float* packed_scores,
+                                         int batch_size, int vocab_size) {
+  const int row = blockIdx.y;
+  const int column = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < batch_size && column < vocab_size)
+    packed_scores[static_cast<size_t>(row) * vocab_size + column] = rows[row][column];
+}
+
+void LaunchGatherSamplingRows(const float* const* rows, float* packed_scores, int batch_size, int vocab_size,
+                              cudaStream_t stream) {
+  constexpr int block_size = 256;
+  dim3 grid(CeilDiv(vocab_size, block_size), batch_size);
+  GatherSamplingRowsKernel<<<grid, block_size, 0, stream>>>(rows, packed_scores, batch_size, vocab_size);
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void ScatterSamplingTokensKernel(const int32_t* packed_tokens, const int* output_indices,
+                                            int32_t* next_tokens, int batch_size) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < batch_size)
+    next_tokens[output_indices[index]] = packed_tokens[index];
+}
+
+void LaunchScatterSamplingTokens(const int32_t* packed_tokens, const int* output_indices,
+                                 int32_t* next_tokens, int batch_size, cudaStream_t stream) {
+  constexpr int block_size = 256;
+  ScatterSamplingTokensKernel<<<CeilDiv(batch_size, block_size), block_size, 0, stream>>>(
+      packed_tokens, output_indices, next_tokens, batch_size);
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void GatherCurandStatesKernel(const curandState* states, const int* state_indices,
+                                         curandState* checkpoint, int count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < count)
+    checkpoint[index] = states[state_indices[index]];
+}
+
+void LaunchGatherCurandStates(const curandState* states, const int* state_indices,
+                              curandState* checkpoint, int count, cudaStream_t stream) {
+  constexpr int block_size = 256;
+  GatherCurandStatesKernel<<<CeilDiv(count, block_size), block_size, 0, stream>>>(
+      states, state_indices, checkpoint, count);
+  CUDA_CHECK_LAUNCH();
+}
+
+__global__ void ScatterCurandStatesKernel(const curandState* checkpoint, const int* state_indices,
+                                          curandState* states, int count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < count)
+    states[state_indices[index]] = checkpoint[index];
+}
+
+void LaunchScatterCurandStates(const curandState* checkpoint, const int* state_indices,
+                               curandState* states, int count, cudaStream_t stream) {
+  constexpr int block_size = 256;
+  ScatterCurandStatesKernel<<<CeilDiv(count, block_size), block_size, 0, stream>>>(
+      checkpoint, state_indices, states, count);
   CUDA_CHECK_LAUNCH();
 }
 

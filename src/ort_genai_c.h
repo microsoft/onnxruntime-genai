@@ -62,6 +62,7 @@ typedef enum OgaElementType {
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
+typedef struct OgaSpeculativeStats OgaSpeculativeStats;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
@@ -512,6 +513,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGe
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
+ * \brief Set a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens").
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGeneratorParams* params, const char* name, double value);
+
+/**
+ * \brief Get a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
  * \brief Creates a generator from the given model and generator params.
  * \param[in] model The model to use for generation.
  * \param[in] params The parameters to use for generation.
@@ -525,6 +544,43 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
  * \param[in] generator The generator to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
+
+/* Multi-Token-Prediction (MTP) self-speculative decoding (e.g. Qwen3.6). The MtpGenerator
+ * composes a main decoder and an MTP draft head and runs the draft/verify loop in-engine,
+ * keeping the hidden-state handoff on-device. Greedy, batch size 1; the output is identical to
+ * plain greedy decoding (lossless). */
+typedef struct OgaMtpGenerator OgaMtpGenerator;
+
+/**
+ * \brief Creates an MTP self-speculative generator from a main model and an MTP-head model.
+ * \param[in] main_model The main decoder (exported with include_hidden_states).
+ * \param[in] mtp_model The MTP head (mtp.onnx, with a hidden_states input).
+ * \param[in] params The generation parameters (greedy, batch size 1).
+ * \param[out] out The created MTP generator.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_model, const OgaModel* mtp_model, const OgaGeneratorParams* params, OgaMtpGenerator** out);
+
+/** \brief Seed the prompt (runs the main model's prefill). */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
+/** \brief Produce the next token via the draft/verify loop. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator);
+/** \brief Whether generation has reached EOS or max length. */
+OGA_EXPORT bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator);
+/** \brief Number of committed tokens (prompt + generated). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetSequenceCount(const OgaMtpGenerator* generator);
+/** \brief Pointer to the committed token data (valid until the next call). */
+OGA_EXPORT const int32_t* OGA_API_CALL OgaMtpGenerator_GetSequenceData(const OgaMtpGenerator* generator);
+/** \brief Number of main-model forward passes run (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGenerator* generator);
+/** \brief Number of accepted drafts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator);
+/** \brief Number of draft attempts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator);
+/** \brief Returns speculative-decoding statistics using the shared OgaSpeculativeStats schema. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(const OgaMtpGenerator* generator, OgaSpeculativeStats** out);
+/** \brief Destroys the given MTP generator. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* generator);
 
 /**
  * \brief Returns true if the generator has finished generating all the sequences.
@@ -615,6 +671,28 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
 
 /**
+ * \brief Snapshots the generator's recurrent state (conv/linear-attention state) so a later
+ *        OgaGenerator_RewindTo can roll it back. Used for speculative decoding (e.g. MTP) on
+ *        hybrid models, whose recurrent state cannot be partially cropped like the KV cache.
+ *        Take the snapshot at the length you might roll back to, then RewindTo that length to
+ *        restore it. A no-op for models without recurrent state.
+ * \param[in] generator The generator whose recurrent state is snapshotted.
+ * \return OgaResult containing the error message if the snapshot failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator);
+
+/**
+ * \brief Stages a hidden_states tensor as the model's hidden_states input for the next step.
+ *        Used by the MTP self-speculative head, which consumes the main model's last hidden
+ *        state. A no-op for models without a hidden_states input. The tensor is [batch,
+ *        sequence_length, hidden_size] of the model's io dtype.
+ * \param[in] generator The generator to set the hidden_states input on.
+ * \param[in] hidden_states The hidden state values to feed on the next step.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetHiddenStates(OgaGenerator* generator, OgaTensor* hidden_states);
+
+/**
  * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
  *       and will be released when the OgaTensor is destroyed
  * \param[in] generator The generator to run the GetInput on the name provided and the out pointer to store the input.
@@ -671,6 +749,23 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
  *         be used after the OgaGenerator is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
+
+/** \brief Creates an immutable snapshot of the accumulated speculative-decoding statistics.
+ *  Values are zero for non-speculative models. The caller must destroy the returned object. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* stats);
+
+/** \brief Gets an integer counter from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
+    const OgaSpeculativeStats* stats, const char* name, uint64_t* value);
+
+/** \brief Gets a timing, rate, ratio, average, or speedup value from a statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
+    const OgaSpeculativeStats* stats, const char* name, double* value);
+
+/** \brief Gets a boolean value from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetBool(
+    const OgaSpeculativeStats* stats, const char* name, bool* value);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);

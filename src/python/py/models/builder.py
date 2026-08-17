@@ -24,6 +24,7 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
+    GraniteMoeHybridModel,
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
@@ -240,7 +241,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4"}
+    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -254,16 +255,19 @@ def check_extra_options(
             raise ValueError(
                 f"moe_quant_type must be one of {sorted(supported_moe_quant_types)}, got '{moe_quant_type}'."
             )
-        if moe_quant_type == "mxfp4":
+        if moe_quant_type in ("mxfp4", "nvfp4"):
+            # MXFP4 and NVFP4 share the CUDA QMoE FP4 op path and both require the int4 build
+            # precision (that is what exports the quantized QMoE op); the FP4 scheme only sets the
+            # MoE expert weights to the FP4 encoding.
             if execution_provider != "cuda":
                 raise ValueError(
-                    f"moe_quant_type=mxfp4 is only supported on the CUDA EP, got ep='{execution_provider}'."
+                    f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
             if not (precision == "int4" and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the int4 build "
-                    "precision is what exports the quantized QMoE op, and mxfp4 only sets the MoE expert weights to "
-                    "the FP4 encoding."
+                    f"moe_quant_type={moe_quant_type} requires building with precision=int4 (symmetric int4): the "
+                    "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
+                    "MoE expert weights to the FP4 encoding."
                 )
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
@@ -467,6 +471,8 @@ def create_model(
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GraniteMoeHybridForCausalLM":
+        onnx_model = GraniteMoeHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
@@ -740,13 +746,16 @@ def get_args():
                     This affects attention mask reformatting and position IDs handling.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
                         4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale.
                         Requires an ONNX Runtime build with onnxruntime_USE_FP4_QMOE=ON, precision=int4 with symmetric
                         INT4 quantization, and is only supported on the CUDA EP.
+                    nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
+                        4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
+                        Same build/precision/EP requirements as mxfp4.
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
@@ -754,6 +763,8 @@ def get_args():
                     Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
                     The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
                     Quantized KV cache is only supported for the CPU and CUDA execution providers.
+                    When combined with use_paged_attention=true, only the int8_* and fp8_* schemes are supported
+                    (PagedAttention has no sub-byte cache backend, so int4_* is rejected).
                 kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_type is enabled.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}} with one entry per layer.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).

@@ -52,7 +52,7 @@ jobs:
     ${{ else }}:
       value: '$(Agent.TempDirectory)/ortgenai-models'
   - name: cuda_docker_image
-    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20250714.2
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1
 
   steps:
   - checkout: self

@@ -45,6 +45,10 @@ std::string_view NormalizeProviderName(std::string_view name) {
     return "RyzenAI";
   } else if (lower_name == "nvtensorrtrtx") {
     return "NvTensorRtRtx";
+  } else if (lower_name == "amdgpu" ||
+             lower_name == "amdgpuexecutionprovider") {
+    // Accept canonical and catalog forms, all route to AMDGPU.
+    return "AMDGPU";
   }
   return name;  // Return name unchanged
 }
@@ -349,8 +353,12 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_metadata") {
+      v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -388,6 +396,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -533,6 +543,8 @@ struct SlidingWindow_Element : JSON::Element {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else if (name == "slide_inputs") {
       v_->slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_->cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -674,6 +686,102 @@ struct Decoder_Element : JSON::Element {
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
+};
+
+struct MtpInputs_Element : JSON::Element {
+  explicit MtpInputs_Element(Config::Model::Mtp::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_names") {
+      v_.past_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_names") {
+      v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Inputs& v_;
+};
+
+struct MtpOutputs_Element : JSON::Element {
+  explicit MtpOutputs_Element(Config::Model::Mtp::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_names") {
+      v_.present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_names") {
+      v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Outputs& v_;
+};
+
+struct Mtp_Element : JSON::Element {
+  explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_hidden_layers <= 0) throw std::out_of_range("num_hidden_layers must be > 0");
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_key_value_heads <= 0) throw std::out_of_range("num_key_value_heads must be > 0");
+    } else if (name == "head_size") {
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
+    } else if (name == "main_hidden_states") {
+      v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Mtp& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  MtpInputs_Element inputs_{v_.inputs};
+  MtpOutputs_Element outputs_{v_.outputs};
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -1210,6 +1318,13 @@ struct Model_Element : JSON::Element {
     if (name == "decoder") {
       return decoder_;
     }
+    if (name == "draft") {
+      if (!v_.draft)
+        v_.draft = Config::Model::Decoder{};
+      if (!draft_)
+        draft_ = std::make_unique<Decoder_Element>(*v_.draft);
+      return *draft_;
+    }
     if (name == "vision") {
       return vision_;
     }
@@ -1225,6 +1340,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "mtp") {
+      return mtp_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1232,6 +1350,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
+  std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
@@ -1239,14 +1358,19 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Mtp_Element mtp_{v_.mtp};
 };
 
+// Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
+// JSON::Parse_Value only re-throws with the offending field's path prepended when it sees a
+// std::runtime_error, and the public C API boundary reports std::runtime_error, so every config
+// parsing error must use that single type to keep messages (and behavior) consistent.
 int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 2. Check if the value is outside the representable range of an integer.
@@ -1257,14 +1381,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is out of int32 range ["
        << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 3. Reject fractional values — these fields must be integral.
   if (x != std::trunc(x)) {
     std::stringstream ss;
     ss << "Field '" << name << "' value " << x << " is not an integer";
-    throw std::invalid_argument(ss.str());
+    throw std::runtime_error(ss.str());
   }
 
   // 4. Perform the cast.
@@ -1327,6 +1451,30 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+struct Speculative_Element : JSON::Element {
+  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+
+  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  static constexpr int kMinK = 1;
+  static constexpr int kMaxK = 16;
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_draft_tokens") {
+      int k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (k < kMinK || k > kMaxK)
+        throw std::runtime_error(
+            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+      v_.max_draft_tokens = k;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Speculative& v_;
+};
+
 struct DynamicBatching_Element : JSON::Element {
   explicit DynamicBatching_Element(std::optional<Config::Engine::DynamicBatching>& v) : v_{v} {}
 
@@ -1354,6 +1502,11 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_batch_size must be > 0");
       v_->max_batch_size = static_cast<size_t>(parsed_value);
+    } else if (name == "max_scheduled_tokens") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_scheduled_tokens must be > 0");
+      v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1411,6 +1564,14 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   try {
     Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {
     JSON::TranslateException(name);
   }
@@ -1535,6 +1696,8 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
           }
         }
         return true;
+      } else if (provider_options->name == "AMDGPU") {
+        return true;
       } else if (provider_options->name == "WebGPU") {
         for (const auto& value : provider_options->options) {
           if (value.first == "enableGraphCapture" && value.second == "1") {
@@ -1649,6 +1812,7 @@ struct Root_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "model") return model_element_;
     if (name == "search") return search_element_;
+    if (name == "speculative") return speculative_element_;
     if (name == "engine") return engine_element_;
     throw JSON::unknown_value_error{};
   }
@@ -1656,6 +1820,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Speculative_Element speculative_element_{config_.speculative};
   Engine_Element engine_element_{config_.engine};
 };
 
@@ -1819,6 +1984,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  if (model.draft) {
+    for (const auto& provider_option : model.draft->session_options.provider_options) {
+      model.draft->session_options.providers.push_back(provider_option.name);
+    }
   }
 
   if (model.encoder.session_options.has_value()) {

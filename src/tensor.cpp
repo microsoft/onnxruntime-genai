@@ -20,11 +20,15 @@ Tensor::~Tensor() {
   }
 }
 
-void Tensor::CreateTensor(std::span<const int64_t> shape, bool make_static) {
+void Tensor::CreateTensor(std::span<const int64_t> shape, bool make_static, size_t static_capacity_bytes) {
   if (make_static) {
     size_t new_bytes = Ort::SizeOf(type_) * ElementCountFromShape(shape);
     if (buffer_ == nullptr) {
-      bytes_ = new_bytes;
+      // Size the static buffer to the larger of the requested shape and the optional capacity hint.
+      // Pre-sizing to the max captured shape keeps the buffer base address stable when the same
+      // static buffer is reused across multiple CUDA-graph capture shapes (e.g. 1-token decode and
+      // 2-token speculative verify).
+      bytes_ = std::max(new_bytes, static_capacity_bytes);
       buffer_ = p_device_->GetAllocator().Alloc(bytes_);
     } else if (new_bytes > bytes_) {
       throw std::runtime_error("Tensor: Static buffer new_bytes > bytes_");

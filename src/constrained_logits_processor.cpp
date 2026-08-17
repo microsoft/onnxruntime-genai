@@ -246,6 +246,24 @@ void GuidanceLogitsProcessor::Reset() {
   ComputeMask();
 }
 
+// Independent grammar cursor at the current state - shares the params/tokenizer, clones the
+// llguidance tokenizer + each constraint so advancing the clone leaves this processor untouched.
+std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::Clone() const {
+  auto clone = std::unique_ptr<GuidanceLogitsProcessor>(new GuidanceLogitsProcessor());
+  clone->params_ = params_;
+  clone->eos_token_ = eos_token_;
+  clone->tokenizer_ = tokenizer_;
+  clone->tokenize_data_ = tokenize_data_;
+  clone->masks_ = masks_;
+  clone->ff_tokens_batch_ = ff_tokens_batch_;
+  clone->llg_tokenizer_.reset(llg_clone_tokenizer(llg_tokenizer_.get()));
+  clone->llg_constraints_.reserve(llg_constraints_.size());
+  for (const auto& c : llg_constraints_)
+    clone->llg_constraints_.push_back(
+        std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(llg_clone_constraint(c.get())));
+  return clone;
+}
+
 std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
                                                                const uint8_t* bytes, size_t bytes_len) {
   // add prefix to tokenize for partial tokenization, it will produce ids more stable

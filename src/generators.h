@@ -32,8 +32,10 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
+#include "decoding_strategy.h"
 #include "logging.h"
 #include "runtime_settings.h"
+#include "speculative_stats.h"
 #include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 
@@ -46,6 +48,7 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;
   std::shared_ptr<Tensor> tensor;
@@ -78,15 +81,21 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // Co-owns the model so the aliased Config below cannot be freed while this
   // params object is alive. Null for the benchmark-only Config constructor.
   std::shared_ptr<const Model> model_;
-  const Config& config;                  // Aliases model-owned Config; kept alive by model_
-  Config::Search search{config.search};  // Copy of the search parameters from the config
+  const Config& config;                                 // Aliases model-owned Config; kept alive by model_
+  Config::Search search{config.search};                 // Copy of the search parameters from the config
+  Config::Speculative speculative{config.speculative};  // Runtime copy; overrides config default
 
   // Query the params to get the value set for a param
   double GetSearchNumber(std::string_view name) const;
   bool GetSearchBool(std::string_view name) const;
+  void SetSpeculativeNumber(std::string_view name, double value);
+  double GetSpeculativeNumber(std::string_view name) const;
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  // Largest per-step input length captured as a CUDA graph. Defaults to 1 (single-token decode).
+  // MTP speculative decoding sets this to 2 so the 2-token verify shape is also graph-captured.
+  int max_graph_capture_length{1};
   bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
@@ -103,16 +112,32 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 };
 
 struct Generator : LeakChecked<Generator> {
+  enum class Action {
+    standard,   // Default, set in any other case
+    generated,  // Set after GenerateNextToken
+    rewound,    // Set after RewindToLength
+  };
+
   Generator(const Model& model, const GeneratorParams& params);
   ~Generator();
 
   bool IsDone();
   size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
+  // Internal continuous-decoding path for tokens already resident on the model device.
+  void AppendTokens(DeviceSpan<int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+  void SnapshotState();                    // Snapshot recurrent state for speculative rollback (e.g. MTP)
+  // Lossless multi-token MTP: commit the accepted prefix without a replay forward by cropping the
+  // KV cache + position to new_length and the recurrent state to that position's window slot.
+  bool CanCropRecurrentState() const;
+  int64_t RecurrentStateWindow() const;
+  void CropToAccepted(size_t new_length, size_t recurrent_position);
+  void SetHiddenStates(std::shared_ptr<Tensor> hidden_states);  // Stage hidden_states input for next step (MTP head)
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
+  void PrepareForSetLogits();
   void SetRuntimeOption(const char* key, const char* value);
   bool IsSessionTerminated() const;
   void LogAdapterActivated() { generation_telemetry_.LogAdapterActivated(); }
@@ -122,14 +147,21 @@ struct Generator : LeakChecked<Generator> {
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<ExtraInput> extra_inputs_;
   void SetInputs(const NamedTensors& inputs);
-
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
 
-  bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
-  bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
+  bool computed_logits_{};                       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool set_extra_inputs_{true};                  // Set to false once SetExtraInputs() is called once
+  std::shared_ptr<Tensor> hidden_states_input_;  // Kept alive while staged for the model's hidden_states input (MTP head)
+
+  // Returns zero-filled stats when the model is not speculative.
+  SpeculativeStats GetSpeculativeStats() const;
+
+  // True when sampling reduces to greedy/argmax selection (do_sample off, top_k == 1, or
+  // temperature == 0). Computed once at construction so callers don't re-derive it.
+  bool IsGreedySampling() const;
 
  private:
 #if defined(_MSC_VER)
@@ -141,10 +173,7 @@ struct Generator : LeakChecked<Generator> {
   void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
-  enum Action { standard,   // Default, set in any other case
-                generated,  // Set after GenerateNextToken
-                rewound };  // Set after RewindToLength
-  Action last_action_{standard};
+  Action last_action_{Action::standard};
 
   // Pre-computed per-token decisions: avoid repeated checks each token
   // Non-null when the model is a transducer (RNNT, TDT); points into state_.
@@ -157,6 +186,11 @@ struct Generator : LeakChecked<Generator> {
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
+
+  std::unique_ptr<DecodingStrategy> strategy_;
+  friend struct StandardDecodingStrategy;
+  friend struct TransducerDecodingStrategy;
+  friend struct SpeculativeDecodingStrategy;
 };
 
 // Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
@@ -183,6 +217,10 @@ struct OrtGlobals {
     // ~allocator_ runs first.
     std::unique_ptr<OrtSession> session_;
     std::unique_ptr<Ort::Allocator> allocator_;
+    // Optional host-accessible allocator for decode inputs, owned by the OrtEnv (do not free).
+    // Null if unavailable, in which case inputs stay on the default device allocator.
+    Ort::Allocator* host_accessible_allocator_{};
+    int device_id_{};  // Device this allocator is bound to (0 unless a specific device was selected).
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
