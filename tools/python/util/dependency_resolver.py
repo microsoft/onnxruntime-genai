@@ -192,7 +192,7 @@ def _download_and_unpack_nupkg(package_name: str, version: str, package_url: str
         _log.info(f"Package {package_name} already downloaded")
         return unpacked_dir
 
-    _log.info(f"Downloading {package_name} {version} from {package_url}")
+    _log.info(f"Downloading {package_name} {version}...")
     response = requests.get(package_url)
     response.raise_for_status() # raises a 4xx or 5xx (client/server error) if encountered
     package_path = destination_dir / f"{package_name}.zip"
