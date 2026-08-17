@@ -9,8 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -48,20 +50,28 @@ std::string ResolveModelPath(const std::string& model_path) {
   return path.string();
 }
 
-std::unique_ptr<OgaSequences> BuildPromptTokens(int prompt_length_k, const OgaTokenizer& tokenizer) {
-  std::string prompt = "Summarize the following benchmark context:\n";
-  const int target_words = prompt_length_k * 750;
-  prompt.reserve(static_cast<size_t>(target_words) * 8);
-
-  for (int i = 0; i < target_words; ++i) {
-    prompt += "token";
-    prompt += std::to_string(i % 997);
-    prompt += ' ';
+std::string LoadRulerPrompt(int prompt_length_k, std::mt19937& random) {
+  const fs::path prompts_path = fs::path(ORT_GENAI_BENCH_DATA_DIR) / "ruler" / "prompts.json";
+  std::ifstream prompts_file(prompts_path);
+  if (!prompts_file) {
+    throw std::runtime_error("Unable to open RULER prompts file: " + prompts_path.string());
   }
 
-  prompt += "\nAnswer concisely.";
+  nlohmann::json prompts_data;
+  prompts_file >> prompts_data;
+  const std::string bucket = std::to_string(prompt_length_k) + "k";
+  const auto& prompts = prompts_data.at("length_buckets").at(bucket);
+  if (!prompts.is_array() || prompts.empty()) {
+    throw std::runtime_error("RULER prompt bucket must contain at least one sample: " + bucket);
+  }
 
+  std::uniform_int_distribution<size_t> distribution(0, prompts.size() - 1);
+  return prompts.at(distribution(random)).get<std::string>();
+}
+
+std::unique_ptr<OgaSequences> BuildPromptTokens(int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random) {
   auto prompt_tokens = OgaSequences::Create();
+  const std::string prompt = LoadRulerPrompt(prompt_length_k, random);
   tokenizer.Encode(prompt.c_str(), *prompt_tokens);
   return prompt_tokens;
 }
@@ -106,7 +116,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   auto tokenizer = OgaTokenizer::Create(*model);
   auto engine = OgaEngine::Create(*model);
 
-  auto prompt_tokens = BuildPromptTokens(config.prompt_length_k, *tokenizer);
+  std::mt19937 prompt_random(kRandomSeed);
+  auto prompt_tokens = BuildPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
 
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
   std::cout << tag << "Prompt token count: " << prompt_token_count << std::endl;
