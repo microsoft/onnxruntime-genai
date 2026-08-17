@@ -10,10 +10,38 @@
 #include "block.h"
 #include "engine_invariants.h"
 #include "paged_cache_reservation.h"
+#include "prefix_cache.h"
 #include "request.h"
 #include "step_plan.h"
 
 namespace Generators {
+
+// Copies the key and value data of one physical block onto another. Implemented by the paged cache
+// over its per-layer tensors; separated so the divergence policy below can be exercised without a
+// device.
+struct BlockCopier {
+  virtual void CopyBlock(size_t source_block_id, size_t destination_block_id) = 0;
+  virtual ~BlockCopier() = default;
+};
+
+/**
+ * @brief Gives `table` a private copy of the block the next step is about to write into, when that
+ *        block is still referenced by another owner.
+ * @param table The request's committed block table.
+ * @param target_slots Slots the table will hold once the pending step commits.
+ * @param pool The pool the private replacement block is taken from.
+ * @param copier Moves the shared block's key-value data into the replacement.
+ * @return True when a private copy was made.
+ *
+ * Only full blocks are ever shared, and a full block is never written again, so under the prefix
+ * cache's own policy this finds nothing to do. It exists so that a partially filled block that is
+ * shared anyway diverges by copy instead of corrupting the other owner's key-value data, which is
+ * what makes "shared blocks are immutable" an enforced property rather than an assumption.
+ */
+bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
+                            size_t target_slots,
+                            BlockPool& pool,
+                            BlockCopier& copier);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -28,6 +56,7 @@ namespace Generators {
 struct PagedKeyValueCache {
  public:
   PagedKeyValueCache(std::shared_ptr<Model> model);
+  ~PagedKeyValueCache();
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -43,6 +72,29 @@ struct PagedKeyValueCache {
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
   StepPlanningResult PlanStepResources(StepPlan& plan) const;
+
+  /**
+   * @brief Longest run of leading prompt tokens already resident in the cache, or an empty match.
+   * @param tokens The request's whole sequence.
+   * @param max_adoptable_tokens Tokens the caller may skip; always at least one less than the
+   *        sequence length so the request still computes a token and produces logits.
+   *
+   * The returned blocks are the physical blocks the request will point at. Nothing is committed
+   * here: the reservation takes the references, so a step that never runs adopts nothing.
+   */
+  PrefixCacheMatch MatchPrefix(std::span<const int32_t> tokens, size_t max_adoptable_tokens);
+
+  /**
+   * @brief Gives every block that filled up during the committed step a content identity, so later
+   *        prompts sharing the same prefix can adopt it.
+   *
+   * Called once the step's reservation is committed, at which point the host token mirror of each
+   * request covers exactly the slots the cache holds for it.
+   */
+  void SealCommittedBlocks(const void* request_id, std::span<const int32_t> tokens);
+
+  bool PrefixCachingEnabled() const;
+  const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Returns the K, V cache.
   std::vector<std::pair<OrtValue*, OrtValue*>> Cache();
@@ -106,7 +158,27 @@ struct PagedKeyValueCache {
     std::string value_cache_output_name;
   };
 
+  // Copies a block's key and value data across every layer, used only by MakeTailBlockExclusive.
+  class LayerBlockCopier final : public BlockCopier {
+   public:
+    explicit LayerBlockCopier(PagedKeyValueCache& cache) : cache_{cache} {}
+    void CopyBlock(size_t source_block_id, size_t destination_block_id) override;
+
+   private:
+    PagedKeyValueCache& cache_;
+  };
+
   void BindCache(State& state);
+
+  // Reclaims retained prefix blocks so the pool can satisfy a reservation.
+  class RetainedBlockReclaimer final : public BlockReclaimer {
+   public:
+    explicit RetainedBlockReclaimer(PrefixCache& prefix_cache) : prefix_cache_{prefix_cache} {}
+    size_t Reclaim(size_t blocks_needed) override { return prefix_cache_.Reclaim(blocks_needed); }
+
+   private:
+    PrefixCache& prefix_cache_;
+  };
 
   //   The key and the value cache is represented as an array of blocks. Each block contains
   //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_size
@@ -132,10 +204,13 @@ struct PagedKeyValueCache {
   //   M = block_size per block
 
   std::shared_ptr<Model> model_;
-  std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
-  std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
+  std::vector<LayerCache> cache_;          // Pair of key and value caches for all layers
+  std::unique_ptr<BlockPool> block_pool_;  // Allocator for blocks
+  // Declared after the pool so it releases its retained references before the pool goes away.
+  std::unique_ptr<PrefixCache> prefix_cache_;       // Content-addressed index over filled blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<OrtValue> block_tables_value_;    // Block tables for all requests in the cache
+  size_t block_bytes_per_layer_{};                  // Bytes one block occupies in one layer's cache
 
   // Graph capture needs the block table at a device address that never moves and at a shape that
   // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.

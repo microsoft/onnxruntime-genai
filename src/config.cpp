@@ -1507,6 +1507,23 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_scheduled_tokens must be > 0");
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
+    } else if (name == "prefix_caching") {
+      v_->prefix_caching = JSON::Get<bool>(value);
+    } else if (name == "prefix_cache_pool_fraction") {
+      const auto parsed_value = JSON::Get<double>(value);
+      if (!std::isfinite(parsed_value) || parsed_value < 0 || parsed_value > 1)
+        throw std::out_of_range("prefix_cache_pool_fraction must be >= 0 and <= 1");
+      v_->prefix_cache_pool_fraction = static_cast<float>(parsed_value);
+    } else if (name == "prefix_cache_max_blocks") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value < 0)
+        throw std::out_of_range("prefix_cache_max_blocks must be >= 0");
+      v_->prefix_cache_max_blocks = static_cast<size_t>(parsed_value);
+    } else if (name == "prefix_cache_min_blocks") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("prefix_cache_min_blocks must be > 0");
+      v_->prefix_cache_min_blocks = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }

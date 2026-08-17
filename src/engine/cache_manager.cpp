@@ -3,7 +3,10 @@
 
 #include "cache_manager.h"
 
+#include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace Generators {
 
@@ -24,6 +27,7 @@ class PagedCacheStepReservation final : public CacheStepReservation {
           entry.target_cache_slots,
           entry.newly_admitted,
           entry.whole_sequence_cache_slots,
+          entry.prefix_match.get(),
       });
       if (entry.newly_admitted) {
         newly_admitted_.push_back(entry.request);
@@ -240,6 +244,36 @@ std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() con
 std::unique_ptr<CacheStepReservation> PagedCacheManager::ReserveStep(const StepPlan& plan) {
   return std::make_unique<PagedCacheStepReservation>(
       *key_value_cache_, cache_allocated_requests_, plan);
+}
+
+std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(const Request& request) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return nullptr;
+  }
+
+  const auto tokens = request.SequenceTokensCpu();
+  if (tokens.size() < 2) {
+    return nullptr;
+  }
+
+  // A request must always compute at least its last token: that token's logits are what select the
+  // next one, so adopting the whole sequence would leave the step with nothing to sample from.
+  auto match = key_value_cache_->MatchPrefix(tokens, tokens.size() - 1);
+  if (match.Empty()) {
+    return nullptr;
+  }
+  return std::make_shared<const PrefixCacheMatch>(std::move(match));
+}
+
+void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return;
+  }
+
+  for (const auto& entry : plan.requests) {
+    key_value_cache_->SealCommittedBlocks(entry.request_id,
+                                          entry.request->SequenceTokensCpu());
+  }
 }
 
 }  // namespace Generators

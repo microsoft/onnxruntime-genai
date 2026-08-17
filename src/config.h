@@ -516,6 +516,17 @@ struct Config {
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
+      // Reuse resident key-value blocks whose token prefix matches a new prompt, instead of
+      // recomputing them. Off by default: it changes block lifetime and residency, so a deployment
+      // opts into it once it has qualified the memory behaviour for its model and provider.
+      bool prefix_caching{false};
+      // Share of the block pool the prefix cache may hold on to for finished requests. Retained
+      // blocks are always reclaimable, so this bounds retention rather than reserving capacity.
+      float prefix_cache_pool_fraction{0.5f};
+      // Absolute ceiling on retained blocks; overrides the fraction when set.
+      std::optional<size_t> prefix_cache_max_blocks;
+      // Shortest match worth adopting, in blocks.
+      size_t prefix_cache_min_blocks{1};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 

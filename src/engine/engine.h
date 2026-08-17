@@ -118,6 +118,16 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   bool HasPendingRequests() const;
 
+  /**
+   * @brief Transaction counters for this Engine's dynamic steps.
+   */
+  const EngineTransactionMetrics& TransactionMetrics() const { return transaction_metrics_; }
+
+  /**
+   * @brief Prefix-cache counters, or null when the cache does not content-address its blocks.
+   */
+  const PrefixCacheMetrics* PrefixCacheStats() const { return cache_manager_->PrefixMetrics(); }
+
  private:
   std::shared_ptr<Request> DrainReadyRequest();
   std::shared_ptr<Request> StepDynamic();

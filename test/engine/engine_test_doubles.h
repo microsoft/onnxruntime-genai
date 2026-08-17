@@ -354,5 +354,126 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
   return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
 }
 
+// A DecoderIO whose logits depend on the whole sequence each request holds, so a request served
+// from a warm cache and the same request served cold can be compared token for token. Every
+// request's row peaks at a token derived from its complete sequence, which is exactly the input the
+// model would see; adopting a prefix must not change it.
+struct SequenceDependentDecoderIO : DecoderIO {
+  SequenceDependentDecoderIO(std::shared_ptr<Model> model, ScheduledRequests& scheduled_requests,
+                             std::shared_ptr<CacheManager> cache_manager)
+      : DecoderIO(model, scheduled_requests, cache_manager),
+        vocab_size_{static_cast<int64_t>(model->config_->model.vocab_size)} {
+    const int64_t batch_size = static_cast<int64_t>(scheduled_requests.size());
+    logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
+    const std::array<int64_t, 2> shape{batch_size, vocab_size_};
+    logits_->CreateTensor(shape);
+    auto device_span = logits_->GetDeviceSpan<float>();
+    auto cpu_span = device_span.CpuSpan();
+    std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
+    int64_t row = 0;
+    for (const auto& request : scheduled_requests) {
+      cpu_span[row * vocab_size_ + NextToken(*request)] = 100.0f;
+      ++row;
+    }
+    device_span.CopyCpuToDevice();
+  }
+
+  // Deterministic function of the sequence so far. Steers clear of token 0 and 1 (pad and
+  // end-of-stream for the engine test model) so a run ends on its length limit instead.
+  int32_t NextToken(const Request& request) const {
+    uint64_t accumulator = 1469598103934665603ULL;
+    for (const int32_t token : request.SequenceTokensCpu()) {
+      accumulator ^= static_cast<uint64_t>(static_cast<uint32_t>(token));
+      accumulator *= 1099511628211ULL;
+    }
+    const int64_t usable = vocab_size_ - 2;
+    return static_cast<int32_t>(2 + static_cast<int64_t>(accumulator % static_cast<uint64_t>(usable)));
+  }
+
+  std::vector<DeviceSpan<float>> ProcessLogits() override {
+    std::vector<DeviceSpan<float>> rows;
+    auto all = logits_->GetDeviceSpan<float>();
+    for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
+      rows.push_back(all.subspan(i * vocab_size_, vocab_size_));
+    }
+    return rows;
+  }
+
+ private:
+  int64_t vocab_size_;
+};
+
+// A ModelExecutor that runs no model but records the packed token counts each step asked for, which
+// is the prefill work a prefix adoption is meant to remove.
+struct TokenCountingModelExecutor : ModelExecutor {
+  TokenCountingModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
+      : model_{std::move(model)}, cache_manager_{std::move(cache_manager)} {}
+
+  void Decode(ScheduledRequests& scheduled_requests, ExecutionContext& context) override {
+    ++decode_calls;
+    if (context.plan) {
+      decoded_token_counts.push_back(context.plan->token_count);
+      std::vector<size_t> adopted;
+      adopted.reserve(context.plan->requests.size());
+      for (const auto& entry : context.plan->requests) {
+        adopted.push_back(entry.prefix_match ? entry.prefix_match->token_count : 0);
+        adopted_tokens += entry.prefix_match ? entry.prefix_match->token_count : 0;
+        if (entry.is_prefill) {
+          prefill_tokens += entry.unprocessed_token_count;
+        } else {
+          decode_tokens += entry.unprocessed_token_count;
+        }
+      }
+      decoded_adopted_tokens.push_back(std::move(adopted));
+    }
+    const auto failure = std::exchange(next_failure_, ScriptedExecutionFailure::None);
+    if (failure == ScriptedExecutionFailure::RetryableBeforeExecution) {
+      throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
+                                "Injected retryable execution failure."};
+    }
+    scheduled_requests.AddDecoderState(
+        std::make_unique<SequenceDependentDecoderIO>(model_, scheduled_requests, cache_manager_));
+  }
+
+  void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
+
+  size_t TotalDecodedTokens() const {
+    size_t total = 0;
+    for (const size_t count : decoded_token_counts) total += count;
+    return total;
+  }
+
+  int decode_calls{0};
+  size_t prefill_tokens{0};  // Prompt tokens actually pushed through the model.
+  size_t decode_tokens{0};
+  size_t adopted_tokens{0};  // Prompt tokens skipped because their keys and values were resident.
+  std::vector<size_t> decoded_token_counts;
+  std::vector<std::vector<size_t>> decoded_adopted_tokens;
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::shared_ptr<CacheManager> cache_manager_;
+  ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
+};
+
+// An Engine wired to the real paged cache manager and the real dynamic scheduler, with only model
+// execution replaced. This is the production admission, reservation, prefix-cache, and commit path.
+struct PagedEngine {
+  std::shared_ptr<Engine> engine;
+  std::shared_ptr<CacheManager> cache;
+  TokenCountingModelExecutor* executor;
+};
+
+inline PagedEngine MakePagedEngine(std::shared_ptr<Model> model) {
+  std::shared_ptr<CacheManager> cache = std::make_shared<PagedCacheManager>(model);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<TokenCountingModelExecutor>(model, cache);
+  TokenCountingModelExecutor* executor_observer = executor.get();
+
+  EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+  return PagedEngine{std::move(engine), std::move(cache), executor_observer};
+}
+
 }  // namespace test
 }  // namespace Generators

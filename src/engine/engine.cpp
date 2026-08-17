@@ -3,6 +3,10 @@
 
 #include "engine.h"
 
+#include <memory>
+#include <string>
+#include <utility>
+
 namespace Generators {
 
 namespace {
@@ -18,6 +22,31 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   }
   return message;
 }
+
+// Undoes any prefix adoption the step plan staged unless the step reached its commit boundary.
+// Every request rollback it performs is itself noexcept, so it is safe to run while unwinding.
+class PrefixAdoptionGuard {
+ public:
+  explicit PrefixAdoptionGuard(StepPlan* plan) : plan_{plan} {}
+  PrefixAdoptionGuard(const PrefixAdoptionGuard&) = delete;
+  PrefixAdoptionGuard& operator=(const PrefixAdoptionGuard&) = delete;
+  ~PrefixAdoptionGuard() { Rollback(); }
+
+  void Rollback() noexcept {
+    if (!plan_) {
+      return;
+    }
+    for (const auto& entry : plan_->requests) {
+      entry.request->RollbackPrefixAdoption();
+    }
+    plan_ = nullptr;
+  }
+
+  void Committed() noexcept { plan_ = nullptr; }
+
+ private:
+  StepPlan* plan_{};
+};
 
 }  // namespace
 
@@ -101,6 +130,10 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     // Nothing becomes externally visible until the final commit succeeds.
     step_plan_.transaction_id = next_transaction_id_++;
     auto planning_result = scheduler_->PlanStep(step_plan_);
+    // Planning stages any prefix adoption as the last thing it does, so guarding it from here means
+    // no path out of this scope -- a rollback, a reservation failure, or an exception from any
+    // collaborator -- can leave a request claiming progress the released reservation never gave it.
+    PrefixAdoptionGuard adoption_guard{&step_plan_};
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -164,6 +197,10 @@ std::shared_ptr<Request> Engine::StepDynamic() {
         }
         request_transaction_active = false;
       }
+      // A prefix adoption moves a request's processed cursor while the step is in flight, before
+      // any block table commits. Undo it here so a retried step re-matches from scratch instead of
+      // starting from a prefix the released reservation never gave it.
+      adoption_guard.Rollback();
       try {
         reservation->Release();
       } catch (...) {
@@ -276,6 +313,10 @@ std::shared_ptr<Request> Engine::StepDynamic() {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
+      // Content-address the blocks that filled up in this step only after the request bookkeeping
+      // is committed, so the host token mirror covers exactly the slots the cache now holds.
+      cache_manager_->SealCommittedBlocks(step_plan_);
+      adoption_guard.Committed();
     } catch (...) {
       MarkUnhealthyAndThrow(
           StepOutcomeKind::ExecutionContractFailure,

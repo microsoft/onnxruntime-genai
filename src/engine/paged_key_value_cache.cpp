@@ -3,7 +3,12 @@
 
 #include "cache_manager.h"
 
+#include <algorithm>
+#include <memory>
 #include <numeric>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "sequence_positions.h"
 
@@ -53,7 +58,56 @@ size_t RequiredSlots(const std::shared_ptr<Request>& request) {
   return static_cast<size_t>(request->CurrentSequenceLength());
 }
 
+PrefixCacheOptions ComposePrefixCacheOptions(const Config::Engine::DynamicBatching& config,
+                                             size_t num_blocks) {
+  PrefixCacheOptions options;
+  options.enabled = config.prefix_caching;
+  options.min_match_blocks = std::max<size_t>(config.prefix_cache_min_blocks, 1);
+  if (config.prefix_cache_max_blocks.has_value()) {
+    options.max_blocks = std::min(*config.prefix_cache_max_blocks, num_blocks);
+  } else {
+    const float fraction = std::clamp(config.prefix_cache_pool_fraction, 0.0f, 1.0f);
+    options.max_blocks = static_cast<size_t>(static_cast<float>(num_blocks) * fraction);
+  }
+  return options;
+}
+
 }  // namespace
+
+bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
+                            size_t target_slots,
+                            BlockPool& pool,
+                            BlockCopier& copier) {
+  if (target_slots <= table.committed_slots || pool.BlockSize() == 0) {
+    return false;
+  }
+
+  const size_t block_index = table.committed_slots / pool.BlockSize();
+  if (block_index >= table.blocks.size()) {
+    return false;
+  }
+
+  auto& block = table.blocks[block_index];
+  if (!block->IsShared()) {
+    return false;
+  }
+
+  auto replacement = pool.ReserveBlocks(pool.BlockSize());
+  if (replacement.size() != 1) {
+    throw std::runtime_error("Copy-on-write needs exactly one replacement block.");
+  }
+  copier.CopyBlock(block->Id(), replacement.front()->Id());
+  replacement.front()->AddSlots(block->Size());
+
+  auto shared = block;
+  table.blocks[block_index] = replacement.front();
+  if (table.sealed_blocks > block_index) {
+    throw std::logic_error(
+        "Copy-on-write reached a block the prefix cache already sealed, which is never written.");
+  }
+  pool.Free({shared});
+  return true;
+}
 
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     : model_(model) {
@@ -74,6 +128,13 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     });
   }
   block_pool_ = std::make_unique<BlockPool>(model->config_->engine.dynamic_batching->block_size, num_blocks);
+  prefix_cache_ = std::make_unique<PrefixCache>(
+      *block_pool_,
+      ComposePrefixCacheOptions(*model->config_->engine.dynamic_batching, num_blocks));
+  block_bytes_per_layer_ = model->config_->engine.dynamic_batching->block_size *
+                           model->config_->model.decoder.num_key_value_heads *
+                           model->config_->model.decoder.head_size *
+                           Ort::SizeOf(dtype);
 
   max_batch_size_ = model->config_->engine.dynamic_batching->max_batch_size;
   graph_capture_ = IsGraphCaptureEnabled(model->config_->model.decoder.session_options);
@@ -173,6 +234,9 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   for (auto request_it = block_tables_.begin(); request_it != block_tables_.end(); ++request_it) {
     if (request_it->request_id == request.get()) {
+      // Blocks the prefix cache indexed keep its reference and stay resident, so the next turn of
+      // this conversation can adopt them. Everything else, including the partially filled tail
+      // block, goes straight back to the pool.
       block_pool_->Free(request_it->blocks);
       block_tables_.erase(request_it);
       return;
@@ -180,8 +244,116 @@ void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   }
 }
 
+PagedKeyValueCache::~PagedKeyValueCache() {
+  // Release the block tables before the prefix cache and the pool unwind, so every reference is
+  // accounted for regardless of whether the engine drained its requests first. The single-block
+  // release allocates nothing, so teardown cannot fail on a failed allocation.
+  for (auto& table : block_tables_) {
+    for (const auto& block : table.blocks) {
+      block_pool_->Release(block);
+    }
+  }
+  block_tables_.clear();
+}
+
+PrefixCacheMatch PagedKeyValueCache::MatchPrefix(std::span<const int32_t> tokens,
+                                                 size_t max_adoptable_tokens) {
+  return prefix_cache_->Match(tokens, max_adoptable_tokens);
+}
+
+bool PagedKeyValueCache::PrefixCachingEnabled() const {
+  return prefix_cache_->Enabled();
+}
+
+const PrefixCacheMetrics& PagedKeyValueCache::PrefixMetrics() const {
+  return prefix_cache_->Metrics();
+}
+
+void PagedKeyValueCache::SealCommittedBlocks(const void* request_id,
+                                             std::span<const int32_t> tokens) {
+  if (!prefix_cache_->Enabled()) {
+    return;
+  }
+
+  const auto table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
+                                     [request_id](const PagedCacheBlockTable& table) {
+                                       return table.request_id == request_id;
+                                     });
+  if (table_it == block_tables_.end()) {
+    return;
+  }
+
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = table_it->committed_slots / block_size;
+  if (full_blocks <= table_it->sealed_blocks) {
+    return;
+  }
+  if (tokens.size() < full_blocks * block_size) {
+    throw std::runtime_error(
+        "The request's token mirror is shorter than the slots the paged cache committed for it.");
+  }
+
+  auto parent = table_it->sealed_identity;
+  for (size_t index = table_it->sealed_blocks; index < full_blocks; ++index) {
+    auto chained = prefix_cache_->Register(table_it->blocks[index],
+                                           tokens.subspan(index * block_size, block_size),
+                                           parent);
+    if (!chained) {
+      // Nothing after an unreachable identity can be reached either, so the chain stops here and
+      // the remaining blocks stay private to this request.
+      break;
+    }
+    parent = std::move(chained);
+    table_it->sealed_blocks = index + 1;
+    table_it->sealed_identity = parent;
+  }
+}
+
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
-  return PagedCacheReservation{*block_pool_, block_tables_, requests};
+  // A step only ever writes into a request's tail block, and sharing is restricted to full blocks
+  // that are never written again, so this normally finds nothing to do. When a tail block is shared
+  // anyway the writer takes a private copy of it here, before any reservation state exists, rather
+  // than diverging into the other owner's key-value data.
+  if (prefix_cache_->Enabled()) {
+    LayerBlockCopier copier{*this};
+    for (const auto& request : requests) {
+      if (request.newly_admitted) {
+        continue;
+      }
+      const auto table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
+                                         [&request](const PagedCacheBlockTable& value) {
+                                           return value.request_id == request.request_id;
+                                         });
+      if (table_it == block_tables_.end()) {
+        continue;
+      }
+      MakeTailBlockExclusive(*table_it, request.target_slots, *block_pool_, copier);
+    }
+  }
+
+  RetainedBlockReclaimer reclaimer{*prefix_cache_};
+  return PagedCacheReservation{*block_pool_, block_tables_, requests, &reclaimer};
+}
+
+void PagedKeyValueCache::LayerBlockCopier::CopyBlock(size_t source_block_id,
+                                                     size_t destination_block_id) {
+  const size_t block_bytes = cache_.block_bytes_per_layer_;
+  if (block_bytes == 0) {
+    throw std::runtime_error("The paged cache cannot copy a block of unknown size.");
+  }
+
+  const auto copy = [&](OrtValue& tensor) {
+    auto* data = tensor.GetTensorMutableRawData();
+    const size_t total_bytes = cache_.block_pool_->Capacity() * block_bytes;
+    auto buffer = cache_.model_->p_device_kvcache_->WrapMemoryBase(data, total_bytes);
+    buffer->CopyFrom(destination_block_id * block_bytes, *buffer, source_block_id * block_bytes,
+                     block_bytes);
+  };
+
+  for (auto& layer : cache_.cache_) {
+    copy(*layer.key_cache);
+    copy(*layer.value_cache);
+  }
 }
 
 StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
@@ -197,7 +369,10 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     throw std::runtime_error("Step plan request limit exceeds the configured batch size.");
   }
 
-  const size_t available_blocks = block_pool_->AvailableBlocks();
+  // Retained prefix blocks are always reclaimable, so they count as capacity a step can take. The
+  // reservation reclaims exactly what it needs, in least-recently-used order.
+  const size_t available_blocks =
+      block_pool_->AvailableBlocks() + prefix_cache_->ReclaimableBlocks();
   size_t planned_blocks = 0;
   size_t selected_requests = 0;
   size_t selected_new_requests = 0;
@@ -208,26 +383,51 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   struct CacheGrowth {
     size_t proposed_blocks{};
     size_t new_blocks{};
+    // Retained prefix blocks this admission would adopt that no other selected request has already
+    // been charged for. They are counted as available above, but adopting them takes them out of
+    // the reclaimable pool, so they have to be charged to this step as well or the reservation
+    // could be planned to reclaim capacity it has just claimed.
+    std::vector<size_t> claimed_retained_blocks;
   };
+  // Retained blocks already charged to this step, so several requests adopting the same prefix pay
+  // for it once instead of being deferred for capacity that is not actually needed twice.
+  std::vector<size_t> charged_retained_blocks;
   // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
   // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
   // first chunk and then losing the rest of the pool to another request would stall it part way
   // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
+  // Blocks adopted from the prefix cache already exist, so they widen the request's block table
+  // without drawing on the free pool.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
-    const size_t committed_slots = table ? table->committed_slots : 0;
+    const size_t adopted_blocks =
+        entry.prefix_match ? entry.prefix_match->blocks.size() : 0;
+    const size_t committed_slots =
+        table ? table->committed_slots : (entry.prefix_match ? entry.prefix_match->token_count : 0);
     if (entry.target_cache_slots < committed_slots) {
       throw std::runtime_error("Step plan target precedes the committed cache boundary.");
     }
 
+    std::vector<size_t> claimed_retained_blocks;
+    if (entry.prefix_match) {
+      for (const auto& block : entry.prefix_match->blocks) {
+        if (block->RefCount() == 1 &&
+            std::find(charged_retained_blocks.begin(), charged_retained_blocks.end(),
+                      block->Id()) == charged_retained_blocks.end()) {
+          claimed_retained_blocks.push_back(block->Id());
+        }
+      }
+    }
+
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_blocks = table ? table->blocks.size() : adopted_blocks;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
-    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks,
+                       std::move(claimed_retained_blocks)};
   };
   const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
     return growth.proposed_blocks > block_pool_->Capacity() ||
@@ -235,10 +435,13 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
             growth.proposed_blocks > max_block_table_columns_);
   };
   const auto select = [&](size_t request_index,
-                          const CacheGrowth& growth) {
+                          CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
     // pending with their committed block tables untouched and can be reconsidered next Step().
-    planned_blocks += growth.new_blocks;
+    planned_blocks += growth.new_blocks + growth.claimed_retained_blocks.size();
+    charged_retained_blocks.insert(charged_retained_blocks.end(),
+                                   growth.claimed_retained_blocks.begin(),
+                                   growth.claimed_retained_blocks.end());
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
     if (selected_requests != request_index) {
@@ -272,7 +475,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
       throw std::runtime_error("Step plan resident membership does not match the committed cache.");
     }
 
-    const auto growth = calculate_growth(candidate, table);
+    auto growth = calculate_growth(candidate, table);
     if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;
@@ -280,10 +483,15 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
       continue;
     }
 
+    // Charging the retained blocks an adoption claims alongside the blocks it still has to take
+    // makes adoption capacity-neutral: every adopted block removes one from `new_blocks` and adds
+    // one back here, so a step is never admitted on capacity the reservation then cannot reclaim,
+    // and a prefix hit never makes a request harder to admit than recomputing it would.
     if (selected_requests >= scheduled_request_limit ||
         (candidate.newly_admitted &&
          committed_request_count + selected_new_requests >= max_batch_size_) ||
-        planned_blocks + growth.new_blocks > available_blocks) {
+        planned_blocks + growth.new_blocks + growth.claimed_retained_blocks.size() >
+            available_blocks) {
       capacity_deferred = true;
       continue;
     }
@@ -345,6 +553,15 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.total_blocks = block_pool_->Capacity();
   snapshot.free_blocks = block_pool_->AvailableBlocks();
   snapshot.block_table_columns = block_table_columns_;
+  for (const auto& block : block_pool_->OwnedBlocks()) {
+    snapshot.blocks.push_back(CachedBlockSnapshot{
+        block->Id(),
+        block->RefCount(),
+        block->Size(),
+        block->IsFull(),
+        block->HasIdentity(),
+    });
+  }
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
@@ -368,6 +585,11 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
   for (const auto& block : reservation.ReservedBlocks()) {
     snapshot.transaction_reserved_block_ids.push_back(block->Id());
   }
+  snapshot.transaction_adopted_block_ids.reserve(
+      reservation.AdoptedBlocks().size());
+  for (const auto& block : reservation.AdoptedBlocks()) {
+    snapshot.transaction_adopted_block_ids.push_back(block->Id());
+  }
   snapshot.reservations.reserve(reservation.Deltas().size());
   for (const auto& delta : reservation.Deltas()) {
     RequestReservationSnapshot request_reservation;
@@ -380,6 +602,11 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
       request_reservation.reserved_block_ids.push_back(
           reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
+    }
+    request_reservation.adopted_block_ids.reserve(delta.adopted_block_count);
+    for (size_t i = 0; i < delta.adopted_block_count; ++i) {
+      request_reservation.adopted_block_ids.push_back(
+          reservation.AdoptedBlocks()[delta.adopted_block_offset + i]->Id());
     }
     snapshot.reservations.push_back(std::move(request_reservation));
   }

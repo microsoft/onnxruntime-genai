@@ -96,6 +96,37 @@ struct Request : std::enable_shared_from_this<Request>,
   std::span<const int32_t> UnprocessedTokensCpu() const;
 
   /**
+   * @brief Returns the whole host-side mirror of this request's sequence.
+   * @return Span of the prompt plus every committed generated token, valid until the next call that
+   *         appends to the sequence.
+   *
+   * The paged cache reads it to content-address the blocks it has committed for the request and to
+   * find a prompt whose prefix another sequence already computed.
+   */
+  std::span<const int32_t> SequenceTokensCpu() const;
+
+  /**
+   * @brief Moves the processed cursor to the end of a prefix whose keys and values are already in
+   *        the cache, so this request's prefill only computes the remainder.
+   * @param adopted_slots Tokens the cache holds for this request's leading sequence.
+   *
+   * Staged, not committed: the step that adopts the prefix has not run yet, so a rolled back step
+   * calls RollbackPrefixAdoption() and leaves the request exactly as it was. Only a request that
+   * has not processed anything yet can adopt a prefix.
+   */
+  void StagePrefixAdoption(size_t adopted_slots);
+
+  /**
+   * @brief Undoes a staged prefix adoption, returning the request to its pre-step cursor.
+   */
+  void RollbackPrefixAdoption() noexcept;
+
+  /**
+   * @brief Tokens this request skipped by adopting a cached prefix, for reporting.
+   */
+  int64_t AdoptedPrefixLength() const { return adopted_prefix_length_; }
+
+  /**
    * @brief Checks if there are any unseen tokens in the request.
    * @return True if there are unseen tokens, false otherwise.
    */
@@ -279,6 +310,10 @@ struct Request : std::enable_shared_from_this<Request>,
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  // Set while a step that adopts a cached prefix is in flight, so a rollback can restore the cursor
+  // this request had before the step was planned. Kept after commit for reporting.
+  int64_t adopted_prefix_length_{};
+  bool prefix_adoption_staged_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;

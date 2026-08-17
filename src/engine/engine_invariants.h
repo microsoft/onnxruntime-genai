@@ -53,6 +53,16 @@ struct RequestReservationSnapshot {
   size_t target_slots{};
   size_t tail_slots_to_consume{};
   std::vector<size_t> reserved_block_ids;
+  std::vector<size_t> adopted_block_ids;  // Resident prefix blocks this admission points at.
+};
+
+// Immutable view of one physical block the cache currently owns.
+struct CachedBlockSnapshot {
+  size_t block_id{};
+  size_t ref_count{};  // Owners holding the block: request tables, the transaction, the index.
+  size_t used_slots{};
+  bool full{};
+  bool indexed{};  // The prefix cache holds one of the references and can give it back.
 };
 
 // Immutable view of the paged cache's block accounting. Produced by PagedKeyValueCache::Snapshot().
@@ -63,9 +73,13 @@ struct PagedCacheSnapshot {
   size_t block_table_columns{};  // Padded block-table width the model sees, or 0 when unused.
   std::vector<RequestBlockSnapshot> requests;
   std::vector<size_t> transaction_reserved_block_ids;
+  std::vector<size_t> transaction_adopted_block_ids;
   std::vector<RequestReservationSnapshot> reservations;
+  std::vector<CachedBlockSnapshot> blocks;  // Every block the pool currently owns.
 
-  // Blocks currently owned by some Request (sum of per-Request block counts).
+  // Blocks currently owned by some Request (sum of per-Request block counts). A block several
+  // Requests share is counted once per Request, so this is a table-entry count rather than a
+  // physical block count.
   size_t AllocatedBlocks() const;
   size_t TransactionReservedBlocks() const {
     return transaction_reserved_block_ids.size();
