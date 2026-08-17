@@ -256,16 +256,14 @@ def check_extra_options(
                 f"moe_quant_type must be one of {sorted(supported_moe_quant_types)}, got '{moe_quant_type}'."
             )
         if moe_quant_type in ("mxfp4", "nvfp4"):
-            # MXFP4 and NVFP4 share the CUDA QMoE FP4 op path and both require the int4 build
-            # precision (that is what exports the quantized QMoE op); the FP4 scheme only sets the
-            # MoE expert weights to the FP4 encoding.
             if execution_provider != "cuda":
                 raise ValueError(
                     f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
+        if moe_quant_type == "mxfp4":
             if not (precision == "int4" and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    f"moe_quant_type={moe_quant_type} requires building with precision=int4 (symmetric int4): the "
+                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the "
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
@@ -302,6 +300,16 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    quantization_config = getattr(config, "quantization_config", {})
+    if quantization_config.get("quant_method") == "modelopt":
+        if execution_provider != "cuda":
+            raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
+        if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
+            raise ValueError("ModelOpt checkpoints require moe_quant_type=nvfp4 to preserve the original experts.")
+        extra_options["moe_quant_type"] = "nvfp4"
+        if str(quantization_config.get("kv_cache_quant_algo", "")).upper() == "FP8":
+            extra_options.setdefault("kv_cache_quant_type", "fp8_per_tensor")
 
     # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
     # embedding and the LM head. This is only valid when the model actually ties them.
@@ -755,7 +763,8 @@ def get_args():
                         INT4 quantization, and is only supported on the CUDA EP.
                     nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
-                        Same build/precision/EP requirements as mxfp4.
+                        Requires an ONNX Runtime build with NVFP4 QMoE support. The graph precision controls
+                        unquantized tensors and model I/O; the expert weights remain NVFP4.
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
