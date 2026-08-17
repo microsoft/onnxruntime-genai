@@ -62,6 +62,58 @@ TEST(InvariantValidatorTest, ValidCacheHasNoViolations) {
   EXPECT_TRUE(ValidateCacheInvariants(MakeValidCache()).empty());
 }
 
+TEST(InvariantValidatorTest, ValidWindowBlockPoolHasNoViolations) {
+  auto cache = MakeValidCache();
+  cache.window_blocks.total_blocks = 4;
+  cache.window_blocks.free_blocks = 0;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.requests = {
+      RequestBlockSnapshot{kRequestA, {0, 1}},
+      RequestBlockSnapshot{kRequestB, {2, 3}},
+  };
+
+  EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+}
+
+TEST(InvariantValidatorTest, WindowBlockPoolValidatesRingSizeAndOwnershipIndependently) {
+  auto cache = MakeValidCache();
+  cache.window_blocks.total_blocks = 4;
+  cache.window_blocks.free_blocks = 1;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.requests = {
+      RequestBlockSnapshot{kRequestA, {0}},
+      RequestBlockSnapshot{kRequestB, {1, 1}},
+  };
+
+  const auto violations = ValidateCacheInvariants(cache);
+
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("window blocks instead of 2") !=
+                                  std::string::npos;
+                         }),
+            violations.end());
+  EXPECT_NE(std::find_if(violations.begin(), violations.end(),
+                         [](const InvariantViolation& violation) {
+                           return violation.message.find("Window block id 1 is listed more than once") !=
+                                  std::string::npos;
+                         }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, WindowBlockPoolIncludesTransactionReservationsInAccounting) {
+  auto cache = MakeValidCache();
+  cache.window_blocks.total_blocks = 2;
+  cache.window_blocks.free_blocks = 0;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.transaction_reserved_block_ids = {0, 1};
+
+  EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+
+  cache.window_blocks.transaction_reserved_block_ids.pop_back();
+  EXPECT_FALSE(ValidateCacheInvariants(cache).empty());
+}
+
 TEST(InvariantValidatorTest, AllocatedBlocksCountsOwnedBlocks) {
   const auto cache = MakeValidCache();
   EXPECT_EQ(cache.AllocatedBlocks(), 3u);

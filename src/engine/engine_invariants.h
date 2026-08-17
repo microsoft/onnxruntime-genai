@@ -55,6 +55,14 @@ struct RequestReservationSnapshot {
   std::vector<size_t> reserved_block_ids;
 };
 
+struct WindowBlockPoolSnapshot {
+  size_t total_blocks{};
+  size_t free_blocks{};
+  size_t blocks_per_request{};
+  std::vector<RequestBlockSnapshot> requests;
+  std::vector<size_t> transaction_reserved_block_ids;
+};
+
 // Immutable view of the paged cache's block accounting. Produced by PagedKeyValueCache::Snapshot().
 struct PagedCacheSnapshot {
   size_t block_size{};
@@ -64,6 +72,7 @@ struct PagedCacheSnapshot {
   std::vector<RequestBlockSnapshot> requests;
   std::vector<size_t> transaction_reserved_block_ids;
   std::vector<RequestReservationSnapshot> reservations;
+  WindowBlockPoolSnapshot window_blocks;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).
   size_t AllocatedBlocks() const;

@@ -463,6 +463,21 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
     }
     snapshot.requests.push_back(std::move(request_snapshot));
   }
+  if (Windowed()) {
+    snapshot.window_blocks.total_blocks = window_block_pool_->Capacity();
+    snapshot.window_blocks.free_blocks = window_block_pool_->AvailableBlocks();
+    snapshot.window_blocks.blocks_per_request = window_ring_blocks_;
+    snapshot.window_blocks.requests.reserve(block_tables_.size());
+    for (const auto& block_table : block_tables_) {
+      RequestBlockSnapshot request_snapshot;
+      request_snapshot.request_id = block_table.request_id;
+      request_snapshot.block_ids.reserve(block_table.window_blocks.size());
+      for (const auto& block : block_table.window_blocks) {
+        request_snapshot.block_ids.push_back(block->Id());
+      }
+      snapshot.window_blocks.requests.push_back(std::move(request_snapshot));
+    }
+  }
   return snapshot;
 }
 
@@ -473,6 +488,11 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
       reservation.ReservedBlocks().size());
   for (const auto& block : reservation.ReservedBlocks()) {
     snapshot.transaction_reserved_block_ids.push_back(block->Id());
+  }
+  snapshot.window_blocks.transaction_reserved_block_ids.reserve(
+      reservation.ReservedWindowBlocks().size());
+  for (const auto& block : reservation.ReservedWindowBlocks()) {
+    snapshot.window_blocks.transaction_reserved_block_ids.push_back(block->Id());
   }
   snapshot.reservations.reserve(reservation.Deltas().size());
   for (const auto& delta : reservation.Deltas()) {

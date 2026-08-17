@@ -66,6 +66,9 @@ class PagedCacheReservation {
   const std::vector<std::shared_ptr<Block>>& ReservedBlocks() const {
     return reserved_blocks_;
   }
+  const std::vector<std::shared_ptr<Block>>& ReservedWindowBlocks() const {
+    return reserved_window_blocks_;
+  }
   size_t RequiredBlockTableColumns() const;
   const std::vector<PagedCacheReservationDelta>& Deltas() const { return deltas_; }
 

@@ -184,6 +184,59 @@ TEST(PagedCacheReservationTest, ReleaseReturnsWindowRingBlocks) {
   EXPECT_TRUE(tables.empty());
 }
 
+TEST(PagedCacheReservationTest, RollbackReturnsBothPoolsForMixedExistingAndNewRequests) {
+  BlockPool pool{kBlockSize, 3};
+  BlockPool window_pool{kBlockSize, 4};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4),
+                           window_pool.AllocateBlocks(2 * kBlockSize)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 5, false},
+      PagedCacheReservationRequest{kRequestB, 1, true},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests, &window_pool, 2};
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
+  EXPECT_EQ(window_pool.AvailableBlocks(), 0u);
+
+  reservation.Release();
+
+  ASSERT_EQ(tables.size(), 1u);
+  EXPECT_EQ(tables[0].request_id, kRequestA);
+  EXPECT_EQ(tables[0].committed_slots, 4u);
+  EXPECT_EQ(tables[0].blocks.size(), 1u);
+  EXPECT_EQ(tables[0].window_blocks.size(), 2u);
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+  EXPECT_EQ(window_pool.AvailableBlocks(), 2u);
+}
+
+TEST(PagedCacheReservationTest, CommittedWindowBlocksCanBeRemovedAndReused) {
+  BlockPool pool{kBlockSize, 1};
+  BlockPool window_pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array request_a{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+  };
+  PagedCacheReservation first{pool, tables, request_a, &window_pool, 2};
+  first.Commit();
+  ASSERT_EQ(tables.size(), 1u);
+  const auto first_window_blocks = tables[0].window_blocks;
+
+  pool.Free(tables[0].blocks);
+  window_pool.Free(tables[0].window_blocks);
+  tables.erase(tables.begin());
+
+  const std::array request_b{
+      PagedCacheReservationRequest{kRequestB, 1, true},
+  };
+  PagedCacheReservation second{pool, tables, request_b, &window_pool, 2};
+  second.Commit();
+  ASSERT_EQ(tables.size(), 1u);
+  EXPECT_EQ(tables[0].window_blocks[0]->Id(), first_window_blocks[0]->Id());
+  EXPECT_EQ(tables[0].window_blocks[1]->Id(), first_window_blocks[1]->Id());
+}
+
 TEST(PagedCacheReservationTest, WindowTableUsesReservedRingBeforeCommit) {
   BlockPool pool{kBlockSize, 1};
   BlockPool window_pool{kBlockSize, 2};
