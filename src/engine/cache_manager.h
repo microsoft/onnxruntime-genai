@@ -59,6 +59,10 @@ struct CacheManager {
   // `attention_metadata`.
   virtual size_t BlockTableColumns() const { return 0; }
 
+  // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
+  // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
+  virtual size_t MaxQueryTokensPerRequest() const { return 0; }
+
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
   virtual PagedCacheSnapshot Snapshot() const { return {}; }
@@ -122,6 +126,10 @@ struct PagedCacheManager : CacheManager {
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+
+  size_t MaxQueryTokensPerRequest() const override {
+    return key_value_cache_->MaxQueryTokensPerRequest();
+  }
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 

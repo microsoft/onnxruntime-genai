@@ -161,9 +161,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     size_t processed_sequence_length{};
   };
   std::vector<Candidate> candidates;
+  const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
 
-  const auto add_candidate = [&candidates](const std::shared_ptr<Request>& request,
-                                           bool newly_admitted) {
+  const auto add_candidate = [&candidates, cache_query_token_cap](
+                                 const std::shared_ptr<Request>& request,
+                                 bool newly_admitted) {
     const auto snapshot = request->Snapshot();
     const RequestStatus expected_status =
         newly_admitted ? RequestStatus::Assigned : RequestStatus::InProgress;
@@ -187,10 +189,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
+    auto prefill_token_cap = request->SearchOptions().chunk_size;
+    if (cache_query_token_cap != 0 &&
+      (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
+      prefill_token_cap = cache_query_token_cap;
+    }
     candidate.budget = DecodeFirstBudgetCandidate{
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
-        request->SearchOptions().chunk_size,
+      prefill_token_cap,
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);

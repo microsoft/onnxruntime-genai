@@ -98,6 +98,9 @@ struct PagedKeyValueCache {
   size_t MaxBlockTableColumns() const { return max_block_table_columns_; }
   size_t MaxBlockTableRows() const { return max_block_table_rows_; }
   bool GraphCaptureEnabled() const { return graph_capture_; }
+  size_t MaxQueryTokensPerRequest() const {
+    return Windowed() ? window_live_span_ - window_size_ + 1 : 0;
+  }
 
   void UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests);
   void UpdateState(State& state,
