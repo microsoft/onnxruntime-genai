@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
+
+from ..path_utils import scrub_string_for_telemetry
 
 
 class CommonSchemaJsonSerializationHelper:
@@ -43,7 +46,11 @@ class CommonSchemaJsonSerializationHelper:
             return value
 
         # Numeric types
-        if isinstance(value, (int, float)):
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("Telemetry numeric values must be finite")
             return value
 
         # String
@@ -82,23 +89,23 @@ class CommonSchemaJsonSerializationHelper:
             return base64.b64encode(bytes(value)).decode("ascii")
 
         # Arrays/Lists
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, (list, tuple, set, frozenset)):
             return [CommonSchemaJsonSerializationHelper.serialize_value(item) for item in value]
 
         # Dictionary/Map
         if isinstance(value, dict):
             result = {}
             for k, v in value.items():
-                key = str(k)
+                key = scrub_string_for_telemetry(str(CommonSchemaJsonSerializationHelper.serialize_value(k)))
                 if key:
                     result[key] = CommonSchemaJsonSerializationHelper.serialize_value(v)
             return result
 
         # Default: convert to string
         try:
-            return str(value)
+            return scrub_string_for_telemetry(str(value))
         except Exception:
-            return f"ERROR: type {type(value).__name__} is not supported"
+            return f"[unsupported:{type(value).__name__}]"
 
     @staticmethod
     def create_event_envelope(
@@ -141,4 +148,4 @@ class CommonSchemaJsonSerializationHelper:
             UTF-8 encoded JSON bytes
 
         """
-        return json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")

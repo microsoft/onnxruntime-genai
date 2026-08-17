@@ -231,7 +231,7 @@ class GenAITelemetry:
         try:
             data = self._common_context()
             if attributes:
-                data.update(attributes)
+                data.update(scrub_value_for_telemetry(attributes))
             envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
                 event_name=event_name,
                 timestamp=datetime.now(timezone.utc),

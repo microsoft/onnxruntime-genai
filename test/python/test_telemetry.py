@@ -394,6 +394,8 @@ class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
             module.sanitize_model_identifier("/home/alice/models/model.onnx"),
             "[path]",
         )
+        self.assertEqual(module.sanitize_model_identifier(Path("private/model.onnx")), "[path]")
+        self.assertEqual(module.sanitize_model_identifier("/secret.onnx"), "[path]")
         self.assertEqual(module.sanitize_model_identifier("microsoft/phi-3-mini"), "microsoft/phi-3-mini")
         self.assertEqual(module.normalize_execution_provider("NvTensorRtRtx"), "trt-rtx")
         path_utils_module = sys.modules[module.sanitize_model_identifier.__module__]
@@ -685,6 +687,60 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(extra_options["adapter_path"], "[path]")
         self.assertEqual(extra_options["[path]"]["paths"], ["[path]"])
         self.assertEqual(extra_options["batch_size"], 4)
+
+    def test_generic_log_scrubs_all_serializable_fallbacks(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        class PrivateValue:
+            def __str__(self):
+                return r"C:\Users\alice\private\model.onnx"
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+
+        telemetry.log(
+            "GenAIAction",
+            {
+                PrivateValue(): {Path("private/model.onnx"), PrivateValue()},
+                "rooted": "/secret.onnx",
+                "repository": "microsoft/phi-3-mini",
+            },
+        )
+
+        payload = telemetry._store.store.call_args.args[0]
+        serialized = json.loads(payload)
+        serialized_text = payload.decode("utf-8")
+        self.assertNotIn("alice", serialized_text.lower())
+        self.assertNotIn("secret.onnx", serialized_text)
+        self.assertEqual(serialized["data"]["repository"], "microsoft/phi-3-mini")
+        self.assertIn("[path]", serialized["data"])
+        self.assertTrue(all(value == "[path]" for value in serialized["data"]["[path]"]))
+
+    def test_non_finite_event_is_rejected_without_affecting_next_event(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+        telemetry._next_model_session_id = 1
+
+        telemetry.log_benchmark(tokenization_latency_ms=float("nan"))
+        telemetry.log_benchmark(tokenization_latency_ms=1.0)
+
+        self.assertEqual(telemetry._store.store.call_count, 1)
 
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error

@@ -8,6 +8,9 @@
 import ntpath
 import os
 import posixpath
+from collections.abc import Mapping, Set
+from datetime import date, datetime, time, timedelta
+from uuid import UUID
 
 MAX_TELEMETRY_STRING_LENGTH = 256
 MAX_ERROR_MESSAGE_LENGTH = 40_960
@@ -21,6 +24,8 @@ def _token_start(value: str, index: int) -> int:
 
 def _find_path_anchor(value: str):
     for index, char in enumerate(value):
+        if index == 0 and char == "/":
+            return 0
         if char == "\\" and index + 1 < len(value) and value[index + 1] == "\\":
             return index
         if char == "~" and index + 1 < len(value) and value[index + 1] in "/\\":
@@ -86,20 +91,40 @@ def scrub_error_message_for_telemetry(value: str) -> str:
 
 def scrub_value_for_telemetry(value):
     """Recursively scrub strings and path-like values before serialization."""
-    if isinstance(value, (str, os.PathLike)):
-        return scrub_string_for_telemetry(os.fsdecode(value))
-    if isinstance(value, dict):
-        return {
-            scrub_string_for_telemetry(os.fsdecode(key))
-            if isinstance(key, (str, os.PathLike))
-            else key: scrub_value_for_telemetry(child)
-            for key, child in value.items()
-        }
+    if isinstance(value, os.PathLike):
+        return "[path]"
+    if isinstance(value, str):
+        return scrub_string_for_telemetry(value)
+    if value is None or isinstance(
+        value,
+        (bool, int, float, bytes, bytearray, datetime, date, time, timedelta, UUID),
+    ):
+        return value
+    if isinstance(value, Mapping):
+        result = {}
+        for key, child in value.items():
+            if isinstance(key, os.PathLike):
+                safe_key = "[path]"
+            elif isinstance(key, str):
+                safe_key = scrub_string_for_telemetry(key)
+            else:
+                try:
+                    safe_key = scrub_string_for_telemetry(str(key))
+                except Exception:
+                    safe_key = f"[unsupported:{type(key).__name__}]"
+            if safe_key:
+                result[safe_key] = scrub_value_for_telemetry(child)
+        return result
     if isinstance(value, list):
         return [scrub_value_for_telemetry(child) for child in value]
     if isinstance(value, tuple):
         return tuple(scrub_value_for_telemetry(child) for child in value)
-    return value
+    if isinstance(value, Set):
+        return [scrub_value_for_telemetry(child) for child in value]
+    try:
+        return scrub_string_for_telemetry(str(value))
+    except Exception:
+        return f"[unsupported:{type(value).__name__}]"
 
 
 def normalize_execution_provider(value):
@@ -109,6 +134,8 @@ def normalize_execution_provider(value):
 
 def sanitize_model_identifier(value):
     """Preserve model IDs while replacing local paths with ``[path]``."""
+    if isinstance(value, os.PathLike):
+        return "[path]"
     if not isinstance(value, str) or not value:
         return value
 
