@@ -971,6 +971,9 @@ class Qwen35TextModel(Model):
     Both layer types use OffsetRMSNorm (the ``1 + weight`` variant).
     """
 
+    def _get_model_type(self, config):
+        return "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
@@ -1024,8 +1027,6 @@ class Qwen35TextModel(Model):
         self._kv_cache_scale_created = False
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
@@ -2292,6 +2293,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
     unchanged from the parent class.
     """
 
+    def _get_model_type(self, config):
+        return "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Map Qwen3.5-MoE config attributes to what the base class expects.
         if hasattr(config, "text_config"):
@@ -2318,10 +2322,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # the ModelOpt tensors (E2M1 codes + E4M3 block scale + fp32 global scale). NOTE: the
         # NVFP4 *routed MoE experts* are controlled separately by ``moe_quant_type=nvfp4``
         # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
-        # The base builder derives the GenAI model.type by stripping the suffix
-        # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
-
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1

@@ -37,6 +37,9 @@ from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
+    def _get_model_type(self, config):
+        return config.architectures[0]
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
@@ -91,7 +94,7 @@ class Model:
         )
 
         self.model_name_or_path = config._name_or_path
-        self.model_type = config.architectures[0]
+        self.model_type = self._get_model_type(config)
         self.io_dtype = ir.DataType(io_dtype)
         self.onnx_dtype = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
