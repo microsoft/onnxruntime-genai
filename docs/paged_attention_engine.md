@@ -137,11 +137,9 @@ the model's chat template.
 `Continue(tokens)` appends the next input fragment and moves a resident request back to `Assigned`.
 `AddTokens()` remains an initial-input-only operation.
 
-There is no fixed wall-clock or next-step timeout. Planning skips turn-complete residents and does
-not release their cache. Retained requests still consume paged-cache blocks and a batch slot, so
-applications must call `Remove()` when they no longer need continuation. Until Phase 2 defines
-residency and eviction, insufficient capacity is surfaced as backpressure rather than silently
-discarding another conversation's model state.
+Planning skips turn-complete residents and does not release their cache. Retained requests still
+consume paged-cache blocks and a batch slot, so applications must call `Remove()` when they no
+longer need continuation.
 
 ### `Remove()`
 
@@ -157,10 +155,6 @@ scheduler ownership. Returning to `Unassigned` would imply that the same logical
 submitted as a new request. A closed static-batch row may remain physically allocated until the
 batch is recycled, but it is no longer sampled or returned.
 
-Lifecycle status and residency are separate concepts. Phase 1 guarantees that dynamic
-`TurnComplete` requests stay resident until `Remove()`. Phase 2 will define observable residency and
-automatic eviction; no eviction policy is part of this lifecycle change.
-
 ## The request length counters
 
 Three views of request progress are important:
@@ -169,7 +163,16 @@ Three views of request progress are important:
 | --- | --- |
 | `CurrentSequenceLength()` | Number of tokens currently held by the request's search sequence |
 | `processed_sequence_length_` | Number of sequence tokens already represented in the committed KV cache |
-| `seen_sequence_length_` | High-water sequence index of generated output consumed by the API caller; continuation input may create gaps |
+| `seen_sequence_length_` | High-water sequence index of generated output consumed by the API caller; copied into invariant snapshots rather than used to select the next output token |
+
+Generated-output delivery uses separate bookkeeping because continuation input creates gaps in the
+logical sequence:
+
+| Value | Meaning |
+| --- | --- |
+| `tokens_host_` | Host-side mirror of the complete logical sequence, including prompt, generated output, and continuation input |
+| `unseen_token_indices_` | Positions of generated tokens in `tokens_host_`; continuation-input positions are never added |
+| `next_unseen_token_index_` | Cursor into `unseen_token_indices_`; entries at and after this cursor have not been consumed |
 
 The unprocessed tokens are:
 
@@ -227,19 +230,16 @@ If the engine has previously encountered a fatal transaction or execution failur
 `DynamicBatchScheduler::PlanStep()` skips `TurnComplete` residents and builds candidates from
 executable residents plus waiting requests.
 
-The cache manager checks whether those candidates fit alongside dormant turn-complete requests. It
-does not reclaim another request as a side effect of `Step()`. If retained residency prevents
-admission or cache growth, the plan reports capacity backpressure; the application decides which
-conversation to release with `Remove()`.
+The cache manager checks whether those candidates fit alongside dormant turn-complete requests. If
+retained residency prevents admission or cache growth, the plan reports capacity backpressure; the
+application decides which conversation to release with `Remove()`.
 
 ### 2. Build the initial step plan
 
 The scheduler snapshots requests that already belong to the paged cache. Executable residents may
 be `InProgress` or `Assigned`; an `Assigned` resident is a queued continuation.
 
-It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` and
-are marked as newly admitted candidates. Residency, not status alone, determines
-`newly_admitted`.
+It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` and are marked as newly admitted candidates.
 
 The scheduler orders candidates with decodes first. Order remains stable among
 decodes and among prefills. Each candidate initially contributes one provisional
@@ -617,11 +617,6 @@ Requests skipped because of token, row, or temporary cache capacity remain pendi
 
 If no request can run because of temporary capacity, `StepDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 
-The native Engine exposes `CapacityDeferred` as a structured `StepOutcomeKind`. The current C and
-Python wrappers still surface it as an error message. Phase 2 must add a structured public
-backpressure/residency signal before introducing automatic eviction, so applications can select a
-turn-complete request to close without parsing text.
-
 ## Static engine path
 
 The static engine path is intentionally separate.
@@ -635,9 +630,7 @@ batch. Static cache rows still cannot be released independently, and an all-turn
 be recycled for new work. Static continuation is therefore valid only while the original
 single-request batch remains resident.
 
-A closed static row remains physically retained until that shared batch is recycled. It is not
-sampled or returned again, but its Request/Search storage can remain alive for the lifetime of the
-batch.
+A closed request that is already resident in a static batch remains physically retained until that shared batch is recycled. It is not sampled or returned again, but its Request/Search storage can remain alive for the lifetime of the batch.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -662,11 +655,6 @@ if request.status == og.RequestStatus.TURN_COMPLETE:
 # Repeat engine.step(), then close the conversation when continuation is no longer needed.
 engine.remove_request(request)
 ```
-
-`AddTokens` is for initial input. The explicit continuation operations are `OgaRequestContinue` in
-C, `OgaRequest::Continue` in the C++ wrapper, and `request.continue_with` in Python. Lifecycle is
-available through `OgaRequestGetStatus`, `OgaRequest::GetStatus`, and `request.status`.
-`IsDone()` remains a compatibility convenience for “the current turn is complete.”
 
 One ready request may be returned several times over its lifetime as new tokens become available. A
 turn-complete dynamic request remains cache-resident until explicit removal, which releases dynamic

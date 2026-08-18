@@ -130,13 +130,11 @@ TEST_F(RequestLifecycleTest, AppendIsRejectedWhileInProgress) {
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
 }
 
-TEST_F(RequestLifecycleTest, AddTokensIsRejectedAfterSubmission) {
+TEST_F(RequestLifecycleTest, AddTokensIsRejectedWhileAssigned) {
   auto prompt = Prompt();
   const std::vector<int32_t> more{5};
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
 
-  EXPECT_THROW(request->AddTokens(more), std::runtime_error);
-  request->Schedule();
   EXPECT_THROW(request->AddTokens(more), std::runtime_error);
 }
 

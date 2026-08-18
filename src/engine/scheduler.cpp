@@ -31,16 +31,13 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
-void StaticBatchScheduler::ValidateRequest(const Request& request) const {
+void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so it
   // cannot resume a half written prompt. Only the paged cache can hold one.
-  if (request.SearchOptions().chunk_size.value_or(0) != 0) {
+  if (request->SearchOptions().chunk_size.value_or(0) != 0) {
     throw std::runtime_error(
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
   }
-}
-
-void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   if (auto* sampler = GetBatchedSampler())
     request->SamplingState(*sampler);
   requests_pool_.push_back(request);
@@ -59,10 +56,6 @@ void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
 
 ScheduledRequests StaticBatchScheduler::Schedule() {
   const auto allocated_requests = cache_manager_->AllocatedRequests();
-  const auto is_resident = [&allocated_requests](const std::shared_ptr<Request>& request) {
-    return std::find(allocated_requests.begin(), allocated_requests.end(), request) !=
-           allocated_requests.end();
-  };
 
   for (const auto& request : allocated_requests) {
     if (IsQueued(request->status_)) {
@@ -72,7 +65,7 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
 
   std::vector<std::shared_ptr<Request>> requests_to_schedule;
   for (auto& request : requests_pool_) {
-    if (IsQueued(request->status_) && !is_resident(request)) {
+    if (IsQueued(request->status_) && !cache_manager_->IsResident(request)) {
       requests_to_schedule.push_back(request);
     }
   }
@@ -196,10 +189,6 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidates.push_back(std::move(candidate));
   };
 
-  const auto is_resident = [&allocated_requests](const std::shared_ptr<Request>& request) {
-    return std::find(allocated_requests.begin(), allocated_requests.end(), request) !=
-           allocated_requests.end();
-  };
   for (const auto& request : allocated_requests) {
     if (IsTurnComplete(request->status_)) {
       continue;
@@ -208,7 +197,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   }
 
   for (const auto& request : requests_pool_) {
-    if (IsQueued(request->status_) && !is_resident(request)) {
+    if (IsQueued(request->status_) && !cache_manager_->IsResident(request)) {
       add_candidate(request, true);
     }
   }

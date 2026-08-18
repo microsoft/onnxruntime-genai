@@ -309,14 +309,14 @@ TEST(InvariantValidatorTest, SeenBeyondCurrentReported) {
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, CompletedRequestWithFinalUnprocessedTokenIsValid) {
+TEST(InvariantValidatorTest, TurnCompleteRequestWithFinalUnprocessedTokenIsValid) {
   // At completion the just-generated final token is appended but never fed back to the model, so a
-  // A TurnComplete Request may legitimately report unprocessed tokens. This must not fire.
+  // TurnComplete Request may legitimately report unprocessed tokens. This must not fire.
   auto request = MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 9, 10);
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, CompletedRequestFullyProcessedIsValid) {
+TEST(InvariantValidatorTest, TurnCompleteRequestFullyProcessedIsValid) {
   EXPECT_TRUE(ValidateRequestInvariants(
                   MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10))
                   .empty());

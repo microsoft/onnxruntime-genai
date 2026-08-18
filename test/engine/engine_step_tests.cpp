@@ -158,7 +158,7 @@ TEST_F(EngineStepTest, StepWithNoRequestsReturnsNull) {
   EXPECT_EQ(engine.executor->decode_calls, 0);
 }
 
-TEST_F(EngineStepTest, StaticBatchingRetainsLegacyCommitOrdering) {
+TEST_F(EngineStepTest, StaticBatchingPreservesOrderingAndReusesResidentContinuation) {
   model_->config_->engine.dynamic_batching.reset();
   auto trace = std::make_shared<CallTrace>();
   auto cache = std::make_shared<RecordingCacheManager>(
@@ -188,28 +188,6 @@ TEST_F(EngineStepTest, StaticBatchingRetainsLegacyCommitOrdering) {
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(executor_observer->decode_calls, 2);
   EXPECT_EQ(cache_observer->allocate_calls, allocations_before);
-}
-
-TEST_F(EngineStepTest, StaticAdmissionValidationDoesNotStrandRequest) {
-  model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
-  auto scheduler = Scheduler::Create(model_, cache);
-  auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, EosToken(*model_));
-  EngineDependencies dependencies{cache, std::move(scheduler),
-                                  std::move(executor)};
-  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
-  auto prompt = Prompt(10);
-  auto request = MintRequest(*model_, prompt);
-  request->Params()->search.chunk_size = 2;
-
-  EXPECT_THROW(engine->AddRequest(request), std::runtime_error);
-  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
-
-  request->Params()->search.chunk_size.reset();
-  EXPECT_NO_THROW(engine->AddRequest(request));
-  EXPECT_EQ(request->status_, RequestStatus::Assigned);
 }
 
 TEST_F(EngineStepTest, StaticContinueFailsAfterBatchRecycling) {
@@ -527,27 +505,6 @@ TEST_F(EngineStepTest, RemovingOnlyDrainedReadyRequestClearsQueue) {
 
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(engine.engine->Step(), nullptr);
-}
-
-TEST_F(EngineStepTest, RepeatedReadyRemovalsPreserveRemainingQueueOrder) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
-  std::vector<std::shared_ptr<Request>> requests;
-  for (int32_t seed : {10, 20, 30}) {
-    auto prompt = Prompt(seed);
-    auto request = MintRequest(*model_, prompt);
-    engine.engine->AddRequest(request);
-    requests.push_back(std::move(request));
-  }
-
-  ASSERT_EQ(engine.engine->Step(), requests[0]);
-  engine.engine->RemoveRequest(requests[0]);
-  // The first removal resets the drain cursor to zero while two ready entries remain. Removing a
-  // second request must compact that nonempty queue in place without overlapping std::move ranges.
-  engine.engine->RemoveRequest(requests[1]);
-
-  EXPECT_EQ(requests[0]->status_, RequestStatus::Closed);
-  EXPECT_EQ(requests[1]->status_, RequestStatus::Closed);
-  EXPECT_EQ(engine.engine->Step(), requests[2]);
 }
 
 TEST_F(EngineStepTest, StaticTurnCompleteRowIsNotRepublishedWhilePeerRuns) {

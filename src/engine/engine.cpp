@@ -58,7 +58,6 @@ void Engine::AddRequest(std::shared_ptr<Request> request) {
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
-  scheduler_->ValidateRequest(*request);
   request->Assign(shared_from_this());
   scheduler_->AddRequest(request);
 }
@@ -73,16 +72,11 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 
   scheduler_->RemoveRequest(request);
 
-  auto first_undrained =
-      ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_);
-  const auto retained_end =
-      std::remove(first_undrained, ready_requests_.end(), request);
-  const auto new_end = ready_request_index_ == 0
-                           ? retained_end
-                           : std::move(first_undrained, retained_end,
-                                       ready_requests_.begin());
-  ready_requests_.erase(new_end, ready_requests_.end());
+  ready_requests_.erase(
+      ready_requests_.begin(),
+      ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
   ready_request_index_ = 0;
+  std::erase(ready_requests_, request);
   request->CompleteClose();
 }
 

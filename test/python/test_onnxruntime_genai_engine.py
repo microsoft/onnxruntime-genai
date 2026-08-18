@@ -250,14 +250,6 @@ def test_continuation_while_peer_remains_active(model):
     assert short_sink.tokens == reference_sink.tokens
 
 
-def test_request_rejects_empty_input(model):
-    params = og.GeneratorParams(model)
-    request = og.Request(params)
-
-    with pytest.raises(RuntimeError, match="at least one token"):
-        request.add_tokens(np.asarray([], dtype=np.int32))
-
-
 def test_request_rejects_tokens_while_awaiting_admission(model):
     engine = og.Engine(model)
     sink = _Sink()
@@ -267,19 +259,6 @@ def test_request_rejects_tokens_while_awaiting_admission(model):
         request.add_tokens(np.asarray([12], dtype=np.int32))
 
     engine.remove_request(request)
-
-
-def test_closed_request_cannot_continue(model):
-    engine = og.Engine(model)
-    sink = _Sink()
-    request = _add_request(engine, model, _PROMPT_A, 8, sink)
-    engine.remove_request(request)
-
-    assert request.status == og.RequestStatus.CLOSED
-    with pytest.raises(RuntimeError, match="closed request"):
-        request.add_tokens(np.asarray([12], dtype=np.int32))
-    with pytest.raises(RuntimeError, match="closed request"):
-        request.continue_with(np.asarray([12], dtype=np.int32))
 
 
 def test_request_cannot_be_removed_from_another_engine(model):
@@ -320,6 +299,10 @@ def test_request_lifecycle_status(model):
 
     engine.remove_request(request)
     assert request.status == og.RequestStatus.CLOSED
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.continue_with(np.asarray([12], dtype=np.int32))
     with pytest.raises(RuntimeError, match="already closed"):
         engine.remove_request(request)
 

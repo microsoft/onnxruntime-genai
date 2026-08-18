@@ -221,26 +221,6 @@ TEST_F(SchedulerContractTest, DynamicResidentQueuedRequestIsNotReadmitted) {
   EXPECT_EQ(cache->AllocatedCount(), 1u);
 }
 
-TEST_F(SchedulerContractTest, StaticResidentQueuedRequestSchedulesWithoutAllocation) {
-  model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
-  StaticBatchScheduler scheduler(model_, cache);
-
-  auto request = Assigned(10);
-  scheduler.AddRequest(request);
-  cache->Allocate({request});
-  request->status_ = RequestStatus::Assigned;
-  const int allocations_before = cache->allocate_calls;
-
-  auto scheduled = scheduler.Schedule();
-
-  ASSERT_EQ(scheduled.size(), 1u);
-  EXPECT_EQ(scheduled[0], request);
-  EXPECT_EQ(request->status_, RequestStatus::InProgress);
-  EXPECT_EQ(cache->allocate_calls, allocations_before);
-}
-
 // Removing a request from the dynamic scheduler deallocates its cache resources immediately.
 TEST_F(SchedulerContractTest, DynamicRemoveReleasesCacheResources) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);

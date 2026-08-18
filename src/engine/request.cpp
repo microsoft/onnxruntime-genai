@@ -126,12 +126,12 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
 }
 
 void Request::Continue(std::span<const int32_t> tokens) {
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot continue a closed request.");
+  }
   if (tokens.empty())
     throw std::runtime_error("Expected at least one token for continuation. Received 0.");
   if (!IsTurnComplete(status_)) {
-    if (IsClosed(status_)) {
-      throw std::runtime_error("Cannot continue a closed request.");
-    }
     throw std::runtime_error("Continue is only valid after the current turn is complete.");
   }
 
@@ -221,7 +221,7 @@ void Request::AdvanceChunk() {
 }
 
 int32_t Request::UnseenToken() {
-  if (next_unseen_token_index_ == unseen_token_indices_.size())
+  if (next_unseen_token_index_ >= unseen_token_indices_.size())
     throw std::runtime_error("All tokens have been seen.");
 
   const size_t token_index = unseen_token_indices_[next_unseen_token_index_++];
