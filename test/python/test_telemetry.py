@@ -655,6 +655,32 @@ class TestPathRedaction(unittest.TestCase):
         self.assertTrue(scrubbed.startswith("https://example.test/"))
         self.assertEqual(token_start.call_count, 1)
 
+        slash_heavy_token = "a" + "/" * MAX_ERROR_MESSAGE_LENGTH + "b"
+        with patch(
+            "telemetry.path_utils._token_start",
+            wraps=path_utils._token_start,
+        ) as token_start:
+            scrubbed = path_utils.scrub_error_message_for_telemetry(slash_heavy_token)
+
+        self.assertEqual(len(scrubbed.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
+        self.assertEqual(token_start.call_count, 1)
+
+    def test_local_file_uris_are_redacted_but_remote_urls_are_preserved(self):
+        from telemetry.path_utils import scrub_string_for_telemetry
+
+        self.assertEqual(
+            scrub_string_for_telemetry("Error at file:///home/alice/secret/model.onnx"),
+            "Error at [path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("sqlite:////home/alice/private.db"),
+            "[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("https://example.test/model"),
+            "https://example.test/model",
+        )
+
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
 

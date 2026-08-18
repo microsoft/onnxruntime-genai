@@ -23,8 +23,26 @@ def _token_start(value: str, index: int) -> int:
     return index
 
 
+def _is_remote_uri_token(value: str, start: int, end: int) -> bool:
+    scheme_end = value.find("://", start, end)
+    if scheme_end < 0:
+        return False
+    scheme_start = scheme_end
+    while scheme_start > start and (
+        value[scheme_start - 1].isascii()
+        and (value[scheme_start - 1].isalnum() or value[scheme_start - 1] in "+-.")
+    ):
+        scheme_start -= 1
+    scheme = value[scheme_start:scheme_end].lower()
+    return bool(scheme and scheme not in {"file", "sqlite", "unix"})
+
+
 def _find_path_anchor(value: str):
     index = 0
+    slash_token_end = 0
+    slash_token_start = 0
+    slash_token_is_remote_uri = False
+    slash_token_analyzed = False
     while index < len(value):
         char = value[index]
         if index == 0 and char == "/":
@@ -52,16 +70,23 @@ def _find_path_anchor(value: str):
                     if separators >= 2:
                         return _token_start(value, index)
         if char == "/":
-            token_start = _token_start(value, index)
-            token_end = index
-            while (
-                token_end < len(value)
-                and not value[token_end].isspace()
-                and value[token_end] not in "\"'"
-            ):
-                token_end += 1
-            if "://" in value[token_start:token_end]:
-                index = token_end
+            if index >= slash_token_end:
+                slash_token_start = _token_start(value, index)
+                slash_token_end = index
+                while (
+                    slash_token_end < len(value)
+                    and not value[slash_token_end].isspace()
+                    and value[slash_token_end] not in "\"'"
+                ):
+                    slash_token_end += 1
+                slash_token_is_remote_uri = _is_remote_uri_token(
+                    value,
+                    slash_token_start,
+                    slash_token_end,
+                )
+                slash_token_analyzed = False
+            if slash_token_is_remote_uri:
+                index += 1
                 continue
             if (
                 index + 1 < len(value)
@@ -69,21 +94,23 @@ def _find_path_anchor(value: str):
                 and value[index - 1] in "\"' \t=([{,;"
             ):
                 return index
-            segments = 0
-            cursor = index
-            while cursor < len(value) and value[cursor] == "/":
-                separator_end = cursor + 1
-                while separator_end < len(value) and value[separator_end] == "/":
-                    separator_end += 1
-                cursor = separator_end
-                segment_start = cursor
-                while cursor < len(value) and value[cursor] not in "/\r\n \t":
-                    cursor += 1
-                if cursor == segment_start:
-                    break
-                segments += 1
-            if segments >= 2:
-                return _token_start(value, index)
+            if not slash_token_analyzed:
+                slash_token_analyzed = True
+                segments = 0
+                cursor = index
+                while cursor < slash_token_end and value[cursor] == "/":
+                    separator_end = cursor + 1
+                    while separator_end < slash_token_end and value[separator_end] == "/":
+                        separator_end += 1
+                    cursor = separator_end
+                    segment_start = cursor
+                    while cursor < slash_token_end and value[cursor] not in "/\r\n \t":
+                        cursor += 1
+                    if cursor == segment_start:
+                        break
+                    segments += 1
+                if segments >= 2:
+                    return slash_token_start
         index += 1
     return None
 
