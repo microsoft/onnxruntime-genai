@@ -150,9 +150,9 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
 std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
   std::vector<int64_t> valid_token_indices;
   for (auto& request : scheduled_requests_) {
-    // A completed row retained in the static batch for continuation can contribute zero
+    // A TurnComplete or Closed row retained in the static batch can contribute zero
     // unprocessed tokens. Selecting index 0 keeps the subspan in bounds; its logits are discarded
-    // because ScheduledRequests skips completed and removed rows during sampling.
+    // because ScheduledRequests samples only InProgress rows.
     const auto unprocessed_token_count = request->ScheduledTokenCount();
     valid_token_indices.push_back(
         unprocessed_token_count == 0 ? 0 : static_cast<int64_t>(unprocessed_token_count - 1));
