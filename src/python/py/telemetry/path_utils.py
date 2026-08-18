@@ -34,6 +34,7 @@ def _find_path_anchor(value: str):
         if (
             char.isascii()
             and char.isalpha()
+            and (index == 0 or value[index - 1] in "\"' \t=([{,;")
             and index + 2 < len(value)
             and value[index + 1] == ":"
             and value[index + 2] in "/\\"
@@ -49,10 +50,20 @@ def _find_path_anchor(value: str):
                     if separators >= 2:
                         return _token_start(value, index)
         if char == "/":
+            token_start = _token_start(value, index)
+            token_end = index
+            while (
+                token_end < len(value)
+                and not value[token_end].isspace()
+                and value[token_end] not in "\"'"
+            ):
+                token_end += 1
+            if "://" in value[token_start:token_end]:
+                continue
             if (
                 index + 1 < len(value)
                 and value[index + 1] not in "/\r\n \t"
-                and value[index - 1] in "\"' \t"
+                and value[index - 1] in "\"' \t=([{,;"
             ):
                 return index
             segments = 0

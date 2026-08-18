@@ -63,14 +63,24 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 def _resolve_home_dir() -> Path:
     """Resolve the user home directory with fallbacks for container environments."""
     home = os.getenv("HOME")
-    if home:
+    if home and Path(home).is_absolute():
         return Path(home)
+    if platform.system() != "Windows":
+        try:
+            import pwd  # noqa: PLC0415
+
+            passwd_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            if passwd_home.is_absolute():
+                return passwd_home
+        except (AttributeError, ImportError, KeyError, OSError):
+            pass
     try:
-        return Path.home()
+        fallback_home = Path.home()
+        if fallback_home.is_absolute():
+            return fallback_home
     except (RuntimeError, KeyError):
-        if platform.system() != "Windows":
-            return Path("/var/tmp")
-        return Path(tempfile.gettempdir())
+        pass
+    raise RuntimeError("No absolute per-user telemetry storage directory is available")
 
 
 @functools.lru_cache(maxsize=1)
@@ -87,10 +97,10 @@ def get_telemetry_base_dir() -> Path:
         return home / "Library" / "Application Support" / ORT_SUPPORT_DIR
 
     cache_dir = os.getenv("XDG_CACHE_HOME")
-    if not cache_dir:
-        cache_dir = str(_resolve_home_dir() / ".cache")
+    if cache_dir and Path(cache_dir).is_absolute():
+        return Path(cache_dir) / ORT_SUPPORT_DIR
 
-    return Path(cache_dir) / ORT_SUPPORT_DIR
+    return _resolve_home_dir() / ".cache" / ORT_SUPPORT_DIR
 
 
 class _FileStore:
@@ -107,7 +117,10 @@ class _FileStore:
             raise FileNotFoundError(f"File {self._file_path.stem} does not exist") from None
         if stat.S_ISLNK(file_info.st_mode) or not stat.S_ISREG(file_info.st_mode):
             raise PermissionError(f"File {self._file_path.stem} is not a regular file")
-        return self._file_path.read_text(encoding="utf-8").strip()
+        try:
+            return self._file_path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            raise ValueError(f"File {self._file_path.stem} is not valid UTF-8") from None
 
     def store_id(self, device_id: str, replace_existing: bool = False) -> bool:
         # create the folder location if it does not exist, owner-only (0700) so other users on the
@@ -151,8 +164,10 @@ class _WindowsStore:
         with winreg.OpenKeyEx(
             winreg.HKEY_CURRENT_USER, self.REGISTRY_PATH, reserved=0, access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY
         ) as key_handle:
-            device_id = winreg.QueryValueEx(key_handle, self.REGISTRY_KEY)
-        return device_id[0].strip()
+            device_id, value_type = winreg.QueryValueEx(key_handle, self.REGISTRY_KEY)
+        if value_type != winreg.REG_SZ or not isinstance(device_id, str):
+            raise ValueError(f"Registry value {self.REGISTRY_KEY} is not a string")
+        return device_id.strip()
 
     def store_id(self, device_id: str, replace_existing: bool = False) -> bool:
         import winreg  # noqa: PLC0415
@@ -277,6 +292,8 @@ def get_device_id() -> str:
             existing = store.retrieve_id
         except (FileExistsError, FileNotFoundError):
             return ("missing", "")
+        except ValueError:
+            return ("invalid", "")
         except Exception:
             return ("failed", "")
         return ("valid", existing) if _is_valid_device_id(existing) else ("invalid", "")

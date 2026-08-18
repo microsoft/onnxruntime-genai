@@ -59,6 +59,20 @@ def test_telemetry_execution_provider_normalizes_trt_rtx():
     assert builder_module._normalize_execution_provider_name("cuda") == "cuda"
 
 
+def test_extra_options_redact_relative_pathlike_values():
+    sanitized = builder_module._sanitize_extra_options(
+        {
+            "adapter_path": Path("private/adapter"),
+            "nested": {"scale_path": Path("private/scales.json")},
+            "batch_size": 4,
+        }
+    )
+
+    assert sanitized["adapter_path"] == "[path]"
+    assert sanitized["nested"]["scale_path"] == "[path]"
+    assert sanitized["batch_size"] == 4
+
+
 def test_telemetry_fallback_restores_source_path(monkeypatch):
     telemetry_stub = types.ModuleType("telemetry")
 

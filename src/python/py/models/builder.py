@@ -60,14 +60,22 @@ from builders.quant_config import KV_CACHE_QUANT_TYPES
 from transformers import AutoConfig
 
 try:
-    from onnxruntime_genai.telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
+    from onnxruntime_genai.telemetry.path_utils import (
+        normalize_execution_provider,
+        sanitize_model_identifier,
+        scrub_value_for_telemetry,
+    )
 except ImportError:
     telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     path_added = telemetry_root not in sys.path
     if path_added:
         sys.path.insert(0, telemetry_root)
     try:
-        from telemetry.path_utils import normalize_execution_provider, sanitize_model_identifier
+        from telemetry.path_utils import (
+            normalize_execution_provider,
+            sanitize_model_identifier,
+            scrub_value_for_telemetry,
+        )
     finally:
         if path_added and telemetry_root in sys.path:
             sys.path.remove(telemetry_root)
@@ -444,13 +452,13 @@ def _sanitize_path_value(value):
     return sanitize_model_identifier(value)
 
 
-def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, str]:
+def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
     """Stringify extra options for telemetry, excluding secrets and redacting local paths."""
     sanitized = {}
     for key, value in extra_options.items():
         if key == "hf_token":
             continue
-        sanitized[key] = _sanitize_path_value(str(value))
+        sanitized[key] = scrub_value_for_telemetry(value)
     return sanitized
 
 

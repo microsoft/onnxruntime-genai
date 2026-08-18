@@ -65,6 +65,7 @@ class EventUploader:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._pending_delete_ids: list[int] = []
+        self._split_batch_size: int | None = None
 
     # ----- control -------------------------------------------------------
 
@@ -118,6 +119,7 @@ class EventUploader:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._pending_delete_ids = []
+        self._split_batch_size = None
         self._drain_lock.discard_after_fork()
 
     def stop(self, timeout_seconds: float = 12.0) -> None:
@@ -141,7 +143,8 @@ class EventUploader:
             self._pending_delete_ids = []
             return (len(pending_ids), 0)
 
-        batch = self._store.get_batch(self._max_items)
+        batch_limit = min(self._max_items, self._split_batch_size or self._max_items)
+        batch = self._store.get_batch(batch_limit)
         if not batch:
             return (0, 0)
 
@@ -174,8 +177,19 @@ class EventUploader:
         except Exception:
             success, status = (False, None)
 
-        if success or not HttpJsonPostTransport.is_retryable(status):
+        if success:
+            self._split_batch_size = None
+            self._pending_delete_ids = included
+            if not self._store.delete(included):
+                return (0, len(included))
+            self._pending_delete_ids = []
+            return (len(included), 0)
+        if not HttpJsonPostTransport.is_retryable(status):
+            if status in {400, 413, 422} and len(included) > 1:
+                self._split_batch_size = max(1, len(included) // 2)
+                return (0, len(included))
             # Permanent rejection (e.g. 4xx): drop so it can't block the queue.
+            self._split_batch_size = None
             self._pending_delete_ids = included
             if not self._store.delete(included):
                 return (0, len(included))

@@ -247,7 +247,12 @@ class GenAITelemetry:
     def _serialize_event(self, event_name: str, attributes: dict[str, Any] | None = None) -> bytes:
         data = self._common_context()
         if attributes:
-            data.update(scrub_value_for_telemetry(attributes))
+            scrubbed_attributes = scrub_value_for_telemetry(attributes)
+            if isinstance(attributes.get("exceptionMessage"), str):
+                scrubbed_attributes["exceptionMessage"] = scrub_error_message_for_telemetry(
+                    attributes["exceptionMessage"]
+                )
+            data.update(scrubbed_attributes)
         envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
             event_name=event_name,
             timestamp=datetime.now(timezone.utc),
@@ -560,6 +565,7 @@ class GenAITelemetry:
     def _after_fork_child(cls) -> None:
         """Discard parent process resources inherited by a forked child."""
         instance = cls._instance
+        telemetry_disabled = bool(instance is not None and getattr(instance, "_telemetry_disabled", False))
         cls._lock = threading.RLock()
         cls._instance = None
         if instance is None:
@@ -577,6 +583,8 @@ class GenAITelemetry:
         instance._uploader = None
         instance._store = None
         instance._heartbeat_thread = None
+        if telemetry_disabled:
+            cls._instance = instance
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.

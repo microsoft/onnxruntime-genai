@@ -160,4 +160,4 @@ class HttpJsonPostTransport(ITransport):
         """Whether a response status indicates the request should be retried."""
         if status_code is None:
             return True  # Network errors are retryable
-        return status_code in {408, 429, 500, 502, 503, 504}
+        return status_code in {408, 429} or 500 <= status_code <= 599

@@ -792,7 +792,16 @@ class TestPathRedaction(unittest.TestCase):
         telemetry._app_session_guid = "session"
         telemetry._envelope_ikey = "o:test"
 
-        telemetry.log("GenAIAction", {"message": "missing /Alice_resume.pdf", "ratio": "n/a"})
+        telemetry.log(
+            "GenAIAction",
+            {
+                "message": "missing /Alice_resume.pdf",
+                "assignment": "file=/Carol_resume.pdf",
+                "parenthesized": "missing(/Dana_resume.pdf)",
+                "ratio": "n/a",
+                "url": "https://example.com/model",
+            },
+        )
         telemetry.log_error("FileNotFoundError", "missing /Bob_resume.pdf")
 
         payloads = [
@@ -800,8 +809,57 @@ class TestPathRedaction(unittest.TestCase):
             for call in telemetry._store.store_with_id.call_args_list
         ]
         self.assertEqual(payloads[0]["message"], "missing [path]")
+        self.assertEqual(payloads[0]["assignment"], "file=[path]")
+        self.assertEqual(payloads[0]["parenthesized"], "missing([path]")
         self.assertEqual(payloads[0]["ratio"], "n/a")
+        self.assertEqual(payloads[0]["url"], "https://example.com/model")
         self.assertEqual(payloads[1]["exceptionMessage"], "missing [path]")
+
+    def test_exception_message_keeps_error_specific_size_limit(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+        message = "x" * 4096
+
+        telemetry.log_error("RuntimeError", message)
+
+        payload = json.loads(telemetry._store.store_with_id.call_args.args[0])
+        self.assertEqual(payload["data"]["exceptionMessage"], message)
+
+    def test_non_string_exception_message_uses_general_scrubbing(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        class Unstringifiable:
+            def __str__(self):
+                raise RuntimeError("cannot stringify")
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+
+        telemetry.log("GenAIAction", {"exceptionMessage": Unstringifiable()})
+
+        payload = json.loads(telemetry._store.store_with_id.call_args.args[0])
+        self.assertEqual(
+            payload["data"]["exceptionMessage"],
+            "[unsupported:Unstringifiable]",
+        )
 
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error
@@ -913,6 +971,21 @@ class TestDeviceId(unittest.TestCase):
                     deviceid.DeviceIdStatus.CORRUPTED,
                 )
 
+    def test_non_utf8_device_id_is_repaired(self):
+        import telemetry.deviceid as deviceid
+
+        device_id_path = Path(self._tmpdir.name) / "deviceid"
+        device_id_path.write_bytes(b"\xff\xfe")
+
+        repaired = deviceid.get_device_id()
+
+        self.assertTrue(deviceid._is_valid_device_id(repaired))
+        self.assertEqual(device_id_path.read_text(encoding="utf-8"), repaired)
+        self.assertEqual(
+            deviceid._device_id_state["status"],
+            deviceid.DeviceIdStatus.CORRUPTED,
+        )
+
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
         try:
@@ -924,6 +997,37 @@ class TestDeviceId(unittest.TestCase):
             self.assertEqual(
                 path,
                 Path(r"C:\Users\test\AppData\Local") / "Microsoft" / "DeveloperTools" / ".onnxruntime",
+            )
+        finally:
+            self._get_telemetry_base_dir.cache_clear()
+
+    def test_relative_posix_storage_environment_uses_absolute_home_fallback(self):
+        self._get_telemetry_base_dir.cache_clear()
+        try:
+            with (
+                patch("telemetry.deviceid.platform.system", return_value="Linux"),
+                patch.dict(
+                    os.environ,
+                    {"XDG_CACHE_HOME": "relative-cache", "HOME": "relative-home"},
+                    clear=False,
+                ),
+                patch(
+                    "telemetry.deviceid.os.getuid",
+                    side_effect=AttributeError,
+                    create=True,
+                ),
+                patch.object(Path, "home", return_value=Path(self._tmpdir.name)),
+            ):
+                path = self._get_telemetry_base_dir()
+
+            self.assertTrue(path.is_absolute())
+            self.assertEqual(
+                path,
+                Path(self._tmpdir.name)
+                / ".cache"
+                / "Microsoft"
+                / "DeveloperTools"
+                / ".onnxruntime",
             )
         finally:
             self._get_telemetry_base_dir.cache_clear()
@@ -978,6 +1082,24 @@ class TestDeviceId(unittest.TestCase):
             winreg.REG_SZ,
             "test-device-id",
         )
+
+    def test_windows_store_rejects_wrong_registry_type(self):
+        import telemetry.deviceid as deviceid
+
+        winreg = MagicMock(
+            HKEY_CURRENT_USER=object(),
+            KEY_READ=0x0001,
+            KEY_WOW64_64KEY=0x0100,
+            REG_SZ=1,
+            REG_BINARY=3,
+        )
+        winreg.QueryValueEx.return_value = (b"not-a-string", winreg.REG_BINARY)
+
+        with (
+            patch.dict(sys.modules, {"winreg": winreg}),
+            self.assertRaises(ValueError),
+        ):
+            _ = deviceid._WindowsStore().retrieve_id
 
     def test_concurrent_processes_publish_one_device_id(self):
         import subprocess
@@ -1321,6 +1443,26 @@ class TestForkLifecycle(_HermeticTelemetryTestCase):
         self.assertFalse(old_instance._initialized)
         self.assertIsNone(GenAITelemetry._instance)
 
+    def test_after_fork_preserves_runtime_opt_out(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        old_instance = object.__new__(GenAITelemetry)
+        old_instance._uploader = MagicMock()
+        old_instance._store = MagicMock()
+        old_instance._enabled = False
+        old_instance._initialized = True
+        old_instance._telemetry_disabled = True
+        GenAITelemetry._instance = old_instance
+
+        GenAITelemetry._after_fork_child()
+        child = GenAITelemetry()
+
+        self.assertIs(child, old_instance)
+        self.assertFalse(child._enabled)
+        self.assertTrue(child._telemetry_disabled)
+        self.assertIsNone(child._store)
+        self.assertIsNone(child._heartbeat_thread)
+
     @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
     def test_forked_child_reinitializes_process_state(self):
         from telemetry.telemetry import GenAITelemetry
@@ -1353,6 +1495,38 @@ class TestForkLifecycle(_HermeticTelemetryTestCase):
         _, status = os.waitpid(pid, 0)
         self.assertEqual(status, 0)
         self.assertEqual(result, "True|True|True")
+
+    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
+    def test_forked_child_keeps_runtime_opt_out(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        parent = GenAITelemetry()
+        self._join_heartbeat()
+        parent.disable_telemetry()
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                child = GenAITelemetry()
+                result = "|".join(
+                    (
+                        str(child._enabled),
+                        str(child._store is None),
+                        str(child._heartbeat_thread is None),
+                    )
+                )
+                os.write(write_fd, result.encode("ascii"))
+            finally:
+                os.close(write_fd)
+                os._exit(0)
+
+        os.close(write_fd)
+        result = os.read(read_fd, 128).decode("ascii")
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(status, 0)
+        self.assertEqual(result, "False|True|True")
 
 
 class TestActionDecorator(_HermeticTelemetryTestCase):
@@ -1481,6 +1655,12 @@ class TestHttpTransport(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         self.assertAlmostEqual(urlopen.call_args_list[0].kwargs["timeout"], 1.0)
         self.assertAlmostEqual(urlopen.call_args_list[1].kwargs["timeout"], 0.25)
+
+    def test_all_server_errors_are_retryable(self):
+        from telemetry.library.transport import HttpJsonPostTransport
+
+        self.assertTrue(HttpJsonPostTransport.is_retryable(507))
+        self.assertTrue(HttpJsonPostTransport.is_retryable(520))
 
 
 class TestPayloadBuilder(unittest.TestCase):
@@ -1749,6 +1929,33 @@ class TestUploaderDrainLogic(unittest.TestCase):
         delivered, left = uploader.drain_once()
         self.assertEqual((delivered, left), (0, 1))
         self.assertEqual(store.count(), 1)  # kept for retry
+
+    def test_uncommon_5xx_responses_are_retained(self):
+        for status in (507, 520):
+            with self.subTest(status=status):
+                store, uploader = self._setup()
+                store.store(b'{"later":1}')
+                uploader._transport.send = lambda *a, status=status, **k: (False, status)
+                self.assertEqual(uploader.drain_once(), (0, 1))
+                self.assertEqual(store.count(), 1)
+
+    def test_content_rejection_isolates_bad_event(self):
+        store, uploader = self._setup()
+        store.store(b'{"bad":1}')
+        store.store(b'{"valid":1}')
+
+        def send(payload, timeout, item_count=1):
+            if item_count > 1 or b'"bad"' in payload:
+                return (False, 400)
+            return (True, 204)
+
+        uploader._transport.send = MagicMock(side_effect=send)
+
+        self.assertEqual(uploader.drain_once(), (0, 2))
+        self.assertEqual(uploader.drain_once(), (1, 0))
+        self.assertEqual(uploader.drain_once(), (1, 0))
+        self.assertEqual(store.count(), 0)
+        self.assertEqual(uploader._transport.send.call_count, 3)
 
     def test_oversized_first_row_is_dropped(self):
         import telemetry.uploader as uploader_module
