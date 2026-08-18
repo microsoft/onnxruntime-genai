@@ -24,7 +24,9 @@ def _token_start(value: str, index: int) -> int:
 
 
 def _find_path_anchor(value: str):
-    for index, char in enumerate(value):
+    index = 0
+    while index < len(value):
+        char = value[index]
         if index == 0 and char == "/":
             return 0
         if char == "\\" and index + 1 < len(value) and value[index + 1] == "\\":
@@ -59,6 +61,7 @@ def _find_path_anchor(value: str):
             ):
                 token_end += 1
             if "://" in value[token_start:token_end]:
+                index = token_end
                 continue
             if (
                 index + 1 < len(value)
@@ -81,6 +84,7 @@ def _find_path_anchor(value: str):
                 segments += 1
             if segments >= 2:
                 return _token_start(value, index)
+        index += 1
     return None
 
 
@@ -92,9 +96,9 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
 
 
 def _scrub_string_for_telemetry(value: str, max_bytes: int) -> str:
-    anchor = _find_path_anchor(value)
-    scrubbed = value if anchor is None else value[:anchor] + "[path]"
-    return _truncate_utf8(scrubbed, max_bytes)
+    bounded = _truncate_utf8(value, max_bytes)
+    anchor = _find_path_anchor(bounded)
+    return bounded if anchor is None else bounded[:anchor] + "[path]"
 
 
 def scrub_string_for_telemetry(value: str) -> str:

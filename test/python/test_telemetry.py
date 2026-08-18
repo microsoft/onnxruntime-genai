@@ -621,6 +621,7 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(_redact_paths("x" * 255 + "€"), "x" * 255)
 
     def test_error_messages_are_capped_at_40960_utf8_bytes(self):
+        import telemetry.path_utils as path_utils
         from telemetry.path_utils import MAX_ERROR_MESSAGE_LENGTH
         from telemetry.telemetry import GenAITelemetry
         from telemetry.telemetry_extensions import log_error
@@ -642,6 +643,17 @@ class TestPathRedaction(unittest.TestCase):
         core.log_error("RuntimeError", "x" * (MAX_ERROR_MESSAGE_LENGTH + 100))
         core_message = core._emit.call_args.args[1]["exceptionMessage"]
         self.assertEqual(len(core_message.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
+
+        slash_heavy_url = "https://example.test/" + "segment/" * MAX_ERROR_MESSAGE_LENGTH
+        with patch(
+            "telemetry.path_utils._token_start",
+            wraps=path_utils._token_start,
+        ) as token_start:
+            scrubbed = path_utils.scrub_error_message_for_telemetry(slash_heavy_url)
+
+        self.assertEqual(len(scrubbed.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
+        self.assertTrue(scrubbed.startswith("https://example.test/"))
+        self.assertEqual(token_start.call_count, 1)
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
