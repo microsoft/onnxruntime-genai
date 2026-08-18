@@ -73,7 +73,6 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
         GenAITelemetry._instance = None
         GenAITelemetry._process_disabled = False
-        GenAITelemetry._forked_child = False
 
         self._tmpdir = tempfile.mkdtemp()
         self._patchers = []
@@ -143,7 +142,6 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
             p.stop()
         GenAITelemetry._instance = None
         GenAITelemetry._process_disabled = False
-        GenAITelemetry._forked_child = False
         deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -834,7 +832,7 @@ class TestPathRedaction(unittest.TestCase):
         ) as token_start:
             scrubbed = path_utils.scrub_error_message_for_telemetry(slash_heavy_token)
 
-        self.assertEqual(len(scrubbed.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
+        self.assertEqual(scrubbed, "[path]")
         self.assertEqual(token_start.call_count, 1)
 
     def test_uri_values_are_redacted(self):
@@ -894,6 +892,164 @@ class TestPathRedaction(unittest.TestCase):
             scrub_string_for_telemetry("download(https://host/x,/home/alice/out.onnx)"),
             "download([path]",
         )
+        self.assertEqual(
+            scrub_string_for_telemetry("--proxy-https://internal-host:8080"),
+            "--proxy-http[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("1.https://acct.blob.core.windows.net?x=1"),
+            "1.http[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("3proxy://10.0.0.5:8443"),
+            "3prox[path]",
+        )
+
+    def test_secret_key_value_forms_are_redacted(self):
+        from telemetry.path_utils import scrub_string_for_telemetry
+
+        cases = {
+            "fetch example.test?access_token=top-secret": "fetch example.test?access_token=[path]",
+            "redirect#access_token=top-secret": "redirect#access_token=[path]",
+            "fetch aka.ms/model?sig=top-secret": "fetch aka.ms/model?sig=[path]",
+            "hf_token=top-secret": "hf_token=[path]",
+            "refresh-token=top-secret": "refresh-token=[path]",
+            "auth.token=top-secret": "auth.token=[path]",
+            "refreshToken=top-secret": "refreshToken=[path]",
+            "dbPassword=top-secret": "dbPassword=[path]",
+            "clientApiKey=top-secret": "clientApiKey=[path]",
+            "auth.apiKey=top-secret": "auth.apiKey=[path]",
+            "AWS_SECRET_ACCESS_KEY=top-secret": "AWS_SECRET_ACCESS_KEY=[path]",
+            "storageAccountKey=top-secret": "storageAccountKey=[path]",
+            "tls-private-key=top-secret": "tls-private-key=[path]",
+            "dbConnectionString=top-secret": "dbConnectionString=[path]",
+            "dbpassword=top-secret": "dbpassword=[path]",
+            "clientsecret=top-secret": "clientsecret=[path]",
+            "PWD=odbc-value": "PWD=[path]",
+            "Proxy-Authorization: Basic value": "Proxy-Authorization: [path]",
+            "headers.authorization=Bearer value": "headers.authorization=[path]",
+            "failure --token=top-secret": "failure --token=[path]",
+            "failure --api-key top-secret": "failure --api-key [path]",
+            "failure /token:top-secret": "failure /token:[path]",
+            "failure /password top-secret": "failure /password [path]",
+            "Authorization: Bearer value": "Authorization: [path]",
+            "model dir /_apikey:top-secret": "model dir [path]",
+            "arg /1token=top-secret": "arg [path]",
+            "connect /2fa_token=top-secret": "connect [path]",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(scrub_string_for_telemetry(value), expected)
+
+        for benign in (
+            "tokenizer=enabled",
+            "refresh_tokenizer=enabled",
+            "refreshTokenizer=enabled",
+            "oauth=enabled",
+            "onnxruntime/1.24.0",
+            "version 1.24.0-rc1",
+            "n/a",
+            "read/write",
+            r"domain\user",
+            "microsoft/phi-3-mini",
+        ):
+            with self.subTest(benign=benign):
+                self.assertEqual(scrub_string_for_telemetry(benign), benign)
+
+    def test_secret_scanner_advances_past_rejected_key_tokens(self):
+        import telemetry.path_utils as path_utils
+
+        value = "-" + "field-" * 6_800 + "value"
+        with patch(
+            "telemetry.path_utils._is_secret_key",
+            wraps=path_utils._is_secret_key,
+        ) as is_secret_key:
+            scrubbed = path_utils.scrub_string_for_telemetry(value)
+
+        self.assertEqual(scrubbed, value)
+        self.assertEqual(is_secret_key.call_count, 1)
+
+    def test_schemeless_credentials_are_redacted(self):
+        from telemetry.path_utils import scrub_string_for_telemetry
+
+        for value in (
+            "connect user:password@example.test/model",
+            "connect user:p=a@localhost/model",
+            "connect u=ser:password@localhost/model",
+            "connect u;ser:password@example.test/model",
+            "connect user:password@[::1]/model",
+            "connect user:p;=$a@[::1]/model",
+            "connect user:p'(!$a@localhost/model",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(scrub_string_for_telemetry(value), "connect [path]")
+
+    def test_secret_maps_and_lists_are_structured_and_deterministic(self):
+        from telemetry.path_utils import scrub_value_for_telemetry
+
+        scrubbed = scrub_value_for_telemetry(
+            {
+                "z-url": "https://example.test/model",
+                "a-benign": "n/a",
+                "m-value": "token=metadata-secret",
+                "refresh_token": "metadata-secret",
+                "clientApiKey": "metadata-secret",
+                "headers.authorization": "metadata-secret",
+            }
+        )
+
+        self.assertEqual(
+            list(scrubbed),
+            [
+                "a-benign",
+                "clientApiKey",
+                "headers.authorization",
+                "m-value",
+                "refresh_token",
+                "z-url",
+            ],
+        )
+        self.assertEqual(scrubbed["a-benign"], "n/a")
+        self.assertEqual(scrubbed["clientApiKey"], "[path]")
+        self.assertEqual(scrubbed["headers.authorization"], "[path]")
+        self.assertEqual(scrubbed["m-value"], "token=[path]")
+        self.assertEqual(scrubbed["refresh_token"], "[path]")
+        self.assertEqual(scrubbed["z-url"], "[path]")
+
+        values = [
+            "n/a",
+            "read/write",
+            "https://example.test/private",
+            "hf_token=list-secret",
+            r"domain\user",
+        ]
+        self.assertEqual(
+            scrub_value_for_telemetry(values),
+            ["n/a", "read/write", "[path]", "hf_token=[path]", r"domain\user"],
+        )
+
+    def test_redaction_markers_are_atomic_at_the_length_cap(self):
+        from telemetry.path_utils import MAX_TELEMETRY_STRING_LENGTH, scrub_string_for_telemetry
+
+        path_tail = " alice/models"
+        path_padding = "x" * (MAX_TELEMETRY_STRING_LENGTH - len(path_tail))
+        self.assertEqual(
+            scrub_string_for_telemetry(path_padding + path_tail + "/private"),
+            path_padding + " [path]",
+        )
+
+        credential_tail = " user:password"
+        credential_padding = "x" * (MAX_TELEMETRY_STRING_LENGTH - len(credential_tail))
+        self.assertEqual(
+            scrub_string_for_telemetry(credential_padding + credential_tail + "@localhost"),
+            credential_padding + " [path]",
+        )
+
+        near_cap_url = "x" * (MAX_TELEMETRY_STRING_LENGTH - 12) + " https://example.test/private"
+        redacted = scrub_string_for_telemetry(near_cap_url)
+        self.assertTrue(redacted.endswith("[path]"))
+        self.assertLessEqual(len(redacted.encode("utf-8")), MAX_TELEMETRY_STRING_LENGTH)
+        self.assertNotIn("[pat", redacted.removesuffix("[path]"))
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message
@@ -1162,7 +1318,7 @@ class TestPathRedaction(unittest.TestCase):
             self.assertEqual(attributes["pathlike"], "[path]")
             self.assertEqual(attributes["pathlike_key"]["[path]"], "value")
             self.assertEqual(attributes["nested"]["paths"], ["[path]"])
-            self.assertEqual(attributes["[path]"], "value")
+            self.assertEqual(attributes["[path]"], "[path]")
             self.assertEqual(attributes["nested"]["[path]"], "value")
 
     def test_public_helpers_never_propagate_failures(self):
@@ -1749,114 +1905,6 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
         self.assertEqual(payload["data"]["operatorTypes"], operator_types)
 
 
-class TestForkLifecycle(_HermeticTelemetryTestCase):
-    def test_after_fork_discards_inherited_resources(self):
-        from telemetry.telemetry import GenAITelemetry
-
-        old_instance = object.__new__(GenAITelemetry)
-        uploader = MagicMock()
-        store = MagicMock()
-        old_instance._uploader = uploader
-        old_instance._store = store
-        old_instance._enabled = True
-        old_instance._initialized = True
-        GenAITelemetry._instance = old_instance
-
-        GenAITelemetry._after_fork_child()
-
-        uploader.discard_after_fork.assert_called_once()
-        store.discard_after_fork.assert_called_once()
-        self.assertFalse(old_instance._enabled)
-        self.assertFalse(old_instance._initialized)
-        self.assertIsNone(GenAITelemetry._instance)
-
-    def test_after_fork_preserves_full_runtime_opt_out(self):
-        from telemetry.telemetry import GenAITelemetry
-
-        old_instance = object.__new__(GenAITelemetry)
-        old_instance._uploader = MagicMock()
-        old_instance._store = MagicMock()
-        old_instance._enabled = False
-        old_instance._initialized = True
-        old_instance._telemetry_disabled = True
-        GenAITelemetry._instance = old_instance
-
-        GenAITelemetry._after_fork_child()
-        child = GenAITelemetry()
-
-        self.assertIsNot(child, old_instance)
-        self.assertFalse(child._enabled)
-        self.assertTrue(child._telemetry_disabled)
-        self.assertIsNone(child._store)
-        self.assertIsNone(child._heartbeat_thread)
-
-    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
-    def test_forked_child_reinitializes_process_state(self):
-        from telemetry.telemetry import GenAITelemetry
-
-        parent = GenAITelemetry()
-        self._join_heartbeat()
-        parent_guid = parent._app_session_guid
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:
-            os.close(read_fd)
-            try:
-                child = GenAITelemetry()
-                result = "|".join(
-                    (
-                        str(child is not parent),
-                        str(child._app_session_guid != parent_guid),
-                        str(child._uploader is not None and child._uploader._thread is not None),
-                        str(child._heartbeat_thread is None),
-                    )
-                )
-                child.shutdown(0)
-                os.write(write_fd, result.encode("ascii"))
-            finally:
-                os.close(write_fd)
-                os._exit(0)
-
-        os.close(write_fd)
-        result = os.read(read_fd, 128).decode("ascii")
-        os.close(read_fd)
-        _, status = os.waitpid(pid, 0)
-        self.assertEqual(status, 0)
-        self.assertEqual(result, "True|True|True|True")
-
-    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
-    def test_forked_child_keeps_runtime_opt_out(self):
-        from telemetry.telemetry import GenAITelemetry
-
-        parent = GenAITelemetry()
-        self._join_heartbeat()
-        parent.disable_telemetry()
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:
-            os.close(read_fd)
-            try:
-                child = GenAITelemetry()
-                result = "|".join(
-                    (
-                        str(child._enabled),
-                        str(child._store is None),
-                        str(child._heartbeat_thread is None),
-                    )
-                )
-                os.write(write_fd, result.encode("ascii"))
-            finally:
-                os.close(write_fd)
-                os._exit(0)
-
-        os.close(write_fd)
-        result = os.read(read_fd, 128).decode("ascii")
-        os.close(read_fd)
-        _, status = os.waitpid(pid, 0)
-        self.assertEqual(status, 0)
-        self.assertEqual(result, "False|True|True")
-
-
 class TestActionDecorator(_HermeticTelemetryTestCase):
     """Test the @action decorator and ActionContext."""
 
@@ -2098,38 +2146,6 @@ class TestOfflineEventStore(unittest.TestCase):
             self.assertEqual(s.get_batch(10), [])
             self.assertTrue(s.release(row_id, b'{"enriched":1}'))
             self.assertEqual([payload for _, payload in s.get_batch(10)], [b'{"enriched":1}'])
-
-    def test_store_connection_is_closed_before_fork_and_reopened_lazily(self):
-        store = self._new_store()
-        store.prepare_for_fork()
-
-        self.assertIsNone(store._conn)
-        self.assertTrue(store.store(b'{"after_fork":1}'))
-        self.assertTrue(store.is_open)
-        self.assertEqual(
-            store._conn.execute("PRAGMA busy_timeout").fetchone()[0],
-            store._busy_timeout_ms,
-        )
-
-        store.discard_after_fork()
-        self.assertIsNone(store._conn)
-
-    def test_failed_lazy_reconnect_is_rate_limited_and_retried(self):
-        store = self._new_store()
-        store.prepare_for_fork()
-
-        with (
-            patch.object(store, "_initialize") as initialize,
-            patch(
-                "telemetry.offline_store.time.monotonic",
-                side_effect=[100.0, 101.0, 106.0],
-            ),
-        ):
-            self.assertFalse(store.store(b'{"attempt":1}'))
-            self.assertFalse(store.store(b'{"attempt":2}'))
-            self.assertFalse(store.store(b'{"attempt":3}'))
-
-        self.assertEqual(initialize.call_count, 2)
 
     def test_delete(self):
         s = self._new_store()

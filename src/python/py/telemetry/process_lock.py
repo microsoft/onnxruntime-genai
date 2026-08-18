@@ -63,14 +63,6 @@ class ProcessDrainLock:
                     return False
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
 
-    def discard_after_fork(self) -> None:
-        """Close the child's inherited handle without unlocking the parent's lock."""
-        fh = self._fh
-        self._fh = None
-        if fh is not None:
-            with suppress(Exception):
-                fh.close()
-
     def release(self) -> None:
         if self._fh is None:
             return

@@ -158,7 +158,6 @@ class GenAITelemetry:
     _instance: GenAITelemetry | None = None
     _lock = threading.RLock()
     _process_disabled = False
-    _forked_child = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -224,7 +223,7 @@ class GenAITelemetry:
                     return
 
                 heartbeat_id = None
-                if not self._heartbeat_started and not type(self)._forked_child:
+                if not self._heartbeat_started:
                     heartbeat_id = self._store.reserve(
                         self._serialize_event(HEARTBEAT_EVENT, self._minimal_heartbeat_attributes()),
                         _HEARTBEAT_RELEASE_SECONDS,
@@ -581,42 +580,6 @@ class GenAITelemetry:
                     self._uploader.close()
                     self._uploader = None
 
-    @classmethod
-    def _before_fork(cls) -> None:
-        """Close SQLite in the parent so the child never inherits a live handle."""
-        instance = cls._instance
-        store = getattr(instance, "_store", None) if instance is not None else None
-        if store is not None:
-            with suppress(Exception):
-                store.prepare_for_fork()
-
-    @classmethod
-    def _after_fork_child(cls) -> None:
-        """Discard parent process resources inherited by a forked child."""
-        instance = cls._instance
-        telemetry_disabled = bool(instance is not None and getattr(instance, "_telemetry_disabled", False))
-        cls._lock = threading.RLock()
-        cls._forked_child = True
-        cls._instance = None
-        if instance is None:
-            return
-        uploader = getattr(instance, "_uploader", None)
-        store = getattr(instance, "_store", None)
-        if uploader is not None:
-            with suppress(Exception):
-                uploader.discard_after_fork()
-        if store is not None:
-            with suppress(Exception):
-                store.discard_after_fork()
-        instance._enabled = False
-        instance._initialized = False
-        instance._uploader = None
-        instance._store = None
-        instance._heartbeat_thread = None
-        instance._heartbeat_started = True
-        if telemetry_disabled:
-            cls._process_disabled = True
-
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.
 
@@ -676,10 +639,3 @@ def disable_telemetry() -> None:
         instance = GenAITelemetry._instance
         if instance is not None:
             instance.disable_telemetry()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(
-        before=GenAITelemetry._before_fork,
-        after_in_child=GenAITelemetry._after_fork_child,
-    )

@@ -29,9 +29,6 @@ import threading
 import time
 from contextlib import suppress
 
-_RECONNECT_BUSY_TIMEOUT_MS = 50
-_RECONNECT_INTERVAL_SECONDS = 5.0
-
 
 def _chmod_best_effort(path: str, mode: int) -> None:
     if os.name == "nt" or not path:
@@ -57,13 +54,10 @@ class OfflineEventStore:
         self._busy_timeout_ms = busy_timeout_ms
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
-        self._reconnect_enabled = False
-        self._next_reconnect_attempt = 0.0
         self._initialize()
 
-    def _initialize(self, busy_timeout_ms: int | None = None) -> None:
+    def _initialize(self) -> None:
         parent = os.path.dirname(self._db_path)
-        effective_busy_timeout_ms = self._busy_timeout_ms if busy_timeout_ms is None else busy_timeout_ms
         # sqlite3.connect below reports whether storage can actually be opened.
         with suppress(Exception):
             os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -72,40 +66,24 @@ class OfflineEventStore:
         try:
             conn = sqlite3.connect(
                 self._db_path,
-                timeout=effective_busy_timeout_ms / 1000.0,
+                timeout=self._busy_timeout_ms / 1000.0,
                 check_same_thread=False,
             )
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute(f"PRAGMA busy_timeout={effective_busy_timeout_ms}")
+            conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS events "
                 "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL, available_at REAL NOT NULL DEFAULT 0)"
             )
             conn.commit()
-            # A reconnect may use a short probe timeout, but normal operations
-            # retain the configured contention tolerance.
-            conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             self._conn = conn
-            self._next_reconnect_attempt = 0.0
             self._harden_permissions()
         except Exception:
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
             self._conn = None
-
-    def _ensure_open(self) -> bool:
-        if self._conn is not None:
-            return True
-        if not self._reconnect_enabled:
-            return False
-        now = time.monotonic()
-        if now < self._next_reconnect_attempt:
-            return False
-        self._next_reconnect_attempt = now + _RECONNECT_INTERVAL_SECONDS
-        self._initialize(min(self._busy_timeout_ms, _RECONNECT_BUSY_TIMEOUT_MS))
-        return self._conn is not None
 
     def _harden_permissions(self) -> None:
         _chmod_best_effort(os.path.dirname(self._db_path), 0o700)
@@ -116,7 +94,7 @@ class OfflineEventStore:
     @property
     def is_open(self) -> bool:
         with self._lock:
-            return self._ensure_open()
+            return self._conn is not None
 
     @property
     def db_path(self) -> str:
@@ -134,7 +112,7 @@ class OfflineEventStore:
         if not payload:
             return None
         with self._lock:
-            if not self._ensure_open():
+            if self._conn is None:
                 return None
             try:
                 cursor = self._conn.execute(
@@ -159,7 +137,7 @@ class OfflineEventStore:
     def get_batch(self, max_count: int) -> list[tuple[int, bytes]]:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
         with self._lock:
-            if not self._ensure_open():
+            if self._conn is None:
                 return []
             try:
                 rows = self._conn.execute(
@@ -173,7 +151,7 @@ class OfflineEventStore:
     def release(self, row_id: int, payload: bytes | None = None) -> bool:
         """Make a reserved event drainable, optionally replacing its payload."""
         with self._lock:
-            if not self._ensure_open():
+            if self._conn is None:
                 return False
             try:
                 if payload is None:
@@ -195,7 +173,7 @@ class OfflineEventStore:
         if not ids:
             return True
         with self._lock:
-            if not self._ensure_open():
+            if self._conn is None:
                 return False
             # Failed deletes leave rows durable for a later drain attempt.
             try:
@@ -209,28 +187,16 @@ class OfflineEventStore:
 
     def count(self) -> int:
         with self._lock:
-            if not self._ensure_open():
+            if self._conn is None:
                 return 0
             try:
                 return int(self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
             except Exception:
                 return 0
 
-    def close(self, reconnect: bool = False) -> None:
+    def close(self) -> None:
         with self._lock:
-            self._reconnect_enabled = reconnect
             if self._conn is not None:
                 with suppress(Exception):
                     self._conn.close()
                 self._conn = None
-
-    def prepare_for_fork(self) -> None:
-        """Close the live connection in the parent before it can be inherited."""
-        self.close(reconnect=True)
-
-    def discard_after_fork(self) -> None:
-        """Reset child-only state after the parent closed the connection pre-fork."""
-        self._lock = threading.Lock()
-        self._reconnect_enabled = False
-        self._next_reconnect_attempt = 0.0
-        self._conn = None
