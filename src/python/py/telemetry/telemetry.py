@@ -650,7 +650,8 @@ class GenAITelemetry:
                 uploader_stopped = self._uploader.stop_loop(remaining_seconds())
                 if uploader_stopped:
                     try:
-                        self._uploader.flush(remaining_seconds())
+                        if not getattr(self, "_telemetry_disabled", False):
+                            self._uploader.flush(remaining_seconds())
                     finally:
                         self._uploader.close()
                         self._uploader = None

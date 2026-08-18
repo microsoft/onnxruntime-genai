@@ -2206,6 +2206,25 @@ class TestShutdownSafety(unittest.TestCase):
         old_uploader.signal_stop.assert_called_once()
         old_uploader.stop_loop.assert_called_once_with(0)
 
+    def test_shutdown_does_not_flush_after_runtime_disable(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._initialized = True
+        telemetry._telemetry_disabled = True
+        telemetry._heartbeat_thread = None
+        telemetry._uploader = MagicMock()
+        telemetry._uploader.stop_loop.return_value = True
+        telemetry._store = MagicMock()
+        uploader = telemetry._uploader
+
+        telemetry.shutdown(5.0)
+
+        uploader.stop_loop.assert_called_once()
+        uploader.flush.assert_not_called()
+        uploader.close.assert_called_once()
+        self.assertIsNone(telemetry._store)
+
 
 if __name__ == "__main__":
     unittest.main()
