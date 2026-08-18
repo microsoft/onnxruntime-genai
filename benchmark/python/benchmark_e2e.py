@@ -27,9 +27,8 @@ import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
-from telemetry_utils import emit_benchmark_telemetry
+from telemetry_utils import emit_benchmark_telemetry, normalize_execution_provider, sanitize_model_identifier
 from telemetry_utils import get_telemetry as _get_telemetry
-from telemetry_utils import normalize_execution_provider, sanitize_model_identifier
 from tqdm import tqdm
 
 
