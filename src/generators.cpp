@@ -59,6 +59,20 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
+bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
+  // Some models fall back to CPU attention, where continuation is valid because their KV cache is
+  // also on CPU. Other listed providers preserve appendable KV state across generation turns.
+  constexpr std::array<DeviceType, 6> supported_devices{
+      DeviceType::CPU,
+      DeviceType::CUDA,
+      DeviceType::WEBGPU,
+      DeviceType::OpenVINO,
+      DeviceType::NvTensorRtRtx,
+      DeviceType::RyzenAI};
+  return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
+         supported_devices.end();
+}
+
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   bool ort_verbose_logging = false;
   GetEnv("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
@@ -669,19 +683,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  // Some models fallback to CPU for the attention operator (for example, some decoder-pipeline NPU models).
-  // Continuous decoding is supported for this case as the kv cache for such models is always on CPU.
-  constexpr std::array<DeviceType, 6> devices_supporting_continuous_decoding{
-      DeviceType::CPU,
-      DeviceType::CUDA,
-      DeviceType::WEBGPU,
-      DeviceType::OpenVINO,
-      DeviceType::NvTensorRtRtx,
-      DeviceType::RyzenAI};
-
   if (search_->GetSequenceLength() != 0 &&
-      std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->model_.p_device_kvcache_->GetType(); }))
+      !SupportsContinuousDecoding(state_->model_.p_device_kvcache_->GetType()))
     // Support for continuous decoding should be based on the type of device used for KV cache
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");

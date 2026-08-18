@@ -55,10 +55,23 @@ struct Request : std::enable_shared_from_this<Request>,
   void Schedule();
 
   /**
-   * @brief Adds a sequence of tokens to the request for processing.
+   * @brief Adds initial input tokens before the request is submitted to an Engine.
    * @param tokens Span of token IDs to be added.
+   *
+   * This operation is legal only while the request is Unassigned. Use Continue()
+   * to begin another turn after the current turn reaches TurnComplete.
    */
   void AddTokens(std::span<const int32_t> tokens);
+
+  /**
+   * @brief Queues another generation turn using resident model state.
+   * @param tokens New input tokens to append after the completed turn.
+   *
+   * This operation is legal only from TurnComplete. It preserves unread generated
+   * output, appends no input tokens to that output stream, and moves the request
+   * back to Assigned (the queued state).
+   */
+  void Continue(std::span<const int32_t> tokens);
 
   /**
    * @brief Retrieves the next unseen token in the request.
@@ -87,7 +100,7 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Returns the unprocessed tokens from the host-side mirror of the sequence.
    * @return Span of unprocessed token IDs, valid only until the next call that appends to the
-   *         sequence (CompleteGeneration, AddTokens or Assign). Copy it if it must outlive those.
+   *         sequence (CompleteGeneration, Continue or Assign). Copy it if it must outlive those.
    *
    * Same tokens as UnprocessedTokens(), but readable without copying them back from the device.
    * Building the next step's input ids is the hot path for this, and a device readback there costs
@@ -133,13 +146,15 @@ struct Request : std::enable_shared_from_this<Request>,
   void CompleteGeneration();
 
   /**
-   * @brief Checks if the termination condition for the request has been met.
-   * @return True if the request is done, false otherwise.
+   * @brief Checks if the current generation turn reached a stopping condition.
+   * @return True in TurnComplete; the request may still be continued or closed.
    */
   bool IsDone() const;
 
+  RequestStatus Status() const noexcept { return status_; }
+
   /**
-   * @brief Removes the request from being processed.
+   * @brief Removes the request from its engine and moves it to terminal Closed.
    */
   void Remove();
 
@@ -188,6 +203,13 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Binds the token count selected by a dynamic RequestStepPlan.
    */
   void BindScheduledTokenCount(size_t token_count);
+
+  /**
+   * @brief Tokens this request contributes to the next step.
+   *
+   * Equivalent to UnprocessedTokens().size() without constructing a device span.
+   */
+  size_t ScheduledTokenCount() const;
 
   /**
    * @brief True when this step's tokens run to the end of the sequence.
@@ -263,17 +285,21 @@ struct Request : std::enable_shared_from_this<Request>,
   void* GetOpaqueData();
 
  private:
-  // Tokens of the current step, clamped to what is actually left to process.
-  size_t ScheduledTokenCount() const;
-
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
-  // seen_sequence_length_ independently tracks tokens consumed by the application.
+  // seen_sequence_length_ is the high-water sequence index of generated output consumed by the
+  // application. Continuation input creates gaps, so it is not an unseen-token count.
   std::vector<int32_t> prefill_input_ids_;
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  std::vector<size_t> unseen_token_indices_;
+  size_t next_unseen_token_index_{};
   int64_t seen_sequence_length_{};
+  friend struct Engine;
+
+  void CompleteClose();
+
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.

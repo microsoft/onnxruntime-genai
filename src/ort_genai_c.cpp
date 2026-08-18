@@ -1329,10 +1329,20 @@ OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
 
 OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
   OGA_TRY
-  if (tokens->size() > 1) {
-    throw std::runtime_error("Request can only be created with a single sequence");
+  if (tokens->size() != 1) {
+    throw std::runtime_error("Request input must contain exactly one sequence.");
   }
   request->AddTokens((*tokens)[0]);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
+  OGA_TRY
+  if (tokens->size() != 1) {
+    throw std::runtime_error("Request continuation must contain exactly one sequence.");
+  }
+  request->Continue((*tokens)[0]);
   return nullptr;
   OGA_CATCH
 }
@@ -1354,6 +1364,29 @@ OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
 OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
   OGA_TRY
   *out = request->IsDone();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out) {
+  OGA_TRY
+  switch (request->Status()) {
+    case Generators::RequestStatus::Unassigned:
+      *out = OgaRequestStatus_created;
+      break;
+    case Generators::RequestStatus::Assigned:
+      *out = OgaRequestStatus_queued;
+      break;
+    case Generators::RequestStatus::InProgress:
+      *out = OgaRequestStatus_in_progress;
+      break;
+    case Generators::RequestStatus::TurnComplete:
+      *out = OgaRequestStatus_turn_complete;
+      break;
+    case Generators::RequestStatus::Closed:
+      *out = OgaRequestStatus_closed;
+      break;
+  }
   return nullptr;
   OGA_CATCH
 }

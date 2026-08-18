@@ -4,8 +4,8 @@
 // Lifecycle tests for the engine Request state machine. Because a tiny real
 // CPU fixture model is available, these tests drive genuine Request objects (rather than a mock
 // Search) and pin the transition policy: which mutations each status permits, and how
-// create/assign/schedule/remove move a request between Unassigned, Assigned, InProgress, and
-// Completed.
+// create/assign/schedule/continue/remove move a request between Unassigned, Assigned, InProgress,
+// TurnComplete, and Closed.
 
 #include <memory>
 #include <stdexcept>
@@ -48,10 +48,18 @@ class RequestLifecycleTest : public ::testing::Test {
   DoublesEngine engine_;
 };
 
+TEST(ContinuousDecodingDeviceSupportTest, MatchesKvCacheCapabilityContract) {
+  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CPU));
+  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CUDA));
+  EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::DML));
+  EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::QnnHtp));
+}
+
 // A request must carry at least one token per append; an empty batch is rejected.
 TEST_F(RequestLifecycleTest, EmptyAppendIsRejected) {
   auto request = NewRequest();
   EXPECT_THROW(request->AddTokens({}), std::runtime_error);
+  EXPECT_THROW(request->Continue({}), std::runtime_error);
 }
 
 TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
@@ -122,31 +130,145 @@ TEST_F(RequestLifecycleTest, AppendIsRejectedWhileInProgress) {
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
 }
 
-// After a request completes, appending tokens resumes its sequence (the continuation path) rather
-// than being rejected.
-TEST_F(RequestLifecycleTest, AppendAfterCompletedExtendsSequence) {
+TEST_F(RequestLifecycleTest, AddTokensIsRejectedAfterSubmission) {
   auto prompt = Prompt();
+  const std::vector<int32_t> more{5};
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
-  const int64_t assigned_length = request->CurrentSequenceLength();
 
-  request->status_ = RequestStatus::Completed;
-  std::vector<int32_t> more{5, 6};
-  request->AddTokens(more);
-
-  EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
+  EXPECT_THROW(request->AddTokens(more), std::runtime_error);
+  request->Schedule();
+  EXPECT_THROW(request->AddTokens(more), std::runtime_error);
 }
 
-// Removing a request releases it from the engine (deallocating its cache resources) and returns it
-// to the Unassigned state.
-TEST_F(RequestLifecycleTest, RemoveReturnsRequestToUnassigned) {
+// After a turn completes, Continue appends another input fragment and queues the resident request.
+TEST_F(RequestLifecycleTest, ContinueAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();
+  auto request = MintRequest(*model_, prompt);
+  const int64_t assigned_length = static_cast<int64_t>(prompt.size());
+  engine_.engine->AddRequest(request);
+
+  engine_.engine->Step();
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  std::vector<int32_t> more{5, 6};
+  EXPECT_THROW(request->AddTokens(more), std::runtime_error);
+  request->Continue(more);
+
+  EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_FALSE(request->IsDone());
+  EXPECT_EQ(engine_.engine->Step(), request);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+}
+
+TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {
+  auto prompt = Prompt();
+  auto request = MintRequest(*model_, prompt);
+  engine_.engine->AddRequest(request);
+  engine_.engine->Step();
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  const auto before = request->Snapshot();
+
+  const size_t remaining =
+      static_cast<size_t>(request->Params()->search.max_length -
+                          request->CurrentSequenceLength());
+  std::vector<int32_t> too_many(remaining, 5);
+  EXPECT_THROW(request->Continue(too_many), std::runtime_error);
+
+  const auto after = request->Snapshot();
+  EXPECT_EQ(after.status, before.status);
+  EXPECT_EQ(after.current_sequence_length, before.current_sequence_length);
+  EXPECT_EQ(after.processed_sequence_length, before.processed_sequence_length);
+}
+
+TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+  engine_.cache->Allocate({request});
+  request->Schedule();
+
+  RequestStepPlan first_plan;
+  first_plan.request = request;
+  first_plan.request_id = request.get();
+  first_plan.sequence_length_before = request->CurrentSequenceLength();
+  first_plan.target_cache_slots =
+      static_cast<size_t>(first_plan.sequence_length_before);
+  constexpr int32_t generated_token = 5;
+  auto first_logits = LogitsForToken(*model_, generated_token);
+  request->SaveStateForTransaction();
+  const auto first_result = request->ApplyLogitsForTransaction(first_logits);
+  request->CommitStateForTransaction();
+  request->CommitStep(first_plan, first_result);
+  ASSERT_TRUE(request->HasUnseenTokens());
+
+  RequestStepPlan completion_plan;
+  completion_plan.request = request;
+  completion_plan.request_id = request.get();
+  completion_plan.sequence_length_before = request->CurrentSequenceLength();
+  completion_plan.target_cache_slots =
+      static_cast<size_t>(completion_plan.sequence_length_before);
+  auto eos_logits = LogitsForToken(*model_, EosToken(*model_));
+  request->SaveStateForTransaction();
+  const auto completion_result =
+      request->ApplyLogitsForTransaction(eos_logits);
+  request->CommitStateForTransaction();
+  request->CommitStep(completion_plan, completion_result);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  const std::vector<int32_t> continuation{6, 7};
+  request->Continue(continuation);
+
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  ASSERT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), generated_token);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
+TEST_F(RequestLifecycleTest, ContinueIsRejectedOutsideTurnComplete) {
+  const std::vector<int32_t> more{5};
+  auto request = NewRequest();
+  EXPECT_THROW(request->Continue(more), std::runtime_error);
+
+  auto prompt = Prompt();
+  request->AddTokens(prompt);
+  engine_.engine->AddRequest(request);
+  EXPECT_THROW(request->Continue(more), std::runtime_error);
+
+  request->Schedule();
+  EXPECT_THROW(request->Continue(more), std::runtime_error);
+}
+
+// Removing a request releases it from the engine and makes it terminal.
+TEST_F(RequestLifecycleTest, RemoveMakesRequestTerminal) {
+  auto prompt = Prompt();
+  const std::vector<int32_t> more{5};
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
   ASSERT_EQ(request->status_, RequestStatus::Assigned);
 
   request->Remove();
-  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(engine_.cache->deallocate_calls, 1);
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_THROW(request->AddTokens(more), std::runtime_error);
+  EXPECT_THROW(request->Continue(more), std::runtime_error);
+  EXPECT_THROW(request->Remove(), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RemoveIsRejectedBeforeSubmission) {
+  auto request = NewRequest();
+  EXPECT_THROW(request->Remove(), std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+}
+
+TEST_F(RequestLifecycleTest, RemoveClosesRequestAfterEngineDestruction) {
+  auto local_engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt();
+  auto request = MintRequest(*model_, prompt);
+  local_engine.engine->AddRequest(request);
+  local_engine.engine.reset();
+
+  EXPECT_NO_THROW(request->Remove());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
 }
 
 TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
@@ -225,7 +347,7 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 
-TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted) {
+TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToTurnComplete) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
   const auto before = request->Snapshot();
@@ -242,7 +364,7 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToCompleted)
   request->CommitStep(plan, result);
 
   EXPECT_TRUE(result.done);
-  EXPECT_EQ(request->status_, RequestStatus::Completed);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
 }
 
 TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {

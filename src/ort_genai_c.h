@@ -59,6 +59,14 @@ typedef enum OgaElementType {
   OgaElementType_bfloat16,    // Non-IEEE floating-point format based on IEEE754 single-precision
 } OgaElementType;
 
+typedef enum OgaRequestStatus {
+  OgaRequestStatus_created,
+  OgaRequestStatus_queued,
+  OgaRequestStatus_in_progress,
+  OgaRequestStatus_turn_complete,
+  OgaRequestStatus_closed,
+} OgaRequestStatus;
+
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
@@ -1205,7 +1213,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaReq
  * \brief Removes a request from the OgaEngine.
  *
  * This function removes a request from the engine, allowing it to be cleaned up. The request must have been previously added
- * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed by the engine.
+ * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed and cannot be reused.
+ * Removing an already closed request returns an error.
  *
  * \param[in] engine The engine instance from which the request is being removed.
  * \param[in] request The request to remove from the engine. The request must have been previously added to the engine.
@@ -1226,16 +1235,29 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
 
 /**
- * \brief Adds input sequences to the request.
+ * \brief Adds initial input sequences to a created request.
  *
- * This function sets the input sequences for the request. The input sequences are used to seed the generation process.
- * The request must have been created using OgaCreateRequest before calling this function.
+ * This function is valid only before the request is submitted to an Engine. Use OgaRequestContinue to begin another
+ * generation turn after OgaRequestStatus_turn_complete.
+ * Input must leave room for at least one generated token below max_length.
  *
  * \param[in] request The request to set the input sequences on.
  * \param[in] tokens The input sequences to set on the request.
  * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
+
+/**
+ * \brief Queues another generation turn using the request's resident model state.
+ *
+ * This function is valid only from OgaRequestStatus_turn_complete. The request moves to
+ * OgaRequestStatus_queued, and subsequent OgaEngineStep calls process the appended input.
+ *
+ * \param[in] request The request to continue.
+ * \param[in] tokens The new input sequence for the next turn.
+ * \return OgaResult containing the error message if continuation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens);
 
 /**
  * \brief Destroys the given request.
@@ -1300,17 +1322,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* r
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
 
 /**
- * \brief Checks if the request is done processing.
+ * \brief Checks if the current generation turn is complete.
  *
- * This function checks if the request has finished processing. The request is done when one of the termination
- * conditions has been reached (e.g. end of sequence token is encountered or the request was cancelled).
- * If the request is done, it will return true; otherwise, it will return false.
+ * This function returns true at OgaRequestStatus_turn_complete. It does not mean that the request is permanently
+ * closed; OgaRequestContinue may queue another turn while state remains resident.
  *
  * \param[in] request The request to check if it is done.
  * \param[out] out Boolean flag that will be set to true if the request is done, or false otherwise.
  * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Gets the request lifecycle status.
+ *
+ * \param[in] request The request to inspect.
+ * \param[out] out The current lifecycle status.
+ * \return OgaResult containing the error message if the status could not be read, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out);
 
 /**
  * \brief Registers an execution provider library with ONNXRuntime API.

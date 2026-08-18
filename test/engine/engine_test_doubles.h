@@ -81,6 +81,12 @@ struct RecordingCacheManager : CacheManager {
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
 
+  bool IsResident(const std::shared_ptr<Request>& request) const override {
+    return std::find(allocated_.begin(), allocated_.end(), request) != allocated_.end();
+  }
+
+  size_t ResidentRequestCount() const override { return allocated_.size(); }
+
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
     const size_t request_limit =
         plan.scheduled_request_limit == 0 ? capacity_ : plan.scheduled_request_limit;

@@ -899,10 +899,20 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestAddTokens(this, &tokens));
   }
 
+  void Continue(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestContinue(this, &tokens));
+  }
+
   bool IsDone() const {
     bool is_done{};
     OgaCheckResult(OgaRequestIsDone(this, &is_done));
     return is_done;
+  }
+
+  OgaRequestStatus GetStatus() const {
+    OgaRequestStatus status;
+    OgaCheckResult(OgaRequestGetStatus(this, &status));
+    return status;
   }
 
   bool HasUnseenTokens() const {

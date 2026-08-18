@@ -208,6 +208,122 @@ def test_completion_isolation(model):
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
 
 
+def test_continuation_while_peer_remains_active(model):
+    short_max_new, long_max_new = 60, 80
+    # EOS is valid input context here; Continue must reset the prior turn's done state rather than
+    # treating an EOS token in the new prompt fragment as a newly generated stop.
+    follow_up = [_EOS_TOKEN_ID, 12]
+
+    reference_engine = og.Engine(model)
+    reference_sink = _Sink()
+    reference = _add_request(
+        reference_engine, model, _PROMPT_A, short_max_new, reference_sink
+    )
+    while not reference.is_done():
+        ready = reference_engine.step()
+        assert ready is not None
+        _drain(ready)
+    reference.continue_with(np.asarray(follow_up, dtype=np.int32))
+    _run(reference_engine)
+
+    engine = og.Engine(model)
+    short_sink, long_sink = _Sink(), _Sink()
+    short = _add_request(engine, model, _PROMPT_A, short_max_new, short_sink)
+    long = _add_request(engine, model, _PROMPT_LONG, long_max_new, long_sink)
+
+    while not short.is_done():
+        ready = engine.step()
+        assert ready is not None
+        if _drain(ready) and ready is not short:
+            engine.remove_request(ready)
+
+    assert not long.is_done(), "peer must remain active when continuation is appended"
+    for _ in range(3):
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+    assert not long.is_done(), "peer must remain active during the continuation delay"
+
+    short.continue_with(np.asarray(follow_up, dtype=np.int32))
+    _run(engine)
+
+    assert short_sink.tokens == reference_sink.tokens
+
+
+def test_request_rejects_empty_input(model):
+    params = og.GeneratorParams(model)
+    request = og.Request(params)
+
+    with pytest.raises(RuntimeError, match="at least one token"):
+        request.add_tokens(np.asarray([], dtype=np.int32))
+
+
+def test_request_rejects_tokens_while_awaiting_admission(model):
+    engine = og.Engine(model)
+    sink = _Sink()
+    request = _add_request(engine, model, _PROMPT_A, 8, sink)
+
+    with pytest.raises(RuntimeError, match="initial input before submission"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+
+    engine.remove_request(request)
+
+
+def test_closed_request_cannot_continue(model):
+    engine = og.Engine(model)
+    sink = _Sink()
+    request = _add_request(engine, model, _PROMPT_A, 8, sink)
+    engine.remove_request(request)
+
+    assert request.status == og.RequestStatus.CLOSED
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.continue_with(np.asarray([12], dtype=np.int32))
+
+
+def test_request_cannot_be_removed_from_another_engine(model):
+    owner = og.Engine(model)
+    other = og.Engine(model)
+    sink = _Sink()
+    request = _add_request(owner, model, _PROMPT_A, 8, sink)
+
+    with pytest.raises(RuntimeError, match="does not belong"):
+        other.remove_request(request)
+
+    owner.remove_request(request)
+
+
+def test_request_lifecycle_status(model):
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=64)
+    request = og.Request(params)
+    assert request.status == og.RequestStatus.CREATED
+
+    request.add_tokens(np.asarray(_PROMPT_A, dtype=np.int32))
+    sink = _Sink()
+    request.set_opaque_data(sink)
+    engine = og.Engine(model)
+    engine.add_request(request)
+    assert request.status == og.RequestStatus.QUEUED
+
+    while not request.is_done():
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+    assert request.status == og.RequestStatus.TURN_COMPLETE
+
+    with pytest.raises(RuntimeError, match="use Continue"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+    request.continue_with(np.asarray([12], dtype=np.int32))
+    assert request.status == og.RequestStatus.QUEUED
+
+    engine.remove_request(request)
+    assert request.status == og.RequestStatus.CLOSED
+    with pytest.raises(RuntimeError, match="already closed"):
+        engine.remove_request(request)
+
+
 def test_remove_request_freezes_output(model):
     max_new = 40
     sibling_new = 16

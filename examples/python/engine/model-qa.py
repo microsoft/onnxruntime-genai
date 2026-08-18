@@ -17,42 +17,53 @@ def run(args: argparse.Namespace):
     tokenizer = og.Tokenizer(model)
     engine = og.Engine(model)
 
-    while prompt := input("🫵  : "):
-        if prompt == "/exit":
-            break
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False,
+        max_length=1024,
+    )
 
-        messages = [
-            {"role": "system", "content": ""},
-            {"role": "user", "content": f"{prompt}"},
-        ]
-        messages = json.dumps(messages)
+    request = og.Request(params)
+    system_message = json.dumps([{"role": "system", "content": ""}])
+    request.add_tokens(
+        tokenizer.encode(
+            tokenizer.apply_chat_template(messages=system_message, add_generation_prompt=False),
+        ),
+    )
+    streaming_tokenizer = tokenizer.create_stream()
+    request_added = False
 
-        params = og.GeneratorParams(model)
-        params.set_search_options(
-            do_sample=False,
-            max_length=1024,
-        )
+    try:
+        while prompt := input("🫵  : "):
+            if prompt == "/exit":
+                break
 
-        request = og.Request(params)
-        request.add_tokens(
-            tokenizer.encode(tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)),
-        )
-        streaming_tokenizer = tokenizer.create_stream()
+            user_message = json.dumps([{"role": "user", "content": prompt}])
+            turn_tokens = tokenizer.encode(
+                tokenizer.apply_chat_template(messages=user_message, add_generation_prompt=True),
+            )
 
-        engine.add_request(request)
+            if request_added:
+                request.continue_with(turn_tokens)
+            else:
+                request.add_tokens(turn_tokens)
+                engine.add_request(request)
+                request_added = True
 
-        print("🤖 :", end="", flush=True)
+            print("🤖 :", end="", flush=True)
 
-        while ready_request := engine.step():
-            while ready_request.has_unseen_tokens():
-                print(
-                    streaming_tokenizer.decode(ready_request.get_unseen_token()),
-                    end="",
-                    flush=True,
-                )
+            while ready_request := engine.step():
+                while ready_request.has_unseen_tokens():
+                    print(
+                        streaming_tokenizer.decode(ready_request.get_unseen_token()),
+                        end="",
+                        flush=True,
+                    )
 
-        print()
-        engine.remove_request(request)
+            print()
+    finally:
+        if request_added:
+            engine.remove_request(request)
 
 
 if __name__ == "__main__":

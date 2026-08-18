@@ -92,33 +92,74 @@ The engine creates throughput by batching several independent requests, not by p
 The important request states are:
 
 ```text
-Unassigned -> Assigned -> InProgress -> Completed
-     ^           |            |            |
-     +-----------+------------+------------+
-                  Remove()
+Unassigned (Created) -- submit --> Assigned (Queued) -- schedule --> InProgress
+                                      ^                              |
+                                      |                              | turn stops
+                                      +---- Continue(tokens) ---- TurnComplete
+
+Assigned (Queued) ---+
+InProgress ----------+-- Remove() --> Closed
+TurnComplete --------+
 ```
 
 ### `Unassigned`
 
-The request is not owned by an engine. Input tokens added in this state are kept as prefill input.
+The request is not owned by an engine. `AddTokens()` accumulates the initial prompt in this state.
+`Continue()` is not valid until a submitted request reaches `TurnComplete`.
 
 ### `Assigned`
 
 `Engine::AddRequest()` validates the request, calls `Request::Assign()`, and adds it to the scheduler pool.
 
-Assignment moves the prompt into the request's `Search`, creates the host-side token mirror, initializes the sequence counters, and records the owning engine. The request has not yet been admitted to the paged cache.
+This is the queued state. `Engine::AddRequest()` moves a new request here before first admission.
+`Continue()` also moves a cache-resident `TurnComplete` request here while its next input waits for
+execution.
+
+For a new request, assignment moves the prompt into `Search`, creates the host-side token mirror,
+initializes the sequence counters, and records the owning Engine. `AddTokens()` and `Continue()` are
+both rejected while already queued. Input must leave room for at least one generated token below
+`max_length`.
 
 ### `InProgress`
 
-The request has completed at least one committed engine transaction and belongs to the active engine workload. It normally has one unprocessed token at the beginning of a decode step: the token sampled by the previous step.
+The current turn is executable and owned by the Engine. It normally has one unprocessed token at
+the beginning of a decode step: the token sampled by the previous step.
 
-### `Completed`
+### `TurnComplete`
 
-The search has reached an end condition, such as an EOS token or maximum length. The request can be returned to the caller immediately, but its cache blocks are normally reclaimed by `DynamicBatchScheduler::ReapCompletedRequests()` at the beginning of the next planning pass.
+The current generation turn reached an end condition, such as EOS or maximum length. Generated
+output remains available, and `IsDone()` means this state rather than permanent request termination.
 
-`Remove()` is legal from `Assigned`, `InProgress`, and `Completed`, and returns the request to `Unassigned`. On the dynamic path, removal immediately erases scheduler membership and releases committed paged-cache ownership.
+A generated EOS/stop token is not appended to the logical sequence or returned as unseen output.
+The next continuation fragment is therefore responsible for any turn-boundary tokens required by
+the model's chat template.
 
-This removal does not purge an entry already placed in `Engine::ready_requests_`. Because `Engine::Step()` drains that queue before scheduling new work, a removed request that was already ready can still be returned by a later `Step()` call.
+`Continue(tokens)` appends the next input fragment and moves a resident request back to `Assigned`.
+`AddTokens()` remains an initial-input-only operation.
+
+There is no fixed wall-clock or next-step timeout. Planning skips turn-complete residents and does
+not release their cache. Retained requests still consume paged-cache blocks and a batch slot, so
+applications must call `Remove()` when they no longer need continuation. Until Phase 2 defines
+residency and eviction, insufficient capacity is surfaced as backpressure rather than silently
+discarding another conversation's model state.
+
+### `Remove()`
+
+`Remove()` is legal from `Assigned`, `InProgress`, and `TurnComplete`, and moves the request to
+terminal `Closed`. On the dynamic path, removal immediately erases scheduler membership and releases
+committed paged-cache ownership. The Engine also removes any undrained ready-queue entries for that
+request.
+
+### `Closed`
+
+`Closed` is distinct from `Unassigned` because removal may already have destroyed residency and
+scheduler ownership. Returning to `Unassigned` would imply that the same logical sequence could be
+submitted as a new request. A closed static-batch row may remain physically allocated until the
+batch is recycled, but it is no longer sampled or returned.
+
+Lifecycle status and residency are separate concepts. Phase 1 guarantees that dynamic
+`TurnComplete` requests stay resident until `Remove()`. Phase 2 will define observable residency and
+automatic eviction; no eviction policy is part of this lifecycle change.
 
 ## The request length counters
 
@@ -128,7 +169,7 @@ Three views of request progress are important:
 | --- | --- |
 | `CurrentSequenceLength()` | Number of tokens currently held by the request's search sequence |
 | `processed_sequence_length_` | Number of sequence tokens already represented in the committed KV cache |
-| `seen_sequence_length_` | Number of tokens already observed by the API caller |
+| `seen_sequence_length_` | High-water sequence index of generated output consumed by the API caller; continuation input may create gaps |
 
 The unprocessed tokens are:
 
@@ -172,7 +213,7 @@ This distinction is important:
 
 - One call to `Step()` does not always mean one model invocation.
 - Draining a previously committed batch does not change model or cache state.
-- `Engine::RemoveRequest()` does not purge requests already in the ready queue; `Step()` drains those entries before scheduling new work.
+- `Engine::RemoveRequest()` purges undrained entries for that request from the ready queue.
 - `HasPendingRequests()` is true while either the ready queue or scheduler contains work.
 
 If the engine has previously encountered a fatal transaction or execution failure, `Step()` rethrows the stored error instead of attempting more work.
@@ -181,17 +222,24 @@ If the engine has previously encountered a fatal transaction or execution failur
 
 `Engine::StepDynamic()` coordinates the complete transaction.
 
-### 1. Reap completed requests
+### 1. Identify active and waiting requests
 
-`DynamicBatchScheduler::PlanStep()` begins by calling `ReapCompletedRequests()`.
+`DynamicBatchScheduler::PlanStep()` skips `TurnComplete` residents and builds candidates from
+executable residents plus waiting requests.
 
-Completed requests that still own paged-cache blocks are deallocated and removed from the scheduler pool. Their released blocks are immediately available when the same planning pass considers new requests.
+The cache manager checks whether those candidates fit alongside dormant turn-complete requests. It
+does not reclaim another request as a side effect of `Step()`. If retained residency prevents
+admission or cache growth, the plan reports capacity backpressure; the application decides which
+conversation to release with `Remove()`.
 
 ### 2. Build the initial step plan
 
-The scheduler snapshots all requests that already belong to the paged cache. These requests are expected to be `InProgress`.
+The scheduler snapshots requests that already belong to the paged cache. Executable residents may
+be `InProgress` or `Assigned`; an `Assigned` resident is a queued continuation.
 
-It then snapshots waiting requests from the scheduler pool. These requests are expected to be `Assigned` and are marked as newly admitted candidates.
+It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` and
+are marked as newly admitted candidates. Residency, not status alone, determines
+`newly_admitted`.
 
 The scheduler orders candidates with decodes first. Order remains stable among
 decodes and among prefills. Each candidate initially contributes one provisional
@@ -383,9 +431,11 @@ Committing request bookkeeping:
 
 - Appends the staged token to the host token mirror.
 - Sets `processed_sequence_length_` to the sequence length that existed before sampling.
-- Changes the status to `InProgress` or `Completed`.
+- Changes the status to `InProgress` or `TurnComplete`.
 
-For a newly admitted request, this commit is the point where it moves directly from `Assigned` to `InProgress` or `Completed`. The dynamic transaction path does not need a separate visible scheduling state between those two states.
+For a new request or queued continuation, this commit is the point where it moves from `Assigned`
+to `InProgress` or `TurnComplete`. The dynamic transaction path does not need a separate visible
+scheduling state between those states.
 
 Finally, the engine swaps the staged ready list into `ready_requests_`. The first ready request is returned immediately, and later calls drain the rest without another model run.
 
@@ -567,6 +617,11 @@ Requests skipped because of token, row, or temporary cache capacity remain pendi
 
 If no request can run because of temporary capacity, `StepDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
 
+The native Engine exposes `CapacityDeferred` as a structured `StepOutcomeKind`. The current C and
+Python wrappers still surface it as an error message. Phase 2 must add a structured public
+backpressure/residency signal before introducing automatic eviction, so applications can select a
+turn-complete request to close without parsing text.
+
 ## Static engine path
 
 The static engine path is intentionally separate.
@@ -575,6 +630,15 @@ The static engine path is intentionally separate.
 
 `StepStatic()` performs decode and sampling directly without the dynamic transaction and reservation protocol.
 
+A resident static request queued by `Continue()` returns to `InProgress` without reallocating the
+batch. Static cache rows still cannot be released independently, and an all-turn-complete batch may
+be recycled for new work. Static continuation is therefore valid only while the original
+single-request batch remains resident.
+
+A closed static row remains physically retained until that shared batch is recycled. It is not
+sampled or returned again, but its Request/Search storage can remain alive for the lifetime of the
+batch.
+
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
 ## Public API shape
@@ -582,6 +646,7 @@ Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`,
 The language bindings expose the same basic loop:
 
 ```python
+request.add_tokens(initial_tokens)
 engine.add_request(request)
 
 while engine.has_pending_requests():
@@ -590,9 +655,22 @@ while engine.has_pending_requests():
         while ready_request.has_unseen_tokens():
             token = ready_request.get_unseen_token()
             # Stream or process the token.
+
+if request.status == og.RequestStatus.TURN_COMPLETE:
+    request.continue_with(next_turn_tokens)
+
+# Repeat engine.step(), then close the conversation when continuation is no longer needed.
+engine.remove_request(request)
 ```
 
-One ready request may be returned several times over its lifetime as new tokens become available. The request remains owned by the engine until it completes or is explicitly removed.
+`AddTokens` is for initial input. The explicit continuation operations are `OgaRequestContinue` in
+C, `OgaRequest::Continue` in the C++ wrapper, and `request.continue_with` in Python. Lifecycle is
+available through `OgaRequestGetStatus`, `OgaRequest::GetStatus`, and `request.status`.
+`IsDone()` remains a compatibility convenience for “the current turn is complete.”
+
+One ready request may be returned several times over its lifetime as new tokens become available. A
+turn-complete dynamic request remains cache-resident until explicit removal, which releases dynamic
+cache ownership immediately.
 
 ## Keeping this document current
 

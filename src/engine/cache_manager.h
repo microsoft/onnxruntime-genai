@@ -54,6 +54,10 @@ struct CacheManager {
 
   virtual std::vector<std::shared_ptr<Request>> AllocatedRequests() const = 0;
 
+  virtual bool IsResident(const std::shared_ptr<Request>& request) const = 0;
+
+  virtual size_t ResidentRequestCount() const = 0;
+
   // Columns in the block table the model will see this step, or 0 when the cache does not use one.
   // The decode path multiplies it by the block size to get the KV length bound it reports through
   // `attention_metadata`.
@@ -97,6 +101,10 @@ struct StaticCacheManager : CacheManager {
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
 
+  bool IsResident(const std::shared_ptr<Request>& request) const override;
+
+  size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
+
  private:
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<KeyValueCache> key_value_cache_;
@@ -124,6 +132,10 @@ struct PagedCacheManager : CacheManager {
   }
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
+
+  bool IsResident(const std::shared_ptr<Request>& request) const override;
+
+  size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
 

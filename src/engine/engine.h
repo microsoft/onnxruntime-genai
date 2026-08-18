@@ -122,6 +122,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<Request> DrainReadyRequest();
   std::shared_ptr<Request> StepDynamic();
   std::shared_ptr<Request> StepStatic();
+  void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
   [[noreturn]] void MarkUnhealthyAndThrow(StepOutcomeKind outcome,
                                           StepTransactionId transaction_id,
                                           const void* request_id,
@@ -141,6 +142,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<std::shared_ptr<Request>> ready_requests_;
   std::vector<std::shared_ptr<Request>> staged_ready_requests_;
   size_t ready_request_index_{};
+
+  friend struct Request;
 };
 
 }  // namespace Generators

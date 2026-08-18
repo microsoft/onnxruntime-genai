@@ -58,12 +58,51 @@ void Engine::AddRequest(std::shared_ptr<Request> request) {
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
+  scheduler_->ValidateRequest(*request);
   request->Assign(shared_from_this());
   scheduler_->AddRequest(request);
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
+  if (request && IsClosed(request->status_)) {
+    throw std::runtime_error("Cannot remove a request that is already closed.");
+  }
+  if (!request || request->engine_.lock().get() != this) {
+    throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
+  }
+
   scheduler_->RemoveRequest(request);
+
+  auto first_undrained =
+      ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_);
+  const auto retained_end =
+      std::remove(first_undrained, ready_requests_.end(), request);
+  const auto new_end = ready_request_index_ == 0
+                           ? retained_end
+                           : std::move(first_undrained, retained_end,
+                                       ready_requests_.begin());
+  ready_requests_.erase(new_end, ready_requests_.end());
+  ready_request_index_ = 0;
+  request->CompleteClose();
+}
+
+void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const {
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (request->engine_.lock().get() != this) {
+    throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
+  }
+
+  if (!cache_manager_->IsResident(request)) {
+    throw std::runtime_error("Cannot continue a request whose model state is no longer resident.");
+  }
+
+  if (!cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->ResidentRequestCount() > 1) {
+    throw std::runtime_error(
+        "Continuous decoding is only supported when a static engine batch contains one request.");
+  }
 }
 
 std::shared_ptr<Request> Engine::Step() {
@@ -79,11 +118,22 @@ std::shared_ptr<Request> Engine::Step() {
 std::shared_ptr<Request> Engine::StepStatic() {
   while (scheduler_->HasPendingRequests()) {
     auto scheduled_requests = scheduler_->Schedule();
+    std::vector<RequestStatus> statuses_before_step;
+    statuses_before_step.reserve(scheduled_requests.size());
+    for (const auto& request : scheduled_requests) {
+      statuses_before_step.push_back(request->status_);
+    }
+
     model_executor_->Decode(scheduled_requests);
     scheduled_requests.GenerateNextTokens();
 
-    for (auto& request : scheduled_requests) {
-      if (request->HasUnseenTokens() || request->IsDone()) {
+    for (size_t i = 0; i < scheduled_requests.size(); ++i) {
+      auto request = scheduled_requests[i];
+      const bool turn_completed_this_step =
+          !IsTurnComplete(statuses_before_step[i]) &&
+          IsTurnComplete(request->status_);
+      if (!IsClosed(request->status_) &&
+          (request->HasUnseenTokens() || turn_completed_this_step)) {
         ready_requests_.push_back(request);
       }
     }
@@ -146,8 +196,31 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
-    auto scheduled_requests =
-        scheduler_->CreateScheduledRequests(step_plan_);
+    auto scheduled_requests = [&]() -> ScheduledRequests {
+      try {
+        return scheduler_->CreateScheduledRequests(step_plan_);
+      } catch (...) {
+        const auto construction_error = std::current_exception();
+        try {
+          reservation->Release();
+        } catch (...) {
+          ++transaction_metrics_.rollbacks;
+          MarkUnhealthyAndThrow(
+              StepOutcomeKind::FatalExecutionFailure,
+              step_plan_.transaction_id,
+              nullptr,
+              "Failed to release cache state after scheduled-request construction failed.",
+              std::current_exception());
+        }
+        ++transaction_metrics_.rollbacks;
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            step_plan_.transaction_id,
+            nullptr,
+            "Failed to construct the scheduled request transaction.",
+            construction_error);
+      }
+    }();
     ExecutionContext context{&step_plan_};
     context.cache_reservation = reservation->PagedReservation();
 

@@ -710,6 +710,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
+  pybind11::enum_<OgaRequestStatus>(m, "RequestStatus")
+      .value("CREATED", OgaRequestStatus_created)
+      .value("QUEUED", OgaRequestStatus_queued)
+      .value("IN_PROGRESS", OgaRequestStatus_in_progress)
+      .value("TURN_COMPLETE", OgaRequestStatus_turn_complete)
+      .value("CLOSED", OgaRequestStatus_closed);
+
   pybind11::class_<OgaRequest>(m, "Request")
       .def(pybind11::init(
           [](PyGeneratorParams& params) {
@@ -721,8 +728,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         sequences->Append(tokens_span.data(), tokens_span.size());
         request.AddTokens(*sequences);
       })
+      .def("continue_with", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+        auto sequences = OgaSequences::Create();
+        auto tokens_span = ToSpan(tokens);
+        sequences->Append(tokens_span.data(), tokens_span.size());
+        request.Continue(*sequences);
+      })
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_done", &OgaRequest::IsDone)
+      .def_property_readonly("status", &OgaRequest::GetStatus)
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
       .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
         request.SetOpaqueData(opaque_data.ptr());

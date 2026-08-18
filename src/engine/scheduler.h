@@ -26,6 +26,8 @@ struct Scheduler {
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
+  virtual void ValidateRequest(const Request&) const {}
+
   /**
    * @brief Adds a request to the Scheduler for processing.
    * @param request A shared pointer to the Request object to be added.
@@ -82,6 +84,8 @@ struct Scheduler {
 struct StaticBatchScheduler : Scheduler {
   StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
+  void ValidateRequest(const Request& request) const override;
+
   void AddRequest(std::shared_ptr<Request> request) override;
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
@@ -94,7 +98,6 @@ struct StaticBatchScheduler : Scheduler {
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
-  std::set<std::shared_ptr<Request>> to_be_removed_requests_;
 };
 
 struct DynamicBatchScheduler : Scheduler {
@@ -111,8 +114,6 @@ struct DynamicBatchScheduler : Scheduler {
   bool HasPendingRequests() const override;
 
  private:
-  void ReapCompletedRequests();
-
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
