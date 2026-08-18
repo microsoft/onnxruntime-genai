@@ -461,7 +461,7 @@ class Model:
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
-        self.prune_lm_head = self.extra_options.get("prune_lm_head", True)
+        self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
         if self.prune_lm_head and self.exclude_lm_head:
             if "prune_lm_head" in self.extra_options:

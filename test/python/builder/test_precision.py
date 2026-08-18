@@ -369,8 +369,8 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
 @pytest.mark.parametrize(
     "extra_options, logits_first_dim",
     [
-        ({"include_hidden_states": True}, "batch_size"),
-        ({"include_hidden_states": True, "prune_lm_head": False}, "num_tokens"),
+        ({"include_hidden_states": True}, "num_tokens"),
+        ({"include_hidden_states": True, "prune_lm_head": True}, "batch_size"),
     ],
 )
 def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):

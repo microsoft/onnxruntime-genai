@@ -709,10 +709,10 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is true.
-                    For standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead of [B,S,H].
-                    For paged-attention models, gathers the final packed hidden state for each sequence so the MatMul
-                    input is [B,H] instead of [num_tokens,H]. Set to false to project every hidden state.
+                prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
+                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
+                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
+                    the MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
@@ -722,11 +722,10 @@ def get_args():
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
                     [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
                     `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
-                    `past_sequence_lengths` metadata inputs. With prune_lm_head=true (the default), selects the final
-                    packed hidden state for each sequence so the model outputs [batch_size, vocab_size] logits. With
-                    prune_lm_head=false, the model outputs [num_tokens, vocab_size] logits. Currently only supported
-                    for the CUDA execution provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds
-                    or exclude_lm_head.
+                    `past_sequence_lengths` metadata inputs. With prune_lm_head=true, selects the final packed hidden
+                    state for each sequence so the model outputs [batch_size, vocab_size] logits. By default, the model
+                    outputs [num_tokens, vocab_size] logits. Currently only supported for the CUDA execution provider
+                    with fp16 or bf16 precision. Cannot be combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
