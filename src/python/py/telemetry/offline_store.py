@@ -31,7 +31,6 @@ import time
 from contextlib import suppress
 
 SCHEMA_VERSION = 2
-_FORKED_CONNECTIONS: list[sqlite3.Connection] = []
 
 
 def _chmod_best_effort(path: str, mode: int) -> None:
@@ -219,12 +218,16 @@ class OfflineEventStore:
                     self._conn.close()
                 self._conn = None
 
+    def prepare_for_fork(self) -> None:
+        """Close the live connection in the parent before it can be inherited."""
+        self.close()
+
+    def reopen_after_fork(self) -> None:
+        """Restore the parent's connection after a fork."""
+        if self._conn is None:
+            self._initialize()
+
     def discard_after_fork(self) -> None:
-        """Detach the child's inherited SQLite handle without invoking SQLite."""
+        """Reset child-only state after the parent closed the connection pre-fork."""
         self._lock = threading.Lock()
-        conn = self._conn
-        if conn is not None:
-            # Even close() is unsafe after fork: a WAL close in the child can
-            # checkpoint or unlink files still used by the parent.
-            _FORKED_CONNECTIONS.append(conn)
         self._conn = None

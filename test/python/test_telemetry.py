@@ -71,6 +71,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         from telemetry.telemetry import GenAITelemetry
 
         GenAITelemetry._instance = None
+        GenAITelemetry._process_disabled = False
 
         self._tmpdir = tempfile.mkdtemp()
         self._patchers = []
@@ -139,6 +140,7 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         for p in reversed(self._patchers):
             p.stop()
         GenAITelemetry._instance = None
+        GenAITelemetry._process_disabled = False
         deviceid._device_id_state.update({"device_id": None, "status": deviceid.DeviceIdStatus.NEW})
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -239,6 +241,23 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self._deliver()
         mock_device_id.assert_not_called()
         self.assertEqual(self.sent_payloads, [])
+
+    def test_public_disable_does_not_initialize_telemetry(self):
+        from telemetry.telemetry import GenAITelemetry, disable_telemetry
+
+        with (
+            patch("telemetry.telemetry.OfflineEventStore") as store,
+            patch("telemetry.telemetry.EventUploader") as uploader,
+        ):
+            disable_telemetry()
+
+            self.assertIsNone(GenAITelemetry._instance)
+            telemetry = GenAITelemetry()
+
+        store.assert_not_called()
+        uploader.assert_not_called()
+        self.assertFalse(telemetry._enabled)
+        self.assertIsNone(telemetry._store)
 
     def test_enabled_records_heartbeat_and_events(self):
         import uuid
@@ -1867,22 +1886,24 @@ class TestOfflineEventStore(unittest.TestCase):
             {"id", "payload", "available_at"},
         )
 
-    def test_discard_after_fork_does_not_close_inherited_connection(self):
+    def test_store_connection_is_closed_before_fork_and_reopened_only_in_parent(self):
         import telemetry.offline_store as store_module
 
         store = object.__new__(store_module.OfflineEventStore)
         store._lock = store_module.threading.Lock()
         connection = MagicMock()
         store._conn = connection
-        leaked_count = len(store_module._FORKED_CONNECTIONS)
-        try:
-            store.discard_after_fork()
+        store.prepare_for_fork()
 
-            self.assertIsNone(store._conn)
-            connection.close.assert_not_called()
-            self.assertIs(store_module._FORKED_CONNECTIONS[-1], connection)
-        finally:
-            del store_module._FORKED_CONNECTIONS[leaked_count:]
+        self.assertIsNone(store._conn)
+        connection.close.assert_called_once()
+
+        with patch.object(store, "_initialize") as initialize:
+            store.reopen_after_fork()
+        initialize.assert_called_once()
+
+        store.discard_after_fork()
+        self.assertIsNone(store._conn)
 
     def test_delete(self):
         s = self._new_store()

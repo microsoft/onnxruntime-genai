@@ -160,6 +160,7 @@ class GenAITelemetry:
 
     _instance: GenAITelemetry | None = None
     _lock = threading.RLock()
+    _process_disabled = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -167,7 +168,7 @@ class GenAITelemetry:
                 if cls._instance is None:
                     instance = super().__new__(cls)
                     instance._initialized = False
-                    instance._telemetry_disabled = False
+                    instance._telemetry_disabled = cls._process_disabled
                     instance._next_model_session_id = 1
                     cls._instance = instance
         return cls._instance
@@ -571,6 +572,7 @@ class GenAITelemetry:
     def disable_telemetry(self) -> None:
         """Disable telemetry irreversibly for the remainder of this process."""
         with self._lock:
+            type(self)._process_disabled = True
             self._telemetry_disabled = True
             self._enabled = False
             if self._uploader is not None:
@@ -582,6 +584,24 @@ class GenAITelemetry:
                 if self._uploader.stop_loop(0):
                     self._uploader.close()
                     self._uploader = None
+
+    @classmethod
+    def _before_fork(cls) -> None:
+        """Close SQLite in the parent so the child never inherits a live handle."""
+        instance = cls._instance
+        store = getattr(instance, "_store", None) if instance is not None else None
+        if store is not None:
+            with suppress(Exception):
+                store.prepare_for_fork()
+
+    @classmethod
+    def _after_fork_parent(cls) -> None:
+        """Reopen the parent's SQLite connection after a fork."""
+        instance = cls._instance
+        store = getattr(instance, "_store", None) if instance is not None else None
+        if store is not None:
+            with suppress(Exception):
+                store.reopen_after_fork()
 
     @classmethod
     def _after_fork_child(cls) -> None:
@@ -660,8 +680,16 @@ def _get_telemetry() -> GenAITelemetry:
 
 def disable_telemetry() -> None:
     """Disable GenAI telemetry for the remainder of this process."""
-    _get_telemetry().disable_telemetry()
+    with GenAITelemetry._lock:
+        GenAITelemetry._process_disabled = True
+        instance = GenAITelemetry._instance
+        if instance is not None:
+            instance.disable_telemetry()
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=GenAITelemetry._after_fork_child)
+    os.register_at_fork(
+        before=GenAITelemetry._before_fork,
+        after_in_parent=GenAITelemetry._after_fork_parent,
+        after_in_child=GenAITelemetry._after_fork_child,
+    )
