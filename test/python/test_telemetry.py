@@ -288,20 +288,31 @@ class TestOptOut(_HermeticTelemetryTestCase):
         telemetry._store.store_with_id.assert_not_called()
 
     def test_heartbeat_is_durable_before_system_enrichment(self):
+        import json
         import threading
 
         from telemetry.telemetry import GenAITelemetry
 
         release_enrichment = threading.Event()
+
+        def get_system_info():
+            release_enrichment.wait(5)
+            return {"cpu_model": "test cpu"}
+
         with (
-            patch("telemetry.telemetry.get_system_info", side_effect=lambda: release_enrichment.wait(5) or {}),
+            patch("telemetry.telemetry.get_system_info", side_effect=get_system_info),
             patch("telemetry.telemetry.EventUploader.start"),
         ):
             telemetry = GenAITelemetry()
-            batch = telemetry._store.get_batch(10)
-            self.assertTrue(any(b"GenAIHeartbeat" in payload for _, payload in batch))
+            self.assertEqual(telemetry._store.count(), 1)
+            self.assertEqual(telemetry._store.get_batch(10), [])
             release_enrichment.set()
             telemetry._heartbeat_thread.join(5)
+            batch = telemetry._store.get_batch(10)
+
+        self.assertEqual(len(batch), 1)
+        payload = json.loads(batch[0][1])
+        self.assertEqual(payload["data"]["cpuModel"], "test cpu")
 
     def test_initialization_keeps_exporter_diagnostics_configurable(self):
         from telemetry.library.event_source import event_source
@@ -1761,6 +1772,43 @@ class TestOfflineEventStore(unittest.TestCase):
         self.assertEqual(s.count(), 5)
         batch = s.get_batch(3)
         self.assertEqual([p for _, p in batch], [b'{"e":0}', b'{"e":1}', b'{"e":2}'])
+
+    def test_deferred_row_is_durable_but_unavailable_until_released(self):
+        s = self._new_store()
+        with patch("telemetry.offline_store.time.time", return_value=100.0):
+            row_id = s.store_with_id(b'{"minimal":1}', available_after_seconds=60.0)
+            s.store(b'{"ready":1}')
+            self.assertEqual(s.count(), 2)
+            self.assertEqual([payload for _, payload in s.get_batch(10)], [b'{"ready":1}'])
+            self.assertTrue(s.replace(row_id, b'{"enriched":1}'))
+            self.assertEqual(
+                [payload for _, payload in s.get_batch(10)],
+                [b'{"enriched":1}', b'{"ready":1}'],
+            )
+
+    def test_version_one_store_is_migrated_without_losing_events(self):
+        import sqlite3
+        import tempfile
+
+        import telemetry.offline_store as store_module
+
+        db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)")
+        conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(b'{"legacy":1}'),))
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+        conn.close()
+
+        store = store_module.OfflineEventStore(db)
+        self.addCleanup(store.close)
+
+        self.assertTrue(store.is_open)
+        self.assertEqual(store.get_batch(1)[0][1], b'{"legacy":1}')
+        self.assertEqual(
+            {row[1] for row in store._conn.execute("PRAGMA table_info(events)").fetchall()},
+            {"id", "payload", "available_at"},
+        )
 
     def test_delete(self):
         s = self._new_store()

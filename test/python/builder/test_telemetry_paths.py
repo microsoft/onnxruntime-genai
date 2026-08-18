@@ -1,3 +1,4 @@
+import builtins
 import importlib.util
 import sys
 import types
@@ -71,6 +72,26 @@ def test_extra_options_redact_relative_pathlike_values():
     assert sanitized["adapter_path"] == "[path]"
     assert sanitized["nested"]["scale_path"] == "[path]"
     assert sanitized["batch_size"] == 4
+
+
+def test_builder_import_survives_telemetry_import_failure(monkeypatch):
+    real_import = builtins.__import__
+
+    def fail_telemetry_import(name, *args, **kwargs):
+        if name == "telemetry.path_utils":
+            raise OSError(126, "native telemetry dependency unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_telemetry_import)
+
+    module = _load_builder_entrypoint_module()
+
+    assert module._normalize_execution_provider_name("NvTensorRtRtx") == "trt-rtx"
+    assert module._sanitize_path_value("/private/model") == "[path]"
+    assert module._sanitize_extra_options({"private": "/secret", "batch_size": 4}) == {
+        "private": "[redacted]",
+        "batch_size": 4,
+    }
 
 
 def test_telemetry_fallback_restores_source_path(monkeypatch):

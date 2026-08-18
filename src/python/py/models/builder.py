@@ -60,22 +60,33 @@ from builders.quant_config import KV_CACHE_QUANT_TYPES
 from transformers import AutoConfig
 
 try:
-    from onnxruntime_genai.telemetry.path_utils import (
+    from ..telemetry.path_utils import (
         normalize_execution_provider,
         sanitize_model_identifier,
         scrub_value_for_telemetry,
     )
-except ImportError:
+except Exception:
     telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     path_added = telemetry_root not in sys.path
     if path_added:
         sys.path.insert(0, telemetry_root)
     try:
-        from telemetry.path_utils import (
-            normalize_execution_provider,
-            sanitize_model_identifier,
-            scrub_value_for_telemetry,
-        )
+        try:
+            from telemetry.path_utils import (
+                normalize_execution_provider,
+                sanitize_model_identifier,
+                scrub_value_for_telemetry,
+            )
+        except Exception:
+            # Telemetry must never make the standalone model builder unavailable.
+            def normalize_execution_provider(value):
+                return "trt-rtx" if value == "NvTensorRtRtx" else value
+
+            def sanitize_model_identifier(value):
+                return value if value in (None, "") else "[path]"
+
+            def scrub_value_for_telemetry(value):
+                return value if value is None or isinstance(value, (bool, int, float)) else "[redacted]"
     finally:
         if path_added and telemetry_root in sys.path:
             sys.path.remove(telemetry_root)

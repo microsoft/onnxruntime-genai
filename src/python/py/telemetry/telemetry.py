@@ -63,6 +63,7 @@ _CI_ENV_VARS = {
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
 }
 _UNIT_TEST_ENV_VAR = "ORT_RUNNING_UNIT_TESTS"
+_HEARTBEAT_ENRICHMENT_GRACE_SECONDS = 60.0
 _DISTRIBUTION_NAMES = (
     "onnxruntime-genai",
     "onnxruntime-genai-cuda",
@@ -219,7 +220,11 @@ class GenAITelemetry:
                     return
                 # Persist the counting-critical heartbeat before any background
                 # work so even a short-lived builder process leaves it durable.
-                heartbeat_id = self._persist(HEARTBEAT_EVENT, self._minimal_heartbeat_attributes())
+                heartbeat_id = self._persist(
+                    HEARTBEAT_EVENT,
+                    self._minimal_heartbeat_attributes(),
+                    available_after_seconds=_HEARTBEAT_ENRICHMENT_GRACE_SECONDS,
+                )
 
                 self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
@@ -261,11 +266,19 @@ class GenAITelemetry:
         )
         return CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
 
-    def _persist(self, event_name: str, attributes: dict[str, Any] | None = None) -> int | None:
+    def _persist(
+        self,
+        event_name: str,
+        attributes: dict[str, Any] | None = None,
+        available_after_seconds: float = 0.0,
+    ) -> int | None:
         if not self._enabled or self._store is None:
             return None
         try:
-            return self._store.store_with_id(self._serialize_event(event_name, attributes))
+            return self._store.store_with_id(
+                self._serialize_event(event_name, attributes),
+                available_after_seconds=available_after_seconds,
+            )
         except Exception:
             return None
 
@@ -328,16 +341,20 @@ class GenAITelemetry:
         """Best-effort enrichment of the already-durable heartbeat."""
         if not self._enabled or self._telemetry_disabled or self._store is None:
             return
+        ready = False
         try:
             attributes = self._build_heartbeat_attributes()
             if row_id is None:
                 self._emit(HEARTBEAT_EVENT, attributes)
                 return
-            if self._store.replace(row_id, self._serialize_event(HEARTBEAT_EVENT, attributes)):
-                if self._uploader is not None:
-                    self._uploader.request_drain()
+            ready = self._store.replace(row_id, self._serialize_event(HEARTBEAT_EVENT, attributes))
         except Exception:
-            return
+            pass
+        finally:
+            if row_id is not None and not ready and self._store is not None:
+                ready = self._store.make_available(row_id)
+            if ready and self._enabled and not self._telemetry_disabled and self._uploader is not None:
+                self._uploader.request_drain()
 
     def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
