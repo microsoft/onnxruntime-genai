@@ -153,3 +153,53 @@ def test_failed_build_ignores_existing_output_artifacts(monkeypatch, tmp_path):
     )
 
     assert captured["output_model_size_bytes"] == 0
+
+
+def test_pathlike_input_is_normalized_for_success(monkeypatch):
+    captured = {}
+
+    def create_impl(*args, **kwargs):
+        captured["input_path"] = args[1]
+        return "created"
+
+    monkeypatch.setattr(builder_module, "_create_model_impl", create_impl)
+
+    assert (
+        builder_module.create_model(
+            "model",
+            Path("model.gguf"),
+            "output",
+            "fp16",
+            "cpu",
+            "cache",
+        )
+        == "created"
+    )
+    assert captured["input_path"] == "model.gguf"
+
+
+def test_pathlike_input_preserves_early_failure_telemetry(monkeypatch):
+    captured = {}
+
+    def fail_create(*args, **kwargs):
+        raise RuntimeError("early failure")
+
+    monkeypatch.setattr(builder_module, "_create_model_impl", fail_create)
+    monkeypatch.setattr(
+        builder_module,
+        "_emit_model_build_telemetry",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="early failure"):
+        builder_module.create_model(
+            "model",
+            Path("model.gguf"),
+            "output",
+            "fp16",
+            "cpu",
+            "cache",
+        )
+
+    assert captured["source_format"] == "gguf"
+    assert captured["fallback_model_name"] == "model.gguf"

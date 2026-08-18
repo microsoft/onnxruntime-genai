@@ -45,13 +45,13 @@ def _fnv1a_hex(value: str) -> str:
 
 
 def _is_valid_device_id(value: str) -> bool:
-    if len(value) > 256:
+    if not isinstance(value, str) or len(value) != 36:
         return False
-    try:
-        uuid.UUID(value)
-    except (AttributeError, ValueError):
-        return False
-    return True
+    hyphens = {8, 13, 18, 23}
+    return all(
+        char == "-" if index in hyphens else char.lower() in "0123456789abcdef"
+        for index, char in enumerate(value)
+    )
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:

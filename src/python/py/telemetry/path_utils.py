@@ -8,7 +8,8 @@
 import ntpath
 import os
 import posixpath
-from collections.abc import Mapping, Set
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from datetime import date, datetime, time, timedelta
 from uuid import UUID
 
@@ -48,6 +49,12 @@ def _find_path_anchor(value: str):
                     if separators >= 2:
                         return _token_start(value, index)
         if char == "/":
+            if (
+                index + 1 < len(value)
+                and value[index + 1] not in "/\r\n \t"
+                and value[index - 1] in "\"' \t"
+            ):
+                return index
             segments = 0
             cursor = index
             while cursor < len(value) and value[cursor] == "/":
@@ -119,7 +126,7 @@ def scrub_value_for_telemetry(value):
         return [scrub_value_for_telemetry(child) for child in value]
     if isinstance(value, tuple):
         return tuple(scrub_value_for_telemetry(child) for child in value)
-    if isinstance(value, Set):
+    if isinstance(value, AbstractSet):
         return [scrub_value_for_telemetry(child) for child in value]
     try:
         return scrub_string_for_telemetry(str(value))

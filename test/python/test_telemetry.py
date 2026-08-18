@@ -778,6 +778,31 @@ class TestPathRedaction(unittest.TestCase):
 
         self.assertEqual(telemetry._store.store_with_id.call_count, 1)
 
+    def test_embedded_rooted_paths_are_scrubbed_in_final_payloads(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+
+        telemetry.log("GenAIAction", {"message": "missing /Alice_resume.pdf", "ratio": "n/a"})
+        telemetry.log_error("FileNotFoundError", "missing /Bob_resume.pdf")
+
+        payloads = [
+            json.loads(call.args[0])["data"]
+            for call in telemetry._store.store_with_id.call_args_list
+        ]
+        self.assertEqual(payloads[0]["message"], "missing [path]")
+        self.assertEqual(payloads[0]["ratio"], "n/a")
+        self.assertEqual(payloads[1]["exceptionMessage"], "missing [path]")
+
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error
 
@@ -863,6 +888,30 @@ class TestDeviceId(unittest.TestCase):
             deviceid._fnv1a_hex(deviceid._DEVICE_ID_HASH_SALT + raw_id),
             "912603c603e23b6b",
         )
+
+    def test_noncanonical_device_ids_are_repaired(self):
+        import telemetry.deviceid as deviceid
+
+        device_id_path = Path(self._tmpdir.name) / "deviceid"
+        for stored_value in (
+            "00000000000040008000000000000000",
+            "{00000000-0000-4000-8000-000000000000}",
+        ):
+            with self.subTest(stored_value=stored_value):
+                device_id_path.write_text(stored_value, encoding="utf-8")
+                deviceid._device_id_state.update(
+                    {"device_id": None, "status": deviceid.DeviceIdStatus.NEW}
+                )
+
+                repaired = deviceid.get_device_id()
+
+                self.assertTrue(deviceid._is_valid_device_id(repaired))
+                self.assertNotEqual(repaired, stored_value)
+                self.assertEqual(device_id_path.read_text(encoding="utf-8"), repaired)
+                self.assertEqual(
+                    deviceid._device_id_state["status"],
+                    deviceid.DeviceIdStatus.CORRUPTED,
+                )
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()

@@ -27,8 +27,8 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
-    GraniteMoeHybridModel,
     GraniteModel,
+    GraniteMoeHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
@@ -133,7 +133,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -576,7 +576,9 @@ def _create_model_impl(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+        raise Exception(
+            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
+        ) from None
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -796,10 +798,13 @@ def create_model(
     """Create a model and emit a minimal failure event even before model selection."""
     overall_start = time.perf_counter()
     telemetry_state = {"emitted": False}
+    normalized_input_path = input_path
     try:
+        if input_path:
+            normalized_input_path = os.fsdecode(input_path)
         return _create_model_impl(
             model_name,
-            input_path,
+            normalized_input_path,
             output_dir,
             precision,
             execution_provider,
@@ -819,8 +824,12 @@ def create_model(
                 execution_provider=execution_provider,
                 output_dir="",
                 extra_options=extra_options,
-                source_format="gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface",
-                fallback_model_name=input_path or model_name,
+                source_format=(
+                    "gguf"
+                    if isinstance(normalized_input_path, str) and normalized_input_path.lower().endswith(".gguf")
+                    else "huggingface"
+                ),
+                fallback_model_name=normalized_input_path or model_name,
             )
         raise
 
