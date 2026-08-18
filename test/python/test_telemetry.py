@@ -654,7 +654,7 @@ class TestPathRedaction(unittest.TestCase):
         self.assertNotIn("alice", message)
         self.assertIn("[path]", message)
 
-    def test_format_exception_message_keeps_external_basename(self):
+    def test_format_exception_message_redacts_external_file_path(self):
         from telemetry.telemetry import _format_exception_message
 
         with patch(
@@ -665,7 +665,7 @@ class TestPathRedaction(unittest.TestCase):
 
         self.assertEqual(message, 'File "[path]", line 7, in run')
 
-    def test_format_exception_message_keeps_internal_basename_and_context(self):
+    def test_format_exception_message_redacts_internal_file_path_and_keeps_context(self):
         from telemetry.telemetry import _format_exception_message
 
         with patch(

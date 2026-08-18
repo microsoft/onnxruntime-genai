@@ -194,9 +194,15 @@ def test_pathlike_input_is_normalized_for_success(monkeypatch):
     captured = {}
 
     def create_impl(*args, **kwargs):
+        assert captured["telemetry_initialized"]
         captured["input_path"] = args[1]
         return "created"
 
+    monkeypatch.setattr(
+        builder_module,
+        "_get_model_builder_telemetry",
+        lambda: captured.update(telemetry_initialized=True),
+    )
     monkeypatch.setattr(builder_module, "_create_model_impl", create_impl)
 
     assert (
@@ -220,6 +226,7 @@ def test_pathlike_input_preserves_early_failure_telemetry(monkeypatch):
         raise RuntimeError("early failure")
 
     monkeypatch.setattr(builder_module, "_create_model_impl", fail_create)
+    monkeypatch.setattr(builder_module, "_get_model_builder_telemetry", lambda: None)
     monkeypatch.setattr(
         builder_module,
         "_emit_model_build_telemetry",

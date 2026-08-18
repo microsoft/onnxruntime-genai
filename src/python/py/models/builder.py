@@ -473,6 +473,26 @@ def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _get_model_builder_telemetry():
+    """Return telemetry without making it a model-builder dependency."""
+    try:
+        try:
+            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
+        except Exception:
+            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            path_added = telemetry_root not in sys.path
+            if path_added:
+                sys.path.insert(0, telemetry_root)
+            try:
+                from telemetry import GenAITelemetry  # noqa: PLC0415
+            finally:
+                if path_added and telemetry_root in sys.path:
+                    sys.path.remove(telemetry_root)
+        return GenAITelemetry()
+    except Exception:
+        return None
+
+
 def _emit_model_build_telemetry(
     action_name: str,
     duration_ms: float,
@@ -487,21 +507,8 @@ def _emit_model_build_telemetry(
     fallback_model_name: str = "",
 ) -> None:
     try:
-        try:
-            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
-        except ImportError:
-            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            path_added = telemetry_root not in sys.path
-            if path_added:
-                sys.path.insert(0, telemetry_root)
-            try:
-                from telemetry import GenAITelemetry  # noqa: PLC0415
-            finally:
-                if path_added and telemetry_root in sys.path:
-                    sys.path.remove(telemetry_root)
-
-        telemetry = GenAITelemetry()
-        if not telemetry.accepts_detailed_events:
+        telemetry = _get_model_builder_telemetry()
+        if telemetry is None or not telemetry.accepts_detailed_events:
             return
 
         model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
@@ -818,6 +825,9 @@ def create_model(
     overall_start = time.perf_counter()
     telemetry_state = {"emitted": False}
     normalized_input_path = input_path
+    # Initialize before the long-running build so heartbeat enrichment and
+    # queued-event delivery proceed while model conversion is underway.
+    _get_model_builder_telemetry()
     try:
         if input_path:
             normalized_input_path = os.fsdecode(input_path)
