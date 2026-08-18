@@ -56,4 +56,3 @@ Implement the benchmark as a native C++ executable using the public C++ interfac
 ABI coverage is required. Python may orchestrate optional experiments or visualize saved results,
 but must not be required to run or qualify the benchmark. Back it with native Engine telemetry;
 do not derive core scheduler/cache measurements from Python wall-clock timing alone.
- 

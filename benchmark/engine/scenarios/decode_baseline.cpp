@@ -124,6 +124,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
   ScenarioExecutionOutput output;
   std::vector<double> ttft_values;
+  // Inter-token gaps from measured runs only; warmup samples are never added here.
   std::vector<double> inter_token_latency_values;
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
@@ -139,9 +140,14 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
+    std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
 
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
+
+    // Start timing before submission so TTFT captures arrival-to-first-token, including admission.
+    const auto run_start = std::chrono::steady_clock::now();
+    size_t generated_tokens = 0;
 
     for (int i = 0; i < config.concurrency; ++i) {
       params.emplace_back(OgaGeneratorParams::Create(*model));
@@ -158,9 +164,6 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
       engine->Add(*requests.back());
     }
-
-    const auto run_start = std::chrono::steady_clock::now();
-    size_t generated_tokens = 0;
 
     while (auto ready_request = engine->Step()) {
       const auto now = std::chrono::steady_clock::now();
@@ -189,7 +192,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
         if (first_token_ms[request_index] < 0.0) {
           first_token_ms[request_index] = elapsed_ms;
         } else {
-          inter_token_latency_values.push_back(
+          request_itl_ms[request_index].push_back(
               std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
         }
 
@@ -219,8 +222,15 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     for (int i = 0; i < config.concurrency; ++i) {
       const double ttft_ms = std::max(0.0, first_token_ms[static_cast<size_t>(i)]);
       ttft_values.push_back(ttft_ms);
+
+      // Each request record reports its own median inter-token latency, not the global one.
+      auto& request_samples = request_itl_ms[static_cast<size_t>(i)];
       output.requests.push_back(
-          {measured_run_index * config.concurrency + i, ttft_ms, Percentile(inter_token_latency_values, 50.0)});
+          {measured_run_index * config.concurrency + i, ttft_ms, Percentile(request_samples, 50.0)});
+
+      // Summary ITL percentiles are token-weighted: each inter-token gap contributes one sample.
+      inter_token_latency_values.insert(
+          inter_token_latency_values.end(), request_samples.begin(), request_samples.end());
     }
 
     ++measured_run_index;
