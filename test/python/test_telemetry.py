@@ -287,6 +287,25 @@ class TestOptOut(_HermeticTelemetryTestCase):
         mock_device_id.assert_not_called()
         telemetry._store.store_with_id.assert_not_called()
 
+    def test_runtime_disable_during_enrichment_keeps_minimal_heartbeat_deferred(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._telemetry_disabled = False
+        telemetry._store = MagicMock()
+        telemetry._uploader = None
+
+        def disable_during_enrichment():
+            telemetry.disable_telemetry()
+            return {"cpu_model": "private cpu"}
+
+        telemetry._build_heartbeat_attributes = disable_during_enrichment
+        telemetry._send_heartbeat(42)
+
+        telemetry._store.replace.assert_not_called()
+        telemetry._store.make_available.assert_not_called()
+
     def test_heartbeat_is_durable_before_system_enrichment(self):
         import json
         import threading
@@ -1847,6 +1866,23 @@ class TestOfflineEventStore(unittest.TestCase):
             {row[1] for row in store._conn.execute("PRAGMA table_info(events)").fetchall()},
             {"id", "payload", "available_at"},
         )
+
+    def test_discard_after_fork_does_not_close_inherited_connection(self):
+        import telemetry.offline_store as store_module
+
+        store = object.__new__(store_module.OfflineEventStore)
+        store._lock = store_module.threading.Lock()
+        connection = MagicMock()
+        store._conn = connection
+        leaked_count = len(store_module._FORKED_CONNECTIONS)
+        try:
+            store.discard_after_fork()
+
+            self.assertIsNone(store._conn)
+            connection.close.assert_not_called()
+            self.assertIs(store_module._FORKED_CONNECTIONS[-1], connection)
+        finally:
+            del store_module._FORKED_CONNECTIONS[leaked_count:]
 
     def test_delete(self):
         s = self._new_store()

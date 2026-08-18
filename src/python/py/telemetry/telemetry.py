@@ -344,15 +344,20 @@ class GenAITelemetry:
         ready = False
         try:
             attributes = self._build_heartbeat_attributes()
-            if row_id is None:
-                self._emit(HEARTBEAT_EVENT, attributes)
-                return
-            ready = self._store.replace(row_id, self._serialize_event(HEARTBEAT_EVENT, attributes))
+            with self._lock:
+                if not self._enabled or self._telemetry_disabled or self._store is None:
+                    return
+                if row_id is None:
+                    self._emit(HEARTBEAT_EVENT, attributes)
+                    return
+                ready = self._store.replace(row_id, self._serialize_event(HEARTBEAT_EVENT, attributes))
         except Exception:
             pass
         finally:
-            if row_id is not None and not ready and self._store is not None:
-                ready = self._store.make_available(row_id)
+            if row_id is not None and not ready:
+                with self._lock:
+                    if self._enabled and not self._telemetry_disabled and self._store is not None:
+                        ready = self._store.make_available(row_id)
             if ready and self._enabled and not self._telemetry_disabled and self._uploader is not None:
                 self._uploader.request_drain()
 
