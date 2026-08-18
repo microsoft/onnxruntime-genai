@@ -1886,24 +1886,33 @@ class TestOfflineEventStore(unittest.TestCase):
             {"id", "payload", "available_at"},
         )
 
-    def test_store_connection_is_closed_before_fork_and_reopened_only_in_parent(self):
-        import telemetry.offline_store as store_module
-
-        store = object.__new__(store_module.OfflineEventStore)
-        store._lock = store_module.threading.Lock()
-        connection = MagicMock()
-        store._conn = connection
+    def test_store_connection_is_closed_before_fork_and_reopened_lazily(self):
+        store = self._new_store()
         store.prepare_for_fork()
 
         self.assertIsNone(store._conn)
-        connection.close.assert_called_once()
-
-        with patch.object(store, "_initialize") as initialize:
-            store.reopen_after_fork()
-        initialize.assert_called_once()
+        self.assertTrue(store.store(b'{"after_fork":1}'))
+        self.assertTrue(store.is_open)
 
         store.discard_after_fork()
         self.assertIsNone(store._conn)
+
+    def test_failed_lazy_reconnect_is_rate_limited_and_retried(self):
+        store = self._new_store()
+        store.prepare_for_fork()
+
+        with (
+            patch.object(store, "_initialize") as initialize,
+            patch(
+                "telemetry.offline_store.time.monotonic",
+                side_effect=[100.0, 101.0, 106.0],
+            ),
+        ):
+            self.assertFalse(store.store(b'{"attempt":1}'))
+            self.assertFalse(store.store(b'{"attempt":2}'))
+            self.assertFalse(store.store(b'{"attempt":3}'))
+
+        self.assertEqual(initialize.call_count, 2)
 
     def test_delete(self):
         s = self._new_store()

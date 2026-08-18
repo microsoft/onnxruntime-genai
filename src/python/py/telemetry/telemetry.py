@@ -595,15 +595,6 @@ class GenAITelemetry:
                 store.prepare_for_fork()
 
     @classmethod
-    def _after_fork_parent(cls) -> None:
-        """Reopen the parent's SQLite connection after a fork."""
-        instance = cls._instance
-        store = getattr(instance, "_store", None) if instance is not None else None
-        if store is not None:
-            with suppress(Exception):
-                store.reopen_after_fork()
-
-    @classmethod
     def _after_fork_child(cls) -> None:
         """Discard parent process resources inherited by a forked child."""
         instance = cls._instance
@@ -690,6 +681,5 @@ def disable_telemetry() -> None:
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(
         before=GenAITelemetry._before_fork,
-        after_in_parent=GenAITelemetry._after_fork_parent,
         after_in_child=GenAITelemetry._after_fork_child,
     )
