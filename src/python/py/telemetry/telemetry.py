@@ -609,6 +609,7 @@ class GenAITelemetry:
         instance._uploader = None
         instance._store = None
         instance._heartbeat_thread = None
+        instance._heartbeat_started = False
         if telemetry_disabled:
             cls._instance = instance
 

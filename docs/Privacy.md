@@ -27,5 +27,6 @@ For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetr
 Telemetry can be disabled in any of these ways:
 
 - **Don't build it in.** Telemetry is compiled by default when using `build.py`, `build.bat`, or `build.sh` on supported platforms. Pass `--no_telemetry` to produce a binary that collects no telemetry, or configure CMake directly with `-DENABLE_TELEMETRY=OFF`.
-- **Disable non-essential telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before ONNX Runtime GenAI initializes. Detailed events are suppressed, but one best-effort process Heartbeat may still be attempted. CI and automated-test environments suppress all telemetry.
+- **Disable native telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before the native ONNX Runtime GenAI runtime initializes to prevent native events, the native uploader, and native device-ID persistence.
+- **Disable Python builder and benchmark details.** For the Python model builder and benchmark telemetry, the same environment variable suppresses detailed events, but one best-effort Heartbeat may still be attempted and may create or use the shared persistent device identifier. CI and automated-test environments suppress all Python telemetry.
 - **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. A process information or Heartbeat event may still be emitted.

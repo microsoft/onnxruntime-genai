@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call, mock_open, patch
 
 _TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 _TELEMETRY_SOURCE_PATH_ADDED = _TELEMETRY_SOURCE_PATH not in sys.path
@@ -445,6 +445,36 @@ class TestVersionResolution(unittest.TestCase):
             mock_version.call_args_list,
             [call("onnxruntime-genai"), call("onnxruntime-genai-cuda")],
         )
+
+
+class TestTelemetryPackaging(unittest.TestCase):
+    @staticmethod
+    def _configured_packages(telemetry_enabled: bool):
+        setup_template = Path(__file__).parents[2] / "src" / "python" / "setup.py.in"
+        source = (
+            setup_template.read_text(encoding="utf-8")
+            .replace("@TARGET_NAME@", "onnxruntime-genai")
+            .replace("@VERSION_INFO@", "0.0.0")
+            .replace("@PYTHON_TELEMETRY_ENABLED@", str(telemetry_enabled))
+        )
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data="description")),
+            patch("setuptools.setup") as setup,
+        ):
+            exec(compile(source, str(setup_template), "exec"), {"__name__": "__main__"})
+        return setup.call_args.kwargs["packages"]
+
+    def test_telemetry_enabled_wheel_includes_python_telemetry(self):
+        packages = self._configured_packages(True)
+
+        self.assertIn("onnxruntime_genai.telemetry", packages)
+
+    def test_telemetry_disabled_wheel_excludes_python_telemetry(self):
+        packages = self._configured_packages(False)
+
+        self.assertNotIn("onnxruntime_genai.telemetry", packages)
+        self.assertIn("onnxruntime_genai.models", packages)
 
 
 class TestBenchmarkTelemetryIdentifiers(unittest.TestCase):
@@ -1538,7 +1568,7 @@ class TestForkLifecycle(_HermeticTelemetryTestCase):
         self.assertFalse(child._enabled)
         self.assertTrue(child._telemetry_disabled)
         self.assertIsNone(child._store)
-        self.assertIsNone(child._heartbeat_thread)
+        self.assertIsNotNone(child._heartbeat_thread)
 
     @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
     def test_forked_child_reinitializes_process_state(self):
@@ -1590,7 +1620,7 @@ class TestForkLifecycle(_HermeticTelemetryTestCase):
                     (
                         str(child._enabled),
                         str(child._store is None),
-                        str(child._heartbeat_thread is None),
+                        str(child._heartbeat_thread is not None),
                     )
                 )
                 os.write(write_fd, result.encode("ascii"))
