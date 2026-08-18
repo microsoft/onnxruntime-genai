@@ -191,13 +191,13 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.newly_admitted = newly_admitted;
     auto prefill_token_cap = request->SearchOptions().chunk_size;
     if (cache_query_token_cap != 0 &&
-      (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
+        (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
       prefill_token_cap = cache_query_token_cap;
     }
     candidate.budget = DecodeFirstBudgetCandidate{
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
-      prefill_token_cap,
+        prefill_token_cap,
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);
