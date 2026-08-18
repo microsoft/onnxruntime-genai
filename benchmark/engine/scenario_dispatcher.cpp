@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -27,9 +28,23 @@ namespace {
 
 // versions.json is written next to the executable when the build stages the benchmark dependencies.
 nlohmann::json ReadStagedVersions() {
-  std::ifstream file("build/Linux/RelWithDebInfo/benchmark/engine/versions.json", std::ios::binary);
-  if (!file) {
-    throw std::runtime_error("versions.json not found; expected the build to stage it under benchmark/engine.");
+  // Match versions.json staged under any build config: build/Linux/<config>/benchmark/engine.
+  const std::regex versions_pattern(R"(build/Linux/[^/]+/benchmark/engine/versions\.json$)");
+  fs::path versions_path;
+  for (const auto& entry : fs::recursive_directory_iterator("build/Linux")) {
+    if (!entry.is_regular_file() || !std::regex_search(entry.path().generic_string(), versions_pattern)) {
+      continue;
+    }
+    if (!versions_path.empty()) {
+      throw std::runtime_error("Multiple versions.json found under build/Linux; expected exactly one build config.");
+    }
+    versions_path = entry.path();
+  }
+
+  std::ifstream file(versions_path, std::ios::binary);
+  if (versions_path.empty() || !file) {
+    throw std::runtime_error(
+        "versions.json not found; expected the build to stage it under build/Linux/<config>/benchmark/engine.");
   }
 
   nlohmann::json versions;
