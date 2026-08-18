@@ -81,9 +81,8 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   }
 }
 
-// Regression test: beam search with a vocab_size too small to supply
-// 2*num_beams candidates must be rejected at generator creation instead of
-// driving an out-of-bounds partial_sort in BeamSearch_Cpu::SelectTop.
+// Beam search rejects vocabularies that are too small to supply
+// 2*num_beams candidates.
 TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   config->Overlay(R"({ "model": { "vocab_size" : 1 } })");
@@ -102,9 +101,7 @@ TEST(SamplingTests, BeamSearchVocabSizeTooSmallThrowsCpu) {
   }
 }
 
-// Regression test: an eos_token_id outside [0, vocab_size) must be rejected at
-// generator creation time instead of causing an out-of-bounds write in
-// Search_Cpu::ApplyMinLength (which uses eos_token_id as a score-row index).
+// eos_token_id must stay within [0, vocab_size).
 TEST(SamplingTests, EosTokenIdExceedsVocabSizeThrowsCpu) {
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   config->Overlay(R"({ "model": { "vocab_size" : 5, "eos_token_id" : 5 } })");

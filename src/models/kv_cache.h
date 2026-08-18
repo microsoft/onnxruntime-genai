@@ -207,6 +207,10 @@ struct LFM2Cache : KeyValueCache {
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
 
+// Returns true when the runtime uses a non-rewindable windowed KV cache.
+bool UsesNonRewindableWindowedKeyValueCache(
+    const Model& model, const Config::Model::Decoder& decoder);
+
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
 
 }  // namespace Generators

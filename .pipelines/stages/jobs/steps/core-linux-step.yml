@@ -83,12 +83,12 @@ steps:
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
         if [ '${{ parameters.arch }}' = 'arm64' ]; then
-          cuda_archs='110-real;120-real;121-real;120-virtual'
+          cuda_archs='89-real;90-real;100-real;103-real;120-real;121-real'
         else
-          cuda_archs='75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+          cuda_archs='75-real;80-real;86-real;89-real;90-real;120-real'
         fi
       else
-        cuda_archs='61-real;75-real;86-real;89-real;120-real;120-virtual'
+        cuda_archs='75-real;80-real;86-real;89-real;90-real;120-real'
       fi
       docker_args+=(-e "CUDA_EXTRA_ARGS=--use_cuda --cuda_home /usr/local/cuda --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=${cuda_archs}")
     fi

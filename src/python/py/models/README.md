@@ -25,6 +25,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
+    - [Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)](#export-a-modelopt-nvfp4fp8-checkpoint-qwen36)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
@@ -62,6 +63,7 @@ The tool currently supports the following model architectures.
 - Gemma
 - gpt-oss
 - Granite
+- Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
 - Llama
@@ -343,6 +345,19 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 ```
+
+#### Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)
+
+This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized by NVIDIA TensorRT Model Optimizer and you want to carry its NVFP4/FP8 tensors into the ONNX model instead of dequantizing to fp16 and re-quantizing to int4.
+
+```bash
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda -c cache_dir_to_store_temp_files
+```
+
+When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. If the checkpoint declares `kv_cache_quant_algo=FP8`, the KV cache is exported as FP8 as well. CUDA linear-attention gate fusion is enabled automatically.
+
+The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops.
 
 #### Enable WebGPU Graph Capture
 

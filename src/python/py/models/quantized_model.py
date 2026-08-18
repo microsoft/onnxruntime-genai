@@ -220,13 +220,27 @@ class QuantizedDecoderLayer:
 
 
 class QuantizedModel:
-    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+    def __init__(
+        self,
+        quant_type,
+        input_path,
+        quant_attrs,
+        q_size,
+        kv_size,
+        intermediate_size,
+        num_layers,
+        load_weights=True,
+        lm_head=None,
+    ):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
-        self.lm_head = TensorModule()
-        self.layers = {}
+        self.lm_head = lm_head if lm_head is not None else TensorModule()
+        self.layers = {} if load_weights else []
         self.num_layers = num_layers
+        if not load_weights:
+            return
+
         self._quant_attrs = quant_attrs
         self._load_quant_config(quant_attrs)
 
@@ -1636,6 +1650,253 @@ class OliveModel(GPTQModel):
             module.qzeros = module.qzeros.reshape(-1).contiguous()
 
 
+# ---------------------------------------------------------------------------
+# NVIDIA Model Optimizer (modelopt) NVFP4 + FP8 checkpoints
+# ---------------------------------------------------------------------------
+# Model Optimizer exports a mixed-precision HF checkpoint:
+#   * MoE experts + shared expert + lm_head : W4A16_NVFP4 (block-16 E2M1 weights,
+#     FP8-E4M3 block scales, per-tensor FP32 global scale `weight_scale_2`).
+#   * attention (self_attn / linear_attn projections) : FP8 (per-tensor weight_scale).
+#   * everything else (norms, conv1d, router, embeddings) : BF16.
+#
+# The ONNX Runtime GenAI QMoE op consumes the NVFP4 *routed* experts natively
+# (quant_type="nvfp4"), and the Qwen builder reads those per-expert tensors
+# straight from the source safetensors (see make_nvfp4_moe_initializers). So this
+# loader only has to materialize the NON-routed weights the builder walks as plain
+# modules: it dequantizes the FP8 attention and NVFP4 shared-expert / lm_head to
+# BF16 and passes BF16 tensors through unchanged. Attention is exported through the
+# builder's native contrib-op path when requested. The dequantized copies retain
+# compatibility with the builder's standard fallback path.
+
+
+class ModeloptDecoderLayer:
+    """Lightweight decoder-layer container (name ends in 'DecoderLayer' so the
+    builder's is_layer() recognizes it). Only the attention variant present in the
+    checkpoint (linear_attn or self_attn) is populated; the other stays None."""
+
+    def __init__(self, layer_id):
+        self.layer_id = layer_id
+        self.input_layernorm = TensorModule()
+        self.post_attention_layernorm = TensorModule()
+        self.self_attn = None
+        self.linear_attn = None
+        self.mlp = None
+
+    def is_empty(self):
+        return self.input_layernorm.weight is None
+
+
+class ModeloptLinearModule(TensorModule):
+    def __init__(self):
+        super().__init__()
+        self.weight_scale = None
+        self.weight_scale_2 = None
+        self.input_scale = None
+
+
+class ModeloptModel(QuantizedModel):
+    """Loader for NVIDIA Model Optimizer NVFP4 + FP8 mixed-precision checkpoints.
+
+    The base initializes the module surface the builder walks without running its
+    eager integer-checkpoint loading path. This loader instead streams tensors on
+    demand and dequantizes only the non-routed weights to BF16.
+    """
+
+    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+        import json
+        from types import SimpleNamespace
+        from safetensors import safe_open
+
+        with open(os.path.join(input_path, "config.json")) as f:
+            cfg = json.load(f)
+        text_config = cfg.get("text_config", cfg)
+        num_layers = num_layers or text_config.get("num_hidden_layers")
+        self._num_experts = text_config.get("num_experts", text_config.get("num_local_experts"))
+        super().__init__(
+            quant_type,
+            input_path,
+            quant_attrs,
+            q_size,
+            kv_size,
+            intermediate_size,
+            num_layers,
+            load_weights=False,
+            lm_head=ModeloptLinearModule(),
+        )
+        self._input_path = input_path
+        self._safe_open = safe_open
+        self._simple_namespace = SimpleNamespace
+        self._open_handles = {}
+        self._handle_keys = {}
+
+        index_path = os.path.join(input_path, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                self._weight_map = json.load(f)["weight_map"]
+            self._single_file = None
+        else:
+            self._weight_map = None
+            candidates = sorted(f for f in os.listdir(input_path) if f.endswith(".safetensors"))
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"'{input_path}' has no 'model.safetensors.index.json', so it must contain exactly one "
+                    f".safetensors file, but found {len(candidates)}: {candidates}."
+                )
+            self._single_file = candidates[0]
+
+        try:
+            self.layers.extend(self._build_layer(layer_id) for layer_id in range(num_layers))
+
+            # Globals: embeddings + final norm are BF16; lm_head retains its native NVFP4 tensors.
+            self.embedding.weight = self._get("model.language_model.embed_tokens.weight")
+            self.final_norm.weight = self._get("model.language_model.norm.weight")
+            self._linear_module("lm_head", self.lm_head)
+        finally:
+            # Every tensor is materialized above; do not hold file descriptors open for
+            # the rest of the (long) export. `_get` re-opens lazily if it is called again.
+            self.close()
+
+    def close(self):
+        """Release the cached safetensors file handles."""
+        for handle in self._open_handles.values():
+            handle.__exit__(None, None, None)
+        self._open_handles.clear()
+        self._handle_keys.clear()
+
+    def __del__(self):
+        if getattr(self, "_open_handles", None):
+            self.close()
+
+    # -- raw tensor access ------------------------------------------------------
+    def _get(self, name):
+        if self._weight_map is not None:
+            fname = self._weight_map.get(name)
+            files = [fname] if fname is not None else []
+        else:
+            files = [self._single_file]
+        for fname in files:
+            handle = self._open_handles.get(fname)
+            if handle is None:
+                handle = self._safe_open(os.path.join(self._input_path, fname), framework="pt", device="cpu")
+                self._open_handles[fname] = handle
+                self._handle_keys[fname] = set(handle.keys())
+            if name in self._handle_keys[fname]:
+                return handle.get_tensor(name)
+        return None
+
+    def _validate_positive_scalar(self, tensor, name):
+        if tensor is None or tensor.numel() != 1:
+            shape = None if tensor is None else tuple(tensor.shape)
+            raise ValueError(f"ModelOpt tensor '{name}' must be a scalar, got shape {shape}.")
+        value = tensor.float()
+        if not torch.isfinite(value).item() or value.item() <= 0:
+            raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive, got {value.item()}.")
+
+    def _validate_linear(self, module, base):
+        if module.weight_scale_2 is not None:
+            if module.weight.dtype != torch.uint8 or module.weight.ndim != 2 or module.weight.shape[1] % 8 != 0:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight' must be packed uint8 [N, K/2] with K divisible by 16, "
+                    f"got dtype={module.weight.dtype} shape={tuple(module.weight.shape)}."
+                )
+            expected_shape = (int(module.weight.shape[0]), int(module.weight.shape[1]) // 8)
+            if module.weight_scale is None:
+                raise ValueError(
+                    f"NVFP4 tensor '{base}' has 'weight_scale_2' but no 'weight_scale' "
+                    "(FP8-E4M3 block scales). The Model Optimizer checkpoint is incomplete."
+                )
+            if module.weight_scale.dtype not in {torch.uint8, torch.float8_e4m3fn}:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight_scale' must contain E4M3 bytes, "
+                    f"got {module.weight_scale.dtype}."
+                )
+            if tuple(module.weight_scale.shape) != expected_shape:
+                raise ValueError(
+                    f"ModelOpt tensor '{base}.weight_scale' has shape {tuple(module.weight_scale.shape)}, "
+                    f"expected {expected_shape}."
+                )
+            self._validate_positive_scalar(module.weight_scale_2, f"{base}.weight_scale_2")
+        elif module.weight.dtype == torch.float8_e4m3fn:
+            self._validate_positive_scalar(module.weight_scale, f"{base}.weight_scale")
+            if module.input_scale is not None:
+                self._validate_positive_scalar(module.input_scale, f"{base}.input_scale")
+
+    def _linear_module(self, base, module=None):
+        weight = self._get(f"{base}.weight")
+        if weight is None:
+            return None
+        module = module if module is not None else ModeloptLinearModule()
+        module.weight = weight
+        module.weight_scale = self._get(f"{base}.weight_scale")
+        module.weight_scale_2 = self._get(f"{base}.weight_scale_2")
+        if ".self_attn." in base:
+            module.input_scale = self._get(f"{base}.input_scale")
+        self._validate_linear(module, base)
+        bias = self._get(f"{base}.bias")
+        if bias is not None:
+            module.bias = bias
+        return module
+
+    def _tensor_module(self, name):
+        module = TensorModule()
+        module.weight = self._get(name)
+        return module
+
+    def _build_layer(self, layer_id):
+        ns = self._simple_namespace
+        p = f"model.language_model.layers.{layer_id}"
+        layer = ModeloptDecoderLayer(layer_id)
+        layer.input_layernorm.weight = self._get(f"{p}.input_layernorm.weight")
+        layer.post_attention_layernorm.weight = self._get(f"{p}.post_attention_layernorm.weight")
+
+        if self._get(f"{p}.linear_attn.in_proj_qkv.weight") is not None:
+            la = ns()
+            la.in_proj_qkv = self._linear_module(f"{p}.linear_attn.in_proj_qkv")
+            la.in_proj_z = self._linear_module(f"{p}.linear_attn.in_proj_z")
+            la.in_proj_a = self._linear_module(f"{p}.linear_attn.in_proj_a")
+            la.in_proj_b = self._linear_module(f"{p}.linear_attn.in_proj_b")
+            la.out_proj = self._linear_module(f"{p}.linear_attn.out_proj")
+            la.conv1d = self._tensor_module(f"{p}.linear_attn.conv1d.weight")
+            la.A_log = self._get(f"{p}.linear_attn.A_log")
+            la.dt_bias = self._get(f"{p}.linear_attn.dt_bias")
+            la.norm = self._tensor_module(f"{p}.linear_attn.norm.weight")
+            layer.linear_attn = la
+        elif self._get(f"{p}.self_attn.q_proj.weight") is not None:
+            sa = ns()
+            sa.q_proj = self._linear_module(f"{p}.self_attn.q_proj")
+            sa.k_proj = self._linear_module(f"{p}.self_attn.k_proj")
+            sa.v_proj = self._linear_module(f"{p}.self_attn.v_proj")
+            sa.o_proj = self._linear_module(f"{p}.self_attn.o_proj")
+            sa.q_norm = self._tensor_module(f"{p}.self_attn.q_norm.weight")
+            sa.k_norm = self._tensor_module(f"{p}.self_attn.k_norm.weight")
+            layer.self_attn = sa
+        else:
+            raise ValueError(
+                f"Layer {layer_id} has neither '{p}.linear_attn.in_proj_qkv.weight' nor "
+                f"'{p}.self_attn.q_proj.weight', so its attention variant cannot be determined. "
+                "The Model Optimizer checkpoint is incomplete or uses unsupported weight names."
+            )
+
+        mlp = ns()
+        mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")
+        shared = ns()
+        shared.gate_proj = self._linear_module(f"{p}.mlp.shared_expert.gate_proj")
+        shared.up_proj = self._linear_module(f"{p}.mlp.shared_expert.up_proj")
+        shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
+        mlp.shared_expert = shared
+        mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
+        mlp.experts = []
+        for expert_id in range(self._num_experts):
+            expert_prefix = f"{p}.mlp.experts.{expert_id}"
+            expert = ns()
+            expert.gate_proj = self._linear_module(f"{expert_prefix}.gate_proj")
+            expert.up_proj = self._linear_module(f"{expert_prefix}.up_proj")
+            expert.down_proj = self._linear_module(f"{expert_prefix}.down_proj")
+            mlp.experts.append(expert)
+        layer.mlp = mlp
+        return layer
+
+
 class QuantModel:
     @staticmethod
     def from_pretrained(quant_type, **kwargs):
@@ -1652,6 +1913,8 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
+        elif quant_type == "modelopt":
+            model = ModeloptModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 

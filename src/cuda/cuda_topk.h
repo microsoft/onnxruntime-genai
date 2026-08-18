@@ -104,9 +104,10 @@ struct TopkData : public TopkDataDetail {
   // Caching the device_id to avoid repeated calls to cudaGetDevice.
   int device_id;
 
-  // A local, lock-free cache for the best algorithm for each k. This provides a fast path
-  // to algorithm selection within a single TopkData instance.
+  // A local, lock-free cache for the best algorithm for each (k, batch_size) pair. This provides
+  // a fast path to algorithm selection within a single TopkData instance.
   std::array<TopkAlgo, kMaxBenchmarkLocalCache + 1> local_algo_cache_;
+  std::array<int, kMaxBenchmarkLocalCache + 1> local_algo_cache_batch_size_;
 
   // --- Intermediate Buffers for Top-K Algorithms (Pointers into memory_buffer_span_) ---
 

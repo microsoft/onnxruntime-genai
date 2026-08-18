@@ -30,11 +30,8 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  // Verify that the frame size is expected
-  const int num_frames = static_cast<int>(audio_features_->GetShape()[2]);
-  if (num_frames != GetNumFrames()) {
-    throw new std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
-  }
+  const auto& shape = audio_features_->GetShape();
+  ValidateWhisperAudioFeaturesShape(shape, GetNumFrames());
 
   // Add encoder hidden states
   auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};

@@ -31,6 +31,10 @@ examples/csharp/ModelChat/models
 
 !test/models/gemma4/*
 !test/models/hf-internal-testing/*
+!test/models/marian-batch/*
+!test/models/marian-batch-beams/*
+!test/models/marian-batch-values/
+!test/models/marian-batch-values/*
 !test/models/mistral3/*
 !test/models/multimodal-decoder-no-input-ids/*
 !test/models/multimodal-decoder-with-input-ids/*

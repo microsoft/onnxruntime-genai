@@ -58,8 +58,8 @@ TEST(TelemetryRedactionTest, SpacedUsernameFullyRedacted) {
 
 TEST(TelemetryRedactionTest, HomeUsernameNeverLeaksAcrossVariants) {
   // Case, mixed/duplicate separators, "." segments, and embedding in a larger token must never leave
-  // the user name in the output. Exact output varies with where the first anchor lands, so the
-  // security-relevant invariant is asserted directly: the user name is absent and a redaction occurred.
+  // the user name in the output. Exact output varies with where the first anchor lands, so assert
+  // directly that the user name is absent and a redaction occurred.
   const char* inputs[] = {
       "C:\\UsErS\\alice\\model.onnx",
       "C:\\Users/alice\\model.onnx",

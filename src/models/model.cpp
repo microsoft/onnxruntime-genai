@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <filesystem>
 #include <functional>
 #include <random>
 #include <set>
@@ -22,6 +23,7 @@
 #include "tokenizer_tag_utils.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
 #include "parakeet_processor.h"
@@ -63,14 +65,24 @@ State::State(const GeneratorParams& params, const Model& model)
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture
+  // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_value_ = dis(gen);
-    graph_id_ = std::to_string(graph_id_value_);
+    GraphIdForLength(1, 0);
   }
+}
+
+const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
+  auto it = graph_ids_.find(graph_key);
+  if (it != graph_ids_.end()) {
+    return it->second.text;
+  }
+  // Distinct random annotation id per captured length (ORT captures one graph per id).
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, INT_MAX);
+  const int id_value = dis(gen);
+  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
 }
 
 void State::DumpInputs() {
@@ -95,13 +107,14 @@ void State::DumpOutputs() {
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run) {
+void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
+                int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -235,14 +248,22 @@ State::~State() {
   // in try/catch because destructors must not throw -- a throw during unwinding
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
-  if (graph_capture_session_ && graph_id_value_ > 0) {
-    try {
-      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
-    } catch (...) {
-      // Best-effort cleanup; swallow to keep the destructor non-throwing.
-      if (g_log.enabled && g_log.ort_lib) {
-        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
-                       << ") failed: unknown exception" << std::endl;
+  if (graph_capture_session_) {
+    // Speculative decoding (MTP) may capture more than one input length, each with its
+    // own annotation id, so release every id that was handed out.
+    for (const auto& length_and_id : graph_ids_) {
+      const int id_value = length_and_id.second.value;
+      if (id_value <= 0) {
+        continue;
+      }
+      try {
+        graph_capture_session_->ReleaseCapturedGraph(id_value);
+      } catch (...) {
+        // Best-effort cleanup; swallow to keep the destructor non-throwing.
+        if (g_log.enabled && g_log.ort_lib) {
+          Log("ort_lib") << "ReleaseCapturedGraph(id=" << id_value
+                         << ") failed: unknown exception" << std::endl;
+        }
       }
     }
   }
@@ -459,7 +480,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -491,6 +512,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
+  // Bind the allocator to the selected device rather than assuming device 0.
+  allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
     auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
@@ -502,6 +525,11 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
+
+  // Let the device set up any additional allocators it offers (e.g. host-accessible memory for
+  // decode inputs). Devices that offer none leave the defaults in place.
+  device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
+  allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -586,14 +614,23 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
+  // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
+  // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
+  DeviceInterface* p_host_accessible_inputs = p_device_->GetHostAccessibleDevice();
+
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
       p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
+  else if (p_host_accessible_inputs)
+    p_device_inputs_ = p_host_accessible_inputs;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // Logits are read back on the CPU every step, which is slow from a host-accessible allocation.
+  p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.
@@ -692,45 +729,97 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    // If relative path, try to resolve using multiple search locations
-    fs::path custom_library_path{custom_library_file_prefix};
-    if (custom_library_path.is_relative()) {
-      bool resolved = false;
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
 
-      // First try: resolve relative to GenAI model folder (most intuitive for users)
-      fs::path model_relative_path = config_->config_path / custom_library_path;
-      if (fs::exists(model_relative_path)) {
-        custom_library_file_prefix = model_relative_path.string();
-        resolved = true;
-      }
+    // Reject path traversal components regardless of absolute/relative
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
+    }
 
-      // Second try: resolve relative to EP library directory (for system-wide installations)
-      if (!resolved) {
-        size_t num_devices = 0;
-        const OrtEpDevice* const* device_ptrs = nullptr;
-        Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+    // Build the set of allowed directories. The resolved library path must fall
+    // within one of these to prevent loading arbitrary libraries from disk.
+    std::vector<std::filesystem::path> allowed_dirs;
 
-        for (size_t i = 0; i < num_devices && !resolved; ++i) {
-          const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
-          size_t num_entries = 0;
-          const char* const* keys = nullptr;
-          const char* const* values = nullptr;
-          Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+    // 1. GenAI model folder
+    std::error_code ec;
+    auto model_dir = std::filesystem::canonical(std::filesystem::path(config_->config_path.string()), ec);
+    if (!ec) allowed_dirs.push_back(model_dir);
 
-          for (size_t kvi = 0; kvi < num_entries; kvi++) {
-            const std::string key = keys[kvi];
-            const std::string val = values[kvi];
-            if (key == library_path_metadata_key_name) {
-              fs::path ep_library_dir = fs::path(val).parent_path();
-              fs::path resolved_path = ep_library_dir / custom_library_path;
-              if (fs::exists(resolved_path)) {
-                custom_library_file_prefix = resolved_path.string();
-                resolved = true;
-                break;
-              }
-            }
+    // 2. EP library directories
+    {
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+      for (size_t i = 0; i < num_devices; ++i) {
+        const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
+        size_t num_entries = 0;
+        const char* const* keys = nullptr;
+        const char* const* values = nullptr;
+        Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+
+        for (size_t kvi = 0; kvi < num_entries; kvi++) {
+          if (std::string(keys[kvi]) == library_path_metadata_key_name) {
+            auto ep_dir = std::filesystem::canonical(std::filesystem::path(values[kvi]).parent_path(), ec);
+            if (!ec) allowed_dirs.push_back(ep_dir);
           }
         }
+      }
+    }
+
+    // 3. Current working directory
+    {
+      auto cwd = std::filesystem::current_path(ec);
+      if (!ec) {
+        auto cwd_canonical = std::filesystem::canonical(cwd, ec);
+        if (!ec) allowed_dirs.push_back(cwd_canonical);
+      }
+    }
+
+    // Resolve the library path. For relative paths, search allowed directories in order.
+    // For absolute paths, use as-is and validate against the allowlist.
+    bool resolved = false;
+    if (custom_library_path.is_relative()) {
+      for (const auto& dir : allowed_dirs) {
+        std::filesystem::path candidate = dir / custom_library_path;
+        if (std::filesystem::exists(candidate, ec)) {
+          custom_library_file_prefix = std::filesystem::canonical(candidate).string();
+          resolved = true;
+          break;
+        }
+      }
+    } else {
+      // Absolute path — canonicalize and validate below
+      auto canonical_path = std::filesystem::canonical(custom_library_path, ec);
+      if (!ec && std::filesystem::exists(canonical_path, ec)) {
+        custom_library_file_prefix = canonical_path.string();
+        resolved = true;
+      }
+    }
+
+    // Validate that the resolved path is under one of the allowed directories
+    if (resolved) {
+      std::filesystem::path resolved_canonical =
+          std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
+      if (ec) {
+        throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
+      }
+      bool in_allowed_dir = false;
+      auto resolved_str = resolved_canonical.string();
+      for (const auto& dir : allowed_dirs) {
+        auto dir_str = dir.string();
+        // Check that resolved path starts with the allowed directory prefix
+        if (resolved_str.size() >= dir_str.size() &&
+            resolved_str.compare(0, dir_str.size(), dir_str) == 0 &&
+            (resolved_str.size() == dir_str.size() ||
+             resolved_str[dir_str.size()] == std::filesystem::path::preferred_separator)) {
+          in_allowed_dir = true;
+          break;
+        }
+      }
+      if (!in_allowed_dir) {
+        throw std::runtime_error(
+            "custom_ops_library path is not within an allowed directory: " + custom_library_file_prefix);
       }
     }
 
@@ -869,6 +958,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.draft)
+    return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);

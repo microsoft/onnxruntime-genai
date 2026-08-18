@@ -163,27 +163,11 @@ steps:
       ep: ${{ parameters.ep }}
       ort_version: ${{ parameters.ort_version }}
       ort_home: '$(ortHome)'
-# --- WinML SDK feed isolation: nuget.config → Lotus (WinML EP only) ----------
+# --- WinML SDK feed isolation: NuGet → Lotus (WinML EP only) -----------------
 # cmake/ortlib.cmake (USE_WINML) runs `nuget install Microsoft.Windows.AI.MachineLearning`
-# via cmake/nuget.cmake. Write a cleared, Lotus-only nuget.config at the sources
-# root (nuget.exe walks up from the build dir to find it) so that download resolves
-# from Lotus, and authenticate the pipeline identity to it.
+# via cmake/nuget.cmake. Authenticate the pipeline identity; the build passes the
+# Lotus URL directly to every NuGet invocation.
 - ${{ if eq(parameters.ep, 'winml') }}:
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $cfg = "$(Build.SourcesDirectory)/nuget.config"
-      @(
-        '<?xml version="1.0" encoding="utf-8"?>',
-        '<configuration>',
-        '  <packageSources>',
-        '    <clear />',
-        '    <add key="Lotus" value="$(lotusNuGetFeed)" />',
-        '  </packageSources>',
-        '</configuration>'
-      ) | Set-Content -Path $cfg -Encoding utf8
-      Write-Host "Wrote $cfg"
-    displayName: 'Configure WinML SDK nuget feed isolation (Lotus)'
-    workingDirectory: '$(Build.SourcesDirectory)'
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
 
@@ -219,12 +203,12 @@ steps:
       $args += '--use_cuda', '--cuda_home', $cudaHome
       if ('${{ parameters.cuda_version }}' -like '13.*') {
         if ('${{ parameters.arch }}' -eq 'arm64') {
-          $cudaArchs = '110-real;120-real;121-real;120-virtual'
+          $cudaArchs = '120-real;121-real'
         } else {
-          $cudaArchs = '75-real;80-real;86-real;89-real;90-real;120-real;120-virtual'
+          $cudaArchs = '75-real;80-real;86-real;89-real;120-real'
         }
       } else {
-        $cudaArchs = '61-real;75-real;86-real;89-real;120-real;120-virtual'
+        $cudaArchs = '61-real;75-real;86-real;89-real;120-real'
       }
       $args += '--cmake_extra_defines', "CMAKE_CUDA_ARCHITECTURES=$cudaArchs"
     }
@@ -232,6 +216,7 @@ steps:
     # ort_version parameter for the WinML EP).
     if ('${{ parameters.ep }}' -eq 'winml') {
       $args += '--use_winml', '--use_dml', '--winml_sdk_version', '${{ parameters.ort_version }}'
+      $args += '--cmake_extra_defines', 'NUGET_PACKAGE_SOURCE=$(lotusNuGetFeed)'
     }
     Write-Host "Running: python $($args -join ' ')"
     & python @args
