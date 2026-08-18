@@ -1088,11 +1088,11 @@ class Qwen35TextModel(Model):
         # 0 (the default) disables the window entirely and produces
         # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
         # Requires ORT kernels that understand the `state_window` attribute.
-        self._recurrent_state_window = int(extra_options.get("recurrent_state_window", 0))
-        if self._recurrent_state_window < 0:
-            raise ValueError("recurrent_state_window must be >= 0")
+        self._state_window = int(extra_options.get("state_window", 0))
+        if self._state_window < 0:
+            raise ValueError("state_window must be >= 0")
         # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
-        self._state_window_dims = [self._recurrent_state_window] if self._recurrent_state_window else []
+        self._state_window_dims = [self._state_window] if self._state_window else []
 
         # Collapse the float32 gate glue around LinearAttention into the fused com.microsoft
         # `LinearAttentionGate` and `GatedRMSNorm` ops. The reference model computes both the decay
@@ -1812,7 +1812,7 @@ class Qwen35TextModel(Model):
             present_conv_state=present_conv,
             output_shape=["batch_size", conv_dim, "sequence_length"],
             present_conv_shape=[*self._state_window_dims, "batch_size", conv_dim, kernel_size - 1],
-            state_window=self._recurrent_state_window,
+            state_window=self._state_window,
         )
         silu_output = f"{conv_op_name}/output_0"
 
@@ -1855,7 +1855,7 @@ class Qwen35TextModel(Model):
             scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
             output_shape=["batch_size", "sequence_length", v_dim],
             present_recurrent_shape=[*self._state_window_dims, "batch_size", n_kv, hk, hv],
-            state_window=self._recurrent_state_window,
+            state_window=self._state_window,
         )
         la_output = f"{la_op_name}/output_0"
 

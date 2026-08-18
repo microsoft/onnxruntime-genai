@@ -839,7 +839,7 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     CopyHiddenRow(vhidden, a, *hidden_slice_);
     length_ += static_cast<size_t>(N) + 1;
   } else if (main_->CanCropRecurrentState() && a >= 1) {
-    // Partial accept (a>=1), LOSSLESS CROP fast-path (model exported with recurrent_state_window).
+    // Partial accept (a>=1), LOSSLESS CROP fast-path (model exported with state_window).
     // The batched verify's row a is an EARLY row of a wide (M=N+1) forward, whose argmax is NOT
     // decode-consistent (only the LAST row of a forward matches a 1-token decode; §13.1). So we
     // cannot take the bonus straight from the verify. Instead: crop the KV cache + recurrent state
@@ -906,7 +906,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
 
   // --- Verify [t, d0..d_{N-1}] in a single batched main forward. ---
   // Snapshot the recurrent state ONLY for the fallback re-run rollback (models WITHOUT
-  // recurrent_state_window). Snapshot() copies every linear-attn layer's conv+recurrent
+  // state_window). Snapshot() copies every linear-attn layer's conv+recurrent
   // state (2*num_layers D2D copies + launches) on EVERY step. When the crop fast-path is
   // available the reject branch uses the state window via CropToPosition and NEVER rewinds
   // the recurrent state (RewindTo/RestoreSnapshot is unreachable), so the snapshot is dead
@@ -1012,7 +1012,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     CopyHiddenRow(vhidden, N, *hidden_slice_);  // hidden that predicted the bonus token
     length_ += static_cast<size_t>(N) + 1;
   } else if (main_->CanCropRecurrentState()) {
-    // Rejected at position a, LOSSLESS-CROP fast path (model exported with recurrent_state_window):
+    // Rejected at position a, LOSSLESS-CROP fast path (model exported with state_window):
     // skip the full re-run main forward (~25% of N=3 step time). The batched verify already advanced
     // the recurrent state through every token (window slot for position a = state AFTER the committed
     // prefix [t, d0..d_{a-1}]) and computed row a's hidden -- which is exactly the hidden that
@@ -1028,7 +1028,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     CopyHiddenRow(vhidden, a, *hidden_slice_);  // verify row a: hidden that predicts the correction
     length_ += static_cast<size_t>(a) + 1;
   } else {
-    // Fallback (model without recurrent_state_window): the recurrent state cannot be cropped, so
+    // Fallback (model without state_window): the recurrent state cannot be cropped, so
     // restore the snapshot at L and re-run only the committed prefix [t, d0..d_{a-1}] so the carried
     // recurrent/KV state is decode-consistent; pair the sampled correction (already drawn from the
     // batched verify's residual) with the re-run's hidden at row a.

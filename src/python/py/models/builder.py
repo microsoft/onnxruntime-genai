@@ -180,14 +180,14 @@ def check_extra_options(
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
-    if "recurrent_state_window" in extra_options:
+    if "state_window" in extra_options:
         try:
-            recurrent_state_window = int(extra_options["recurrent_state_window"])
+            state_window = int(extra_options["state_window"])
         except (TypeError, ValueError) as e:
-            raise ValueError("recurrent_state_window must be a non-negative integer.") from e
-        if recurrent_state_window < 0:
-            raise ValueError("recurrent_state_window must be a non-negative integer.")
-        extra_options["recurrent_state_window"] = recurrent_state_window
+            raise ValueError("state_window must be a non-negative integer.") from e
+        if state_window < 0:
+            raise ValueError("state_window must be a non-negative integer.")
+        extra_options["state_window"] = state_window
 
     if extra_options.get("enable_mtp", False):
         if not extra_options.get("include_hidden_states", False):
@@ -745,9 +745,9 @@ def get_args():
                     By default the head inherits the main model precision; ModelOpt MTP tensors keep their native
                     NVFP4/FP8 formats. An explicit override dequantizes native tensors first. For mxfp4/nvfp4,
                     dense MatMuls then use int4 while routed experts use the selected FP4 QMoE format.
-                recurrent_state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
+                state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    Requires ONNX Runtime kernels that implement the state_window attribute.
+                    Requires ONNX Runtime kernels that implement this attribute.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged

@@ -382,7 +382,7 @@ By default the MTP head inherits the main model's precision. For a ModelOpt chec
 
 The head always exports `hidden_states_out` (its own post-final-norm hidden state), which a multi-token loop feeds back as the next chained draft's `hidden_states` input. It is required for `num_speculative_tokens > 1` and ignored otherwise.
 
-A multi-token verify forward can additionally carry a window of recurrent/conv states so a partial accept can be handled by cropping instead of replaying the main model. Pass `recurrent_state_window=W` (with `W >= num_speculative_tokens + 1`) to widen `past/present_key_values.%d.{conv,recurrent}_state` to `[W, B, ...]` and emit the `state_window` attribute on `CausalConvWithState` / `LinearAttention`. This requires ONNX Runtime kernels that understand the attribute; leave it at the default `0` otherwise.
+A multi-token verify forward can additionally carry a window of recurrent/conv states so a partial accept can be handled by cropping instead of replaying the main model. Pass `state_window=W` (with `W >= num_speculative_tokens + 1`) to widen `past/present_key_values.%d.{conv,recurrent}_state` to `[W, B, ...]` and emit the matching attribute on `CausalConvWithState` / `LinearAttention`. This requires ONNX Runtime kernels that understand the attribute; leave it at the default `0` otherwise.
 
 #### Enable WebGPU Graph Capture
 

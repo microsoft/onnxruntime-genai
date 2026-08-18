@@ -241,9 +241,17 @@ def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
     assert options["include_hidden_states"] is True
 
 
-def test_recurrent_state_window_must_be_non_negative(monkeypatch):
+def test_state_window_must_be_non_negative(monkeypatch):
     with pytest.raises(ValueError, match="non-negative integer"):
-        _run_check_extra_options(monkeypatch, {"recurrent_state_window": "-1"})
+        _run_check_extra_options(monkeypatch, {"state_window": "-1"})
+
+
+def test_state_window_is_normalized(monkeypatch):
+    options = {"state_window": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_window"] == 3
 
 
 # ---------------------------------------------------------------------------
