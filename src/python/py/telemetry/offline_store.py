@@ -90,6 +90,9 @@ class OfflineEventStore:
                 conn.execute("ALTER TABLE events ADD COLUMN available_at REAL NOT NULL DEFAULT 0")
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.commit()
+            # A reconnect may use a short probe timeout, but normal operations
+            # retain the configured contention tolerance.
+            conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             self._conn = conn
             self._next_reconnect_attempt = 0.0
             self._harden_permissions()

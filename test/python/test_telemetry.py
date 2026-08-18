@@ -424,8 +424,11 @@ class TestVersionResolution(unittest.TestCase):
         except ImportError:
             self.skipTest("onnxruntime_genai is not installed in this test environment")
 
-        telemetry = importlib.import_module("onnxruntime_genai.telemetry")
-        path_utils = importlib.import_module("onnxruntime_genai.telemetry.path_utils")
+        try:
+            telemetry = importlib.import_module("onnxruntime_genai.telemetry")
+            path_utils = importlib.import_module("onnxruntime_genai.telemetry.path_utils")
+        except ImportError:
+            self.skipTest("installed onnxruntime_genai build has telemetry disabled")
         self.assertTrue(hasattr(telemetry, "GenAITelemetry"))
         self.assertTrue(hasattr(path_utils, "sanitize_model_identifier"))
 
@@ -1913,6 +1916,10 @@ class TestOfflineEventStore(unittest.TestCase):
         self.assertIsNone(store._conn)
         self.assertTrue(store.store(b'{"after_fork":1}'))
         self.assertTrue(store.is_open)
+        self.assertEqual(
+            store._conn.execute("PRAGMA busy_timeout").fetchone()[0],
+            store._busy_timeout_ms,
+        )
 
         store.discard_after_fork()
         self.assertIsNone(store._conn)
