@@ -2920,10 +2920,9 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         # Force a single hidden layer regardless of the original config value.
         extra_options = copy.deepcopy(extra_options)
         extra_options["num_hidden_layers"] = 1
+        extra_options["model_type"] = "Qwen3_5_Moe_textForCausalLM"
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        self.model_type = "Qwen3_5_Moe_textForCausalLM"
 
         # The MTP head consumes the main model's last hidden state as an extra
         # input (alongside the standard input_ids / position_ids / KV cache).
