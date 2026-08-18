@@ -53,7 +53,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.quant_config import KV_CACHE_QUANT_TYPES
+from builders.quant_config import KV_CACHE_QUANT_TYPES, QuantConfig
 from transformers import AutoConfig
 
 
@@ -194,6 +194,12 @@ def check_extra_options(
             raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
         if extra_options.get("exclude_lm_head", False):
             raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
+
+    if "mtp_quant_config" in extra_options:
+        mtp_quant_config = extra_options["mtp_quant_config"]
+        if not isinstance(mtp_quant_config, QuantConfig):
+            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+        extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
@@ -375,8 +381,10 @@ def parse_extra_options(
 
     if extra_options:
         for kv_str in extra_options:
-            kv = kv_str.split("=")
-            kv_pairs[kv[0].strip()] = kv[1].strip()
+            if "=" not in kv_str:
+                raise ValueError(f"extra option must be KEY=VALUE, got '{kv_str}'")
+            key, value = kv_str.split("=", 1)
+            kv_pairs[key.strip()] = value.strip()
 
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
@@ -741,10 +749,8 @@ def get_args():
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
                 enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
                     Requires include_hidden_states=true, exclude_lm_head=false, and source safetensors containing mtp.* weights.
-                mtp_head_quant_type = int4/int8/mxfp4/nvfp4: Override the MTP head quantization scheme.
-                    By default the head inherits the main model precision; ModelOpt MTP tensors keep their native
-                    NVFP4/FP8 formats. An explicit override dequantizes native tensors first. For mxfp4/nvfp4,
-                    dense MatMuls then use int4 while routed experts use the selected FP4 QMoE format.
+                mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
+                    structured QuantConfig schema independently from the main model.
                 state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Requires ONNX Runtime kernels that implement this attribute.

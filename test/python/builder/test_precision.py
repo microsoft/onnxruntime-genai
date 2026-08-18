@@ -241,6 +241,53 @@ def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
     assert options["include_hidden_states"] is True
 
 
+def test_mtp_quant_config_json_is_parsed(monkeypatch):
+    options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].io_dtype == "bf16"
+    assert options["mtp_quant_config"].weights.type == "int4"
+
+
+def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
+    captured = {}
+
+    def fake_check_extra_options(*args):
+        captured.update(args[-1])
+
+    monkeypatch.setattr(builder_module, "check_extra_options", fake_check_extra_options)
+    builder_module.parse_extra_options(
+        "model",
+        "input",
+        "output",
+        "int4",
+        "cuda",
+        "cache",
+        ['mtp_quant_config={"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}'],
+    )
+
+    assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
+
+
+def test_resolved_quant_config_controls_method_and_overrides():
+    model = Model.__new__(Model)
+    model.quant_config = builder_module.QuantConfig.from_dict(
+        {
+            "weights": {
+                "type": "int4",
+                "method": "k_quant",
+                "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}],
+            }
+        }
+    )
+
+    model.resolve_quant_config()
+
+    assert model.quantization_algo == "k_quant"
+    assert model.matmul_mixed_precision == {"last_matmul": "int8"}
+
+
 def test_state_window_must_be_non_negative(monkeypatch):
     with pytest.raises(ValueError, match="non-negative integer"):
         _run_check_extra_options(monkeypatch, {"state_window": "-1"})

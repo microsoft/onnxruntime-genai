@@ -23,7 +23,7 @@ from transformers import (
 )
 
 from .base import Model
-from .quant_config import resolve_dtype
+from .quant_config import QuantConfig, resolve_dtype
 
 
 class QwenModel(Model):
@@ -2397,64 +2397,54 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self._mtp_ep = ep
             self._mtp_cache_dir = cache_dir
             self._mtp_extra_options = copy.deepcopy(extra_options)
-            self._resolve_mtp_head_quantization(extra_options)
+            self._resolve_mtp_model_config(extra_options)
 
-    def _resolve_mtp_head_quantization(self, extra_options):
-        """Resolve the MTP head's weight precision from ``mtp_head_quant_type``.
+    @staticmethod
+    def _mtp_dtypes_from_quant_config(quant_config):
+        io_dtype = {
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "fp32": ir.DataType.FLOAT,
+        }[quant_config.io_dtype]
+        weights = resolve_dtype(quant_config.weights.type)
+        if weights.kind == "mx":
+            raise ValueError(
+                f"MTP dense weights.type={weights.name} is not supported; use int4/int8/none for dense weights "
+                "and select mxfp4/nvfp4 independently through moe.type"
+            )
+        if weights.kind != "int":
+            return io_dtype, io_dtype
 
-        Updates ``self._mtp_onnx_dtype`` / ``self._mtp_io_dtype`` / ``self._mtp_extra_options``
-        in place. Split out of ``__init__`` so it can be exercised directly by unit tests.
+        signed = weights.signed is not False and quant_config.weights.symmetric
+        if weights.bits == 8:
+            onnx_dtype = ir.DataType.INT8 if signed else ir.DataType.UINT8
+        else:
+            onnx_dtype = ir.DataType.INT4 if signed else ir.DataType.UINT4
+        return io_dtype, onnx_dtype
+
+    def _resolve_mtp_model_config(self, extra_options):
+        """Resolve an independent MTP model configuration.
+
+        Without an MTP-specific option, the head retains the main model's settings and native
+        ModelOpt tensor formats. ``mtp_quant_config`` accepts the structured ``QuantConfig``
+        JSON schema.
         """
-        # By default, ordinary checkpoints inherit the main graph precision. ModelOpt checkpoints
-        # instead preserve each MTP tensor's native format (NVFP4, FP8, or BF16), just like the
-        # main model. `mtp_head_quant_type` is an explicit request to dequantize any native MTP
-        # tensors and requantize the head with the selected scheme.
-        supported_mtp_head_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+        mtp_quant_config_value = extra_options.get("mtp_quant_config")
+        if mtp_quant_config_value is None:
+            return
 
-        _mtp_head_quant_type = extra_options.get("mtp_head_quant_type")
-        if _mtp_head_quant_type is not None:
-            if _mtp_head_quant_type not in supported_mtp_head_quant_types:
-                raise ValueError(
-                    f"mtp_head_quant_type must be one of {sorted(supported_mtp_head_quant_types)}, got '{_mtp_head_quant_type}'."
-                )
-            # `mtp_head_quant_type` selects the head's quantization scheme END-TO-END:
-            # the routed QMoE experts *and* the head's dense MatMuls (mtp.fc, the attention
-            # q/k/v/o projections, the shared expert and the draft lm_head). Before this was
-            # wired up the option only reached the QMoE experts, so `mtp_head_quant_type=int8`
-            # silently produced an int8 QMoE bolted onto an int4 `MatMulNBits` body.
-            #
-            #   int4        -> dense MatMulNBits bits=4 + INT4 QMoE   (onnx_dtype INT4/UINT4)
-            #   int8        -> dense MatMulNBits bits=8 + INT8 QMoE   (onnx_dtype INT8/UINT8)
-            #   mxfp4/nvfp4 -> microscaling FP4 is a QMoE-only scheme (there is no FP4
-            #                  weight-only op for the head's bf16 dense weights), so the
-            #                  dense MatMuls stay int4 and only the experts use FP4.
-            #
-            # io_dtype stays fp16 in every case; only the stored weight dtype changes.
-            _head_descriptor = resolve_dtype(_mtp_head_quant_type)
-            _symmetric = str(self._mtp_extra_options.get("int4_is_symmetric", True)).lower() not in (
-                "0",
-                "false",
-                "no",
-            )
-            _was_float_main = self._mtp_onnx_dtype in (
-                ir.DataType.FLOAT16,
-                ir.DataType.BFLOAT16,
-                ir.DataType.FLOAT,
-            )
-            if _head_descriptor.kind == "int" and _head_descriptor.bits == 8:
-                self._mtp_onnx_dtype = ir.DataType.INT8 if _symmetric else ir.DataType.UINT8
-            else:
-                # Integer INT4 and both QMoE-only FP4 formats use 4-bit dense
-                # MatMul weights. Do not inherit INT8 dense weights from an INT8
-                # main model when the requested head format is MXFP4/NVFP4.
-                self._mtp_onnx_dtype = ir.DataType.INT4 if _symmetric else ir.DataType.UINT4
-            self._mtp_io_dtype = ir.DataType.FLOAT16
-            if _was_float_main:
-                # A float main model carries no int4/int8 knobs, so supply defaults for the
-                # head's dense MatMul placement.
-                self._mtp_extra_options.setdefault("block_size", 32)
-                self._mtp_extra_options.setdefault("algo_config", "rtn_last")
-            self._mtp_extra_options["moe_quant_type"] = _mtp_head_quant_type
+        inherited_options = {
+            key: copy.deepcopy(extra_options[key]) for key in ("hf_token", "hf_remote") if key in extra_options
+        }
+        quant_config = (
+            copy.deepcopy(mtp_quant_config_value)
+            if isinstance(mtp_quant_config_value, QuantConfig)
+            else QuantConfig.from_json(mtp_quant_config_value)
+        )
+
+        self._mtp_io_dtype, self._mtp_onnx_dtype = self._mtp_dtypes_from_quant_config(quant_config)
+        inherited_options["_quant_config"] = quant_config
+        self._mtp_extra_options = inherited_options
 
     def make_model(self, input_path):
         super().make_model(input_path)
@@ -2952,7 +2942,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
 
     @staticmethod
     def _should_preserve_modelopt_mtp(quant_type, extra_options):
-        return quant_type == "modelopt" and "mtp_head_quant_type" not in extra_options
+        return quant_type == "modelopt" and "_quant_config" not in extra_options
 
     def make_model(self, input_path):
         # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.

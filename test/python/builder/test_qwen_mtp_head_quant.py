@@ -1,8 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""`mtp_head_quant_type` must reach the head's dense MatMuls, not just its QMoE experts."""
+"""The MTP model resolves quantization independently from the main model."""
 
+import json
 from types import SimpleNamespace
 
 import onnx_ir as ir
@@ -10,16 +11,18 @@ import pytest
 import torch
 
 from models.builders.base import Model
+from models.builders.quant_config import QuantConfig
 from models.builders.qwen import Qwen35MoeTextModel, Qwen35MtpHead, Qwen35TextModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
-    """Run the MTP-head precision resolution on a bare stub of the builder."""
+    """Run the MTP model config resolution on a bare stub of the builder."""
     model = object.__new__(Qwen35MoeTextModel)
     model._mtp_onnx_dtype = main_onnx_dtype
     model._mtp_io_dtype = ir.DataType.FLOAT16
     model._mtp_extra_options = dict(extra_options)
-    model._resolve_mtp_head_quantization(extra_options)
+    model._mtp_ep = "cuda"
+    model._resolve_mtp_model_config(extra_options)
     return model
 
 
@@ -46,73 +49,65 @@ def test_base_model_type_resolution_uses_config_architecture():
     assert Model._get_model_type(None, config) == "ExampleForCausalLM"
 
 
-@pytest.mark.parametrize(
-    "quant_type,expected_onnx_dtype",
-    [
-        ("int4", ir.DataType.INT4),
-        ("int8", ir.DataType.INT8),
-        # Microscaling FP4 is QMoE-only; the head's dense MatMuls stay int4.
-        ("mxfp4", ir.DataType.INT4),
-        ("nvfp4", ir.DataType.INT4),
-    ],
-)
-def test_head_quant_type_sets_dense_weight_dtype(quant_type, expected_onnx_dtype):
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": quant_type})
-
-    assert model._mtp_onnx_dtype == expected_onnx_dtype
-    assert model._mtp_io_dtype == ir.DataType.FLOAT16
-    assert model._mtp_extra_options["moe_quant_type"] == quant_type
-
-
-def test_int8_head_is_not_downgraded_by_an_nvfp4_main_model():
-    # The main model quantizes its experts to NVFP4; the head must still go fully int8.
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": "int8", "moe_quant_type": "nvfp4"})
-
-    assert model._mtp_onnx_dtype == ir.DataType.INT8
-    assert model._mtp_extra_options["moe_quant_type"] == "int8"
-
-
-def test_asymmetric_head_uses_unsigned_weight_dtype():
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": "int8", "int4_is_symmetric": False})
-
-    assert model._mtp_onnx_dtype == ir.DataType.UINT8
-
-
-def test_float_main_model_gets_int4_defaults_for_a_fp4_head():
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": "nvfp4"}, main_onnx_dtype=ir.DataType.FLOAT16)
+def test_no_mtp_config_inherits_main_model_settings():
+    options = {"enable_mtp": True, "moe_quant_type": "nvfp4", "block_size": 64}
+    model = _resolve(options)
 
     assert model._mtp_onnx_dtype == ir.DataType.INT4
-    assert model._mtp_extra_options["block_size"] == 32
-    assert model._mtp_extra_options["algo_config"] == "rtn_last"
+    assert model._mtp_extra_options == options
 
 
-@pytest.mark.parametrize("quant_type", ["mxfp4", "nvfp4"])
-def test_fp4_head_uses_int4_dense_weights_with_int8_main(quant_type):
+def test_mtp_quant_config_json_configures_targets_independently():
     model = _resolve(
-        {"enable_mtp": True, "mtp_head_quant_type": quant_type},
+        {
+            "mtp_quant_config": json.dumps(
+                {
+                    "io_dtype": "bf16",
+                    "weights": {"type": "int4", "symmetric": False},
+                    "moe": {"type": "none"},
+                }
+            )
+        },
         main_onnx_dtype=ir.DataType.INT8,
     )
 
-    assert model._mtp_onnx_dtype == ir.DataType.INT4
-    assert model._mtp_extra_options["moe_quant_type"] == quant_type
+    assert model._mtp_io_dtype == ir.DataType.BFLOAT16
+    assert model._mtp_onnx_dtype == ir.DataType.UINT4
+    quant_config = model._mtp_extra_options["_quant_config"]
+    assert quant_config.weights.type == "int4"
+    assert quant_config.moe.type == "none"
 
 
-def test_quantized_main_model_does_not_get_int4_defaults():
-    model = _resolve({"enable_mtp": True, "mtp_head_quant_type": "int8"})
+def test_mtp_quant_config_can_keep_the_entire_head_fp16():
+    model = _resolve(
+        {
+            "mtp_quant_config": json.dumps(
+                {
+                    "io_dtype": "fp16",
+                    "weights": {"type": "none"},
+                    "moe": {"type": "none"},
+                }
+            )
+        }
+    )
 
-    assert "int4_algo_config" not in model._mtp_extra_options
+    assert model._mtp_io_dtype == ir.DataType.FLOAT16
+    assert model._mtp_onnx_dtype == ir.DataType.FLOAT16
+    quant_config = model._mtp_extra_options["_quant_config"]
+    assert quant_config.weights.type == "none"
+    assert quant_config.moe.type == "none"
 
 
-def test_unknown_head_quant_type_is_rejected():
-    with pytest.raises(ValueError, match="mtp_head_quant_type must be one of"):
-        _resolve({"enable_mtp": True, "mtp_head_quant_type": "fp8"})
+def test_mtp_dense_fp4_requires_a_supported_dense_format():
+    with pytest.raises(ValueError, match="select mxfp4/nvfp4 independently through moe.type"):
+        _resolve({"mtp_quant_config": '{"weights": {"type": "nvfp4", "block_size": 16}}'})
 
 
 def test_modelopt_defaults_to_native_mtp_but_explicit_type_requantizes():
     assert Qwen35MtpHead._should_preserve_modelopt_mtp("modelopt", {})
     assert not Qwen35MtpHead._should_preserve_modelopt_mtp(
         "modelopt",
-        {"mtp_head_quant_type": "nvfp4"},
+        {"_quant_config": QuantConfig.from_dict({})},
     )
     assert not Qwen35MtpHead._should_preserve_modelopt_mtp(None, {})
 
