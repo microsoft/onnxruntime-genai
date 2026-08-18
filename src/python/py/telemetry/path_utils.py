@@ -32,6 +32,14 @@ def _find_path_anchor(value: str):
         char = value[index]
         if index == 0 and char == "/":
             return 0
+        if char == ":" and index + 2 < len(value) and value[index + 1 : index + 3] == "//":
+            scheme_start = index
+            while scheme_start > 0 and (
+                value[scheme_start - 1].isascii()
+                and (value[scheme_start - 1].isalnum() or value[scheme_start - 1] in "+-.")
+            ):
+                scheme_start -= 1
+            return scheme_start
         if char == "\\" and index + 1 < len(value) and value[index + 1] == "\\":
             return index
         if char == "~" and index + 1 < len(value) and value[index + 1] in "/\\":

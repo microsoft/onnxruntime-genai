@@ -713,7 +713,7 @@ class TestPathRedaction(unittest.TestCase):
             scrubbed = path_utils.scrub_error_message_for_telemetry(slash_heavy_url)
 
         self.assertEqual(scrubbed, "[path]")
-        self.assertEqual(token_start.call_count, 1)
+        self.assertEqual(token_start.call_count, 0)
 
         slash_heavy_token = "a" + "/" * MAX_ERROR_MESSAGE_LENGTH + "b"
         with patch(
@@ -738,6 +738,14 @@ class TestPathRedaction(unittest.TestCase):
         )
         self.assertEqual(
             scrub_string_for_telemetry("https://example.test/model"),
+            "[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("https://alice:secret@example.test"),
+            "[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("https://example.test?token=secret"),
             "[path]",
         )
         self.assertEqual(
@@ -772,7 +780,7 @@ class TestPathRedaction(unittest.TestCase):
         )
         self.assertEqual(
             scrub_string_for_telemetry("download(https://host/x,/home/alice/out.onnx)"),
-            "[path]",
+            "download([path]",
         )
 
     def test_format_exception_message_redacts_source_line_paths(self):
