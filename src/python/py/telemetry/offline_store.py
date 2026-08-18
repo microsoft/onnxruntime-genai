@@ -18,8 +18,8 @@ Uses only the Python standard library (``sqlite3``), so it adds no dependency.
 Intentionally omitted from the full 1DS store (not needed for low-volume CLI
 telemetry): per-event priority (``latency``), persistence classes, general
 reservation/leasing, per-row retry counters, tenant multiplexing, and the
-``settings`` table. ``available_at`` only protects heartbeat enrichment. The
-schema version is tracked with SQLite's built-in ``PRAGMA user_version``.
+``settings`` table. The schema version is tracked with SQLite's built-in
+``PRAGMA user_version``.
 """
 
 from __future__ import annotations

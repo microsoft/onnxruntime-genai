@@ -225,24 +225,22 @@ class TestOptOut(_HermeticTelemetryTestCase):
             with self.subTest(value=value), patch.dict(os.environ, {"CI": value}, clear=True):
                 self.assertFalse(_is_ci_environment())
 
-    def test_opt_out_sends_nothing(self):
+    def test_environment_opt_out_sends_heartbeat_only(self):
         from telemetry.telemetry import GenAITelemetry
 
         os.environ["ORT_DISABLE_TELEMETRY"] = "1"
-        with patch("telemetry.telemetry.get_hashed_device_id_and_status") as mock_device_id:
-            t = GenAITelemetry()
-        # Full process-lifetime opt-out: no resources and no network sends.
+        t = GenAITelemetry()
         self.assertFalse(t._enabled)
+        self.assertFalse(t.accepts_detailed_events)
         self.assertIsNone(t._store)
         self.assertIsNone(t._uploader)
-        self.assertIsNone(t._heartbeat_thread)
-        # A detailed-event method must be a no-op and must not raise.
+        self.assertIsNotNone(t._heartbeat_thread)
+
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
         self._deliver()
-        mock_device_id.assert_not_called()
-        self.assertEqual(self.sent_payloads, [])
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
-    def test_public_disable_does_not_initialize_telemetry(self):
+    def test_public_disable_before_initialization_sends_heartbeat_only_once(self):
         from telemetry.telemetry import GenAITelemetry, disable_telemetry
 
         with (
@@ -250,14 +248,16 @@ class TestOptOut(_HermeticTelemetryTestCase):
             patch("telemetry.telemetry.EventUploader") as uploader,
         ):
             disable_telemetry()
-
-            self.assertIsNone(GenAITelemetry._instance)
-            telemetry = GenAITelemetry()
+            telemetry = GenAITelemetry._instance
+            self._join_heartbeat()
+            disable_telemetry()
 
         store.assert_not_called()
         uploader.assert_not_called()
+        self.assertIsNotNone(telemetry)
         self.assertFalse(telemetry._enabled)
         self.assertIsNone(telemetry._store)
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
     def test_enabled_records_heartbeat_and_events(self):
         import uuid
@@ -285,6 +285,8 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
         t.disable_telemetry()
+        t.log_model_build(action="create_model", duration_ms=1.0, success=True)
+        t.disable_telemetry()
         self.assertFalse(t._enabled)
         self.assertTrue(t._telemetry_disabled)
         t.shutdown()
@@ -292,40 +294,32 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIs(GenAITelemetry(), t)
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
-    def test_runtime_disable_skips_pending_heartbeat(self):
+    def test_disable_during_heartbeat_collection_does_not_duplicate_it(self):
+        import threading
+
         from telemetry.telemetry import GenAITelemetry
 
-        telemetry = object.__new__(GenAITelemetry)
-        telemetry._enabled = False
-        telemetry._telemetry_disabled = False
-        telemetry._store = MagicMock()
-        with patch("telemetry.telemetry.get_hashed_device_id_and_status") as mock_device_id:
-            telemetry._send_heartbeat()
+        release_heartbeat = threading.Event()
 
-        mock_device_id.assert_not_called()
-        telemetry._store.store_with_id.assert_not_called()
+        def get_system_info():
+            release_heartbeat.wait(5)
+            return {}
 
-    def test_runtime_disable_during_enrichment_keeps_minimal_heartbeat_deferred(self):
-        from telemetry.telemetry import GenAITelemetry
-
-        telemetry = object.__new__(GenAITelemetry)
-        telemetry._enabled = True
-        telemetry._telemetry_disabled = False
-        telemetry._store = MagicMock()
-        telemetry._uploader = None
-
-        def disable_during_enrichment():
+        with patch(
+            "telemetry.telemetry.get_system_info",
+            side_effect=get_system_info,
+        ):
+            telemetry = GenAITelemetry()
             telemetry.disable_telemetry()
-            return {"cpu_model": "private cpu"}
+            release_heartbeat.set()
+            telemetry._heartbeat_thread.join(5)
+            telemetry.disable_telemetry()
 
-        telemetry._build_heartbeat_attributes = disable_during_enrichment
-        telemetry._send_heartbeat(42)
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
-        telemetry._store.replace.assert_not_called()
-        telemetry._store.make_available.assert_not_called()
-
-    def test_heartbeat_is_durable_before_system_enrichment(self):
+    def test_heartbeat_is_attempted_directly_after_system_enrichment(self):
         import json
         import threading
 
@@ -342,14 +336,13 @@ class TestOptOut(_HermeticTelemetryTestCase):
             patch("telemetry.telemetry.EventUploader.start"),
         ):
             telemetry = GenAITelemetry()
-            self.assertEqual(telemetry._store.count(), 1)
-            self.assertEqual(telemetry._store.get_batch(10), [])
+            self.assertEqual(telemetry._store.count(), 0)
+            self.assertEqual(self.sent_payloads, [])
             release_enrichment.set()
             telemetry._heartbeat_thread.join(5)
-            batch = telemetry._store.get_batch(10)
 
-        self.assertEqual(len(batch), 1)
-        payload = json.loads(batch[0][1])
+        self.assertEqual(len(self.sent_payloads), 1)
+        payload = json.loads(self.sent_payloads[0])
         self.assertEqual(payload["data"]["cpuModel"], "test cpu")
 
     def test_initialization_keeps_exporter_diagnostics_configurable(self):
@@ -367,17 +360,19 @@ class TestOptOut(_HermeticTelemetryTestCase):
 
         os.environ["ORT_DISABLE_TELEMETRY"] = "true"
         t = GenAITelemetry()
+        self._join_heartbeat()
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
         t.shutdown()
         os.environ.pop("ORT_DISABLE_TELEMETRY")
 
-        # Full suppression remains latched after env removal and reinitialization.
+        # Detailed-event suppression remains latched and does not create a
+        # second Heartbeat after the environment variable is removed.
         self.assertIs(GenAITelemetry(), t)
         self.assertFalse(t._enabled)
         self.assertIsNone(t._store)
         self.assertIsNone(t._heartbeat_thread)
-        self.assertEqual(self.sent_payloads, [])
+        self.assertEqual(self._sent_event_names(), ["GenAIHeartbeat"])
 
     def test_closed_store_allows_initialization_retry(self):
         from telemetry.telemetry import GenAITelemetry
@@ -401,23 +396,18 @@ class TestOptOut(_HermeticTelemetryTestCase):
     def test_initialization_failure_closes_partial_resources(self):
         from telemetry.telemetry import GenAITelemetry
 
-        store = MagicMock(is_open=True)
-        uploader = MagicMock()
-        uploader.stop_loop.return_value = True
         heartbeat = MagicMock(ident=None)
         heartbeat.is_alive.return_value = False
         heartbeat.start.side_effect = RuntimeError("thread start failed")
         with (
-            patch("telemetry.telemetry.OfflineEventStore", return_value=store),
-            patch("telemetry.telemetry.EventUploader", return_value=uploader),
+            patch("telemetry.telemetry.OfflineEventStore") as store,
+            patch("telemetry.telemetry.EventUploader") as uploader,
             patch("telemetry.telemetry.threading.Thread", return_value=heartbeat),
         ):
             telemetry = GenAITelemetry()
 
-        uploader.stop_loop.assert_called_once()
-        uploader.flush.assert_called_once()
-        uploader.close.assert_called_once()
-        store.close.assert_called_once()
+        store.assert_not_called()
+        uploader.assert_not_called()
         self.assertIsNone(telemetry._heartbeat_thread)
         self.assertIsNone(telemetry._uploader)
         self.assertIsNone(telemetry._store)
@@ -2224,6 +2214,22 @@ class TestShutdownSafety(unittest.TestCase):
         uploader.flush.assert_not_called()
         uploader.close.assert_called_once()
         self.assertIsNone(telemetry._store)
+
+    def test_shutdown_does_not_wait_for_opt_out_heartbeat(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._initialized = True
+        telemetry._telemetry_disabled = True
+        telemetry._heartbeat_thread = MagicMock()
+        telemetry._heartbeat_thread.is_alive.return_value = True
+        telemetry._uploader = None
+        telemetry._store = None
+        heartbeat = telemetry._heartbeat_thread
+
+        telemetry.shutdown(5.0)
+
+        heartbeat.join.assert_not_called()
 
 
 if __name__ == "__main__":

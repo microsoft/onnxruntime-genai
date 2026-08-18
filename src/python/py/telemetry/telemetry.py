@@ -29,8 +29,9 @@ from pathlib import Path
 from typing import Any
 
 from .deviceid import get_hashed_device_id_and_status, get_telemetry_base_dir
-from .library.options import OneCollectorExporterOptions
+from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
+from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .path_utils import scrub_error_message_for_telemetry, scrub_string_for_telemetry, scrub_value_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
@@ -63,7 +64,6 @@ _CI_ENV_VARS = {
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
 }
 _UNIT_TEST_ENV_VAR = "ORT_RUNNING_UNIT_TESTS"
-_HEARTBEAT_ENRICHMENT_GRACE_SECONDS = 60.0
 _DISTRIBUTION_NAMES = (
     "onnxruntime-genai",
     "onnxruntime-genai-cuda",
@@ -169,6 +169,7 @@ class GenAITelemetry:
                     instance = super().__new__(cls)
                     instance._initialized = False
                     instance._telemetry_disabled = cls._process_disabled
+                    instance._heartbeat_started = False
                     instance._next_model_session_id = 1
                     cls._instance = instance
         return cls._instance
@@ -186,14 +187,20 @@ class GenAITelemetry:
             self._envelope_ikey = ""
             self._app_version = "unknown"
             self._app_name = "onnxruntime-genai"
-            self._heartbeat_thread: threading.Thread | None = None
+            if not hasattr(self, "_heartbeat_thread"):
+                self._heartbeat_thread: threading.Thread | None = None
 
-            # Full suppression is process-wide and irreversible, including later
-            # initialization attempts after shutdown or environment changes.
-            if self._telemetry_disabled or _is_ci_environment() or _is_telemetry_disabled_by_environment():
+            # CI and automated tests are the only full-disable state.
+            if _is_ci_environment():
                 self._telemetry_disabled = True
                 self._enabled = False
                 return
+
+            user_opt_out = self._telemetry_disabled or _is_telemetry_disabled_by_environment()
+            if user_opt_out:
+                type(self)._process_disabled = True
+                self._telemetry_disabled = True
+                self._enabled = False
 
             self._app_session_guid = str(uuid.uuid4())
 
@@ -209,9 +216,15 @@ class GenAITelemetry:
                     f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
                 )
 
-                # Durable on-disk queue + uploader. Events survive process exit,
-                # so there is no exit-time flush. The uploader retries until
-                # delivery.
+                # Every non-CI process makes one off-thread Heartbeat attempt,
+                # including user opt-out. It is independent of detailed-event
+                # persistence, so opt-out cannot drain previously queued details.
+                self._start_heartbeat_once()
+
+                if user_opt_out:
+                    return
+
+                # Durable on-disk queue + uploader for detailed events.
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
                 if not self._store.is_open:
@@ -219,26 +232,8 @@ class GenAITelemetry:
                     self._enabled = False
                     self._initialized = False
                     return
-                # Persist the counting-critical heartbeat before any background
-                # work so even a short-lived builder process leaves it durable.
-                heartbeat_id = self._persist(
-                    HEARTBEAT_EVENT,
-                    self._minimal_heartbeat_attributes(),
-                    available_after_seconds=_HEARTBEAT_ENRICHMENT_GRACE_SECONDS,
-                )
-
                 self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
-
-                # System enrichment can use blocking subprocesses. Replace the
-                # queued heartbeat only if it has not already been delivered.
-                self._heartbeat_thread = threading.Thread(
-                    target=self._send_heartbeat,
-                    args=(heartbeat_id,),
-                    name="genai-telemetry-heartbeat",
-                    daemon=True,
-                )
-                self._heartbeat_thread.start()
             except Exception:
                 self._enabled = False
                 self.shutdown(1.0)
@@ -267,19 +262,11 @@ class GenAITelemetry:
         )
         return CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
 
-    def _persist(
-        self,
-        event_name: str,
-        attributes: dict[str, Any] | None = None,
-        available_after_seconds: float = 0.0,
-    ) -> int | None:
-        if not self._enabled or self._store is None:
+    def _persist(self, event_name: str, attributes: dict[str, Any] | None = None) -> int | None:
+        if not self.accepts_detailed_events:
             return None
         try:
-            return self._store.store_with_id(
-                self._serialize_event(event_name, attributes),
-                available_after_seconds=available_after_seconds,
-            )
+            return self._store.store_with_id(self._serialize_event(event_name, attributes))
         except Exception:
             return None
 
@@ -292,7 +279,7 @@ class GenAITelemetry:
 
     def _emit(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
-        if not self._enabled or self._store is None:
+        if not self.accepts_detailed_events:
             return
         try:
             row_id = self._persist(event_name, attributes)
@@ -304,7 +291,12 @@ class GenAITelemetry:
     @property
     def accepts_detailed_events(self) -> bool:
         """Whether detailed events can currently be persisted."""
-        return bool(self._enabled and self._store is not None and self._store.is_open)
+        return bool(
+            self._enabled
+            and not getattr(self, "_telemetry_disabled", False)
+            and self._store is not None
+            and self._store.is_open
+        )
 
     def _minimal_heartbeat_attributes(self) -> dict[str, Any]:
         device_id, id_status = get_hashed_device_id_and_status()
@@ -338,29 +330,30 @@ class GenAITelemetry:
             "availableProviders": ",".join(ep_info.get("available_providers", [])),
         }
 
-    def _send_heartbeat(self, row_id: int | None = None) -> None:
-        """Best-effort enrichment of the already-durable heartbeat."""
-        if not self._enabled or self._telemetry_disabled or self._store is None:
+    def _start_heartbeat_once(self) -> None:
+        if self._heartbeat_started:
             return
-        ready = False
+        self._heartbeat_started = True
+        self._heartbeat_thread = threading.Thread(
+            target=self._send_heartbeat,
+            name="genai-telemetry-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _send_heartbeat(self) -> None:
+        """Make one direct best-effort Heartbeat attempt for this process."""
         try:
-            attributes = self._build_heartbeat_attributes()
-            with self._lock:
-                if not self._enabled or self._telemetry_disabled or self._store is None:
-                    return
-                if row_id is None:
-                    self._emit(HEARTBEAT_EVENT, attributes)
-                    return
-                ready = self._store.replace(row_id, self._serialize_event(HEARTBEAT_EVENT, attributes))
+            payload = self._serialize_event(HEARTBEAT_EVENT, self._build_heartbeat_attributes())
+            transport_options = OneCollectorTransportOptions()
+            transport = HttpJsonPostTransport(
+                endpoint=transport_options.endpoint,
+                ikey=self._instrumentation_key,
+                compression=CompressionType.DEFLATE,
+            )
+            transport.send(payload, transport_options.timeout_seconds, item_count=1)
         except Exception:
-            pass
-        finally:
-            if row_id is not None and not ready:
-                with self._lock:
-                    if self._enabled and not self._telemetry_disabled and self._store is not None:
-                        ready = self._store.make_available(row_id)
-            if ready and self._enabled and not self._telemetry_disabled and self._uploader is not None:
-                self._uploader.request_drain()
+            return
 
     def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
@@ -570,7 +563,7 @@ class GenAITelemetry:
             return
 
     def disable_telemetry(self) -> None:
-        """Disable telemetry irreversibly for the remainder of this process."""
+        """Disable detailed telemetry while preserving the one Heartbeat attempt."""
         with self._lock:
             type(self)._process_disabled = True
             self._telemetry_disabled = True
@@ -632,9 +625,11 @@ class GenAITelemetry:
 
         heartbeat_stopped = True
         if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
-            if self._heartbeat_thread.ident is not None:
+            if getattr(self, "_telemetry_disabled", False):
+                heartbeat_stopped = not self._heartbeat_thread.is_alive()
+            elif self._heartbeat_thread.ident is not None:
                 self._heartbeat_thread.join(remaining_seconds())
-            heartbeat_stopped = not self._heartbeat_thread.is_alive()
+                heartbeat_stopped = not self._heartbeat_thread.is_alive()
             if heartbeat_stopped:
                 self._heartbeat_thread = None
 
@@ -671,12 +666,10 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable GenAI telemetry for the remainder of this process."""
+    """Disable detailed telemetry after starting the one Heartbeat attempt."""
     with GenAITelemetry._lock:
         GenAITelemetry._process_disabled = True
-        instance = GenAITelemetry._instance
-        if instance is not None:
-            instance.disable_telemetry()
+        GenAITelemetry().disable_telemetry()
 
 
 if hasattr(os, "register_at_fork"):

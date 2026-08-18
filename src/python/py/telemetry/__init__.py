@@ -6,8 +6,9 @@
 """ONNX Runtime GenAI Telemetry.
 
 Provides telemetry integration for ONNX Runtime GenAI via Microsoft OneCollector.
-Set ORT_DISABLE_TELEMETRY=1 before initialization for a full process-lifetime opt-out.
-Call disable_telemetry() to stop telemetry for the remainder of the process.
+Set ORT_DISABLE_TELEMETRY=1 before initialization, or call disable_telemetry(),
+to suppress detailed events. One best-effort Heartbeat may still be attempted.
+CI and automated-test environments suppress all telemetry.
 
 Usage:
     from onnxruntime_genai.telemetry import GenAITelemetry, action, ActionContext

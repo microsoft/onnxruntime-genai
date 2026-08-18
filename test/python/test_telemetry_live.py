@@ -9,8 +9,8 @@
 
 Logs real events and verifies they reach OneCollector (HTTP 2xx):
 
-- The device-id heartbeat and five detailed events are persisted to the SQLite
-  store and shipped by the background uploader, then the store is confirmed empty.
+- The device-id heartbeat is attempted directly and five detailed events are
+  persisted to SQLite and shipped by the background uploader.
 
 Every outgoing HTTP send is recorded by wrapping the transport, so uploader
 batches are observed. This makes actual HTTP requests; it is NOT a unit test.
@@ -86,10 +86,9 @@ def main():
         print("  OK: store + uploader initialized")
         model_session_id = telemetry.allocate_model_session_id()
 
-        # The heartbeat is enqueued on a background thread (system-info
-        # collection uses blocking subprocesses); wait for that thread so it is
-        # in the store before we add the detailed events.
-        print("[2/8] Letting the background heartbeat be collected/enqueued...")
+        # The Heartbeat is sent directly on a background thread because system
+        # information collection can block.
+        print("[2/8] Waiting for the direct background heartbeat attempt...")
         if telemetry._heartbeat_thread is not None:
             telemetry._heartbeat_thread.join(20)
 
@@ -203,7 +202,7 @@ def main():
     print(f"  heartbeat delivered: {heartbeat_sent}")
     print()
 
-    # 1 heartbeat + 5 detailed = 6 items, all through the durable uploader.
+    # 1 direct heartbeat + 5 detailed events from the durable uploader.
     if remaining == 0 and failures == 0 and sent_items >= 6 and heartbeat_sent:
         print("=" * 60)
         print(f"ALL EVENTS DELIVERED ({sent_items} items: heartbeat + 5 detailed, store drained, HTTP 2xx)")

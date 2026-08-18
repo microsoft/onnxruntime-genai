@@ -919,7 +919,7 @@ def get_args():
     parser.add_argument(
         "--disable_telemetry",
         action="store_true",
-        help="Disable all telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
+        help="Disable detailed telemetry; one Heartbeat may still be attempted (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
