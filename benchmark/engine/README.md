@@ -74,7 +74,6 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
     "scenario": "decode_baseline",
     "concurrency": 1,
     "prompt_length_k": 4,
-    "synthetic": true,
     "model_path": "/models/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
     "execution_provider_library": "build/Linux/RelWithDebInfo/libonnxruntime_providers_cuda.so",
@@ -85,10 +84,9 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 
 | Field | Notes |
 | --- | --- |
-| `scenario` | Currently only `decode_baseline`. |
-| `concurrency` | Requests issued per run. One of 1, 2, 4, 8. |
-| `prompt_length_k` | Approximate prompt length in thousands of tokens. |
-| `synthetic` | Must be `true`; the prompt is generated rather than read from a dataset. |
+| `scenario` | `decode_baseline` or `long_prefill`. |
+| `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
+| `prompt_length_k` | RULER prompt length in thousands of tokens; `long_prefill` supports 32, 64, and 128. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |

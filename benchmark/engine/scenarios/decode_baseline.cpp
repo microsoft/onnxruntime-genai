@@ -5,11 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -21,8 +18,6 @@
 #include "ort_genai.h"
 #include "scenarios/utils.h"
 
-namespace fs = std::filesystem;
-
 namespace engine_benchmark {
 namespace {
 
@@ -30,50 +25,6 @@ constexpr int kRandomSeed = 42;
 
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 1 || concurrency == 2 || concurrency == 4 || concurrency == 8;
-}
-
-std::string ResolveModelPath(const std::string& model_path) {
-  std::string expanded_path = model_path;
-  if (expanded_path == "~" || expanded_path.rfind("~/", 0) == 0) {
-    const char* home = std::getenv("HOME");
-    if (home == nullptr) {
-      throw std::invalid_argument("Cannot expand '~' in model_path: HOME environment variable is not set");
-    }
-    expanded_path = std::string(home) + expanded_path.substr(1);
-  }
-
-  fs::path path = fs::absolute(expanded_path);
-  if (!fs::exists(path)) {
-    throw std::invalid_argument("model_path does not exist: " + model_path);
-  }
-
-  return path.string();
-}
-
-std::string LoadRulerPrompt(int prompt_length_k, std::mt19937& random) {
-  const fs::path prompts_path = fs::path(ORT_GENAI_BENCH_DATA_DIR) / "ruler" / "prompts.json";
-  std::ifstream prompts_file(prompts_path);
-  if (!prompts_file) {
-    throw std::runtime_error("Unable to open RULER prompts file: " + prompts_path.string());
-  }
-
-  nlohmann::json prompts_data;
-  prompts_file >> prompts_data;
-  const std::string bucket = std::to_string(prompt_length_k) + "k";
-  const auto& prompts = prompts_data.at("length_buckets").at(bucket);
-  if (!prompts.is_array() || prompts.empty()) {
-    throw std::runtime_error("RULER prompt bucket must contain at least one sample: " + bucket);
-  }
-
-  std::uniform_int_distribution<size_t> distribution(0, prompts.size() - 1);
-  return prompts.at(distribution(random)).get<std::string>();
-}
-
-std::unique_ptr<OgaSequences> BuildPromptTokens(int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random) {
-  auto prompt_tokens = OgaSequences::Create();
-  const std::string prompt = LoadRulerPrompt(prompt_length_k, random);
-  tokenizer.Encode(prompt.c_str(), *prompt_tokens);
-  return prompt_tokens;
 }
 
 }  // namespace
@@ -86,9 +37,6 @@ void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const 
 
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("decode_baseline requires concurrency in [1,2,4,8]");
-  }
-  if (!config.synthetic) {
-    throw std::invalid_argument("decode_baseline requires synthetic=true");
   }
 }
 
@@ -117,7 +65,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   auto engine = OgaEngine::Create(*model);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto prompt_tokens = BuildPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
+  auto prompt_tokens = BuildRulerPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
 
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
   std::cout << tag << "Prompt token count: " << prompt_token_count << std::endl;

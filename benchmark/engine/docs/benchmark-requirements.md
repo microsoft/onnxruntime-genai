@@ -5,9 +5,8 @@ changes. It must exercise realistic agent workloads rather than report aggregate
 
 The tool should support:
 
-- 1, 2, 4, and 8 concurrent requests with configurable prompt and generation lengths;
-- synthetic token inputs for reproducible capacity tests and real chat/coding prompts for
-  representative latency tests;
+- 1, 2, 4, and 8 concurrent requests with configurable RULER prompt and generation lengths;
+- deterministic RULER prompt fixtures for reproducible capacity and representative latency tests;
 - shared-prefix, partially shared-prefix, and unrelated-prefix workloads;
 - staggered arrivals, request cancellation, continuation, and memory-pressure scenarios;
 - prefill-only, decode-only, and mixed prefill/decode phases;
