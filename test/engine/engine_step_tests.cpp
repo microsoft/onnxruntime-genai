@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -31,6 +32,32 @@ int IndexOf(const CallTrace& trace, const std::string& entry) {
   auto it = std::find(trace.entries.begin(), trace.entries.end(), entry);
   return it == trace.entries.end() ? -1 : static_cast<int>(it - trace.entries.begin());
 }
+
+class ExternalRequestReference {
+ public:
+  explicit ExternalRequestReference(Request& request) : request_{&request} {
+    request_->ExternalAddRef();
+  }
+
+  ExternalRequestReference(const ExternalRequestReference&) = delete;
+  ExternalRequestReference& operator=(const ExternalRequestReference&) = delete;
+
+  ~ExternalRequestReference() {
+    Release();
+  }
+
+  void Release() noexcept {
+    if (request_) {
+      request_->ExternalRelease();
+      request_ = nullptr;
+    }
+  }
+
+ private:
+  Request* request_;
+};
+
+static_assert(noexcept(std::declval<Request&>().ExternalRelease()));
 
 class EngineStepTest : public ::testing::Test {
  protected:
@@ -57,7 +84,7 @@ TEST_F(EngineStepTest, SingleRequestSchedulesThenDecodesThenReturns) {
 
   ASSERT_NE(ready, nullptr);
   EXPECT_EQ(ready, request);
-  EXPECT_TRUE(request->IsDone());
+  EXPECT_TRUE(request->IsTurnComplete());
   EXPECT_EQ(engine.executor->decode_calls, 1);
   ASSERT_EQ(engine.executor->decoded_batch_sizes.size(), 1u);
   EXPECT_EQ(engine.executor->decoded_batch_sizes[0], 1u);
@@ -74,6 +101,8 @@ TEST_F(EngineStepTest, SingleRequestSchedulesThenDecodesThenReturns) {
 TEST_F(EngineStepTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
 
+  // These test-only shared_ptr requests never acquire an external reference. Repeated Step
+  // boundaries must not mistake them for abandoned public handles.
   std::vector<std::shared_ptr<Request>> requests;
   for (int32_t seed : {10, 20, 30}) {
     auto prompt = Prompt(seed);
@@ -93,7 +122,7 @@ TEST_F(EngineStepTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) 
   std::sort(returned.begin(), returned.end());
   EXPECT_EQ(returned, sorted_requests);
   for (const auto& request : requests) {
-    EXPECT_TRUE(request->IsDone());
+    EXPECT_TRUE(request->IsTurnComplete());
   }
   EXPECT_EQ(engine.executor->decode_calls, 1);
   ASSERT_EQ(engine.executor->decoded_batch_sizes.size(), 1u);
@@ -101,15 +130,173 @@ TEST_F(EngineStepTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) 
   EXPECT_FALSE(engine.engine->HasPendingRequests());
 }
 
+TEST_F(EngineStepTest, AddRequestReclaimsAbandonedTurnCompleteAtCapacity) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto first_prompt = Prompt(10);
+  auto first = MintRequest(*model_, first_prompt);
+  ExternalRequestReference first_external{*first};
+  engine.engine->AddRequest(first);
+
+  ASSERT_EQ(engine.engine->Step(), first);
+  ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  first_external.Release();
+
+  auto second_prompt = Prompt(20);
+  auto second = MintRequest(*model_, second_prompt);
+  ExternalRequestReference second_external{*second};
+  engine.engine->AddRequest(second);
+
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  engine.engine->RemoveRequest(second);
+  second_external.Release();
+}
+
+TEST_F(EngineStepTest, StepReclaimsAbandonedTurnCompleteBeforePlanningAtCapacity) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto first_prompt = Prompt(10);
+  auto second_prompt = Prompt(20);
+  auto first = MintRequest(*model_, first_prompt);
+  auto second = MintRequest(*model_, second_prompt);
+  ExternalRequestReference first_external{*first};
+  ExternalRequestReference second_external{*second};
+  engine.engine->AddRequest(first);
+  engine.engine->AddRequest(second);
+
+  ASSERT_EQ(engine.engine->Step(), first);
+  ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(second->status_, RequestStatus::Assigned);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+  first_external.Release();
+
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+  EXPECT_EQ(engine.executor->decode_calls, 2);
+
+  engine.engine->RemoveRequest(second);
+  second_external.Release();
+}
+
+TEST_F(EngineStepTest, StepPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
+  auto survivor_prompt = Prompt(10);
+  auto ready_orphan_prompt = Prompt(20);
+  auto queued_orphan_prompt = Prompt(30);
+  auto survivor = MintRequest(*model_, survivor_prompt);
+  auto ready_orphan = MintRequest(*model_, ready_orphan_prompt);
+  auto queued_orphan = MintRequest(*model_, queued_orphan_prompt);
+  ExternalRequestReference survivor_external{*survivor};
+  ExternalRequestReference ready_orphan_external{*ready_orphan};
+  ExternalRequestReference queued_orphan_external{*queued_orphan};
+  engine.engine->AddRequest(survivor);
+  engine.engine->AddRequest(ready_orphan);
+  engine.engine->AddRequest(queued_orphan);
+
+  ASSERT_EQ(engine.engine->Step(), survivor);
+  ASSERT_EQ(survivor->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(ready_orphan->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(queued_orphan->status_, RequestStatus::Assigned);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 2u);
+
+  ready_orphan_external.Release();
+  queued_orphan_external.Release();
+  ASSERT_EQ(engine.cache->deallocate_calls, 0);
+
+  // Cleanup runs before Step can drain the orphan's ready notification or plan the queued orphan.
+  EXPECT_EQ(engine.engine->Step(), nullptr);
+  EXPECT_EQ(ready_orphan->status_, RequestStatus::Closed);
+  EXPECT_EQ(queued_orphan->status_, RequestStatus::Closed);
+  EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 2);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+
+  // Closed requests were removed from Engine ownership, so another boundary cannot clean them twice.
+  EXPECT_EQ(engine.engine->Step(), nullptr);
+  EXPECT_EQ(engine.cache->deallocate_calls, 2);
+
+  engine.engine->RemoveRequest(survivor);
+  survivor_external.Release();
+}
+
+TEST_F(EngineStepTest, ReacquiringExternalReferenceCancelsDeferredAbandonment) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  ExternalRequestReference initial_external{*request};
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  initial_external.Release();
+  ExternalRequestReference reacquired_external{*request};
+
+  EXPECT_EQ(engine.engine->Step(), nullptr);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 0);
+
+  engine.engine->RemoveRequest(request);
+  reacquired_external.Release();
+}
+
+TEST_F(EngineStepTest, ContinueRejectsUndrainedReadyNotificationWithoutMutation) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto first_prompt = Prompt(10);
+  auto second_prompt = Prompt(20);
+  auto first = MintRequest(*model_, first_prompt);
+  auto second = MintRequest(*model_, second_prompt);
+  engine.engine->AddRequest(first);
+  engine.engine->AddRequest(second);
+
+  ASSERT_EQ(engine.engine->Step(), first);
+  ASSERT_EQ(engine.executor->decode_calls, 1);
+  ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(second->status_, RequestStatus::TurnComplete);
+
+  const auto before = second->Snapshot();
+  const std::vector<int32_t> continuation{5, 6};
+  try {
+    second->Continue(continuation);
+    FAIL() << "Expected Continue to reject the undrained ready notification.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("Engine::Step()"), std::string::npos);
+  }
+
+  const auto rejected = second->Snapshot();
+  EXPECT_EQ(rejected.status, before.status);
+  EXPECT_EQ(rejected.current_sequence_length, before.current_sequence_length);
+  EXPECT_EQ(rejected.processed_sequence_length, before.processed_sequence_length);
+
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+
+  EXPECT_NO_THROW(second->Continue(continuation));
+  const auto continued = second->Snapshot();
+  EXPECT_EQ(continued.status, RequestStatus::Assigned);
+  EXPECT_EQ(continued.current_sequence_length,
+            before.current_sequence_length + static_cast<int64_t>(continuation.size()));
+}
+
 // Under capacity backpressure Step decodes only the requests that fit, then forms a fresh batch for
 // the deferred request on a later step -- one decode per internal cycle, never an over-capacity run.
 //
-// Cache residency is released only by an explicit RemoveRequest, so a finished request keeps its
-// slot until the caller gives it back. With capacity for two requests, the third is admitted only
-// after a completed request has been removed. The loop therefore removes each ready request as the
-// caller is expected to, which is what frees the slot the deferred request needs; the assertions
-// pin both halves of that contract -- the slot is still held when the request is handed back, and
-// it is released exactly at removal.
+// These test requests use only internal shared_ptrs and have never had public handles, so they are
+// not abandoned automatically. A finished request keeps its slot until explicitly removed. With
+// capacity for two requests, the third is admitted only after a completed request has been removed.
+// The assertions pin both halves of that contract -- the slot is still held when the request is
+// handed back, and it is released exactly at removal.
 TEST_F(EngineStepTest, BackpressureFormsAFreshBatchAcrossSteps) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
 
@@ -125,7 +312,7 @@ TEST_F(EngineStepTest, BackpressureFormsAFreshBatchAcrossSteps) {
   int removals = 0;
   while (auto ready = engine.engine->Step()) {
     // The fixture's executor forces end-of-stream, so every request Step hands back is finished.
-    EXPECT_TRUE(ready->IsDone());
+    EXPECT_TRUE(ready->IsTurnComplete());
     // The finished request still owns its cache slot: nothing is reclaimed implicitly.
     EXPECT_EQ(engine.cache->deallocate_calls, removals);
     returned.push_back(ready);
@@ -188,6 +375,38 @@ TEST_F(EngineStepTest, StaticBatchingPreservesOrderingAndReusesResidentContinuat
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(executor_observer->decode_calls, 2);
   EXPECT_EQ(cache_observer->allocate_calls, allocations_before);
+}
+
+TEST_F(EngineStepTest, StaticStepClosesAbandonedResidentWithoutIndividualDeallocation) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/1, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, EosToken(*model_));
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{cache, std::move(scheduler),
+                                  std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  ExternalRequestReference external{*request};
+  engine->AddRequest(request);
+
+  ASSERT_EQ(engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(cache->AllocatedCount(), 1u);
+  external.Release();
+
+  EXPECT_EQ(engine->Step(), nullptr);
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(executor_observer->decode_calls, 1);
+  EXPECT_EQ(cache->AllocatedCount(), 1u);
+  EXPECT_EQ(cache->deallocate_calls, 0);
+
+  // A static row is logically closed once but remains physically resident until batch recycling.
+  EXPECT_EQ(engine->Step(), nullptr);
+  EXPECT_EQ(cache->deallocate_calls, 0);
 }
 
 TEST_F(EngineStepTest, StaticContinueFailsAfterBatchRecycling) {
@@ -289,7 +508,7 @@ TEST_F(EngineStepTest, RetryableExecutionFailureRollsBackAndCanRetry) {
 
   auto ready = engine.engine->Step();
   EXPECT_EQ(ready, request);
-  EXPECT_TRUE(request->IsDone());
+  EXPECT_TRUE(request->IsTurnComplete());
 }
 
 TEST_F(EngineStepTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
@@ -402,7 +621,7 @@ TEST_F(EngineStepTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) 
 
   auto ready = engine.engine->Step();
   EXPECT_EQ(ready, request);
-  EXPECT_TRUE(request->IsDone());
+  EXPECT_TRUE(request->IsTurnComplete());
 }
 
 TEST_F(EngineStepTest, PostProcessingFailureRestoresSearchAndCanRetry) {
@@ -432,7 +651,7 @@ TEST_F(EngineStepTest, PostProcessingFailureRestoresSearchAndCanRetry) {
 
   auto ready = engine.engine->Step();
   EXPECT_EQ(ready, request);
-  EXPECT_TRUE(request->IsDone());
+  EXPECT_TRUE(request->IsTurnComplete());
 }
 
 TEST_F(EngineStepTest, LaterRequestFailureRestoresEarlierSample) {

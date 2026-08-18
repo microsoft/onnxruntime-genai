@@ -62,7 +62,7 @@ typedef enum OgaElementType {
 typedef enum OgaRequestStatus {
   OgaRequestStatus_created,
   OgaRequestStatus_queued,
-  OgaRequestStatus_in_progress,
+  OgaRequestStatus_active,
   OgaRequestStatus_turn_complete,
   OgaRequestStatus_closed,
 } OgaRequestStatus;
@@ -1164,6 +1164,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
 
 /**
  * \brief Destroys the given engine.
+ *
+ * Remove every submitted request with OgaEngineRemoveRequest before destroying the engine.
  * \param[in] engine The engine to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
@@ -1181,7 +1183,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
  *
  * \param[in] engine The engine instance to run a processing step on.
  * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
- *                     If the engine has no ready requests, this will be set to a nullptr.
+ *                     If the engine has no ready requests, this will be set to a nullptr. Each non-null handle
+ *                     returned by this function must be released with OgaDestroyRequest. Releasing this handle
+ *                     does not remove the request from the engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
@@ -1190,6 +1194,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest**
  * \brief Checks if the engine has any pending requests to process.
  *
  * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
+ * A false result does not mean the engine owns no requests: requests at OgaRequestStatus_turn_complete remain owned
+ * until explicitly removed with OgaEngineRemoveRequest.
  *
  * \param[in] engine The engine instance to check for pending requests.
  * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
@@ -1202,9 +1208,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
  * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
+ * On success, the engine retains ownership of the request at OgaRequestStatus_turn_complete, which completes only
+ * the current generation turn. OgaEngineRemoveRequest releases that ownership immediately. If the caller instead
+ * releases every external handle, the request is marked abandoned and reclaimed before the engine's next
+ * OgaEngineAddRequest or OgaEngineStep boundary.
  *
  * \param[in] engine The engine instance to which the request is being added.
- * \param[in] request The request to add to the engine. The request must remain valid until it is removed or processed.
+ * \param[in] request The request to add to the engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
@@ -1212,12 +1222,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaReq
 /**
  * \brief Removes a request from the OgaEngine.
  *
- * This function removes a request from the engine, allowing it to be cleaned up. The request must have been previously added
- * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed and cannot be reused.
- * Removing an already closed request returns an error.
+ * This function logically closes a request, after which it will no longer be processed and cannot be reused.
+ * A nonterminal request must belong to this engine. Removing an already closed request is an engine-agnostic successful
+ * no-op because the request no longer has an owner. Dynamic removal releases cache ownership immediately; a resident
+ * static-batch row may remain physically retained until its shared batch is recycled.
+ * The caller remains responsible for releasing every request handle with OgaDestroyRequest.
  *
  * \param[in] engine The engine instance from which the request is being removed.
- * \param[in] request The request to remove from the engine. The request must have been previously added to the engine.
+ * \param[in] request The request to remove. A nonterminal request must have been previously added to this engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
@@ -1227,6 +1239,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
  *
  * This function initializes a new request object that can be used to submit input sequences for model inference.
  * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
+ * The returned handle is owned by the caller. Explicit removal is recommended for deterministic resource release;
+ * otherwise releasing the final external handle marks a submitted request for deferred Engine reclamation.
  *
  * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
  * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
@@ -1262,10 +1276,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestContinue(OgaRequest* request, const
 /**
  * \brief Destroys the given request.
  *
- * This function cleans up the resources associated with the request, including any input sequences and parameters.
- * It should be called when the request is no longer needed, either after it has been processed.
+ * This function releases one external request handle. Releasing the final handle marks a submitted request abandoned;
+ * its Engine reclaims it before the next OgaEngineAddRequest or OgaEngineStep call. Call OgaEngineRemoveRequest first
+ * when resources must be released immediately. Every handle returned by OgaCreateRequest or OgaEngineStep must be
+ * released once.
  *
- * \param[in] request The request to be destroyed. The request must have been created using OgaCreateRequest.
+ * \param[in] request A request handle returned by OgaCreateRequest or OgaEngineStep.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
 
@@ -1327,8 +1343,21 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request,
  * This function returns true at OgaRequestStatus_turn_complete. It does not mean that the request is permanently
  * closed; OgaRequestContinue may queue another turn while state remains resident.
  *
- * \param[in] request The request to check if it is done.
- * \param[out] out Boolean flag that will be set to true if the request is done, or false otherwise.
+ * \param[in] request The request whose current turn should be checked.
+ * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
+ * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsTurnComplete(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Deprecated compatibility alias for OgaRequestIsTurnComplete.
+ *
+ * This function reports completion of the current generation turn; it does not report permanent request closure.
+ *
+ * \deprecated Use OgaRequestIsTurnComplete instead.
+ *
+ * \param[in] request The request whose current turn should be checked.
+ * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
  * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);

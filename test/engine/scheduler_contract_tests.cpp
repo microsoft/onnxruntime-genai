@@ -277,7 +277,7 @@ TEST_F(SchedulerContractTest, DynamicPlanningKeepsActiveWorkWhenNewAdmissionIsDe
   DynamicBatchScheduler scheduler(model_, cache);
   auto active = Assigned(10);
   MakePrefillResident(scheduler, *cache, active);
-  ASSERT_EQ(active->status_, RequestStatus::InProgress);
+  ASSERT_EQ(active->status_, RequestStatus::Active);
 
   auto deferred = Assigned(20);
   scheduler.AddRequest(deferred);

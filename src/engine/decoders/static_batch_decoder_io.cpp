@@ -152,7 +152,7 @@ std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
   for (auto& request : scheduled_requests_) {
     // A TurnComplete or Closed row retained in the static batch can contribute zero
     // unprocessed tokens. Selecting index 0 keeps the subspan in bounds; its logits are discarded
-    // because ScheduledRequests samples only InProgress rows.
+    // because ScheduledRequests samples only Active rows.
     const auto unprocessed_token_count = request->ScheduledTokenCount();
     valid_token_indices.push_back(
         unprocessed_token_count == 0 ? 0 : static_cast<int64_t>(unprocessed_token_count - 1));

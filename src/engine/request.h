@@ -16,6 +16,13 @@
 
 namespace Generators {
 
+struct Request;
+
+template <>
+struct ExternalRefCountedTraits<Request> {
+  static constexpr bool notify_external_reference_changes = true;
+};
+
 struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
@@ -50,7 +57,7 @@ struct Request : std::enable_shared_from_this<Request>,
   void Assign(std::shared_ptr<Engine> engine);
 
   /**
-   * @brief Updates the status of the request to InProgress and prepares it for processing.
+   * @brief Updates the status of the request to Active and prepares it for processing.
    */
   void Schedule();
 
@@ -148,6 +155,11 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Checks if the current generation turn reached a stopping condition.
    * @return True in TurnComplete; the request may still be continued or closed.
+   */
+  bool IsTurnComplete() const;
+
+  /**
+   * @brief Compatibility alias for IsTurnComplete().
    */
   bool IsDone() const;
 
@@ -297,8 +309,12 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t next_unseen_token_index_{};
   int64_t seen_sequence_length_{};
   friend struct Engine;
+  friend struct ExternalRefCounted<Request>;
 
   void CompleteClose();
+  void OnFirstExternalReference() noexcept;
+  void OnLastExternalReference() noexcept;
+  bool IsExternallyAbandoned() const noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -309,6 +325,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
+  std::atomic<bool> externally_abandoned_{false};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();

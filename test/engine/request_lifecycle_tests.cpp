@@ -4,7 +4,7 @@
 // Lifecycle tests for the engine Request state machine. Because a tiny real
 // CPU fixture model is available, these tests drive genuine Request objects (rather than a mock
 // Search) and pin the transition policy: which mutations each status permits, and how
-// create/assign/schedule/continue/remove move a request between Unassigned, Assigned, InProgress,
+// create/assign/schedule/continue/remove move a request between Unassigned, Assigned, Active,
 // TurnComplete, and Closed.
 
 #include <memory>
@@ -107,26 +107,26 @@ TEST_F(RequestLifecycleTest, ScheduleIsRejectedBeforeAssign) {
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
 }
 
-// An assigned, non-empty request schedules cleanly and moves to InProgress.
-TEST_F(RequestLifecycleTest, ScheduleFromAssignedMovesToInProgress) {
+// An assigned, non-empty request schedules cleanly and moves to Active.
+TEST_F(RequestLifecycleTest, ScheduleFromAssignedMovesToActive) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
   request->Schedule();
-  EXPECT_EQ(request->status_, RequestStatus::InProgress);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
 }
 
-// While a request is in progress its token stream is owned by the engine, so external appends are
+// While a request is active its token stream is owned by the engine, so external appends are
 // rejected without mutating the request.
-TEST_F(RequestLifecycleTest, AppendIsRejectedWhileInProgress) {
+TEST_F(RequestLifecycleTest, AppendIsRejectedWhileActive) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
   request->Schedule();
-  ASSERT_EQ(request->status_, RequestStatus::InProgress);
+  ASSERT_EQ(request->status_, RequestStatus::Active);
   const int64_t length_before = request->CurrentSequenceLength();
 
   std::vector<int32_t> more{5, 6};
   EXPECT_THROW(request->AddTokens(more), std::runtime_error);
-  EXPECT_EQ(request->status_, RequestStatus::InProgress);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
 }
 
@@ -153,9 +153,11 @@ TEST_F(RequestLifecycleTest, ContinueAfterTurnCompleteQueuesNextTurn) {
 
   EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
-  EXPECT_FALSE(request->IsDone());
+  EXPECT_FALSE(request->IsTurnComplete());
   EXPECT_EQ(engine_.engine->Step(), request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_TRUE(request->IsTurnComplete());
+  EXPECT_TRUE(request->IsDone());  // Compatibility alias.
 }
 
 TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {
@@ -236,7 +238,7 @@ TEST_F(RequestLifecycleTest, ContinueIsRejectedOutsideTurnComplete) {
 }
 
 // Removing a request releases it from the engine and makes it terminal.
-TEST_F(RequestLifecycleTest, RemoveMakesRequestTerminal) {
+TEST_F(RequestLifecycleTest, RequestRemoveIsIdempotentAfterClose) {
   auto prompt = Prompt();
   const std::vector<int32_t> more{5};
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
@@ -248,7 +250,36 @@ TEST_F(RequestLifecycleTest, RemoveMakesRequestTerminal) {
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
   EXPECT_THROW(request->AddTokens(more), std::runtime_error);
   EXPECT_THROW(request->Continue(more), std::runtime_error);
-  EXPECT_THROW(request->Remove(), std::runtime_error);
+  EXPECT_NO_THROW(request->Remove());
+  EXPECT_EQ(engine_.cache->deallocate_calls, 1);
+}
+
+TEST_F(RequestLifecycleTest, EngineRemoveRequestIsIdempotentAfterClose) {
+  auto other_engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+
+  engine_.engine->RemoveRequest(request);
+  ASSERT_EQ(request->status_, RequestStatus::Closed);
+  ASSERT_EQ(engine_.cache->deallocate_calls, 1);
+
+  EXPECT_NO_THROW(engine_.engine->RemoveRequest(request));
+  EXPECT_NO_THROW(other_engine.engine->RemoveRequest(request));
+  EXPECT_EQ(engine_.cache->deallocate_calls, 1);
+  EXPECT_EQ(other_engine.cache->deallocate_calls, 0);
+}
+
+TEST_F(RequestLifecycleTest, EngineRemoveRequestRejectsNonterminalRequestFromAnotherEngine) {
+  auto other_engine =
+      MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt();
+  auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
+
+  EXPECT_THROW(other_engine.engine->RemoveRequest(request), std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(engine_.cache->deallocate_calls, 0);
+  EXPECT_EQ(other_engine.cache->deallocate_calls, 0);
 }
 
 TEST_F(RequestLifecycleTest, RemoveIsRejectedBeforeSubmission) {
@@ -296,7 +327,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   request->CommitStep(plan, result);
 
   const auto committed = request->Snapshot();
-  EXPECT_EQ(committed.status, RequestStatus::InProgress);
+  EXPECT_EQ(committed.status, RequestStatus::Active);
   EXPECT_EQ(committed.processed_sequence_length, before.current_sequence_length);
   EXPECT_FALSE(committed.is_prefill);
   ASSERT_TRUE(request->HasUnseenTokens());
@@ -337,7 +368,7 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   request->CommitStep(plan, RequestStepResult{});
 
   const auto committed = request->Snapshot();
-  EXPECT_EQ(committed.status, RequestStatus::InProgress);
+  EXPECT_EQ(committed.status, RequestStatus::Active);
   EXPECT_EQ(committed.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(committed.processed_sequence_length, 2);
   // Two of the three prompt tokens are in the cache, so the request is still prefilling.

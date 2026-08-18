@@ -63,6 +63,22 @@ def model(device):
     return og.Model(config)
 
 
+def test_request_status_names():
+    assert hasattr(og.RequestStatus, "ACTIVE")
+    assert not hasattr(og.RequestStatus, "IN_PROGRESS")
+
+
+def test_request_is_done_compatibility_alias_warns(model):
+    params = og.GeneratorParams(model)
+    request = og.Request(params)
+    expected = request.is_turn_complete()
+
+    with pytest.warns(DeprecationWarning, match=r"is_done.*is_turn_complete"):
+        actual = request.is_done()
+
+    assert actual == expected
+
+
 def _add_request(engine, model, prompt, max_new_tokens, sink):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)
@@ -77,7 +93,7 @@ def _drain(ready):
     sink = ready.get_opaque_data()
     while ready.has_unseen_tokens():
         sink.tokens.append(ready.get_unseen_token())
-    return ready.is_done()
+    return ready.is_turn_complete()
 
 
 def _step_once(engine):
@@ -231,7 +247,7 @@ def test_continuation_while_peer_remains_active(model):
     reference = _add_request(
         reference_engine, model, _PROMPT_A, short_max_new, reference_sink
     )
-    while not reference.is_done():
+    while not reference.is_turn_complete():
         ready = reference_engine.step()
         assert ready is not None
         _drain(ready)
@@ -243,18 +259,18 @@ def test_continuation_while_peer_remains_active(model):
     short = _add_request(engine, model, _PROMPT_A, short_max_new, short_sink)
     long = _add_request(engine, model, _PROMPT_LONG, long_max_new, long_sink)
 
-    while not short.is_done():
+    while not short.is_turn_complete():
         ready = engine.step()
         assert ready is not None
         if _drain(ready) and ready is not short:
             engine.remove_request(ready)
 
-    assert not long.is_done(), "peer must remain active when continuation is appended"
+    assert not long.is_turn_complete(), "peer must remain active when continuation is appended"
     for _ in range(3):
         ready = engine.step()
         assert ready is not None
         _drain(ready)
-    assert not long.is_done(), "peer must remain active during the continuation delay"
+    assert not long.is_turn_complete(), "peer must remain active during the continuation delay"
 
     short.continue_with(np.asarray(follow_up, dtype=np.int32))
     _run(engine)
@@ -283,6 +299,8 @@ def test_request_cannot_be_removed_from_another_engine(model):
         other.remove_request(request)
 
     owner.remove_request(request)
+    other.remove_request(request)
+    assert request.status == og.RequestStatus.CLOSED
 
 
 def test_request_lifecycle_status(model):
@@ -298,11 +316,18 @@ def test_request_lifecycle_status(model):
     engine.add_request(request)
     assert request.status == og.RequestStatus.QUEUED
 
-    while not request.is_done():
+    ready = engine.step()
+    assert ready is not None
+    _drain(ready)
+    assert request.status == og.RequestStatus.ACTIVE
+    assert not request.is_turn_complete()
+
+    while not request.is_turn_complete():
         ready = engine.step()
         assert ready is not None
         _drain(ready)
     assert request.status == og.RequestStatus.TURN_COMPLETE
+    assert request.is_turn_complete()
 
     with pytest.raises(RuntimeError, match="use Continue"):
         request.add_tokens(np.asarray([12], dtype=np.int32))
@@ -311,12 +336,13 @@ def test_request_lifecycle_status(model):
 
     engine.remove_request(request)
     assert request.status == og.RequestStatus.CLOSED
+    assert not request.is_turn_complete()
     with pytest.raises(RuntimeError, match="closed request"):
         request.add_tokens(np.asarray([12], dtype=np.int32))
     with pytest.raises(RuntimeError, match="closed request"):
         request.continue_with(np.asarray([12], dtype=np.int32))
-    with pytest.raises(RuntimeError, match="already closed"):
-        engine.remove_request(request)
+    engine.remove_request(request)
+    assert request.status == og.RequestStatus.CLOSED
 
 
 def test_remove_request_freezes_output(model):

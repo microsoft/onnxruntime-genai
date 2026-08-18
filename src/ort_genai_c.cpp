@@ -1361,11 +1361,15 @@ OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
   OGA_CATCH
 }
 
-OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
+OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
   OGA_TRY
-  *out = request->IsDone();
+  *out = request->IsTurnComplete();
   return nullptr;
   OGA_CATCH
+}
+
+OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
+  return OgaRequestIsTurnComplete(request, out);
 }
 
 OgaResult* OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out) {
@@ -1377,8 +1381,8 @@ OgaResult* OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out)
     case Generators::RequestStatus::Assigned:
       *out = OgaRequestStatus_queued;
       break;
-    case Generators::RequestStatus::InProgress:
-      *out = OgaRequestStatus_in_progress;
+    case Generators::RequestStatus::Active:
+      *out = OgaRequestStatus_active;
       break;
     case Generators::RequestStatus::TurnComplete:
       *out = OgaRequestStatus_turn_complete;

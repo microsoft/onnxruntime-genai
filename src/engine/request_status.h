@@ -17,7 +17,7 @@ namespace Generators {
 enum class RequestStatus {
   Unassigned,    // Created: initial input may be added before submission to an Engine.
   Assigned,      // Queued: submitted initial work or a resident continuation awaits execution.
-  InProgress,    // The current generation turn is executable and owned by the Engine.
+  Active,        // The current generation turn is executable and owned by the Engine.
   TurnComplete,  // The current turn stopped; output and resident model state remain available.
   Closed,        // Permanently terminal; no scheduler or cache resources remain owned.
 };
@@ -27,7 +27,7 @@ constexpr bool IsQueued(RequestStatus status) noexcept {
 }
 
 constexpr bool IsExecuting(RequestStatus status) noexcept {
-  return status == RequestStatus::InProgress;
+  return status == RequestStatus::Active;
 }
 
 constexpr bool IsExecutable(RequestStatus status) noexcept {

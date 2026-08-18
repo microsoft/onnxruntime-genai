@@ -202,7 +202,7 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
   sampling_plan_->Clear();
   for (const auto& request : requests_) {
     // Dynamic transactions keep newly admitted and continued requests Queued until commit, while
-    // the static scheduler moves every executable row to InProgress before constructing the batch.
+    // the static scheduler moves every executable row to Active before constructing the batch.
     const bool status_is_executable =
         require_transaction_support ? IsExecutable(request->status_)
                                     : IsExecuting(request->status_);

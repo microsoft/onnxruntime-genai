@@ -53,6 +53,18 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   search_->DeferCompletion(true);
 }
 
+void Request::OnFirstExternalReference() noexcept {
+  externally_abandoned_.store(false, std::memory_order_release);
+}
+
+void Request::OnLastExternalReference() noexcept {
+  externally_abandoned_.store(true, std::memory_order_release);
+}
+
+bool Request::IsExternallyAbandoned() const noexcept {
+  return externally_abandoned_.load(std::memory_order_acquire);
+}
+
 void Request::Assign(std::shared_ptr<Engine> engine) {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
@@ -83,7 +95,7 @@ void Request::Schedule() {
     throw std::runtime_error("Cannot schedule a request with no tokens.");
   }
 
-  status_ = RequestStatus::InProgress;
+  status_ = RequestStatus::Active;
 }
 
 void Request::Remove() {
@@ -91,7 +103,7 @@ void Request::Remove() {
     throw std::runtime_error("Cannot close a request that has not been submitted to an engine.");
   }
   if (IsClosed(status_)) {
-    throw std::runtime_error("Cannot close a request that is already closed.");
+    return;
   }
 
   auto engine = engine_.lock();
@@ -112,7 +124,7 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
     throw std::runtime_error("Expected at least one token for generation. Received 0.");
 
   if (status_ != RequestStatus::Unassigned) {
-    if (IsTurnComplete(status_)) {
+    if (IsTurnComplete()) {
       throw std::runtime_error("AddTokens only accepts initial input; use Continue for another turn.");
     }
     if (IsClosed(status_)) {
@@ -131,7 +143,7 @@ void Request::Continue(std::span<const int32_t> tokens) {
   }
   if (tokens.empty())
     throw std::runtime_error("Expected at least one token for continuation. Received 0.");
-  if (!IsTurnComplete(status_)) {
+  if (!IsTurnComplete()) {
     throw std::runtime_error("Continue is only valid after the current turn is complete.");
   }
 
@@ -254,8 +266,12 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
-bool Request::IsDone() const {
+bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
+}
+
+bool Request::IsDone() const {
+  return IsTurnComplete();
 }
 
 bool Request::IsPrefill() const {
@@ -351,7 +367,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
     unseen_token_indices_.push_back(token_index);
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
-  status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::InProgress;
+  status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {

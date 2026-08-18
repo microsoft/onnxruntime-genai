@@ -903,10 +903,23 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestContinue(this, &tokens));
   }
 
+  /**
+   * \brief Returns whether the current generation turn is complete.
+   */
+  bool IsTurnComplete() const {
+    bool is_turn_complete{};
+    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
+    return is_turn_complete;
+  }
+
+  /**
+   * \brief Deprecated compatibility alias for IsTurnComplete().
+   *
+   * \deprecated Use IsTurnComplete() instead.
+   */
+  [[deprecated("Use IsTurnComplete() instead.")]]
   bool IsDone() const {
-    bool is_done{};
-    OgaCheckResult(OgaRequestIsDone(this, &is_done));
-    return is_done;
+    return IsTurnComplete();
   }
 
   OgaRequestStatus GetStatus() const {
@@ -953,10 +966,20 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
+  /**
+   * \brief Submits a request and gives the engine ownership until Remove() is called.
+   *
+   * Ownership continues after the current turn completes. Remove the request before releasing its final handle.
+   */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
   }
 
+  /**
+   * \brief Removes a request and releases engine ownership.
+   *
+   * Repeated calls after the request reaches OgaRequestStatus_closed are successful no-ops.
+   */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));
   }

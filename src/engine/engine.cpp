@@ -55,16 +55,27 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 }
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
+  ReclaimAbandonedRequests();
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
-  request->Assign(shared_from_this());
-  scheduler_->AddRequest(request);
+
+  // Track the request before assignment so every successfully submitted request can later be found
+  // even when the scheduler and cache hold it through implementation-specific containers. The
+  // registry allocation therefore happens before any request lifecycle mutation.
+  tracked_requests_.push_back(request);
+  try {
+    request->Assign(shared_from_this());
+    scheduler_->AddRequest(request);
+  } catch (...) {
+    tracked_requests_.pop_back();
+    throw;
+  }
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   if (request && IsClosed(request->status_)) {
-    throw std::runtime_error("Cannot remove a request that is already closed.");
+    return;
   }
   if (!request || request->engine_.lock().get() != this) {
     throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
@@ -77,7 +88,39 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
       ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
   ready_request_index_ = 0;
   std::erase(ready_requests_, request);
+  std::erase(staged_ready_requests_, request);
   request->CompleteClose();
+  std::erase_if(tracked_requests_, [&request](const std::weak_ptr<Request>& tracked) {
+    const auto owned = tracked.lock();
+    return !owned || owned == request;
+  });
+}
+
+void Engine::ReclaimAbandonedRequests() {
+  // ExternalRelease only publishes an atomic abandonment marker. Engine entry points are externally
+  // serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
+  // release, ready-notification purge, and terminal close.
+  std::vector<std::shared_ptr<Request>> abandoned_requests;
+  abandoned_requests.reserve(tracked_requests_.size());
+  std::erase_if(tracked_requests_, [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
+    const auto request = tracked.lock();
+    if (!request) {
+      return true;
+    }
+    if (!IsClosed(request->status_) &&
+        request->engine_.lock().get() == this &&
+        request->IsExternallyAbandoned()) {
+      abandoned_requests.push_back(request);
+    }
+    return false;
+  });
+
+  for (const auto& request : abandoned_requests) {
+    // Recheck defensively in case an external owner was reacquired before this serialized boundary.
+    if (request->IsExternallyAbandoned()) {
+      RemoveRequest(request);
+    }
+  }
 }
 
 void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const {
@@ -92,6 +135,13 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
     throw std::runtime_error("Cannot continue a request whose model state is no longer resident.");
   }
 
+  if (std::find(ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_),
+                ready_requests_.end(), request) != ready_requests_.end()) {
+    throw std::runtime_error(
+        "Cannot continue a request while its ready notification is pending; "
+        "call Engine::Step() to drain the ready notification before continuing.");
+  }
+
   if (!cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->ResidentRequestCount() > 1) {
     throw std::runtime_error(
@@ -100,6 +150,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
 }
 
 std::shared_ptr<Request> Engine::Step() {
+  ReclaimAbandonedRequests();
   if (auto request = DrainReadyRequest()) {
     return request;
   }
