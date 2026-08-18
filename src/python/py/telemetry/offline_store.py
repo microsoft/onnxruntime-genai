@@ -207,20 +207,6 @@ class OfflineEventStore:
                     self._conn.rollback()
                 return False
 
-    def clear(self) -> bool:
-        """Discard all queued events after a runtime opt-out."""
-        with self._lock:
-            if not self._ensure_open():
-                return False
-            try:
-                self._conn.execute("DELETE FROM events")
-                self._conn.commit()
-                return True
-            except Exception:
-                with suppress(Exception):
-                    self._conn.rollback()
-                return False
-
     def count(self) -> int:
         with self._lock:
             if not self._ensure_open():

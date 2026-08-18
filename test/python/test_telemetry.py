@@ -313,7 +313,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         t.disable_telemetry()
         self.assertFalse(t._enabled)
         self.assertTrue(t._telemetry_disabled)
-        self.assertEqual(t._store.count(), 0)
+        self.assertEqual(t._store.count(), 1)
         t.shutdown()
 
         self.assertIs(GenAITelemetry(), t)
@@ -321,7 +321,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIsNone(t._store)
         self.assertEqual(self._sent_event_names(), [])
 
-    def test_disable_during_heartbeat_collection_discards_it(self):
+    def test_disable_during_heartbeat_collection_retains_reserved_row(self):
         import threading
 
         from telemetry.telemetry import GenAITelemetry
@@ -342,7 +342,8 @@ class TestOptOut(_HermeticTelemetryTestCase):
             telemetry._heartbeat_thread.join(5)
             telemetry.disable_telemetry()
 
-        self.assertEqual(telemetry._store.count(), 0)
+        self.assertEqual(telemetry._store.count(), 1)
+        self.assertEqual(telemetry._store.get_batch(10), [])
         self.assertEqual(self._sent_event_names(), [])
 
     def test_heartbeat_is_durable_before_system_enrichment(self):
@@ -725,6 +726,72 @@ class TestPathRedaction(unittest.TestCase):
         scrubbed = _redact_paths(path_after_limit)
         self.assertNotIn("/home/", scrubbed)
         self.assertLessEqual(len(scrubbed.encode("utf-8")), 40_960)
+
+    def test_explicit_short_relative_paths_are_redacted(self):
+        from telemetry.path_utils import scrub_string_for_telemetry
+
+        for value in ("./customer", "../customer", r".\customer", r"..\customer"):
+            with self.subTest(value=value):
+                self.assertEqual(scrub_string_for_telemetry(value), "[path]")
+
+        self.assertEqual(scrub_string_for_telemetry("load ./customer"), "load [path]")
+        self.assertEqual(scrub_string_for_telemetry("path=../customer"), "path=[path]")
+        self.assertEqual(scrub_string_for_telemetry(r"open(.\customer)"), "open([path]")
+        self.assertEqual(scrub_string_for_telemetry(r"path:..\customer"), "path:[path]")
+        for prefix in ("./customer", "../customer", r".\customer", r"..\customer"):
+            with self.subTest(multiline=prefix):
+                self.assertEqual(
+                    scrub_string_for_telemetry(f"first line\n{prefix}"),
+                    "first line\n[path]",
+                )
+                self.assertEqual(
+                    scrub_string_for_telemetry(f"first line\r\n{prefix}"),
+                    "first line\r\n[path]",
+                )
+
+        for identifier in (
+            "n/a",
+            "read/write",
+            r"domain\user",
+            "microsoft/phi-3-mini",
+            "version-1.2/customer",
+        ):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(scrub_string_for_telemetry(identifier), identifier)
+
+    def test_nested_explicit_relative_paths_are_scrubbed_at_serialization(self):
+        import json
+
+        from telemetry.telemetry import GenAITelemetry
+
+        telemetry = object.__new__(GenAITelemetry)
+        telemetry._enabled = True
+        telemetry._telemetry_disabled = False
+        telemetry._store = MagicMock(is_open=True)
+        telemetry._store.store.return_value = True
+        telemetry._uploader = None
+        telemetry._app_name = "onnxruntime-genai"
+        telemetry._app_version = "test"
+        telemetry._app_session_guid = "session"
+        telemetry._envelope_ikey = "o:test"
+
+        telemetry.log(
+            "GenAIAction",
+            {
+                "paths": ["./customer", {"windows": r"..\customer", "multiline": "hint:\n.\\customer"}],
+                "identifiers": ["n/a", "read/write", r"domain\user", "microsoft/phi-3-mini"],
+            },
+        )
+
+        data = json.loads(telemetry._store.store.call_args.args[0])["data"]
+        self.assertEqual(
+            data["paths"],
+            ["[path]", {"multiline": "hint:\n[path]", "windows": "[path]"}],
+        )
+        self.assertEqual(
+            data["identifiers"],
+            ["n/a", "read/write", r"domain\user", "microsoft/phi-3-mini"],
+        )
 
     def test_error_messages_are_capped_at_40960_utf8_bytes(self):
         import telemetry.path_utils as path_utils
@@ -2032,14 +2099,6 @@ class TestOfflineEventStore(unittest.TestCase):
             self.assertTrue(s.release(row_id, b'{"enriched":1}'))
             self.assertEqual([payload for _, payload in s.get_batch(10)], [b'{"enriched":1}'])
 
-    def test_clear_discards_all_queued_events(self):
-        s = self._new_store()
-        s.store(b'{"detail":1}')
-        s.reserve(b'{"heartbeat":1}', 60.0)
-
-        self.assertTrue(s.clear())
-        self.assertEqual(s.count(), 0)
-
     def test_store_connection_is_closed_before_fork_and_reopened_lazily(self):
         store = self._new_store()
         store.prepare_for_fork()
@@ -2350,7 +2409,7 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertTrue(telemetry._telemetry_disabled)
         old_uploader.signal_stop.assert_called_once()
         old_uploader.stop_loop.assert_called_once_with(0)
-        telemetry._store.clear.assert_called_once()
+        telemetry._store.clear.assert_not_called()
 
     def test_shutdown_does_not_flush_after_runtime_disable(self):
         from telemetry.telemetry import GenAITelemetry

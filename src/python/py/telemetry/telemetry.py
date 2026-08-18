@@ -341,15 +341,22 @@ class GenAITelemetry:
         released = False
         try:
             payload = self._serialize_event(HEARTBEAT_EVENT, self._build_heartbeat_attributes())
-            if self._store is not None:
-                released = self._store.release(row_id, payload)
+            with self._lock:
+                if self._enabled and not self._telemetry_disabled and self._store is not None:
+                    released = self._store.release(row_id, payload)
         except Exception:
             pass
         finally:
-            if not released and self._store is not None:
-                released = self._store.release(row_id)
-            if released and self._uploader is not None:
-                self._uploader.request_drain()
+            with self._lock:
+                if (
+                    not released
+                    and self._enabled
+                    and not self._telemetry_disabled
+                    and self._store is not None
+                ):
+                    released = self._store.release(row_id)
+                if released and self._uploader is not None:
+                    self._uploader.request_drain()
 
     def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
@@ -573,8 +580,6 @@ class GenAITelemetry:
                 if self._uploader.stop_loop(0):
                     self._uploader.close()
                     self._uploader = None
-            if self._store is not None:
-                self._store.clear()
 
     @classmethod
     def _before_fork(cls) -> None:
@@ -635,10 +640,7 @@ class GenAITelemetry:
                 uploader_stopped = self._uploader.stop_loop(remaining_seconds())
                 if uploader_stopped:
                     try:
-                        if getattr(self, "_telemetry_disabled", False):
-                            if self._store is not None:
-                                self._store.clear()
-                        else:
+                        if not getattr(self, "_telemetry_disabled", False):
                             self._uploader.flush(remaining_seconds())
                     finally:
                         self._uploader.close()
