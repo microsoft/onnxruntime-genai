@@ -1767,46 +1767,6 @@ class ModeloptModel(QuantizedModel):
         if getattr(self, "_open_handles", None):
             self.close()
 
-    _FP4_E2M1_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
-
-    @classmethod
-    def repack_nvfp4_weight_codes(cls, packed_nk2):
-        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes."""
-        if packed_nk2.dtype != torch.uint8:
-            packed_nk2 = packed_nk2.to(torch.uint8)
-        low = packed_nk2 & 0x0F
-        high = packed_nk2 >> 4
-        n = packed_nk2.shape[0]
-        return torch.stack((low, high), dim=-1).reshape(n, -1).contiguous()
-
-    @classmethod
-    def _dequant_nvfp4(cls, weight_u8, block_scale_e4m3, global_scale, name=""):
-        """Reconstruct a BF16 weight from Model Optimizer NVFP4 tensors."""
-        if block_scale_e4m3 is None:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' has 'weight_scale_2' but no 'weight_scale' (FP8-E4M3 block scales). "
-                "The Model Optimizer checkpoint is incomplete."
-            )
-        if block_scale_e4m3.dtype == torch.uint8:
-            block_scale_e4m3 = block_scale_e4m3.view(torch.float8_e4m3fn)
-        elif block_scale_e4m3.dtype != torch.float8_e4m3fn:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' block scales must be float8_e4m3fn (or raw uint8 bytes), "
-                f"got {block_scale_e4m3.dtype}."
-            )
-        codes = cls.repack_nvfp4_weight_codes(weight_u8).long()
-        mag = cls._FP4_E2M1_LUT[codes & 0x7]
-        values = torch.where((codes & 0x8) > 0, -mag, mag)
-        block_scales = block_scale_e4m3.to(torch.float32)
-        n, k = codes.shape
-        if block_scales.shape[0] != n or block_scales.shape[1] == 0 or k % block_scales.shape[1] != 0:
-            raise ValueError(
-                f"NVFP4 tensor '{name}' block scales {tuple(block_scales.shape)} are not a block-wise split of the "
-                f"[{n}, {k}] weight."
-            )
-        block_scales = block_scales.repeat_interleave(k // block_scales.shape[1], dim=1)
-        return (values * block_scales * float(global_scale)).to(torch.bfloat16)
-
     # -- raw tensor access ------------------------------------------------------
     def _get(self, name):
         if self._weight_map is not None:

@@ -10,6 +10,7 @@ import copy
 import glob
 import json
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import onnx_ir as ir
@@ -1083,14 +1084,14 @@ class Qwen35TextModel(Model):
         # CROP the recurrent state to the accepted prefix on partial accept -- copying slot `a`
         # into slot W-1 -- instead of running a full-cost main-model replay forward.
         #
-        # W must be at least num_speculative_tokens+1 (the length of a verify forward); the default
-        # of 8 covers every N the MTP loop supports. 0 disables the window entirely and produces
+        # W must be at least num_speculative_tokens+1 (the length of a verify forward).
+        # 0 (the default) disables the window entirely and produces
         # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
         # Requires ORT kernels that understand the `state_window` attribute.
         self._recurrent_state_window = int(extra_options.get("recurrent_state_window", 0))
         if self._recurrent_state_window < 0:
             raise ValueError("recurrent_state_window must be >= 0")
-        # Axis-1 window extent to splice into the state shapes, or None when unwindowed.
+        # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
         self._state_window_dims = [self._recurrent_state_window] if self._recurrent_state_window else []
 
         # Collapse the float32 gate glue around LinearAttention into the fused com.microsoft
@@ -2244,7 +2245,7 @@ class Qwen35TextModel(Model):
 
     def _add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
-        with open(config_path, "r") as f:
+        with open(config_path) as f:
             genai_config = json.load(f)
 
         # Expose the main decoder's hidden-states output (the MTP head's input).
@@ -2267,6 +2268,7 @@ class Qwen35TextModel(Model):
             },
             "outputs": {
                 "logits": "logits",
+                "hidden_states": "hidden_states_out",
                 "present_key_names": "present.%d.key",
                 "present_value_names": "present.%d.value",
             },
@@ -2318,11 +2320,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
         # The base builder derives the GenAI model.type by stripping the suffix
         # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = (
-            "Qwen3_5_Moe_textForCausalLM"
-            if self.is_text_only
-            else "Qwen3_5_MoeForConditionalGeneration"
-        )
+        self.model_type = "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
 
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
@@ -2382,7 +2380,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.enable_mtp = self.enable_mtp and not getattr(self, "is_mtp_head", False)
         if self.enable_mtp:
             include_hidden_states = str(extra_options.get("include_hidden_states", "false")).lower() in (
-                "1", "true", "yes",
+                "1",
+                "true",
+                "yes",
             )
             exclude_lm_head = str(extra_options.get("exclude_lm_head", "false")).lower() in ("1", "true", "yes")
             if not include_hidden_states:
@@ -2405,11 +2405,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         Updates ``self._mtp_onnx_dtype`` / ``self._mtp_io_dtype`` / ``self._mtp_extra_options``
         in place. Split out of ``__init__`` so it can be exercised directly by unit tests.
         """
-        # MTP head precision selection. The checkpoint stores the mtp.* weights in bf16, so by
-        # default the head inherits the main model's precision. `mtp_head_quant_type` overrides
-        # that with a head quantization scheme (int4/int8/mxfp4/nvfp4), same style as
-        # `moe_quant_type`: int8 is ~2x cheaper to draft than a dense fp16 head while keeping
-        # most of the acceptance, since the tiny single-layer head tolerates int8 well.
+        # By default, ordinary checkpoints inherit the main graph precision. ModelOpt checkpoints
+        # instead preserve each MTP tensor's native format (NVFP4, FP8, or BF16), just like the
+        # main model. `mtp_head_quant_type` is an explicit request to dequantize any native MTP
+        # tensors and requantize the head with the selected scheme.
         supported_mtp_head_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
 
         _mtp_head_quant_type = extra_options.get("mtp_head_quant_type")
@@ -2430,35 +2429,31 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             #                  weight-only op for the head's bf16 dense weights), so the
             #                  dense MatMuls stay int4 and only the experts use FP4.
             #
-            # io_dtype stays fp16 in every case; only the stored weight dtype changes. The
-            # head's experts are always quantized on the fly from the bf16 `mtp.*` tensors via
-            # the standard QMoE RTN path (make_qmoe_weights) -- the head never consumes the main
-            # model's native NVFP4/FP8 tensors (see `is_mtp_head` above).
+            # io_dtype stays fp16 in every case; only the stored weight dtype changes.
             _head_descriptor = resolve_dtype(_mtp_head_quant_type)
             _symmetric = str(self._mtp_extra_options.get("int4_is_symmetric", True)).lower() not in (
-                "0", "false", "no",
+                "0",
+                "false",
+                "no",
             )
             _was_float_main = self._mtp_onnx_dtype in (
-                ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT,
+                ir.DataType.FLOAT16,
+                ir.DataType.BFLOAT16,
+                ir.DataType.FLOAT,
             )
             if _head_descriptor.kind == "int" and _head_descriptor.bits == 8:
                 self._mtp_onnx_dtype = ir.DataType.INT8 if _symmetric else ir.DataType.UINT8
-                self._mtp_io_dtype = ir.DataType.FLOAT16
-            elif _head_descriptor.kind == "int":
+            else:
+                # Integer INT4 and both QMoE-only FP4 formats use 4-bit dense
+                # MatMul weights. Do not inherit INT8 dense weights from an INT8
+                # main model when the requested head format is MXFP4/NVFP4.
                 self._mtp_onnx_dtype = ir.DataType.INT4 if _symmetric else ir.DataType.UINT4
-                self._mtp_io_dtype = ir.DataType.FLOAT16
-            elif _was_float_main:
-                # MoE-only FP4 head scheme on a float main model: the head's onnx_dtype is NOT
-                # INT4/INT8, so make_moe would emit a plain (unquantized) MoE op and
-                # moe_quant_type would be silently ignored (see base.py make_moe). Promote the
-                # head to INT4 so make_moe emits a QMoE op whose experts use the FP4 scheme.
-                self._mtp_onnx_dtype = ir.DataType.INT4
-                self._mtp_io_dtype = ir.DataType.FLOAT16
+            self._mtp_io_dtype = ir.DataType.FLOAT16
             if _was_float_main:
                 # A float main model carries no int4/int8 knobs, so supply defaults for the
                 # head's dense MatMul placement.
-                self._mtp_extra_options.setdefault("int4_block_size", 32)
-                self._mtp_extra_options.setdefault("int4_algo_config", "rtn_last")
+                self._mtp_extra_options.setdefault("block_size", 32)
+                self._mtp_extra_options.setdefault("algo_config", "rtn_last")
             self._mtp_extra_options["moe_quant_type"] = _mtp_head_quant_type
 
     def make_model(self, input_path):
@@ -2471,7 +2466,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             mtp_extra_options.pop("enable_mtp", None)  # prevent recursion
             mtp_extra_options["exclude_embeds"] = False  # MTP head embeds input_ids
             mtp_extra_options["filename"] = "mtp.onnx"
-            # The MTP head is a leaf model whose only output is logits. It must not
+            # The MTP head is a leaf model whose decoder outputs are logits and its
+            # recurrent hidden state. It must not
             # inherit the main model's hidden-states/lm-head output options, which
             # would make the final-norm output double as a graph output and feed the
             # lm_head, creating a graph cycle.
@@ -2509,15 +2505,18 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         """
         import onnx
 
-        shared_names = ["model.embed_tokens.weight", "lm_head.MatMul.weight"]
         main_onnx = os.path.join(out_dir, main_file)
         mtp_onnx = os.path.join(out_dir, mtp_file)
         main_data_name = main_file + ".data"
         mtp_data_name = mtp_file + ".data"
         main_data = os.path.join(out_dir, main_data_name)
         mtp_data = os.path.join(out_dir, mtp_data_name)
-        if not (os.path.exists(main_onnx) and os.path.exists(mtp_onnx) and
-                os.path.exists(main_data) and os.path.exists(mtp_data)):
+        if not (
+            os.path.exists(main_onnx)
+            and os.path.exists(mtp_onnx)
+            and os.path.exists(main_data)
+            and os.path.exists(mtp_data)
+        ):
             return
 
         def ext_info(tensor):
@@ -2545,19 +2544,23 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                     remaining -= read_size
             return True
 
+        tmp_data = mtp_data + ".tmp"
+        tmp_onnx = mtp_onnx + ".tmp"
         try:
             main = onnx.load(main_onnx, load_external_data=False)
             main_info = {}
             for t in main.graph.initializer:
                 loc, off, ln = ext_info(t)
-                if loc == main_data_name:
+                if loc == main_data_name and (
+                    t.name == "model.embed_tokens.weight" or t.name.startswith("lm_head.MatMul.")
+                ):
                     main_info[t.name] = (t.data_type, tuple(t.dims), off, ln)
 
             mtp = onnx.load(mtp_onnx, load_external_data=False)
             mtp_inits = {t.name: t for t in mtp.graph.initializer}
 
             redirect, remove = {}, set()
-            for name in shared_names:
+            for name in main_info:
                 if name not in mtp_inits or name not in main_info:
                     continue
                 t = mtp_inits[name]
@@ -2583,14 +2586,16 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 kept.append((off, ln, t))
             kept.sort(key=lambda x: x[0])
 
-            tmp_data = mtp_data + ".tmp"
             with open(mtp_data, "rb") as fin, open(tmp_data, "wb") as fout:
                 new_off = 0
                 for old_off, ln, t in kept:
                     fin.seek(old_off)
                     remaining = ln
                     while remaining:
-                        buf = fin.read(min(1 << 22, remaining))
+                        read_size = min(1 << 22, remaining)
+                        buf = fin.read(read_size)
+                        if len(buf) != read_size:
+                            raise EOFError(f"Unexpected end of {mtp_data_name} while copying initializer '{t.name}'.")
                         fout.write(buf)
                         remaining -= len(buf)
                     set_ext(t, mtp_data_name, new_off, ln)
@@ -2598,15 +2603,25 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             for name, (m_off, m_len) in redirect.items():
                 set_ext(mtp_inits[name], main_data_name, m_off, m_len)
 
-            os.replace(tmp_data, mtp_data)
-            onnx.save(mtp, mtp_onnx)  # proto only; external data already written
-            saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
-            print(f"Shared MTP embedding + lm_head with the main model "
-                  f"(saved {saved_mb:.0f} MB from {mtp_data_name})")
-        except Exception as exc:  # noqa: BLE001 - sharing is a best-effort optimization
-            print(f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
-                  f"the duplicated copies remain in {mtp_data_name}.")
+            # Stage both outputs before replacing either original. Saving this
+            # metadata-only model preserves its external-data references.
+            onnx.save(mtp, tmp_onnx)
+        except Exception as exc:
+            for tmp_path in (tmp_data, tmp_onnx):
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            print(
+                f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
+                f"the duplicated copies remain in {mtp_data_name}."
+            )
+            return
 
+        # Commit only fully staged files. A replacement failure is intentionally
+        # fatal: suppressing it could report success for an inconsistent pair.
+        os.replace(tmp_data, mtp_data)
+        os.replace(tmp_onnx, mtp_onnx)
+        saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
+        print(f"Shared MTP embedding + lm_head with the main model (saved {saved_mb:.0f} MB from {mtp_data_name})")
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
@@ -2658,7 +2673,15 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
         # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...] for swiglu_fusion=1
-        is_nvfp4 = self.moe_attrs.get("quant_type") == "nvfp4"
+        # A ModelOpt checkpoint can contain native NVFP4 expert tensors. Preserve
+        # those when their scale metadata is present; otherwise quantize the
+        # checkpoint's dense expert tensors through the regular QMoE path.
+        first_expert = next(iter(mlp.experts), None)
+        is_nvfp4 = (
+            self.moe_attrs.get("quant_type") == "nvfp4"
+            and first_expert is not None
+            and getattr(first_expert.gate_proj, "weight_scale_2", None) is not None
+        )
         gate_up_proj_global_scales = ""
         down_proj_global_scales = ""
 
@@ -2771,19 +2794,13 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
 
             scale_shape = (inter, g_codes.shape[1] // 16)
-            g_sc = self.modelopt_e4m3_bytes(
-                expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape
-            )
-            u_sc = self.modelopt_e4m3_bytes(
-                expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape
-            )
+            g_sc = self.modelopt_e4m3_bytes(expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape)
+            u_sc = self.modelopt_e4m3_bytes(expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape)
             gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
             gate_global = self.modelopt_positive_scalar(
                 expert.gate_proj.weight_scale_2, f"{gate_prefix}.weight_scale_2"
             )
-            up_global = self.modelopt_positive_scalar(
-                expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2"
-            )
+            up_global = self.modelopt_positive_scalar(expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2")
             if gate_global != up_global:
                 raise ValueError(
                     f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
@@ -2802,9 +2819,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 )
             )
             down_g.append(
-                self.modelopt_positive_scalar(
-                    expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2"
-                )
+                self.modelopt_positive_scalar(expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2")
             )
 
         self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
@@ -2869,9 +2884,12 @@ class _LinearWeight:
     ``None`` bias), so ``make_matmul`` / ``make_lm_head`` can consume a raw weight
     tensor loaded directly from safetensors."""
 
-    def __init__(self, weight):
+    def __init__(self, weight, weight_scale=None, weight_scale_2=None, input_scale=None, bias=None):
         self.weight = weight
-        self.bias = None
+        self.weight_scale = weight_scale
+        self.weight_scale_2 = weight_scale_2
+        self.input_scale = input_scale
+        self.bias = bias
 
 
 class _RMSNormWeight:
@@ -2920,15 +2938,21 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         # Force a single hidden layer regardless of the original config value.
         extra_options = copy.deepcopy(extra_options)
         extra_options["num_hidden_layers"] = 1
-        extra_options["model_type"] = "Qwen3_5_Moe_textForCausalLM"
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # With no explicit override, a ModelOpt checkpoint keeps the original
+        # per-tensor MTP formats instead of dequantizing and requantizing them.
+        self._preserve_modelopt_mtp = self._should_preserve_modelopt_mtp(self.quant_type, extra_options)
 
         # The MTP head consumes the main model's last hidden state as an extra
         # input (alongside the standard input_ids / position_ids / KV cache).
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+
+    @staticmethod
+    def _should_preserve_modelopt_mtp(quant_type, extra_options):
+        return quant_type == "modelopt" and "mtp_head_quant_type" not in extra_options
 
     def make_model(self, input_path):
         # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
@@ -2954,13 +2978,11 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         self.make_layer(0, self._mtp_layer)
 
         # Final norm (mtp.norm) -> lm_head.
-        self.make_layernorm(
-            1, _RMSNormWeight(self._mtp_norm_weight), skip=True, simple=True, location="final_norm"
-        )
+        self.make_layernorm(1, _RMSNormWeight(self._mtp_norm_weight), skip=True, simple=True, location="final_norm")
         # Capture the post-final-norm hidden BEFORE lm_head consumes it, so it can be
         # exported as the recurrent feedback output for multi-token speculation.
         mtp_norm_output = self.layernorm_attrs["output_0"]
-        self.make_lm_head(_LinearWeight(self._lm_head_weight))
+        self.make_lm_head(self._lm_head)
 
         # A multi-token (num_speculative_tokens>1) loop feeds this back as the next chained
         # draft's `hidden_states` input, since the module is recurrent:
@@ -2969,11 +2991,12 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         # (genai's ExtraOutputs ignores unused outputs).
         hs_out = "hidden_states_out"
         self.make_node(
-            "Identity", inputs=[mtp_norm_output], outputs=[hs_out],
+            "Identity",
+            inputs=[mtp_norm_output],
+            outputs=[hs_out],
             name="/model/mtp/hidden_states_out/Identity",
         )
-        hs_val = self.make_value(hs_out, self.io_dtype,
-                                 shape=["batch_size", "sequence_length", self.hidden_size])
+        hs_val = self.make_value(hs_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
         self.model.graph.outputs.append(hs_val)
 
         self.make_postprocessing_nodes()
@@ -2993,9 +3016,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
         shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
         if not shards:
-            raise FileNotFoundError(
-                f"No .safetensors files found in '{model_dir}' for MTP weight loading."
-            )
+            raise FileNotFoundError(f"No .safetensors files found in '{model_dir}' for MTP weight loading.")
 
         mtp_state = {}
         embed_weight = None
@@ -3015,7 +3036,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
         for shard in shards:
             with safetensors_torch.safe_open(shard, framework="pt") as f:
-                for key in f.keys():
+                for key in f:
                     if key.startswith("mtp."):
                         mtp_state[key] = f.get_tensor(key)
                     elif key in embed_keys:
@@ -3028,9 +3049,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
                         lm_head_weight_scale_2 = f.get_tensor(key)
 
         if not mtp_state:
-            raise ValueError(
-                f"No 'mtp.*' weights found in '{model_dir}'; this model has no MTP head."
-            )
+            raise ValueError(f"No 'mtp.*' weights found in '{model_dir}'; this model has no MTP head.")
         if embed_weight is None:
             raise ValueError(
                 "Could not find the token embedding weight "
@@ -3040,25 +3059,29 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         if lm_head_weight is None:
             raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
 
-        # Reconstruct the dense BF16 lm_head from NVFP4 (block-16 E2M1 + E4M3 block
-        # scale + FP32 global scale). This mirrors the main model's lm_head so the two
-        # are byte-identical after quantization and can be deduplicated on disk
-        # (see _share_mtp_embedding_lm_head).
-        if lm_head_weight_scale_2 is not None:
-            from onnxruntime_genai.models.quantized_model import ModeloptModel
+        if self._preserve_modelopt_mtp:
+            modelopt_state = dict(mtp_state)
+            modelopt_state["lm_head.weight"] = lm_head_weight
+            if lm_head_weight_scale is not None:
+                modelopt_state["lm_head.weight_scale"] = lm_head_weight_scale
+            if lm_head_weight_scale_2 is not None:
+                modelopt_state["lm_head.weight_scale_2"] = lm_head_weight_scale_2
+            self._load_native_modelopt_mtp_weights(modelopt_state, embed_weight)
+            return
 
-            if lm_head_weight_scale is None:
-                raise ValueError(
-                    "Found 'lm_head.weight_scale_2' but not 'lm_head.weight_scale'; "
-                    "cannot dequantize the NVFP4 MTP head LM head."
-                )
-            lm_head_weight = ModeloptModel._dequant_nvfp4(
-                lm_head_weight, lm_head_weight_scale, lm_head_weight_scale_2, name="lm_head.weight"
-            )
+        # An explicit precision override requantizes from plain BF16 tensors.
+        # Dequantize any native ModelOpt linears before loading the HF layer.
+        mtp_state = self._dequantize_modelopt_state(mtp_state)
+        lm_head_weight = self._dequantize_modelopt_weight(
+            lm_head_weight,
+            lm_head_weight_scale,
+            lm_head_weight_scale_2,
+            "lm_head.weight",
+        )
 
         self._embed_weight = embed_weight
-        self._lm_head_weight = lm_head_weight
-        self._fc_weight = mtp_state["mtp.fc.weight"]
+        self._lm_head = _LinearWeight(lm_head_weight)
+        self._fc = _LinearWeight(mtp_state["mtp.fc.weight"])
         self._pre_fc_norm_embedding_weight = mtp_state["mtp.pre_fc_norm_embedding.weight"]
         self._pre_fc_norm_hidden_weight = mtp_state["mtp.pre_fc_norm_hidden.weight"]
         self._mtp_norm_weight = mtp_state["mtp.norm.weight"]
@@ -3067,17 +3090,145 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         # weights from the ``mtp.layers.0.*`` entries.
         mtp_layer = Qwen3_5MoeDecoderLayer(self._mtp_layer_config, layer_idx=0)
         layer_state = {
-            key[len("mtp.layers.0."):]: value
-            for key, value in mtp_state.items()
-            if key.startswith("mtp.layers.0.")
+            key[len("mtp.layers.0.") :]: value for key, value in mtp_state.items() if key.startswith("mtp.layers.0.")
         }
         missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
-        if unexpected:
-            raise ValueError(f"Unexpected keys when loading the MTP decoder layer: {unexpected}")
-        if missing:
-            print(f"Warning: missing keys when loading the MTP decoder layer: {missing}")
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if unexpected:
+                details.append(f"unexpected={unexpected}")
+            raise ValueError("Invalid MTP decoder-layer weights: " + ", ".join(details))
         mtp_layer.eval()
         self._mtp_layer = mtp_layer
+
+    @staticmethod
+    def _dequantize_modelopt_weight(weight, weight_scale, weight_scale_2, name):
+        if weight_scale_2 is not None:
+            if weight_scale is None:
+                raise ValueError(f"ModelOpt NVFP4 tensor '{name}' is missing its weight_scale.")
+            if weight_scale_2.numel() != 1:
+                raise ValueError(f"ModelOpt NVFP4 tensor '{name}' weight_scale_2 must be a scalar.")
+            if weight_scale.dtype == torch.uint8:
+                weight_scale = weight_scale.view(torch.float8_e4m3fn)
+            elif weight_scale.dtype != torch.float8_e4m3fn:
+                raise ValueError(
+                    f"ModelOpt NVFP4 tensor '{name}' weight_scale must be float8_e4m3fn or uint8, "
+                    f"got {weight_scale.dtype}."
+                )
+            low = weight.to(torch.uint8) & 0x0F
+            high = weight.to(torch.uint8) >> 4
+            codes = torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1).long()
+            magnitudes = torch.tensor(
+                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+                dtype=torch.float32,
+            )[codes & 0x7]
+            values = torch.where((codes & 0x8) > 0, -magnitudes, magnitudes)
+            block_scales = weight_scale.float()
+            if (
+                block_scales.ndim != 2
+                or block_scales.shape[0] != values.shape[0]
+                or block_scales.shape[1] == 0
+                or values.shape[1] % block_scales.shape[1] != 0
+            ):
+                raise ValueError(
+                    f"ModelOpt NVFP4 tensor '{name}' has incompatible weight/scale shapes "
+                    f"{tuple(weight.shape)} and {tuple(weight_scale.shape)}."
+                )
+            block_scales = block_scales.repeat_interleave(values.shape[1] // block_scales.shape[1], dim=1)
+            return (values * block_scales * float(weight_scale_2.float().item())).to(torch.bfloat16)
+        if weight.dtype == torch.float8_e4m3fn:
+            if weight_scale is None or weight_scale.numel() != 1:
+                raise ValueError(f"ModelOpt FP8 tensor '{name}' must have a scalar weight_scale.")
+            return (weight.float() * float(weight_scale.float().item())).to(torch.bfloat16)
+        return weight
+
+    @classmethod
+    def _dequantize_modelopt_state(cls, state):
+        result = {}
+        metadata_suffixes = (".weight_scale", ".weight_scale_2", ".input_scale")
+        for name, tensor in state.items():
+            if name.endswith(metadata_suffixes):
+                continue
+            if not name.endswith(".weight"):
+                result[name] = tensor
+                continue
+            prefix = name.removesuffix(".weight")
+            result[name] = cls._dequantize_modelopt_weight(
+                tensor,
+                state.get(f"{prefix}.weight_scale"),
+                state.get(f"{prefix}.weight_scale_2"),
+                name,
+            )
+        return result
+
+    def _load_native_modelopt_mtp_weights(self, state, embed_weight):
+        """Build lightweight MTP modules while retaining ModelOpt scale metadata."""
+
+        def required(name):
+            tensor = state.get(name)
+            if tensor is None:
+                raise ValueError(f"ModelOpt MTP checkpoint is missing '{name}'.")
+            return tensor
+
+        def linear(prefix):
+            return _LinearWeight(
+                required(f"{prefix}.weight"),
+                weight_scale=state.get(f"{prefix}.weight_scale"),
+                weight_scale_2=state.get(f"{prefix}.weight_scale_2"),
+                input_scale=state.get(f"{prefix}.input_scale"),
+                bias=state.get(f"{prefix}.bias"),
+            )
+
+        def norm(name):
+            return _RMSNormWeight(required(name))
+
+        layer_prefix = "mtp.layers.0"
+        attention_prefix = f"{layer_prefix}.self_attn"
+        mlp_prefix = f"{layer_prefix}.mlp"
+        attention = SimpleNamespace(
+            q_proj=linear(f"{attention_prefix}.q_proj"),
+            k_proj=linear(f"{attention_prefix}.k_proj"),
+            v_proj=linear(f"{attention_prefix}.v_proj"),
+            o_proj=linear(f"{attention_prefix}.o_proj"),
+            q_norm=norm(f"{attention_prefix}.q_norm.weight"),
+            k_norm=norm(f"{attention_prefix}.k_norm.weight"),
+        )
+        experts = []
+        for expert_id in range(self.moe_attrs["num_experts"]):
+            expert_prefix = f"{mlp_prefix}.experts.{expert_id}"
+            experts.append(
+                SimpleNamespace(
+                    gate_proj=linear(f"{expert_prefix}.gate_proj"),
+                    up_proj=linear(f"{expert_prefix}.up_proj"),
+                    down_proj=linear(f"{expert_prefix}.down_proj"),
+                )
+            )
+        shared_prefix = f"{mlp_prefix}.shared_expert"
+        mlp = SimpleNamespace(
+            gate=linear(f"{mlp_prefix}.gate"),
+            experts=experts,
+            shared_expert=SimpleNamespace(
+                gate_proj=linear(f"{shared_prefix}.gate_proj"),
+                up_proj=linear(f"{shared_prefix}.up_proj"),
+                down_proj=linear(f"{shared_prefix}.down_proj"),
+            ),
+            shared_expert_gate=linear(f"{mlp_prefix}.shared_expert_gate"),
+        )
+        self._mtp_layer = SimpleNamespace(
+            input_layernorm=norm(f"{layer_prefix}.input_layernorm.weight"),
+            post_attention_layernorm=norm(f"{layer_prefix}.post_attention_layernorm.weight"),
+            self_attn=attention,
+            linear_attn=None,
+            mlp=mlp,
+        )
+        self._embed_weight = embed_weight
+        self._lm_head = linear("lm_head")
+        self._fc = linear("mtp.fc")
+        self._pre_fc_norm_embedding_weight = required("mtp.pre_fc_norm_embedding.weight")
+        self._pre_fc_norm_hidden_weight = required("mtp.pre_fc_norm_hidden.weight")
+        self._mtp_norm_weight = required("mtp.norm.weight")
 
     def _make_offset_rmsnorm(self, name, root_input, weight_tensor):
         """Build a non-skip SimplifiedLayerNormalization with the ``(1 + weight)``
@@ -3134,5 +3285,5 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         )
 
         # fc: [2H -> H]
-        fc_name = self.make_matmul(_LinearWeight(self._fc_weight), f"{basename}/fc/MatMul", f"{concat_name}/output_0")
+        fc_name = self.make_matmul(self._fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"

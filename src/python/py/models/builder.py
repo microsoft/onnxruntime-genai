@@ -168,10 +168,6 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
-        "fp8_kv_cache",
-        "fuse_linear_attn_gates",
-        "use_original_fp8_weights",
-        "use_original_nvfp4_weights",
         "enable_mtp",
     ]
 
@@ -746,8 +742,9 @@ def get_args():
                 enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
                     Requires include_hidden_states=true, exclude_lm_head=false, and source safetensors containing mtp.* weights.
                 mtp_head_quant_type = int4/int8/mxfp4/nvfp4: Override the MTP head quantization scheme.
-                    By default the head inherits the main model precision. For mxfp4/nvfp4, dense MatMuls use int4
-                    while routed experts use the selected FP4 QMoE format.
+                    By default the head inherits the main model precision; ModelOpt MTP tensors keep their native
+                    NVFP4/FP8 formats. An explicit override dequantizes native tensors first. For mxfp4/nvfp4,
+                    dense MatMuls then use int4 while routed experts use the selected FP4 QMoE format.
                 recurrent_state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Requires ONNX Runtime kernels that implement the state_window attribute.
