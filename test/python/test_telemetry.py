@@ -712,8 +712,7 @@ class TestPathRedaction(unittest.TestCase):
         ) as token_start:
             scrubbed = path_utils.scrub_error_message_for_telemetry(slash_heavy_url)
 
-        self.assertEqual(len(scrubbed.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
-        self.assertTrue(scrubbed.startswith("https://example.test/"))
+        self.assertEqual(scrubbed, "[path]")
         self.assertEqual(token_start.call_count, 1)
 
         slash_heavy_token = "a" + "/" * MAX_ERROR_MESSAGE_LENGTH + "b"
@@ -726,7 +725,7 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(len(scrubbed.encode("utf-8")), MAX_ERROR_MESSAGE_LENGTH)
         self.assertEqual(token_start.call_count, 1)
 
-    def test_local_file_uris_are_redacted_but_remote_urls_are_preserved(self):
+    def test_uri_values_are_redacted(self):
         from telemetry.path_utils import scrub_string_for_telemetry
 
         self.assertEqual(
@@ -739,7 +738,7 @@ class TestPathRedaction(unittest.TestCase):
         )
         self.assertEqual(
             scrub_string_for_telemetry("https://example.test/model"),
-            "https://example.test/model",
+            "[path]",
         )
         self.assertEqual(
             scrub_string_for_telemetry("ssh://alice@host/home/alice/.ssh/id_rsa"),
@@ -755,11 +754,11 @@ class TestPathRedaction(unittest.TestCase):
         )
         self.assertEqual(
             scrub_string_for_telemetry("GET https://host/x?path=/home/alice/model.onnx failed"),
-            "GET https://host/x?path=[path]",
+            "GET [path]",
         )
         self.assertEqual(
             scrub_string_for_telemetry("https://huggingface.co/microsoft/phi-3"),
-            "https://huggingface.co/microsoft/phi-3",
+            "[path]",
         )
         self.assertEqual(
             scrub_string_for_telemetry(
@@ -769,11 +768,11 @@ class TestPathRedaction(unittest.TestCase):
         )
         self.assertEqual(
             scrub_string_for_telemetry("https://host/x,/home/alice/out.onnx"),
-            "https://host/x,[path]",
+            "[path]",
         )
         self.assertEqual(
             scrub_string_for_telemetry("download(https://host/x,/home/alice/out.onnx)"),
-            "download(https://host/x,[path]",
+            "[path]",
         )
 
     def test_format_exception_message_redacts_source_line_paths(self):
@@ -956,7 +955,7 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(payloads[0]["assignment"], "file=[path]")
         self.assertEqual(payloads[0]["parenthesized"], "missing([path]")
         self.assertEqual(payloads[0]["ratio"], "n/a")
-        self.assertEqual(payloads[0]["url"], "https://example.com/model")
+        self.assertEqual(payloads[0]["url"], "[path]")
         self.assertEqual(payloads[1]["exceptionMessage"], "missing [path]")
 
     def test_exception_message_keeps_error_specific_size_limit(self):
