@@ -777,7 +777,7 @@ def _create_model_impl(
     if input_path and input_path.lower().endswith(".gguf"):
         source_format = "gguf"
 
-    build_success = True
+    build_success = False
     try:
         if not config_only:
             # Make ONNX model
@@ -791,9 +791,7 @@ def _create_model_impl(
 
         # Copy Hugging Face processing files to output folder
         onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
-    except Exception:
-        build_success = False
-        raise
+        build_success = True
     finally:
         overall_duration_ms = (time.perf_counter() - overall_start) * 1000
         _telemetry_state["emitted"] = True

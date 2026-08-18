@@ -245,3 +245,41 @@ def test_pathlike_input_preserves_early_failure_telemetry(monkeypatch):
 
     assert captured["source_format"] == "gguf"
     assert captured["fallback_model_name"] == "model.gguf"
+
+
+def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path):
+    captured = {}
+    config = types.SimpleNamespace(architectures=["LlamaForCausalLM"])
+
+    class InterruptedModel:
+        def make_model(self, input_path):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(builder_module, "set_io_dtype", lambda *args: object())
+    monkeypatch.setattr(builder_module, "set_onnx_dtype", lambda *args: object())
+    monkeypatch.setattr(builder_module, "LlamaModel", lambda *args: InterruptedModel())
+    monkeypatch.setattr(
+        builder_module,
+        "_emit_model_build_telemetry",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    telemetry_state = {"emitted": False}
+
+    with pytest.raises(KeyboardInterrupt):
+        builder_module._create_model_impl(
+            "model",
+            "",
+            str(tmp_path / "output"),
+            "fp16",
+            "cpu",
+            str(tmp_path / "cache"),
+            telemetry_state,
+            hf_details={
+                "extra_kwargs": {},
+                "hf_name": "model",
+                "hf_config": config,
+            },
+        )
+
+    assert telemetry_state["emitted"]
+    assert captured["success"] is False
