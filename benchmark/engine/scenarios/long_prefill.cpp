@@ -66,7 +66,7 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
     auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + 1));
+    params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
     params->SetSearchOption("random_seed", kRandomSeed);
 
     auto request = OgaRequest::Create(*params);
