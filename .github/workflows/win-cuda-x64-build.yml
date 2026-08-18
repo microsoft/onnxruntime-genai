@@ -21,6 +21,7 @@ env:
   binaryDir: 'build/cuda/win-x64/Release'
   ORT_NUGET_SOURCE: "https://api.nuget.org/v3/index.json"
   ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_PACKAGE_VERSION: "1.28.0"
   ORT_EP_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.EP.Cuda12.win-x64"
@@ -144,11 +145,10 @@ jobs:
         run: |
           $nativeOutput = "$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
           Remove-Item "$nativeOutput\onnxruntime_providers_cuda.dll" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$nativeOutput\onnxruntime_providers_shared.dll" -Force -ErrorAction SilentlyContinue
-          Copy-Item "$env:GITHUB_WORKSPACE\ort\lib\onnxruntime.dll" $nativeOutput -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\ort\lib\*" $nativeOutput -Force
 
-          if (Get-ChildItem $nativeOutput -Filter "onnxruntime_providers_*.dll") {
-            throw "Provider-bridge libraries must not be present in the native test runtime."
+          if (Test-Path "$nativeOutput\onnxruntime_providers_cuda.dll") {
+            throw "The provider-bridge CUDA library must not be present in the native test runtime."
           }
           if (-not (Test-Path "$env:GITHUB_WORKSPACE\ort\ep\onnxruntime_providers_cuda.dll")) {
             throw "CUDA EP plugin was not staged in ort/ep."
@@ -185,6 +185,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\cuda\torch\requirements.txt
           python -m pip install -r test\python\cuda\ort\requirements.txt
+          python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PACKAGE_VERSION
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the synthetic Engine Python tests

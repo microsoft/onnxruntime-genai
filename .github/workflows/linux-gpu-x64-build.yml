@@ -18,6 +18,7 @@ env:
   ORT_RUNTIME_PACKAGE_NAME: microsoft.ml.onnxruntime
   ORT_EP_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64
   ORT_EP_PACKAGE_VERSION: "0.1.0"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -109,7 +110,7 @@ jobs:
           cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
           test -f ort/ep/libonnxruntime_providers_cuda.so
-          test -z "$(find ort/lib -maxdepth 1 -name 'libonnxruntime_providers_*.so' -print -quit)"
+          test ! -f ort/lib/libonnxruntime_providers_cuda.so
 
       - name: Get Docker Image
         run: |
@@ -202,6 +203,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip uninstall -y onnxruntime-gpu && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PACKAGE_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
@@ -220,8 +222,8 @@ jobs:
       - name: Docker -- Run unit tests
         run: |
           echo "Running docker image onnxruntimecudabuildx64"
-          rm -f build/cuda/Release/libonnxruntime_providers_cuda.so build/cuda/Release/libonnxruntime_providers_shared.so
-          test -z "$(find build/cuda/Release -maxdepth 1 -name 'libonnxruntime_providers_*.so' -print -quit)"
+          rm -f build/cuda/Release/libonnxruntime_providers_cuda.so
+          test ! -f build/cuda/Release/libonnxruntime_providers_cuda.so
           docker run \
             --gpus all \
             --rm \
