@@ -27,7 +27,12 @@ import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from metrics import BenchmarkRecord
-from telemetry_utils import emit_benchmark_telemetry, normalize_execution_provider, sanitize_model_identifier
+from telemetry_utils import (
+    emit_benchmark_telemetry,
+    normalize_execution_provider,
+    sanitize_model_identifier,
+    shutdown_telemetry,
+)
 from telemetry_utils import get_telemetry as _get_telemetry
 from tqdm import tqdm
 
@@ -707,4 +712,7 @@ if __name__ == "__main__":
     assert is_max_lengths_valid, (
         "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
     )
-    main(args)
+    try:
+        main(args)
+    finally:
+        shutdown_telemetry()

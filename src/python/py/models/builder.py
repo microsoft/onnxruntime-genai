@@ -493,6 +493,13 @@ def _get_model_builder_telemetry():
         return None
 
 
+def _shutdown_model_builder_telemetry(max_seconds: float = 1.0) -> None:
+    """Best-effort bounded delivery for the model-builder CLI."""
+    telemetry = _get_model_builder_telemetry()
+    if telemetry is not None:
+        telemetry.shutdown(max_seconds)
+
+
 def _emit_model_build_telemetry(
     action_name: str,
     duration_ms: float,
@@ -919,7 +926,7 @@ def get_args():
     parser.add_argument(
         "--disable_telemetry",
         action="store_true",
-        help="Disable detailed telemetry; one Heartbeat may still be attempted (equivalent to ORT_DISABLE_TELEMETRY=1).",
+        help="Disable all Python telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
@@ -1101,12 +1108,15 @@ if __name__ == "__main__":
         args.cache_dir,
         args.extra_options,
     )
-    create_model(
-        args.model_name,
-        args.input,
-        args.output,
-        args.precision,
-        args.execution_provider,
-        args.cache_dir,
-        **extra_options,
-    )
+    try:
+        create_model(
+            args.model_name,
+            args.input,
+            args.output,
+            args.precision,
+            args.execution_provider,
+            args.cache_dir,
+            **extra_options,
+        )
+    finally:
+        _shutdown_model_builder_telemetry()

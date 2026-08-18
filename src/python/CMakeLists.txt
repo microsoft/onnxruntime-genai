@@ -28,8 +28,8 @@ if(NOT DEFINED REPO_ROOT)
   if(DEFINED onnxruntime-genai_ENABLE_TELEMETRY)
     set(ENABLE_TELEMETRY ${onnxruntime-genai_ENABLE_TELEMETRY})
   elseif(NOT DEFINED ENABLE_TELEMETRY)
-    # Preserve compatibility with prebuilt SDKs that predate this exported flag.
-    set(ENABLE_TELEMETRY ON)
+    # Missing build metadata must fail closed.
+    set(ENABLE_TELEMETRY OFF)
   endif()
 
   if(NOT DEFINED ORT_HOME)

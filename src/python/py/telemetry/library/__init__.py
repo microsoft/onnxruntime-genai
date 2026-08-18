@@ -10,9 +10,7 @@ Microsoft OneCollector endpoint. These modules have no third-party dependency
 and are driven directly by the SQLite-backed uploader.
 """
 
-from .callback_manager import CallbackManager, PayloadTransmittedCallbackArgs
 from .connection_string_parser import ConnectionStringParser
-from .event_source import OneCollectorEventId, OneCollectorEventSource, event_source
 from .options import (
     CompressionType,
     OneCollectorExporterOptions,
@@ -21,21 +19,15 @@ from .options import (
 )
 from .payload_builder import PayloadBuilder
 from .serialization import CommonSchemaJsonSerializationHelper
-from .transport import HttpJsonPostTransport, ITransport
+from .transport import HttpJsonPostTransport
 
 __all__ = [
-    "CallbackManager",
     "CommonSchemaJsonSerializationHelper",
     "CompressionType",
     "ConnectionStringParser",
     "HttpJsonPostTransport",
-    "ITransport",
-    "OneCollectorEventId",
-    "OneCollectorEventSource",
     "OneCollectorExporterOptions",
     "OneCollectorExporterValidationError",
     "OneCollectorTransportOptions",
     "PayloadBuilder",
-    "PayloadTransmittedCallbackArgs",
-    "event_source",
 ]

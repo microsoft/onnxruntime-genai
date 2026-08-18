@@ -7,9 +7,10 @@
 
 import os
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 _SOURCE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
+_telemetry_state = {"instance": None}
 
 
 @contextmanager
@@ -33,13 +34,23 @@ except ImportError:
 
 def get_telemetry():
     """Create telemetry from either the installed wheel or repository source."""
+    if _telemetry_state["instance"] is not None:
+        return _telemetry_state["instance"]
     try:
         from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
     except ImportError:
         with _source_path():
             from telemetry import GenAITelemetry  # noqa: PLC0415
 
-    return GenAITelemetry()
+    _telemetry_state["instance"] = GenAITelemetry()
+    return _telemetry_state["instance"]
+
+
+def shutdown_telemetry(max_seconds=1.0):
+    """Best-effort bounded delivery for benchmark entry points."""
+    if _telemetry_state["instance"] is not None:
+        with suppress(Exception):
+            _telemetry_state["instance"].shutdown(max_seconds)
 
 
 def emit_benchmark_telemetry(
@@ -96,4 +107,5 @@ __all__ = [
     "get_telemetry",
     "normalize_execution_provider",
     "sanitize_model_identifier",
+    "shutdown_telemetry",
 ]

@@ -7,8 +7,7 @@
 
 Provides telemetry integration for ONNX Runtime GenAI via Microsoft OneCollector.
 Set ORT_DISABLE_TELEMETRY=1 before initialization, or call disable_telemetry(),
-to suppress detailed events. One best-effort Heartbeat may still be attempted.
-CI and automated-test environments suppress all telemetry.
+to suppress all Python telemetry for the remainder of the process.
 
 Usage:
     from onnxruntime_genai.telemetry import GenAITelemetry, action, ActionContext

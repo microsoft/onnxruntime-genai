@@ -29,9 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from .deviceid import get_hashed_device_id_and_status, get_telemetry_base_dir
-from .library.options import CompressionType, OneCollectorExporterOptions, OneCollectorTransportOptions
+from .library.options import OneCollectorExporterOptions
 from .library.serialization import CommonSchemaJsonSerializationHelper
-from .library.transport import HttpJsonPostTransport
 from .offline_store import OfflineEventStore
 from .path_utils import scrub_error_message_for_telemetry, scrub_string_for_telemetry, scrub_value_for_telemetry
 from .system_info import get_execution_provider_info, get_system_info
@@ -45,6 +44,7 @@ MODEL_LOAD_EVENT = "GenAIModelLoad"
 INFERENCE_EVENT = "GenAIInference"
 ACTION_EVENT = "GenAIAction"
 ERROR_EVENT = "GenAIError"
+_HEARTBEAT_RELEASE_SECONDS = 60.0
 
 # CI environment variables that auto-disable telemetry. Keep this aligned with
 # src/telemetry/telemetry_environment.h.
@@ -161,6 +161,7 @@ class GenAITelemetry:
     _instance: GenAITelemetry | None = None
     _lock = threading.RLock()
     _process_disabled = False
+    _forked_child = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -190,17 +191,17 @@ class GenAITelemetry:
             if not hasattr(self, "_heartbeat_thread"):
                 self._heartbeat_thread: threading.Thread | None = None
 
-            # CI and automated tests are the only full-disable state.
-            if _is_ci_environment():
-                self._telemetry_disabled = True
-                self._enabled = False
-                return
-
-            user_opt_out = self._telemetry_disabled or _is_telemetry_disabled_by_environment()
-            if user_opt_out:
+            # All opt-out surfaces are full process-lifetime suppression.
+            if (
+                self._telemetry_disabled
+                or self._process_disabled
+                or _is_ci_environment()
+                or _is_telemetry_disabled_by_environment()
+            ):
                 type(self)._process_disabled = True
                 self._telemetry_disabled = True
                 self._enabled = False
+                return
 
             self._app_session_guid = str(uuid.uuid4())
 
@@ -216,15 +217,7 @@ class GenAITelemetry:
                     f"{CommonSchemaJsonSerializationHelper.ONE_COLLECTOR_TENANCY_SYMBOL}:{options.tenant_token}"
                 )
 
-                # Every non-CI process makes one off-thread Heartbeat attempt,
-                # including user opt-out. It is independent of detailed-event
-                # persistence, so opt-out cannot drain previously queued details.
-                self._start_heartbeat_once()
-
-                if user_opt_out:
-                    return
-
-                # Durable on-disk queue + uploader for detailed events.
+                # Heartbeat and detailed events share the durable queue.
                 db_path = os.path.join(get_telemetry_base_dir(), "genai_telemetry.db")
                 self._store = OfflineEventStore(db_path)
                 if not self._store.is_open:
@@ -232,8 +225,25 @@ class GenAITelemetry:
                     self._enabled = False
                     self._initialized = False
                     return
+
+                heartbeat_id = None
+                if not self._heartbeat_started and not type(self)._forked_child:
+                    heartbeat_id = self._store.reserve(
+                        self._serialize_event(HEARTBEAT_EVENT, self._minimal_heartbeat_attributes()),
+                        _HEARTBEAT_RELEASE_SECONDS,
+                    )
+                    self._heartbeat_started = heartbeat_id is not None
+
                 self._uploader = EventUploader(self._store, instrumentation_key=self._instrumentation_key)
                 self._uploader.start()
+                if heartbeat_id is not None:
+                    self._heartbeat_thread = threading.Thread(
+                        target=self._send_heartbeat,
+                        args=(heartbeat_id,),
+                        name="genai-telemetry-heartbeat",
+                        daemon=True,
+                    )
+                    self._heartbeat_thread.start()
             except Exception:
                 self._enabled = False
                 self.shutdown(1.0)
@@ -329,30 +339,20 @@ class GenAITelemetry:
             "availableProviders": ",".join(ep_info.get("available_providers", [])),
         }
 
-    def _start_heartbeat_once(self) -> None:
-        if self._heartbeat_started:
-            return
-        self._heartbeat_started = True
-        self._heartbeat_thread = threading.Thread(
-            target=self._send_heartbeat,
-            name="genai-telemetry-heartbeat",
-            daemon=True,
-        )
-        self._heartbeat_thread.start()
-
-    def _send_heartbeat(self) -> None:
-        """Make one direct best-effort Heartbeat attempt for this process."""
+    def _send_heartbeat(self, row_id: int) -> None:
+        """Enrich and release an already-durable Heartbeat."""
+        released = False
         try:
             payload = self._serialize_event(HEARTBEAT_EVENT, self._build_heartbeat_attributes())
-            transport_options = OneCollectorTransportOptions()
-            transport = HttpJsonPostTransport(
-                endpoint=transport_options.endpoint,
-                ikey=self._instrumentation_key,
-                compression=CompressionType.DEFLATE,
-            )
-            transport.send(payload, transport_options.timeout_seconds, item_count=1)
+            if self._store is not None:
+                released = self._store.release(row_id, payload)
         except Exception:
-            return
+            pass
+        finally:
+            if not released and self._store is not None:
+                released = self._store.release(row_id)
+            if released and self._uploader is not None:
+                self._uploader.request_drain()
 
     def log(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Log a generic telemetry event."""
@@ -562,7 +562,7 @@ class GenAITelemetry:
             return
 
     def disable_telemetry(self) -> None:
-        """Disable detailed telemetry while preserving the one Heartbeat attempt."""
+        """Fully disable Python telemetry for the remainder of this process."""
         with self._lock:
             type(self)._process_disabled = True
             self._telemetry_disabled = True
@@ -576,6 +576,8 @@ class GenAITelemetry:
                 if self._uploader.stop_loop(0):
                     self._uploader.close()
                     self._uploader = None
+            if self._store is not None:
+                self._store.clear()
 
     @classmethod
     def _before_fork(cls) -> None:
@@ -592,6 +594,7 @@ class GenAITelemetry:
         instance = cls._instance
         telemetry_disabled = bool(instance is not None and getattr(instance, "_telemetry_disabled", False))
         cls._lock = threading.RLock()
+        cls._forked_child = True
         cls._instance = None
         if instance is None:
             return
@@ -608,9 +611,9 @@ class GenAITelemetry:
         instance._uploader = None
         instance._store = None
         instance._heartbeat_thread = None
-        instance._heartbeat_started = False
+        instance._heartbeat_started = True
         if telemetry_disabled:
-            cls._instance = instance
+            cls._process_disabled = True
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.
@@ -622,16 +625,6 @@ class GenAITelemetry:
 
         def remaining_seconds() -> float:
             return max(0.0, deadline - time.monotonic())
-
-        heartbeat_stopped = True
-        if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
-            if getattr(self, "_telemetry_disabled", False):
-                heartbeat_stopped = not self._heartbeat_thread.is_alive()
-            elif self._heartbeat_thread.ident is not None:
-                self._heartbeat_thread.join(remaining_seconds())
-                heartbeat_stopped = not self._heartbeat_thread.is_alive()
-            if heartbeat_stopped:
-                self._heartbeat_thread = None
 
         uploader_stopped = True
         if self._uploader is not None:
@@ -645,13 +638,25 @@ class GenAITelemetry:
                 uploader_stopped = self._uploader.stop_loop(remaining_seconds())
                 if uploader_stopped:
                     try:
-                        if not getattr(self, "_telemetry_disabled", False):
+                        if getattr(self, "_telemetry_disabled", False):
+                            if self._store is not None:
+                                self._store.clear()
+                        else:
                             self._uploader.flush(remaining_seconds())
                     finally:
                         self._uploader.close()
                         self._uploader = None
             except Exception:
                 uploader_stopped = False
+
+        heartbeat_stopped = True
+        if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
+            if self._heartbeat_thread.ident is not None:
+                self._heartbeat_thread.join(remaining_seconds())
+            heartbeat_stopped = not self._heartbeat_thread.is_alive()
+            if heartbeat_stopped:
+                self._heartbeat_thread = None
+
         if self._store is not None and uploader_stopped and heartbeat_stopped:
             self._store.close()
             self._store = None
@@ -666,10 +671,12 @@ def _get_telemetry() -> GenAITelemetry:
 
 
 def disable_telemetry() -> None:
-    """Disable detailed telemetry after starting the one Heartbeat attempt."""
+    """Latch full suppression without initializing telemetry."""
     with GenAITelemetry._lock:
         GenAITelemetry._process_disabled = True
-        GenAITelemetry().disable_telemetry()
+        instance = GenAITelemetry._instance
+        if instance is not None:
+            instance.disable_telemetry()
 
 
 if hasattr(os, "register_at_fork"):

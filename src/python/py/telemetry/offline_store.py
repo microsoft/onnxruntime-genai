@@ -79,7 +79,8 @@ class OfflineEventStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={effective_busy_timeout_ms}")
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS events "
+                "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL, available_at REAL NOT NULL DEFAULT 0)"
             )
             conn.commit()
             # A reconnect may use a short probe timeout, but normal operations
@@ -123,26 +124,37 @@ class OfflineEventStore:
 
     def store(self, payload: bytes) -> bool:
         """Append one serialized event; trims the oldest rows if over capacity."""
+        return self._store(payload, 0.0) is not None
+
+    def reserve(self, payload: bytes, available_after_seconds: float) -> int | None:
+        """Persist an event but defer draining until it is released or the delay expires."""
+        return self._store(payload, time.time() + max(0.0, available_after_seconds))
+
+    def _store(self, payload: bytes, available_at: float) -> int | None:
         if not payload:
-            return False
+            return None
         with self._lock:
             if not self._ensure_open():
-                return False
+                return None
             try:
-                self._conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(payload),))
+                cursor = self._conn.execute(
+                    "INSERT INTO events (payload, available_at) VALUES (?, ?)",
+                    (sqlite3.Binary(payload), available_at),
+                )
                 count = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
                 if count > self._max_records:
                     self._conn.execute(
-                        "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id ASC LIMIT ?)",
-                        (count - self._trim_target,),
+                        "DELETE FROM events WHERE id IN "
+                        "(SELECT id FROM events WHERE available_at <= ? ORDER BY id ASC LIMIT ?)",
+                        (time.time(), count - self._trim_target),
                     )
                 self._conn.commit()
                 self._harden_permissions()
-                return True
+                return int(cursor.lastrowid)
             except Exception:
                 with suppress(Exception):
                     self._conn.rollback()
-                return False
+                return None
 
     def get_batch(self, max_count: int) -> list[tuple[int, bytes]]:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
@@ -151,12 +163,32 @@ class OfflineEventStore:
                 return []
             try:
                 rows = self._conn.execute(
-                    "SELECT id, payload FROM events ORDER BY id ASC LIMIT ?",
-                    (max_count if max_count > 0 else -1,),
+                    "SELECT id, payload FROM events WHERE available_at <= ? ORDER BY id ASC LIMIT ?",
+                    (time.time(), max_count if max_count > 0 else -1),
                 ).fetchall()
                 return [(r[0], bytes(r[1])) for r in rows]
             except Exception:
                 return []
+
+    def release(self, row_id: int, payload: bytes | None = None) -> bool:
+        """Make a reserved event drainable, optionally replacing its payload."""
+        with self._lock:
+            if not self._ensure_open():
+                return False
+            try:
+                if payload is None:
+                    cursor = self._conn.execute("UPDATE events SET available_at=0 WHERE id=?", (row_id,))
+                else:
+                    cursor = self._conn.execute(
+                        "UPDATE events SET payload=?, available_at=0 WHERE id=?",
+                        (sqlite3.Binary(payload), row_id),
+                    )
+                self._conn.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                with suppress(Exception):
+                    self._conn.rollback()
+                return False
 
     def delete(self, ids: list[int]) -> bool:
         """Remove rows by id (after a successful upload or a permanent drop)."""
@@ -168,6 +200,20 @@ class OfflineEventStore:
             # Failed deletes leave rows durable for a later drain attempt.
             try:
                 self._conn.executemany("DELETE FROM events WHERE id=?", [(i,) for i in ids])
+                self._conn.commit()
+                return True
+            except Exception:
+                with suppress(Exception):
+                    self._conn.rollback()
+                return False
+
+    def clear(self) -> bool:
+        """Discard all queued events after a runtime opt-out."""
+        with self._lock:
+            if not self._ensure_open():
+                return False
+            try:
+                self._conn.execute("DELETE FROM events")
                 self._conn.commit()
                 return True
             except Exception:

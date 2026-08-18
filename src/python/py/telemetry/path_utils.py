@@ -13,7 +13,7 @@ from collections.abc import Set as AbstractSet
 from datetime import date, datetime, time, timedelta
 from uuid import UUID
 
-MAX_TELEMETRY_STRING_LENGTH = 256
+MAX_TELEMETRY_STRING_LENGTH = 40_960
 MAX_ERROR_MESSAGE_LENGTH = 40_960
 
 

@@ -25,7 +25,7 @@ import onnxruntime_genai as og
 import pandas as pd
 import psutil
 from telemetry_utils import get_telemetry as _get_telemetry
-from telemetry_utils import sanitize_model_identifier
+from telemetry_utils import sanitize_model_identifier, shutdown_telemetry
 from tqdm import tqdm
 
 
@@ -434,4 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
     parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
     args = parser.parse_args()
-    main(args)
+    try:
+        main(args)
+    finally:
+        shutdown_telemetry()

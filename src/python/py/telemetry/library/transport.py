@@ -16,34 +16,13 @@ import time
 import urllib.error
 import urllib.request
 import zlib
-from abc import ABC, abstractmethod
-from collections.abc import Callable
 from contextlib import suppress
 from io import BytesIO
-from typing import TYPE_CHECKING
 
-from .event_source import event_source
 from .options import CompressionType
 
-if TYPE_CHECKING:
-    from .callback_manager import CallbackManager, PayloadTransmittedCallbackArgs
 
-
-class ITransport(ABC):
-    """Abstract base class for transports."""
-
-    @abstractmethod
-    def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, int | None]:
-        """Send a payload. Returns (success, status_code)."""
-
-    @abstractmethod
-    def register_payload_transmitted_callback(
-        self, callback: Callable[[PayloadTransmittedCallbackArgs], None], include_failures: bool = False
-    ) -> Callable[[], None]:
-        """Register a callback for payload transmission events."""
-
-
-class HttpJsonPostTransport(ITransport):
+class HttpJsonPostTransport:
     """HTTP JSON POST transport using ``urllib`` (no third-party dependency)."""
 
     def __init__(
@@ -51,14 +30,12 @@ class HttpJsonPostTransport(ITransport):
         endpoint: str,
         ikey: str,
         compression: CompressionType,
-        callback_manager: CallbackManager | None = None,
         sdk_version: str = "py-genai-1.0.0",
     ):
         self.endpoint = endpoint
         self.ikey = ikey
         self.compression = compression
         self.sdk_version = sdk_version
-        self.callback_manager = callback_manager
 
         self.headers = {
             "x-apikey": ikey,
@@ -70,19 +47,8 @@ class HttpJsonPostTransport(ITransport):
         if compression != CompressionType.NO_COMPRESSION:
             self.headers["Content-Encoding"] = compression.value
 
-    def register_payload_transmitted_callback(
-        self, callback: Callable[[PayloadTransmittedCallbackArgs], None], include_failures: bool = False
-    ) -> Callable[[], None]:
-        if self.callback_manager is None:
-            from .callback_manager import CallbackManager  # noqa: PLC0415
-
-            self.callback_manager = CallbackManager()
-
-        return self.callback_manager.register(callback, include_failures)
-
     def send(self, payload: bytes, timeout_sec: float, item_count: int = 1) -> tuple[bool, int | None]:
         """Send payload via HTTP POST. Returns (success, status_code)."""
-        payload_size_bytes = len(payload)
         try:
             compressed_payload = self._compress(payload)
             headers = {**self.headers, "Content-Length": str(len(compressed_payload))}
@@ -90,17 +56,8 @@ class HttpJsonPostTransport(ITransport):
 
             success, status_code = self._do_request(request, timeout_sec)
 
-            self._notify(success, status_code, payload_size_bytes, item_count, payload)
-
-            if success:
-                return True, status_code
-            if event_source.is_error_logging_enabled and status_code is not None:
-                event_source.http_transport_error_response("HttpJsonPost", status_code, "", "")
-            return False, status_code
-
-        except Exception as ex:
-            self._notify(False, None, payload_size_bytes, item_count, payload)
-            event_source.transport_exception_thrown("HttpJsonPost", ex)
+            return success, status_code
+        except Exception:
             return False, None
 
     @staticmethod
@@ -126,23 +83,6 @@ class HttpJsonPostTransport(ITransport):
                     continue
                 return (False, None)
         return (False, None)
-
-    def _notify(
-        self, success: bool, status_code: int | None, payload_size_bytes: int, item_count: int, payload: bytes
-    ) -> None:
-        if not self.callback_manager:
-            return
-        from .callback_manager import PayloadTransmittedCallbackArgs  # noqa: PLC0415
-
-        self.callback_manager.notify(
-            PayloadTransmittedCallbackArgs(
-                succeeded=success,
-                status_code=status_code,
-                payload_size_bytes=payload_size_bytes,
-                item_count=item_count,
-                payload_bytes=payload,
-            )
-        )
 
     def _compress(self, data: bytes) -> bytes:
         if self.compression == CompressionType.DEFLATE:

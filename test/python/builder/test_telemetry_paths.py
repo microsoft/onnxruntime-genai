@@ -94,6 +94,20 @@ def test_builder_import_survives_telemetry_import_failure(monkeypatch):
     }
 
 
+def test_builder_shutdown_uses_bounded_budget(monkeypatch):
+    calls = []
+
+    def shutdown(seconds):
+        calls.append(seconds)
+
+    telemetry = types.SimpleNamespace(shutdown=shutdown)
+    monkeypatch.setattr(builder_module, "_get_model_builder_telemetry", lambda: telemetry)
+
+    builder_module._shutdown_model_builder_telemetry()
+
+    assert calls == [1.0]
+
+
 def test_telemetry_fallback_restores_source_path(monkeypatch):
     telemetry_stub = types.ModuleType("telemetry")
 

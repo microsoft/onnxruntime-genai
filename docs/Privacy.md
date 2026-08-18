@@ -20,8 +20,6 @@ The standard `build.sh` and `build.bat` wrappers enable telemetry. For informati
 
 ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to send ONNX Runtime GenAI trace events to Microsoft's telemetry backend over HTTPS. Based on user consent, this data is handled following GDPR and privacy regulations for anonymity and data access controls.
 
-The Python model-builder and benchmark event fields are listed in [Python Telemetry Events](PythonTelemetryEvents.md).
-
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry
@@ -30,5 +28,5 @@ Telemetry can be disabled in any of these ways:
 
 - **Don't build it in.** Telemetry is compiled by default when using `build.py`, `build.bat`, or `build.sh` on supported platforms. Pass `--no_telemetry` to produce a binary that collects no telemetry, or configure CMake directly with `-DENABLE_TELEMETRY=OFF`.
 - **Disable native telemetry at runtime.** Set `ORT_DISABLE_TELEMETRY=1` before the native ONNX Runtime GenAI runtime initializes to prevent native events, the native uploader, and native device-ID persistence.
-- **Disable Python builder and benchmark details.** For the Python model builder and benchmark telemetry, the same environment variable suppresses detailed events, but one best-effort Heartbeat may still be attempted and may create or use the shared persistent device identifier. CI and automated-test environments suppress all Python telemetry.
-- **Disable non-essential events via the API.** The C API (and the C++ wrapper, C#, Python, Java, and Objective-C bindings) can suppress non-essential telemetry. A process information or Heartbeat event may still be emitted.
+- **Disable Python telemetry at runtime.** For the Python model builder and benchmarks, set `ORT_DISABLE_TELEMETRY=1`, pass the builder's `--disable_telemetry` flag, or call `onnxruntime_genai.telemetry.disable_telemetry()` before first use. These are full process-lifetime opt-outs: no Heartbeat or detailed event is emitted, and telemetry does not create its store, uploader, or device identifier.
+- **Disable native non-essential events via language-binding APIs.** The C API and its C++, C#, Python, Java, and Objective-C wrappers expose `disable_telemetry_events`-style controls for native non-essential events. Native process information may still be emitted; use `ORT_DISABLE_TELEMETRY` for full native suppression.
