@@ -45,11 +45,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
@@ -67,11 +67,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_shared.so')" Include="$(OrtLibDir)\libonnxruntime_providers_shared.so">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\libonnxruntime_providers_shared.so')" Include="$(OrtLibDir)\libonnxruntime_providers_shared.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
+    <None Condition="'$(EPDir)' == '' and Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
