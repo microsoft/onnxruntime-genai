@@ -902,7 +902,7 @@ class TestPathRedaction(unittest.TestCase):
             },
         )
 
-        payload = telemetry._store.store_with_id.call_args.args[0]
+        payload = telemetry._store.store.call_args.args[0]
         serialized = json.loads(payload)
         serialized_text = payload.decode("utf-8")
         self.assertNotIn("alice", serialized_text.lower())
@@ -927,7 +927,7 @@ class TestPathRedaction(unittest.TestCase):
         telemetry.log_benchmark(tokenization_latency_ms=float("nan"))
         telemetry.log_benchmark(tokenization_latency_ms=1.0)
 
-        self.assertEqual(telemetry._store.store_with_id.call_count, 1)
+        self.assertEqual(telemetry._store.store.call_count, 1)
 
     def test_embedded_rooted_paths_are_scrubbed_in_final_payloads(self):
         import json
@@ -957,7 +957,7 @@ class TestPathRedaction(unittest.TestCase):
 
         payloads = [
             json.loads(call.args[0])["data"]
-            for call in telemetry._store.store_with_id.call_args_list
+            for call in telemetry._store.store.call_args_list
         ]
         self.assertEqual(payloads[0]["message"], "missing [path]")
         self.assertEqual(payloads[0]["assignment"], "file=[path]")
@@ -983,7 +983,7 @@ class TestPathRedaction(unittest.TestCase):
 
         telemetry.log_error("RuntimeError", message)
 
-        payload = json.loads(telemetry._store.store_with_id.call_args.args[0])
+        payload = json.loads(telemetry._store.store.call_args.args[0])
         self.assertEqual(payload["data"]["exceptionMessage"], message)
 
     def test_non_string_exception_message_uses_general_scrubbing(self):
@@ -1006,7 +1006,7 @@ class TestPathRedaction(unittest.TestCase):
 
         telemetry.log("GenAIAction", {"exceptionMessage": Unstringifiable()})
 
-        payload = json.loads(telemetry._store.store_with_id.call_args.args[0])
+        payload = json.loads(telemetry._store.store.call_args.args[0])
         self.assertEqual(
             payload["data"]["exceptionMessage"],
             "[unsupported:Unstringifiable]",
@@ -1499,7 +1499,7 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
         telemetry._envelope_ikey = "o:test"
         telemetry._emit("TestEvent", {"durationMs": 1.0})
 
-        data = json.loads(telemetry._store.store_with_id.call_args.args[0])["data"]
+        data = json.loads(telemetry._store.store.call_args.args[0])["data"]
         self.assertEqual(data["appName"], "onnxruntime-genai")
         self.assertEqual(data["LibraryVersion"], "1.0")
         self.assertEqual(data["AppSessionGuid"], telemetry._app_session_guid)
@@ -1913,43 +1913,6 @@ class TestOfflineEventStore(unittest.TestCase):
         batch = s.get_batch(3)
         self.assertEqual([p for _, p in batch], [b'{"e":0}', b'{"e":1}', b'{"e":2}'])
 
-    def test_deferred_row_is_durable_but_unavailable_until_released(self):
-        s = self._new_store()
-        with patch("telemetry.offline_store.time.time", return_value=100.0):
-            row_id = s.store_with_id(b'{"minimal":1}', available_after_seconds=60.0)
-            s.store(b'{"ready":1}')
-            self.assertEqual(s.count(), 2)
-            self.assertEqual([payload for _, payload in s.get_batch(10)], [b'{"ready":1}'])
-            self.assertTrue(s.replace(row_id, b'{"enriched":1}'))
-            self.assertEqual(
-                [payload for _, payload in s.get_batch(10)],
-                [b'{"enriched":1}', b'{"ready":1}'],
-            )
-
-    def test_version_one_store_is_migrated_without_losing_events(self):
-        import sqlite3
-        import tempfile
-
-        import telemetry.offline_store as store_module
-
-        db = os.path.join(tempfile.mkdtemp(), "genai_telemetry.db")
-        conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)")
-        conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(b'{"legacy":1}'),))
-        conn.execute("PRAGMA user_version=1")
-        conn.commit()
-        conn.close()
-
-        store = store_module.OfflineEventStore(db)
-        self.addCleanup(store.close)
-
-        self.assertTrue(store.is_open)
-        self.assertEqual(store.get_batch(1)[0][1], b'{"legacy":1}')
-        self.assertEqual(
-            {row[1] for row in store._conn.execute("PRAGMA table_info(events)").fetchall()},
-            {"id", "payload", "available_at"},
-        )
-
     def test_store_connection_is_closed_before_fork_and_reopened_lazily(self):
         store = self._new_store()
         store.prepare_for_fork()
@@ -2017,19 +1980,6 @@ class TestOfflineEventStore(unittest.TestCase):
     def test_empty_payload_rejected(self):
         s = self._new_store()
         self.assertFalse(s.store(b""))
-
-    def test_user_version_stamped(self):
-        import sqlite3
-
-        import telemetry.offline_store as store_module
-
-        s = self._new_store()
-        conn = sqlite3.connect(s.db_path)
-        try:
-            v = conn.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            conn.close()
-        self.assertEqual(v, store_module.SCHEMA_VERSION)
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions")
     def test_store_uses_owner_only_permissions(self):

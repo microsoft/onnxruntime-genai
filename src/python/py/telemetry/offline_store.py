@@ -18,8 +18,7 @@ Uses only the Python standard library (``sqlite3``), so it adds no dependency.
 Intentionally omitted from the full 1DS store (not needed for low-volume CLI
 telemetry): per-event priority (``latency``), persistence classes, general
 reservation/leasing, per-row retry counters, tenant multiplexing, and the
-``settings`` table. The schema version is tracked with SQLite's built-in
-``PRAGMA user_version``.
+``settings`` table.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ import threading
 import time
 from contextlib import suppress
 
-SCHEMA_VERSION = 2
 _RECONNECT_BUSY_TIMEOUT_MS = 50
 _RECONNECT_INTERVAL_SECONDS = 5.0
 
@@ -80,15 +78,9 @@ class OfflineEventStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={effective_busy_timeout_ms}")
-            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS events "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL, available_at REAL NOT NULL DEFAULT 0)"
+                "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
             )
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
-            if "available_at" not in columns:
-                conn.execute("ALTER TABLE events ADD COLUMN available_at REAL NOT NULL DEFAULT 0")
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.commit()
             # A reconnect may use a short probe timeout, but normal operations
             # retain the configured contention tolerance.
@@ -131,35 +123,26 @@ class OfflineEventStore:
 
     def store(self, payload: bytes) -> bool:
         """Append one serialized event; trims the oldest rows if over capacity."""
-        return self.store_with_id(payload) is not None
-
-    def store_with_id(self, payload: bytes, available_after_seconds: float = 0.0) -> int | None:
-        """Append one serialized event and return its row id."""
         if not payload:
-            return None
+            return False
         with self._lock:
             if not self._ensure_open():
-                return None
+                return False
             try:
-                available_at = time.time() + max(0.0, available_after_seconds)
-                cursor = self._conn.execute(
-                    "INSERT INTO events (payload, available_at) VALUES (?, ?)",
-                    (sqlite3.Binary(payload), available_at),
-                )
+                self._conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(payload),))
                 count = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
                 if count > self._max_records:
                     self._conn.execute(
-                        "DELETE FROM events WHERE id IN "
-                        "(SELECT id FROM events WHERE available_at <= ? ORDER BY id ASC LIMIT ?)",
-                        (time.time(), count - self._trim_target),
+                        "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id ASC LIMIT ?)",
+                        (count - self._trim_target,),
                     )
                 self._conn.commit()
                 self._harden_permissions()
-                return int(cursor.lastrowid)
+                return True
             except Exception:
                 with suppress(Exception):
                     self._conn.rollback()
-                return None
+                return False
 
     def get_batch(self, max_count: int) -> list[tuple[int, bytes]]:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
@@ -168,48 +151,12 @@ class OfflineEventStore:
                 return []
             try:
                 rows = self._conn.execute(
-                    "SELECT id, payload FROM events WHERE available_at <= ? ORDER BY id ASC LIMIT ?",
-                    (time.time(), max_count if max_count > 0 else -1),
+                    "SELECT id, payload FROM events ORDER BY id ASC LIMIT ?",
+                    (max_count if max_count > 0 else -1,),
                 ).fetchall()
                 return [(r[0], bytes(r[1])) for r in rows]
             except Exception:
                 return []
-
-    def replace(self, row_id: int, payload: bytes) -> bool:
-        """Replace a queued payload if it has not already been drained."""
-        if not payload:
-            return False
-        with self._lock:
-            if not self._ensure_open():
-                return False
-            try:
-                cursor = self._conn.execute(
-                    "UPDATE events SET payload=?, available_at=0 WHERE id=?",
-                    (sqlite3.Binary(payload), row_id),
-                )
-                self._conn.commit()
-                return cursor.rowcount == 1
-            except Exception:
-                with suppress(Exception):
-                    self._conn.rollback()
-                return False
-
-    def make_available(self, row_id: int) -> bool:
-        """Release a deferred row without changing its payload."""
-        with self._lock:
-            if not self._ensure_open():
-                return False
-            try:
-                cursor = self._conn.execute(
-                    "UPDATE events SET available_at=0 WHERE id=?",
-                    (row_id,),
-                )
-                self._conn.commit()
-                return cursor.rowcount == 1
-            except Exception:
-                with suppress(Exception):
-                    self._conn.rollback()
-                return False
 
     def delete(self, ids: list[int]) -> bool:
         """Remove rows by id (after a successful upload or a permanent drop)."""

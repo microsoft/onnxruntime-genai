@@ -262,13 +262,13 @@ class GenAITelemetry:
         )
         return CommonSchemaJsonSerializationHelper.serialize_to_json_bytes(envelope)
 
-    def _persist(self, event_name: str, attributes: dict[str, Any] | None = None) -> int | None:
+    def _persist(self, event_name: str, attributes: dict[str, Any] | None = None) -> bool:
         if not self.accepts_detailed_events:
-            return None
+            return False
         try:
-            return self._store.store_with_id(self._serialize_event(event_name, attributes))
+            return self._store.store(self._serialize_event(event_name, attributes))
         except Exception:
-            return None
+            return False
 
     def allocate_model_session_id(self) -> int:
         """Allocate a process-local, monotonic ID for one model lifecycle."""
@@ -282,8 +282,7 @@ class GenAITelemetry:
         if not self.accepts_detailed_events:
             return
         try:
-            row_id = self._persist(event_name, attributes)
-            if row_id is not None and self._uploader is not None:
+            if self._persist(event_name, attributes) and self._uploader is not None:
                 self._uploader.request_drain()
         except Exception:
             return

@@ -20,6 +20,8 @@ The standard `build.sh` and `build.bat` wrappers enable telemetry. For informati
 
 ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to send ONNX Runtime GenAI trace events to Microsoft's telemetry backend over HTTPS. Based on user consent, this data is handled following GDPR and privacy regulations for anonymity and data access controls.
 
+The Python model-builder and benchmark event fields are listed in [Python Telemetry Events](PythonTelemetryEvents.md).
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry
