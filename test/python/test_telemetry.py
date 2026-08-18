@@ -741,6 +741,26 @@ class TestPathRedaction(unittest.TestCase):
             scrub_string_for_telemetry("https://example.test/model"),
             "https://example.test/model",
         )
+        self.assertEqual(
+            scrub_string_for_telemetry("ssh://alice@host/home/alice/.ssh/id_rsa"),
+            "[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("nfs://server/home/alice/model.onnx"),
+            "[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("Error at https://alice:secret@host/model"),
+            "Error at [path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("GET https://host/x?path=/home/alice/model.onnx failed"),
+            "GET https://host/x?path=[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("https://huggingface.co/microsoft/phi-3"),
+            "https://huggingface.co/microsoft/phi-3",
+        )
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message

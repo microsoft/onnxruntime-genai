@@ -23,10 +23,10 @@ def _token_start(value: str, index: int) -> int:
     return index
 
 
-def _is_remote_uri_token(value: str, start: int, end: int) -> bool:
+def _remote_uri_token_info(value: str, start: int, end: int) -> tuple[bool, int | None]:
     scheme_end = value.find("://", start, end)
     if scheme_end < 0:
-        return False
+        return (False, None)
     scheme_start = scheme_end
     while scheme_start > start and (
         value[scheme_start - 1].isascii()
@@ -34,7 +34,36 @@ def _is_remote_uri_token(value: str, start: int, end: int) -> bool:
     ):
         scheme_start -= 1
     scheme = value[scheme_start:scheme_end].lower()
-    return bool(scheme and scheme not in {"file", "sqlite", "unix"})
+    if not scheme or scheme in {"file", "sqlite", "unix"}:
+        return (False, None)
+
+    authority_start = scheme_end + 3
+    authority_end = end
+    for delimiter in "/?#":
+        candidate = value.find(delimiter, authority_start, end)
+        if candidate >= 0:
+            authority_end = min(authority_end, candidate)
+    if "@" in value[authority_start:authority_end]:
+        return (True, start)
+
+    if scheme not in {"http", "https"}:
+        return (True, start if authority_end < end else None)
+
+    query_start = value.find("?", authority_end, end)
+    if query_start >= 0:
+        for index in range(query_start + 1, end - 1):
+            if value[index] not in "=&":
+                continue
+            candidate = index + 1
+            if value[candidate] in "/\\" or (
+                candidate + 2 < end
+                and value[candidate].isascii()
+                and value[candidate].isalpha()
+                and value[candidate + 1] == ":"
+                and value[candidate + 2] in "/\\"
+            ):
+                return (True, candidate)
+    return (True, None)
 
 
 def _find_path_anchor(value: str):
@@ -79,11 +108,13 @@ def _find_path_anchor(value: str):
                     and value[slash_token_end] not in "\"'"
                 ):
                     slash_token_end += 1
-                slash_token_is_remote_uri = _is_remote_uri_token(
+                slash_token_is_remote_uri, sensitive_anchor = _remote_uri_token_info(
                     value,
                     slash_token_start,
                     slash_token_end,
                 )
+                if sensitive_anchor is not None:
+                    return sensitive_anchor
                 slash_token_analyzed = False
             if slash_token_is_remote_uri:
                 index += 1
