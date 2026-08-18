@@ -81,9 +81,16 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
   std::set<std::string> registered;
 
   for (const auto& config : configs) {
+    if (config.execution_provider != "cuda" && config.execution_provider != "webgpu") {
+      continue;
+    }
+
+    const char* registration_name =
+        config.execution_provider == "cuda" ? "CUDAExecutionProvider" : "WebGpuExecutionProvider";
+
     if (config.execution_provider_library.empty()) {
       throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is 'cuda' or 'webgpu'");
+          "execution_provider_library is required when execution_provider is '" + config.execution_provider + "'");
     }
 
     const fs::path provider_library = fs::absolute(config.execution_provider_library);
@@ -91,13 +98,13 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
       throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
     }
 
-    if (!registered.insert("CUDAExecutionProvider").second) {
+    if (!registered.insert(registration_name).second) {
       continue;
     }
 
-    std::cout << "[dispatcher] Registering CUDA execution provider library: "
+    std::cout << "[dispatcher] Registering " << registration_name << " execution provider library: "
               << provider_library.string() << std::endl;
-    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
+    OgaRegisterExecutionProviderLibrary(registration_name, provider_library.c_str());
   }
 }
 
