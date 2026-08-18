@@ -17,6 +17,7 @@ process exits, so a crashed holder never blocks other processes permanently.
 """
 
 import os
+import time
 from contextlib import suppress
 
 
@@ -31,32 +32,44 @@ class ProcessDrainLock:
     def held(self) -> bool:
         return self._fh is not None
 
-    def acquire(self) -> bool:
+    def acquire(self, timeout_seconds: float = 0.0) -> bool:
         """Try to acquire the lock without blocking. Returns True if held."""
         if self._fh is not None:
             return True
-        fh = None
-        try:
-            with suppress(Exception):
-                os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
-            # The handle owns the advisory lock and must remain open until release().
-            fh = open(self._lock_path, "a+b")  # noqa: SIM115
-            if os.name == "nt":
-                import msvcrt  # noqa: PLC0415
-
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl  # noqa: PLC0415
-
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self._fh = fh
-            return True
-        except Exception:
-            if fh is not None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            fh = None
+            try:
                 with suppress(Exception):
-                    fh.close()
-            return False
+                    os.makedirs(os.path.dirname(self._lock_path), exist_ok=True)
+                # The handle owns the advisory lock and must remain open until release().
+                fh = open(self._lock_path, "a+b")  # noqa: SIM115
+                if os.name == "nt":
+                    import msvcrt  # noqa: PLC0415
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl  # noqa: PLC0415
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fh = fh
+                return True
+            except Exception:
+                if fh is not None:
+                    with suppress(Exception):
+                        fh.close()
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+
+    def discard_after_fork(self) -> None:
+        """Close the child's inherited handle without unlocking the parent's lock."""
+        fh = self._fh
+        self._fh = None
+        if fh is not None:
+            with suppress(Exception):
+                fh.close()
 
     def release(self) -> None:
         if self._fh is None:

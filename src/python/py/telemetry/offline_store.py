@@ -190,3 +190,12 @@ class OfflineEventStore:
                 with suppress(Exception):
                     self._conn.close()
                 self._conn = None
+
+    def discard_after_fork(self) -> None:
+        """Close the child's inherited SQLite handle without using inherited locks."""
+        self._lock = threading.Lock()
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            with suppress(Exception):
+                conn.close()

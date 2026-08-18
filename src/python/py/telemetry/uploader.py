@@ -112,6 +112,14 @@ class EventUploader:
         """Release the single-drainer lock (urllib holds no persistent connection)."""
         self._drain_lock.release()
 
+    def discard_after_fork(self) -> None:
+        """Discard child copies of parent thread and lock state."""
+        self._thread = None
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._pending_delete_ids = []
+        self._drain_lock.discard_after_fork()
+
     def stop(self, timeout_seconds: float = 12.0) -> None:
         """Stop the loop and release the drain lock (convenience)."""
         if self.stop_loop(timeout_seconds):

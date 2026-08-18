@@ -55,7 +55,13 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
         "TRAVIS",
         "CIRCLECI",
         "GITLAB_CI",
-        "BUILD_ID",
+        "CODEBUILD_BUILD_ID",
+        "BUILDKITE",
+        "TEAMCITY_VERSION",
+        "APPVEYOR",
+        "BITBUCKET_BUILD_NUMBER",
+        "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+        "ORT_RUNNING_UNIT_TESTS",
     )
 
     def setUp(self):
@@ -203,6 +209,20 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIsNone(t._heartbeat_thread)
         self.assertFalse(self.mock_send.called)
 
+    def test_ci_and_unit_test_signals_match_native_contract(self):
+        from telemetry.telemetry import _CI_ENV_VARS, _UNIT_TEST_ENV_VAR, _is_ci_environment
+
+        for signal in (*sorted(_CI_ENV_VARS), _UNIT_TEST_ENV_VAR):
+            with self.subTest(signal=signal), patch.dict(os.environ, {signal: " true "}, clear=True):
+                self.assertTrue(_is_ci_environment())
+
+    def test_false_ci_values_do_not_disable_telemetry(self):
+        from telemetry.telemetry import _is_ci_environment
+
+        for value in ("", "0", "false", " no ", "OFF"):
+            with self.subTest(value=value), patch.dict(os.environ, {"CI": value}, clear=True):
+                self.assertFalse(_is_ci_environment())
+
     def test_opt_out_sends_nothing(self):
         from telemetry.telemetry import GenAITelemetry
 
@@ -265,7 +285,23 @@ class TestOptOut(_HermeticTelemetryTestCase):
             telemetry._send_heartbeat()
 
         mock_device_id.assert_not_called()
-        telemetry._store.store.assert_not_called()
+        telemetry._store.store_with_id.assert_not_called()
+
+    def test_heartbeat_is_durable_before_system_enrichment(self):
+        import threading
+
+        from telemetry.telemetry import GenAITelemetry
+
+        release_enrichment = threading.Event()
+        with (
+            patch("telemetry.telemetry.get_system_info", side_effect=lambda: release_enrichment.wait(5) or {}),
+            patch("telemetry.telemetry.EventUploader.start"),
+        ):
+            telemetry = GenAITelemetry()
+            batch = telemetry._store.get_batch(10)
+            self.assertTrue(any(b"GenAIHeartbeat" in payload for _, payload in batch))
+            release_enrichment.set()
+            telemetry._heartbeat_thread.join(5)
 
     def test_initialization_keeps_exporter_diagnostics_configurable(self):
         from telemetry.library.event_source import event_source
@@ -715,7 +751,7 @@ class TestPathRedaction(unittest.TestCase):
             },
         )
 
-        payload = telemetry._store.store.call_args.args[0]
+        payload = telemetry._store.store_with_id.call_args.args[0]
         serialized = json.loads(payload)
         serialized_text = payload.decode("utf-8")
         self.assertNotIn("alice", serialized_text.lower())
@@ -740,7 +776,7 @@ class TestPathRedaction(unittest.TestCase):
         telemetry.log_benchmark(tokenization_latency_ms=float("nan"))
         telemetry.log_benchmark(tokenization_latency_ms=1.0)
 
-        self.assertEqual(telemetry._store.store.call_count, 1)
+        self.assertEqual(telemetry._store.store_with_id.call_count, 1)
 
     def test_action_and_error_metadata_are_recursively_scrubbed(self):
         from telemetry.telemetry_extensions import log_action, log_error
@@ -806,20 +842,27 @@ class TestDeviceId(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_get_hashed_device_id(self):
-        import hashlib
-
         import telemetry.deviceid as deviceid
 
         device_id, status = deviceid.get_hashed_device_id_and_status()
-        # Shared SHA-256 with the custom-device-id prefix.
+        # Shared product-salted FNV-1a with the custom-device-id prefix.
         if status != deviceid.DeviceIdStatus.FAILED:
-            self.assertEqual(len(device_id), 66)
+            self.assertEqual(len(device_id), 18)
             self.assertTrue(device_id.startswith("c:"))
-            self.assertTrue(all(c in "0123456789ABCDEF" for c in device_id[2:]))
+            self.assertTrue(all(c in "0123456789abcdef" for c in device_id[2:]))
             raw_id = deviceid._device_id_state["device_id"]
-            expected = hashlib.sha256(raw_id.encode()).hexdigest().upper()
+            expected = deviceid._fnv1a_hex(deviceid._DEVICE_ID_HASH_SALT + raw_id)
             self.assertEqual(device_id, f"c:{expected}")
         self.assertIn(status, list(deviceid.DeviceIdStatus))
+
+    def test_device_id_hash_matches_native_known_vector(self):
+        import telemetry.deviceid as deviceid
+
+        raw_id = "00000000-0000-4000-8000-000000000000"
+        self.assertEqual(
+            deviceid._fnv1a_hex(deviceid._DEVICE_ID_HASH_SALT + raw_id),
+            "912603c603e23b6b",
+        )
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
@@ -886,6 +929,53 @@ class TestDeviceId(unittest.TestCase):
             winreg.REG_SZ,
             "test-device-id",
         )
+
+    def test_concurrent_processes_publish_one_device_id(self):
+        import subprocess
+
+        source_path = str(Path(__file__).parents[2] / "src" / "python" / "py")
+        script = (
+            "import platform; "
+            "import telemetry.deviceid as d; "
+            "platform.system=lambda:'Linux'; "
+            "d.get_telemetry_base_dir.cache_clear(); "
+            "print(d.get_device_id())"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = source_path + os.pathsep + env.get("PYTHONPATH", "")
+        env["XDG_CACHE_HOME"] = self._tmpdir.name
+
+        def run_processes():
+            processes = [
+                subprocess.Popen(
+                    [sys.executable, "-c", script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                for _ in range(6)
+            ]
+            results = []
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, stderr)
+                results.append(stdout.strip())
+            self.assertEqual(len(set(results)), 1)
+            self.assertTrue(results[0])
+            return results[0]
+
+        run_processes()
+        device_id_path = (
+            Path(self._tmpdir.name)
+            / "Microsoft"
+            / "DeveloperTools"
+            / ".onnxruntime"
+            / "deviceid"
+        )
+        device_id_path.write_text("corrupted", encoding="utf-8")
+        repaired_id = run_processes()
+        self.assertEqual(device_id_path.read_text(encoding="utf-8"), repaired_id)
 
 
 class TestSystemInfo(unittest.TestCase):
@@ -1087,7 +1177,7 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
         telemetry._envelope_ikey = "o:test"
         telemetry._emit("TestEvent", {"durationMs": 1.0})
 
-        data = json.loads(telemetry._store.store.call_args.args[0])["data"]
+        data = json.loads(telemetry._store.store_with_id.call_args.args[0])["data"]
         self.assertEqual(data["appName"], "onnxruntime-genai")
         self.assertEqual(data["LibraryVersion"], "1.0")
         self.assertEqual(data["AppSessionGuid"], telemetry._app_session_guid)
@@ -1159,6 +1249,61 @@ class TestTelemetryEvents(_HermeticTelemetryTestCase):
             emit()
             attributes = telemetry._emit.call_args.args[1]
             self.assertFalse(any("_" in key for key in attributes), attributes)
+
+
+class TestForkLifecycle(_HermeticTelemetryTestCase):
+    def test_after_fork_discards_inherited_resources(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        old_instance = object.__new__(GenAITelemetry)
+        uploader = MagicMock()
+        store = MagicMock()
+        old_instance._uploader = uploader
+        old_instance._store = store
+        old_instance._enabled = True
+        old_instance._initialized = True
+        GenAITelemetry._instance = old_instance
+
+        GenAITelemetry._after_fork_child()
+
+        uploader.discard_after_fork.assert_called_once()
+        store.discard_after_fork.assert_called_once()
+        self.assertFalse(old_instance._enabled)
+        self.assertFalse(old_instance._initialized)
+        self.assertIsNone(GenAITelemetry._instance)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork lifecycle")
+    def test_forked_child_reinitializes_process_state(self):
+        from telemetry.telemetry import GenAITelemetry
+
+        parent = GenAITelemetry()
+        self._join_heartbeat()
+        parent_guid = parent._app_session_guid
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                child = GenAITelemetry()
+                result = "|".join(
+                    (
+                        str(child is not parent),
+                        str(child._app_session_guid != parent_guid),
+                        str(child._uploader is not None and child._uploader._thread is not None),
+                    )
+                )
+                child.shutdown(0)
+                os.write(write_fd, result.encode("ascii"))
+            finally:
+                os.close(write_fd)
+                os._exit(0)
+
+        os.close(write_fd)
+        result = os.read(read_fd, 128).decode("ascii")
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(status, 0)
+        self.assertEqual(result, "True|True|True")
 
 
 class TestActionDecorator(_HermeticTelemetryTestCase):
