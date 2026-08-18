@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime_genai as og
 import pytest
 
@@ -114,6 +115,17 @@ def test_model_declares_paged_config():
     assert config["model"]["vocab_size"] == _VOCAB_SIZE
     assert config["model"]["eos_token_id"] == _EOS_TOKEN_ID
     assert config["search"]["do_sample"] is False
+
+
+def test_model_declares_per_request_fp16_logits():
+    graph = onnx.load(_MODEL_DIR / "decoder.onnx", load_external_data=False).graph
+    logits = next(output for output in graph.output if output.name == "logits")
+    tensor_type = logits.type.tensor_type
+
+    assert tensor_type.elem_type == onnx.TensorProto.FLOAT16
+    assert len(tensor_type.shape.dim) == 2
+    assert tensor_type.shape.dim[0].dim_param == "batch_size"
+    assert tensor_type.shape.dim[1].dim_value == _VOCAB_SIZE
 
 
 def test_deterministic_tokens(model):
