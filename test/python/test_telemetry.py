@@ -16,6 +16,7 @@ These tests verify:
 - Telemetry never crashes the application
 """
 
+import hashlib
 import os
 import stat
 import sys
@@ -214,11 +215,31 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertFalse(self.mock_send.called)
 
     def test_ci_and_unit_test_signals_match_native_contract(self):
-        from telemetry.telemetry import _CI_ENV_VARS, _UNIT_TEST_ENV_VAR, _is_ci_environment
+        from telemetry.telemetry import _CI_ENV_VARS, _is_ci_environment
 
-        for signal in (*sorted(_CI_ENV_VARS), _UNIT_TEST_ENV_VAR):
+        self.assertEqual(
+            _CI_ENV_VARS,
+            {
+                "CI",
+                "TF_BUILD",
+                "GITHUB_ACTIONS",
+                "GITLAB_CI",
+                "CIRCLECI",
+                "TRAVIS",
+                "JENKINS_URL",
+                "CODEBUILD_BUILD_ID",
+                "BUILDKITE",
+                "TEAMCITY_VERSION",
+                "APPVEYOR",
+                "BITBUCKET_BUILD_NUMBER",
+                "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+            },
+        )
+        for signal in sorted(_CI_ENV_VARS):
             with self.subTest(signal=signal), patch.dict(os.environ, {signal: " true "}, clear=True):
                 self.assertTrue(_is_ci_environment())
+        with patch.dict(os.environ, {"ORT_RUNNING_UNIT_TESTS": "true"}, clear=True):
+            self.assertFalse(_is_ci_environment())
 
     def test_false_ci_values_do_not_disable_telemetry(self):
         from telemetry.telemetry import _is_ci_environment
@@ -694,10 +715,16 @@ class TestPathRedaction(unittest.TestCase):
         self.assertEqual(_redact_paths(r"Load Users\bob\model.onnx failed"), "Load [path]")
         self.assertEqual(_redact_paths("models/foo.onnx"), "models/foo.onnx")
         self.assertEqual(_redact_paths("ratio 3/4 and and/or"), "ratio 3/4 and and/or")
+        self.assertEqual(_redact_paths("cwd:C:/models"), "cwd:[path]")
         self.assertEqual(_redact_paths("before /home/alice/model.onnx\nafter"), "before [path]")
         self.assertEqual(_redact_paths("x" * 300), "x" * 300)
         self.assertEqual(len(_redact_paths("x" * 41_000).encode("utf-8")), 40_960)
         self.assertEqual(_redact_paths("x" * 40_959 + "€"), "x" * 40_959)
+
+        path_after_limit = "x" * 40_955 + "/home/alice/model.onnx"
+        scrubbed = _redact_paths(path_after_limit)
+        self.assertNotIn("/home/", scrubbed)
+        self.assertLessEqual(len(scrubbed.encode("utf-8")), 40_960)
 
     def test_error_messages_are_capped_at_40960_utf8_bytes(self):
         import telemetry.path_utils as path_utils
@@ -929,6 +956,14 @@ class TestPathRedaction(unittest.TestCase):
         self.assertIn("[path]", serialized["data"])
         self.assertTrue(all(value == "[path]" for value in serialized["data"]["[path]"]))
 
+    def test_recursive_scrubbing_is_deterministic(self):
+        from telemetry.path_utils import scrub_value_for_telemetry
+
+        scrubbed = scrub_value_for_telemetry({"z": {"beta", "alpha"}, "a": 1})
+
+        self.assertEqual(list(scrubbed), ["a", "z"])
+        self.assertEqual(scrubbed["z"], ["alpha", "beta"])
+
     def test_non_finite_event_is_rejected_without_affecting_next_event(self):
         from telemetry.telemetry import GenAITelemetry
 
@@ -1097,24 +1132,22 @@ class TestDeviceId(unittest.TestCase):
         import telemetry.deviceid as deviceid
 
         device_id, status = deviceid.get_hashed_device_id_and_status()
-        # Shared product-salted FNV-1a with the custom-device-id prefix.
-        if status != deviceid.DeviceIdStatus.FAILED:
-            self.assertEqual(len(device_id), 18)
-            self.assertTrue(device_id.startswith("c:"))
-            self.assertTrue(all(c in "0123456789abcdef" for c in device_id[2:]))
-            raw_id = deviceid._device_id_state["device_id"]
-            expected = deviceid._fnv1a_hex(deviceid._DEVICE_ID_HASH_SALT + raw_id)
-            self.assertEqual(device_id, f"c:{expected}")
+        self.assertEqual(len(device_id), 66)
+        self.assertTrue(device_id.startswith("c:"))
+        self.assertTrue(all(c in "0123456789abcdef" for c in device_id[2:]))
+        raw_id = deviceid._device_id_state["device_id"]
+        expected = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()
+        self.assertEqual(device_id, f"c:{expected}")
         self.assertIn(status, list(deviceid.DeviceIdStatus))
+        self.assertIn(status.value, {"New", "Existing", "Corrupted", "Failed"})
 
     def test_device_id_hash_matches_native_known_vector(self):
         import telemetry.deviceid as deviceid
 
         raw_id = "00000000-0000-4000-8000-000000000000"
-        self.assertEqual(
-            deviceid._fnv1a_hex(deviceid._DEVICE_ID_HASH_SALT + raw_id),
-            "912603c603e23b6b",
-        )
+        deviceid._device_id_state.update({"device_id": raw_id, "status": deviceid.DeviceIdStatus.EXISTING})
+        hashed, _ = deviceid.get_hashed_device_id_and_status()
+        self.assertEqual(hashed, "c:db8055e0e0307d5a016bec4dc338d69875eb0fb7e614a8b125b08fb082095d98")
 
     def test_noncanonical_device_ids_are_repaired(self):
         import telemetry.deviceid as deviceid
@@ -1154,6 +1187,26 @@ class TestDeviceId(unittest.TestCase):
             deviceid._device_id_state["status"],
             deviceid.DeviceIdStatus.CORRUPTED,
         )
+
+    def test_oversized_device_id_is_repaired_without_unbounded_read(self):
+        import telemetry.deviceid as deviceid
+
+        device_id_path = Path(self._tmpdir.name) / "deviceid"
+        device_id_path.write_text("x" * 10_000, encoding="utf-8")
+
+        repaired = deviceid.get_device_id()
+
+        self.assertTrue(deviceid._is_valid_device_id(repaired))
+        self.assertEqual(deviceid._device_id_state["status"], deviceid.DeviceIdStatus.CORRUPTED)
+
+    def test_store_construction_failure_uses_ephemeral_failed_id(self):
+        import telemetry.deviceid as deviceid
+
+        with patch("telemetry.deviceid._FileStore", side_effect=RuntimeError("no home")):
+            generated = deviceid.get_device_id()
+
+        self.assertTrue(deviceid._is_valid_device_id(generated))
+        self.assertEqual(deviceid._device_id_state["status"], deviceid.DeviceIdStatus.FAILED)
 
     def test_windows_base_dir_uses_shared_developer_tools_path(self):
         self._get_telemetry_base_dir.cache_clear()
@@ -1211,10 +1264,26 @@ class TestDeviceId(unittest.TestCase):
     def test_file_store_uses_owner_only_creation_mode(self):
         import telemetry.deviceid as deviceid
 
-        with patch.object(Path, "mkdir") as mock_mkdir:
-            deviceid._FileStore().store_id("test-device-id")
+        store = deviceid._FileStore()
+        store.store_id("00000000-0000-4000-8000-000000000000")
 
-        mock_mkdir.assert_called_once_with(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(os.stat(self._tmpdir.name).st_mode), 0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink ownership checks")
+    def test_file_store_rejects_symlinked_storage_directory(self):
+        import telemetry.deviceid as deviceid
+
+        target = Path(self._tmpdir.name) / "target"
+        target.mkdir()
+        link = Path(self._tmpdir.name) / "linked"
+        link.symlink_to(target, target_is_directory=True)
+
+        with (
+            patch("telemetry.deviceid.get_telemetry_base_dir", return_value=link),
+            self.assertRaises(PermissionError),
+        ):
+            deviceid._FileStore().store_id("00000000-0000-4000-8000-000000000000")
 
     def test_permission_tightening_is_best_effort(self):
         import telemetry.deviceid as deviceid

@@ -63,7 +63,6 @@ _CI_ENV_VARS = {
     "BITBUCKET_BUILD_NUMBER",
     "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
 }
-_UNIT_TEST_ENV_VAR = "ORT_RUNNING_UNIT_TESTS"
 _DISTRIBUTION_NAMES = (
     "onnxruntime-genai",
     "onnxruntime-genai-cuda",
@@ -78,9 +77,7 @@ def _is_environment_signal_truthy(value: str) -> bool:
 
 
 def _is_ci_environment() -> bool:
-    return any(_is_environment_signal_truthy(os.environ.get(var, "")) for var in _CI_ENV_VARS) or (
-        _is_environment_signal_truthy(os.environ.get(_UNIT_TEST_ENV_VAR, ""))
-    )
+    return any(_is_environment_signal_truthy(os.environ.get(var, "")) for var in _CI_ENV_VARS)
 
 
 def _is_telemetry_disabled_by_environment() -> bool:

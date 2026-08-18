@@ -47,10 +47,10 @@ def _find_path_anchor(value: str):
         if (
             char.isascii()
             and char.isalpha()
-            and (index == 0 or value[index - 1] in "\"' \t=([{,;")
             and index + 2 < len(value)
             and value[index + 1] == ":"
             and value[index + 2] in "/\\"
+            and not (value[index + 2] == "/" and index + 3 < len(value) and value[index + 3] == "/")
         ):
             return index
         if char == "\\":
@@ -108,9 +108,9 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
 
 
 def _scrub_string_for_telemetry(value: str, max_bytes: int) -> str:
-    bounded = _truncate_utf8(value, max_bytes)
-    anchor = _find_path_anchor(bounded)
-    return bounded if anchor is None else bounded[:anchor] + "[path]"
+    anchor = _find_path_anchor(value)
+    scrubbed = value if anchor is None else value[:anchor] + "[path]"
+    return _truncate_utf8(scrubbed, max_bytes)
 
 
 def scrub_string_for_telemetry(value: str) -> str:
@@ -135,7 +135,7 @@ def scrub_value_for_telemetry(value):
     ):
         return value
     if isinstance(value, Mapping):
-        result = {}
+        entries = []
         for key, child in value.items():
             if isinstance(key, os.PathLike):
                 safe_key = "[path]"
@@ -147,14 +147,15 @@ def scrub_value_for_telemetry(value):
                 except Exception:
                     safe_key = f"[unsupported:{type(key).__name__}]"
             if safe_key:
-                result[safe_key] = scrub_value_for_telemetry(child)
-        return result
+                entries.append((safe_key, scrub_value_for_telemetry(child)))
+        return dict(sorted(entries, key=lambda entry: entry[0]))
     if isinstance(value, list):
         return [scrub_value_for_telemetry(child) for child in value]
     if isinstance(value, tuple):
         return tuple(scrub_value_for_telemetry(child) for child in value)
     if isinstance(value, AbstractSet):
-        return [scrub_value_for_telemetry(child) for child in value]
+        scrubbed = [scrub_value_for_telemetry(child) for child in value]
+        return sorted(scrubbed, key=repr)
     try:
         return scrub_string_for_telemetry(str(value))
     except Exception:

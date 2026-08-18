@@ -6,6 +6,7 @@
 """Cross-platform persistent device ID shared with native GenAI telemetry."""
 
 import functools
+import hashlib
 import os
 import platform
 import stat
@@ -19,14 +20,14 @@ from typing import ClassVar
 from ..process_lock import ProcessDrainLock
 
 ORT_SUPPORT_DIR = r"Microsoft/DeveloperTools/.onnxruntime"
-_DEVICE_ID_HASH_SALT = "onnxruntime-genai:"
+_MAX_DEVICE_ID_FILE_SIZE = 256
 
 
 class DeviceIdStatus(Enum):
-    NEW = "new"
-    EXISTING = "existing"
-    CORRUPTED = "corrupted"
-    FAILED = "failed"
+    NEW = "New"
+    EXISTING = "Existing"
+    CORRUPTED = "Corrupted"
+    FAILED = "Failed"
 
 
 _device_id_state = {"device_id": None, "status": DeviceIdStatus.NEW}
@@ -38,10 +39,6 @@ def _fnv1a_hex_bytes(value: bytes) -> str:
         hash_value ^= byte
         hash_value = (hash_value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
     return f"{hash_value:016x}"
-
-
-def _fnv1a_hex(value: str) -> str:
-    return _fnv1a_hex_bytes(value.encode("utf-8"))
 
 
 def _is_valid_device_id(value: str) -> bool:
@@ -109,8 +106,16 @@ class _FileStore:
     def __init__(self) -> None:
         self._file_path: Path = get_telemetry_base_dir() / "deviceid"
 
+    def _validate_parent(self) -> None:
+        parent_info = self._file_path.parent.lstat()
+        if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+            raise PermissionError("Device ID storage directory is not a regular directory")
+        if hasattr(os, "geteuid") and parent_info.st_uid != os.geteuid():
+            raise PermissionError("Device ID storage directory is not owned by the current user")
+
     @property
     def retrieve_id(self) -> str:
+        self._validate_parent()
         try:
             file_info = self._file_path.lstat()
         except FileNotFoundError:
@@ -118,7 +123,11 @@ class _FileStore:
         if stat.S_ISLNK(file_info.st_mode) or not stat.S_ISREG(file_info.st_mode):
             raise PermissionError(f"File {self._file_path.stem} is not a regular file")
         try:
-            return self._file_path.read_text(encoding="utf-8").strip()
+            with self._file_path.open("rb") as device_id_file:
+                raw_value = device_id_file.read(_MAX_DEVICE_ID_FILE_SIZE + 1)
+            if len(raw_value) > _MAX_DEVICE_ID_FILE_SIZE:
+                raise ValueError(f"File {self._file_path.stem} exceeds {_MAX_DEVICE_ID_FILE_SIZE} bytes")
+            return raw_value.decode("utf-8").strip()
         except UnicodeDecodeError:
             raise ValueError(f"File {self._file_path.stem} is not valid UTF-8") from None
 
@@ -126,6 +135,7 @@ class _FileStore:
         # create the folder location if it does not exist, owner-only (0700) so other users on the
         # machine cannot traverse into it to reach the device id.
         self._file_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._validate_parent()
         _chmod_best_effort(self._file_path.parent, 0o700)
 
         fd, temp_path = tempfile.mkstemp(prefix="deviceid.tmp.", dir=self._file_path.parent)
@@ -278,14 +288,21 @@ def get_device_id() -> str:
         macOS: ~/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/deviceid
         Windows: HKEY_CURRENT_USER\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime\deviceid
     """
-    system = platform.system()
-    if system == "Windows":
-        store = _WindowsStore()
-    elif system in ("Linux", "Darwin"):
-        store = _FileStore()
-    else:
-        _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": ""})
-        return ""
+    def failed_fallback() -> str:
+        generated = str(uuid.uuid4()).lower()
+        _device_id_state.update({"status": DeviceIdStatus.FAILED, "device_id": generated})
+        return generated
+
+    try:
+        system = platform.system()
+        if system == "Windows":
+            store = _WindowsStore()
+        elif system in ("Linux", "Darwin"):
+            store = _FileStore()
+        else:
+            return failed_fallback()
+    except Exception:
+        return failed_fallback()
 
     def read_existing() -> tuple[str, str]:
         try:
@@ -358,5 +375,5 @@ def get_device_id() -> str:
 def get_hashed_device_id_and_status() -> tuple[str, DeviceIdStatus]:
     """Get the shared hashed device ID and its status."""
     device_id = _device_id_state["device_id"] if _device_id_state["device_id"] is not None else get_device_id()
-    hashed = _fnv1a_hex(_DEVICE_ID_HASH_SALT + device_id) if device_id else ""
+    hashed = hashlib.sha256(device_id.encode("utf-8")).hexdigest() if device_id else ""
     return f"c:{hashed}" if hashed else "", _device_id_state["status"]
