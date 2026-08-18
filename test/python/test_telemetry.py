@@ -761,6 +761,20 @@ class TestPathRedaction(unittest.TestCase):
             scrub_string_for_telemetry("https://huggingface.co/microsoft/phi-3"),
             "https://huggingface.co/microsoft/phi-3",
         )
+        self.assertEqual(
+            scrub_string_for_telemetry(
+                "failed src=/home/alice/model.onnx,url=https://huggingface.co/microsoft/phi-3"
+            ),
+            "failed src=[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("https://host/x,/home/alice/out.onnx"),
+            "https://host/x,[path]",
+        )
+        self.assertEqual(
+            scrub_string_for_telemetry("download(https://host/x,/home/alice/out.onnx)"),
+            "download(https://host/x,[path]",
+        )
 
     def test_format_exception_message_redacts_source_line_paths(self):
         from telemetry.telemetry import _format_exception_message

@@ -23,10 +23,10 @@ def _token_start(value: str, index: int) -> int:
     return index
 
 
-def _remote_uri_token_info(value: str, start: int, end: int) -> tuple[bool, int | None]:
+def _remote_uri_token_info(value: str, start: int, end: int) -> tuple[int, int, int | None] | None:
     scheme_end = value.find("://", start, end)
     if scheme_end < 0:
-        return (False, None)
+        return None
     scheme_start = scheme_end
     while scheme_start > start and (
         value[scheme_start - 1].isascii()
@@ -35,42 +35,50 @@ def _remote_uri_token_info(value: str, start: int, end: int) -> tuple[bool, int 
         scheme_start -= 1
     scheme = value[scheme_start:scheme_end].lower()
     if not scheme or scheme in {"file", "sqlite", "unix"}:
-        return (False, None)
+        return None
 
     authority_start = scheme_end + 3
-    authority_end = end
+    uri_end = end
+    for index in range(authority_start, end - 1):
+        if value[index] in ",;)]}":
+            uri_end = index
+            break
+
+    authority_end = uri_end
     for delimiter in "/?#":
-        candidate = value.find(delimiter, authority_start, end)
+        candidate = value.find(delimiter, authority_start, uri_end)
         if candidate >= 0:
             authority_end = min(authority_end, candidate)
-    if "@" in value[authority_start:authority_end]:
-        return (True, start)
+    if "@" in value[authority_start:uri_end]:
+        return (scheme_start, uri_end, scheme_start)
 
     if scheme not in {"http", "https"}:
-        return (True, start if authority_end < end else None)
+        sensitive_anchor = scheme_start if authority_end < uri_end else None
+        return (scheme_start, uri_end, sensitive_anchor)
 
-    query_start = value.find("?", authority_end, end)
+    query_start = value.find("?", authority_end, uri_end)
     if query_start >= 0:
-        for index in range(query_start + 1, end - 1):
+        for index in range(query_start + 1, uri_end - 1):
             if value[index] not in "=&":
                 continue
             candidate = index + 1
             if value[candidate] in "/\\" or (
-                candidate + 2 < end
+                candidate + 2 < uri_end
                 and value[candidate].isascii()
                 and value[candidate].isalpha()
                 and value[candidate + 1] == ":"
                 and value[candidate + 2] in "/\\"
             ):
-                return (True, candidate)
-    return (True, None)
+                return (scheme_start, uri_end, candidate)
+    return (scheme_start, uri_end, None)
 
 
 def _find_path_anchor(value: str):
     index = 0
     slash_token_end = 0
     slash_token_start = 0
-    slash_token_is_remote_uri = False
+    remote_uri_start = -1
+    remote_uri_end = -1
     slash_token_analyzed = False
     while index < len(value):
         char = value[index]
@@ -108,15 +116,20 @@ def _find_path_anchor(value: str):
                     and value[slash_token_end] not in "\"'"
                 ):
                     slash_token_end += 1
-                slash_token_is_remote_uri, sensitive_anchor = _remote_uri_token_info(
+                remote_uri_info = _remote_uri_token_info(
                     value,
                     slash_token_start,
                     slash_token_end,
                 )
-                if sensitive_anchor is not None:
-                    return sensitive_anchor
+                if remote_uri_info is None:
+                    remote_uri_start = -1
+                    remote_uri_end = -1
+                else:
+                    remote_uri_start, remote_uri_end, sensitive_anchor = remote_uri_info
+                    if sensitive_anchor is not None:
+                        return sensitive_anchor
                 slash_token_analyzed = False
-            if slash_token_is_remote_uri:
+            if remote_uri_start <= index < remote_uri_end:
                 index += 1
                 continue
             if (
