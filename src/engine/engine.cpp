@@ -60,17 +60,15 @@ void Engine::AddRequest(std::shared_ptr<Request> request) {
     request->ValidateEngineCompatibility();
   }
 
-  // Track the request before assignment so every successfully submitted request can later be found
-  // even when the scheduler and cache hold it through implementation-specific containers. The
-  // registry allocation therefore happens before any request lifecycle mutation.
-  tracked_requests_.push_back(request);
-  try {
-    request->Assign(shared_from_this());
-    scheduler_->AddRequest(request);
-  } catch (...) {
-    tracked_requests_.pop_back();
-    throw;
-  }
+  auto request_preparation = request->PrepareAdmission();
+  auto scheduler_preparation = scheduler_->PrepareAddRequest(request);
+  tracked_requests_.reserve(tracked_requests_.size() + 1);
+
+  request_preparation.sampling_state =
+      std::move(scheduler_preparation.sampling_state);
+  request->CommitAdmission(shared_from_this(), std::move(request_preparation));
+  scheduler_->CommitAddRequest(request, std::move(scheduler_preparation));
+  tracked_requests_.emplace_back(request);
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
