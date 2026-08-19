@@ -375,6 +375,19 @@ def _find_truncated_sensitive_token_anchor(value: str, next_char: str) -> int | 
     return None
 
 
+def _is_split_secret_option(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    option = value.strip().strip("\"'")
+    if option.startswith("--"):
+        option = option[2:]
+    elif option.startswith(("-", "/")):
+        option = option[1:]
+    else:
+        return False
+    return bool(option) and _is_secret_key(option)
+
+
 def _truncate_utf8(value: str, max_bytes: int) -> str:
     encoded = value.encode("utf-8")
     if len(encoded) <= max_bytes:
@@ -436,9 +449,27 @@ def scrub_value_for_telemetry(value):
                 entries.append((safe_key, safe_child))
         return dict(sorted(entries, key=lambda entry: entry[0]))
     if isinstance(value, list):
-        return [scrub_value_for_telemetry(child) for child in value]
+        result = []
+        redact_next = False
+        for child in value:
+            if redact_next:
+                result.append("[path]")
+                redact_next = False
+            else:
+                result.append(scrub_value_for_telemetry(child))
+                redact_next = _is_split_secret_option(child)
+        return result
     if isinstance(value, tuple):
-        return tuple(scrub_value_for_telemetry(child) for child in value)
+        result = []
+        redact_next = False
+        for child in value:
+            if redact_next:
+                result.append("[path]")
+                redact_next = False
+            else:
+                result.append(scrub_value_for_telemetry(child))
+                redact_next = _is_split_secret_option(child)
+        return tuple(result)
     if isinstance(value, AbstractSet):
         scrubbed = [scrub_value_for_telemetry(child) for child in value]
         return sorted(scrubbed, key=repr)

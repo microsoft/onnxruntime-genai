@@ -1043,6 +1043,32 @@ class TestPathRedaction(unittest.TestCase):
             scrub_value_for_telemetry(values),
             ["n/a", "read/write", "[path]", "hf_token=[path]", r"domain\user"],
         )
+        self.assertEqual(
+            scrub_value_for_telemetry(
+                {
+                    "argv": [
+                        "python",
+                        "builder.py",
+                        "--api-key",
+                        "sk-live-9f3d",
+                        "--password",
+                        "p@ssw0rd",
+                    ],
+                    "cmd": ("--client-secret", "abc123"),
+                }
+            ),
+            {
+                "argv": [
+                    "python",
+                    "builder.py",
+                    "--api-key",
+                    "[path]",
+                    "--password",
+                    "[path]",
+                ],
+                "cmd": ("--client-secret", "[path]"),
+            },
+        )
 
     def test_redaction_markers_are_atomic_at_the_length_cap(self):
         from telemetry.path_utils import MAX_TELEMETRY_STRING_LENGTH, scrub_string_for_telemetry
