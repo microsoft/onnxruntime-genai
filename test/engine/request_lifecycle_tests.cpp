@@ -33,6 +33,18 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   return logits;
 }
 
+DeviceSpan<float> SamplingLogits(Model& model) {
+  auto logits = model.p_device_inputs_->Allocate<float>(
+      static_cast<size_t>(model.config_->model.vocab_size));
+  auto cpu_logits = logits.CpuSpan();
+  std::fill(cpu_logits.begin(), cpu_logits.end(), -100.0f);
+  cpu_logits[2] = 1.0f;
+  cpu_logits[3] = 1.0f;
+  cpu_logits[4] = 1.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
 class RequestLifecycleTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -199,6 +211,36 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   EXPECT_EQ(restored.processed_sequence_length, before.processed_sequence_length);
   EXPECT_EQ(restored.is_prefill, before.is_prefill);
   EXPECT_FALSE(request->HasUnseenTokens());
+}
+
+TEST_F(RequestLifecycleTest, TransactionalRollbackRestoresSamplingState) {
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 3;
+  params->search.top_p = 1.0f;
+  params->search.temperature = 1.0f;
+  params->search.random_seed = 1234;
+
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  request->Assign(engine_.engine);
+  const auto before = request->Snapshot();
+  auto logits = SamplingLogits(*model_);
+
+  request->SaveStateForTransaction();
+  const auto first = request->ApplyLogitsForTransaction(logits);
+  request->RestoreStateForTransaction();
+
+  EXPECT_EQ(request->Snapshot().current_sequence_length,
+            before.current_sequence_length);
+
+  request->SaveStateForTransaction();
+  const auto retried = request->ApplyLogitsForTransaction(logits);
+  request->RestoreStateForTransaction();
+
+  EXPECT_TRUE(first.token_appended);
+  EXPECT_TRUE(retried.token_appended);
+  EXPECT_EQ(retried.token, first.token);
 }
 
 TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {

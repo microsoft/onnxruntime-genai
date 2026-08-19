@@ -37,6 +37,9 @@ from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
 
 class Model:
+    def _get_model_type(self, config):
+        return config.architectures[0]
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
@@ -91,7 +94,7 @@ class Model:
         )
 
         self.model_name_or_path = config._name_or_path
-        self.model_type = config.architectures[0]
+        self.model_type = self._get_model_type(config)
         self.io_dtype = ir.DataType(io_dtype)
         self.onnx_dtype = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
@@ -325,18 +328,21 @@ class Model:
         # (weights / moe / runtime), then source every quantization knob below from it so there is a
         # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
         # exported models remain byte-identical to the flat-option path.
-        self.quant_config = QuantConfig.from_extra_options(
-            extra_options,
-            precision=self.onnx_dtype_to_precision(self.onnx_dtype),
-            execution_provider=self.ep,
-        )
+        self.quant_config = extra_options.get("_quant_config")
+        if self.quant_config is None:
+            self.quant_config = QuantConfig.from_extra_options(
+                extra_options,
+                precision=self.onnx_dtype_to_precision(self.onnx_dtype),
+                execution_provider=self.ep,
+            )
+        elif not isinstance(self.quant_config, QuantConfig):
+            raise TypeError("_quant_config must be a QuantConfig instance")
 
         # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes the dense weights
         # to 8-bit MatMulNBits at save time, mirroring the int4 path (onnx_dtype INT4/UINT4).
         quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
 
         # MoE-specific variables
-        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
@@ -349,8 +355,8 @@ class Model:
         expert_weight_bits = moe_descriptor.bits
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        moe_op_type = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
-            moe_op_type = "QMoE"
             qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
             qmoe_quant_type = "int"
@@ -785,7 +791,7 @@ class Model:
         # `matmul_mixed_precision` maps a node-group selector to a quant-type name (int4/int8,
         # extensible to fp8/fp4); the bit width is resolved on demand via `resolve_dtype`, so a
         # new scheme needs no new option and no stored bit table.
-        self.resolve_quant_config(self.extra_options)
+        self.resolve_quant_config()
         self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
@@ -851,7 +857,10 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
-            self.resolve_quant_config(getattr(self, "extra_options", {}))
+            if hasattr(self, "quant_config"):
+                self.resolve_quant_config()
+            else:
+                self.resolve_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -1065,20 +1074,24 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def resolve_quant_config(self, extra_options):
-        """Split `algo_config` into a base method and a mixed-precision map.
+    def resolve_quant_config(self, extra_options=None):
+        """Resolve the dense quantization method and mixed-precision map.
 
-        Uses the shared `desugar_algo_config` helper (the same desugaring `QuantConfig`
-        applies), so both surfaces stay consistent. Sets ``self.quantization_algo`` (one of
-        ``{"default", "rtn", "k_quant"}``) and ``self.matmul_mixed_precision`` (a dict mapping
-        node-group selectors to a quant type, e.g. ``{"last_matmul": "int8"}``). Explicit
-        ``matmul_mixed_precision`` entries take precedence over the defaults implied by a legacy
-        compound name. An unknown base method is passed through unchanged and rejected later
-        (in `make_algo_config` / `make_tied_quantized_embedding_input_names`).
+        Both values come from ``self.quant_config`` regardless of whether it was constructed from
+        flat extra options or structured JSON. ``self.matmul_mixed_precision`` maps node-group
+        selectors to a quant type, for example ``{"last_matmul": "int8"}``. The optional flat
+        options argument is retained for direct adapter callers that do not construct a ``Model``.
         """
-        base_method, placement = desugar_algo_config(extra_options)
-        self.quantization_algo = base_method
-        self.matmul_mixed_precision = placement
+        if extra_options is not None:
+            self.quantization_algo, self.matmul_mixed_precision = desugar_algo_config(extra_options)
+            return
+
+        self.quantization_algo = self.quant_config.weights.method
+        self.matmul_mixed_precision = {
+            override.match["preset"]: override.type
+            for override in self.quant_config.weights.overrides
+            if "preset" in override.match and override.type is not None
+        }
 
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
@@ -1330,8 +1343,9 @@ class Model:
                 callback=callback,
             )
 
-        # Delete temporary cache dir if empty
-        if not os.listdir(self.cache_dir):
+        # Delete temporary cache dir if empty. The MTP head shares the main model's
+        # cache dir and saves afterwards, so it may already be gone.
+        if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
@@ -3253,14 +3267,23 @@ class Model:
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
         outputs = [output, present_conv]
+        attributes = {
+            "ndim": kwargs.get("ndim", 1),
+            "activation": kwargs.get("activation", "silu"),
+        }
+        # state_window=W widens past_conv_state / present_conv_state to [W, B, C, K-1]: the carry
+        # states after the last W positions, right-aligned. Slot W-1 is the state after the final
+        # position (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "CausalConvWithState",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            ndim=kwargs.get("ndim", 1),
-            activation=kwargs.get("activation", "silu"),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
@@ -3277,16 +3300,25 @@ class Model:
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         outputs = [output, present_recurrent]
+        attributes = {
+            "q_num_heads": kwargs["q_num_heads"],
+            "kv_num_heads": kwargs["kv_num_heads"],
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+        # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+        # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            q_num_heads=kwargs["q_num_heads"],
-            kv_num_heads=kwargs["kv_num_heads"],
-            update_rule=kwargs.get("update_rule", "gated_delta"),
-            scale=kwargs.get("scale", 1.0),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
