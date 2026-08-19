@@ -13,8 +13,8 @@ resolved ``QuantConfig`` later without changing this file.
 Scope note: this covers the targets the model builder implements today — dense
 ``weights`` (MatMul), ``moe`` (QMoE) experts, and layout-only ``runtime`` knobs —
 together with per-node/per-layer ``overrides`` (used for mixed precision). The
-KV-cache and auxiliary-model (MTP) targets from the broader design are out of
-scope here.
+KV cache is out of scope. Auxiliary models such as MTP consume an independent
+``QuantConfig`` instance rather than adding an auxiliary-model target here.
 """
 
 from __future__ import annotations
@@ -403,9 +403,11 @@ class QuantConfig:
         # --- moe ---------------------------------------------------------
         moe_quant_type = extra_options.get("moe_quant_type")
         if moe_quant_type is None:
-            # int8 precision quantizes MoE experts to 8-bit to match the dense weights.
+            # Match the model precision unless the MoE target is configured independently.
             if precision == "int8" or extra_options.get("use_8bits_moe", False):
                 moe_quant_type = "int8"
+            elif precision in IO_DTYPES:
+                moe_quant_type = "none"
             else:
                 moe_quant_type = "int4"
         # QMoE default block size: 128 on TRT-RTX, 32 elsewhere (mxfp4 is pinned to 32 in MoEConfig).

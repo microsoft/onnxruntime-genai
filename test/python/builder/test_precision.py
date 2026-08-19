@@ -15,7 +15,9 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -215,6 +217,102 @@ def _run_check_extra_options(
 
 
 # ---------------------------------------------------------------------------
+# MTP options are normalized and enforce the main-model output contract.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_mtp_false_string_is_disabled(monkeypatch):
+    options = {"enable_mtp": "false"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is False
+
+
+def test_enable_mtp_requires_hidden_states(monkeypatch):
+    with pytest.raises(ValueError, match="requires include_hidden_states=true"):
+        _run_check_extra_options(monkeypatch, {"enable_mtp": "true"})
+
+
+@pytest.mark.parametrize("option", ["exclude_lm_head", "prune_lm_head"])
+def test_enable_mtp_rejects_incompatible_lm_head_options(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"enable_mtp": "true", "include_hidden_states": "true", option: "true"},
+        )
+
+
+def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
+    options = {"enable_mtp": "true", "include_hidden_states": "true"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is True
+    assert options["include_hidden_states"] is True
+
+
+def test_mtp_quant_config_json_is_parsed(monkeypatch):
+    options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].io_dtype == "bf16"
+    assert options["mtp_quant_config"].weights.type == "int4"
+
+
+def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
+    captured = {}
+
+    def fake_check_extra_options(*args):
+        captured.update(args[-1])
+
+    monkeypatch.setattr(builder_module, "check_extra_options", fake_check_extra_options)
+    builder_module.parse_extra_options(
+        "model",
+        "input",
+        "output",
+        "int4",
+        "cuda",
+        "cache",
+        ['mtp_quant_config={"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}'],
+    )
+
+    assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
+
+
+def test_resolved_quant_config_controls_method_and_overrides():
+    model = Model.__new__(Model)
+    model.quant_config = builder_module.QuantConfig.from_dict(
+        {
+            "weights": {
+                "type": "int4",
+                "method": "k_quant",
+                "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}],
+            }
+        }
+    )
+
+    model.resolve_quant_config()
+
+    assert model.quantization_algo == "k_quant"
+    assert model.matmul_mixed_precision == {"last_matmul": "int8"}
+
+
+def test_state_window_must_be_non_negative(monkeypatch):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _run_check_extra_options(monkeypatch, {"state_window": "-1"})
+
+
+def test_state_window_is_normalized(monkeypatch):
+    options = {"state_window": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_window"] == 3
+
+
+# ---------------------------------------------------------------------------
 # int8 rejects the unsupported QDQ format (8-bit MatMulNBits is QOperator-only).
 # ---------------------------------------------------------------------------
 
@@ -361,9 +459,17 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     model.use_paged_attention = True
     model.hidden_size = 64
     assert model.hidden_state_shape() == ["num_tokens", 64]
+    assert model.hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
 
 
-def test_paged_attention_uses_flat_hidden_states_output_shape():
+@pytest.mark.parametrize(
+    "extra_options, logits_first_dim",
+    [
+        ({"include_hidden_states": True}, "num_tokens"),
+        ({"include_hidden_states": True, "prune_lm_head": True}, "batch_size"),
+    ],
+)
+def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.io_dtype = ir.DataType.FLOAT16
@@ -371,7 +477,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape():
     model.vocab_size = 128
     model.num_kv_heads = 4
     model.head_size = 16
-    model.extra_options = {"include_hidden_states": True}
+    model.extra_options = extra_options
     model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
     model.output_types = {"logits": ir.DataType.FLOAT16}
     model.output_shapes = {
@@ -384,6 +490,72 @@ def test_paged_attention_uses_flat_hidden_states_output_shape():
     model.make_outputs_init()
 
     assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+    assert model.prune_lm_head is (logits_first_dim == "batch_size")
+
+
+@pytest.mark.parametrize(
+    "prune_lm_head, logits_first_dim, expected_rows",
+    [
+        (True, "batch_size", [1, 4, 5]),
+        (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
+    ],
+)
+def test_paged_attention_lm_head_pruning(
+    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
+):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.prune_lm_head = prune_lm_head
+    model.io_dtype = ir.DataType.FLOAT
+    model.hidden_size = 3
+    model.vocab_size = 3
+    model.input_names = {"cumulative_sequence_lengths": "cumulative_sequence_lengths"}
+    model.output_types = {"logits": ir.DataType.FLOAT}
+    model.output_shapes = {"logits": [logits_first_dim, model.vocab_size]}
+    model.layernorm_attrs = {"output_0": "hidden_states"}
+    model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(),
+        outputs=(),
+        nodes=(),
+        opset_imports={"": 21},
+        name="paged_logits_test",
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(
+        model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"])
+    )
+
+    def make_matmul(_lm_head, name, root_input, **_kwargs):
+        model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
+        model.make_value("logits", ir.DataType.FLOAT, [logits_first_dim, model.vocab_size])
+        return name
+
+    monkeypatch.setattr(model, "make_matmul", make_matmul)
+    model.make_lm_head(types.SimpleNamespace(bias=None))
+    graph.outputs.append(model.make_value("logits"))
+
+    model_path = tmp_path / "paged_logits.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+
+    hidden_states = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
+    cumulative_sequence_lengths = np.array([0, 2, 5, 6], dtype=np.int32)
+    (logits,) = session.run(
+        None,
+        {
+            "hidden_states": hidden_states,
+            "cumulative_sequence_lengths": cumulative_sequence_lengths,
+        },
+    )
+
+    np.testing.assert_array_equal(logits, hidden_states[expected_rows])
+    assert session.get_outputs()[0].shape == [logits_first_dim, model.vocab_size]
+    assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
 
 
 @pytest.mark.parametrize(
@@ -391,6 +563,9 @@ def test_paged_attention_uses_flat_hidden_states_output_shape():
     [
         ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
         ({"use_paged_attention": "true", "paged_block_size": "128"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "abc"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
         ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
@@ -406,16 +581,34 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",
         "paged_block_size": "512",
+        "paged_chunk_size": "64",
         "gpu_utilization_factor": "0.75",
         "max_batch_size": "32",
     }
     _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
     assert extra_options["paged_block_size"] == 512
+    assert extra_options["paged_chunk_size"] == 64
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
 
 
-@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head", "prune_lm_head"])
+@pytest.mark.parametrize(
+    "option_value, expected",
+    [
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_paged_attention_accepts_lm_head_pruning_option(monkeypatch, option_value, expected):
+    extra_options = {
+        "use_paged_attention": "true",
+        "prune_lm_head": option_value,
+    }
+    _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+    assert extra_options["prune_lm_head"] is expected
+
+
+@pytest.mark.parametrize("option", ["exclude_embeds", "exclude_lm_head"])
 def test_paged_attention_rejects_incompatible_graph_interfaces(monkeypatch, option):
     with pytest.raises(ValueError, match=option):
         _run_check_extra_options(

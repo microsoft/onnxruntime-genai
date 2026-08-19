@@ -42,7 +42,7 @@ struct State {
   virtual void SnapshotState(size_t position) { (void)position; }
 
   // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
-  // state (recurrent_state_window > 1), the accepted prefix can be committed WITHOUT a replay
+  // state (state_window > 1), the accepted prefix can be committed WITHOUT a replay
   // forward. HasCroppableRecurrentState() reports availability; CropToAccepted() rolls the
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).

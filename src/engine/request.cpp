@@ -23,7 +23,9 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
 }  // namespace
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {
+    : params_{params},
+      rng_{CreateRandomGenerator(params->search.random_seed)},
+      search_{CreateSearch(*params)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -202,12 +204,13 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       throw std::runtime_error("top_k must be 0 or greater");
 
     if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
-      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature);
+      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
+                              rng_);
     } else if (search_params.top_k > 1) {
-      search_->SampleTopK(search_params.top_k, search_params.temperature);
+      search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
     } else {
       assert(search_params.top_k == 0);
-      search_->SampleTopP(search_params.top_p, search_params.temperature);
+      search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
     }
   }
 }
@@ -227,10 +230,12 @@ void Request::ValidateEngineCompatibility() const {
 
 void Request::SaveStateForTransaction() {
   search_->SaveStateForTransaction();
+  transaction_rng_ = rng_;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
   search_->SaveStateForExternalSamplingTransaction();
+  transaction_rng_ = rng_;
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
@@ -251,10 +256,12 @@ RequestStepResult Request::StageGenerationForTransaction(
 
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
+  rng_ = transaction_rng_;
 }
 
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
+  rng_ = transaction_rng_;
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -289,11 +296,11 @@ void Request::SelectNextToken() {
   } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
              search_params.top_k > 1) {
     search_->SampleTopKTopP(search_params.top_k, search_params.top_p,
-                            search_params.temperature);
+                            search_params.temperature, rng_);
   } else if (search_params.top_k > 1) {
-    search_->SampleTopK(search_params.top_k, search_params.temperature);
+    search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
   } else {
-    search_->SampleTopP(search_params.top_p, search_params.temperature);
+    search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
   }
 }
 

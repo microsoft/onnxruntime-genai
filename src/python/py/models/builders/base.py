@@ -70,6 +70,9 @@ def resolve_windowed_paged_kv_cache(extra_options, window_size):
 
 
 class Model:
+    def _get_model_type(self, config):
+        return config.architectures[0]
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
@@ -123,7 +126,7 @@ class Model:
         )
 
         self.model_name_or_path = config._name_or_path
-        self.model_type = config.architectures[0]
+        self.model_type = self._get_model_type(config)
         self.io_dtype = ir.DataType(io_dtype)
         self.onnx_dtype = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
@@ -360,18 +363,21 @@ class Model:
         # (weights / moe / runtime), then source every quantization knob below from it so there is a
         # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
         # exported models remain byte-identical to the flat-option path.
-        self.quant_config = QuantConfig.from_extra_options(
-            extra_options,
-            precision=self.onnx_dtype_to_precision(self.onnx_dtype),
-            execution_provider=self.ep,
-        )
+        self.quant_config = extra_options.get("_quant_config")
+        if self.quant_config is None:
+            self.quant_config = QuantConfig.from_extra_options(
+                extra_options,
+                precision=self.onnx_dtype_to_precision(self.onnx_dtype),
+                execution_provider=self.ep,
+            )
+        elif not isinstance(self.quant_config, QuantConfig):
+            raise TypeError("_quant_config must be a QuantConfig instance")
 
         # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes the dense weights
         # to 8-bit MatMulNBits at save time, mirroring the int4 path (onnx_dtype INT4/UINT4).
         quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
 
         # MoE-specific variables
-        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
@@ -384,8 +390,8 @@ class Model:
         expert_weight_bits = moe_descriptor.bits
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        moe_op_type = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
-            moe_op_type = "QMoE"
             qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
             qmoe_quant_type = "int"
@@ -503,19 +509,21 @@ class Model:
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
-        if self.use_paged_attention:
-            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
-
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
         if self.prune_lm_head and self.exclude_lm_head:
-            print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
+            if "prune_lm_head" in self.extra_options:
+                print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
             self.prune_lm_head = False
+
+        if self.use_paged_attention:
+            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
+            logits_first_dim = "batch_size" if self.prune_lm_head else "num_tokens"
+            self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -524,10 +532,11 @@ class Model:
             del self.output_names["logits"]
 
     def hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
-        """Return a standard 3D shape or a packed 2D paged-attention shape."""
+        """Return a standard 3D shape or a 2D paged-attention shape."""
         last_dim = self.hidden_size if last_dim is None else last_dim
         if self.use_paged_attention:
-            return ["num_tokens", last_dim]
+            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
+            return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
     def get_rope_parameters(self, config):
@@ -825,7 +834,7 @@ class Model:
         # `matmul_mixed_precision` maps a node-group selector to a quant-type name (int4/int8,
         # extensible to fp8/fp4); the bit width is resolved on demand via `resolve_dtype`, so a
         # new scheme needs no new option and no stored bit table.
-        self.resolve_quant_config(self.extra_options)
+        self.resolve_quant_config()
         self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
@@ -891,7 +900,10 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
-            self.resolve_quant_config(getattr(self, "extra_options", {}))
+            if hasattr(self, "quant_config"):
+                self.resolve_quant_config()
+            else:
+                self.resolve_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -1106,23 +1118,21 @@ class Model:
     def uses_windowed_paged_cache(self, layer_id):
         """True when this layer's paged KV cache is a ring sized to the window rather than to the
         full context. Such layers read a different block table and a differently sized cache."""
-        return (
-            self.use_windowed_paged_kv_cache
-            and hasattr(self, "is_local")
-            and self.is_local(layer_id)
-        )
+        return self.has_windowed_paged_layers() and self.is_local(layer_id)
 
     def has_windowed_paged_layers(self):
         """True when at least one layer is actually served from the ring.
 
         A model can carry `sliding_window` in its config without the builder knowing which layers
         it applies to, in which case no layer reads the ring and nothing extra must be emitted.
-        `is_local` is assigned by the subclass after `Model.__init__`, so this cannot be asked from
-        `make_inputs_init`, which runs during it.
+        The runtime also needs at least one full-context layer to size the shared paged cache, so
+        an all-local export falls back to full paged caches. `is_local` is assigned by the subclass
+        after `Model.__init__`, so this cannot be asked from `make_inputs_init`, which runs during it.
         """
-        return self.use_windowed_paged_kv_cache and any(
-            self.uses_windowed_paged_cache(layer_id) for layer_id in range(self.num_layers)
-        )
+        if not self.use_windowed_paged_kv_cache or not hasattr(self, "is_local"):
+            return False
+        local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
+        return any(local_layers) and not all(local_layers)
 
     def make_key_value_cache_shape(self, layer_id, shape):
         """
@@ -1151,20 +1161,24 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def resolve_quant_config(self, extra_options):
-        """Split `algo_config` into a base method and a mixed-precision map.
+    def resolve_quant_config(self, extra_options=None):
+        """Resolve the dense quantization method and mixed-precision map.
 
-        Uses the shared `desugar_algo_config` helper (the same desugaring `QuantConfig`
-        applies), so both surfaces stay consistent. Sets ``self.quantization_algo`` (one of
-        ``{"default", "rtn", "k_quant"}``) and ``self.matmul_mixed_precision`` (a dict mapping
-        node-group selectors to a quant type, e.g. ``{"last_matmul": "int8"}``). Explicit
-        ``matmul_mixed_precision`` entries take precedence over the defaults implied by a legacy
-        compound name. An unknown base method is passed through unchanged and rejected later
-        (in `make_algo_config` / `make_tied_quantized_embedding_input_names`).
+        Both values come from ``self.quant_config`` regardless of whether it was constructed from
+        flat extra options or structured JSON. ``self.matmul_mixed_precision`` maps node-group
+        selectors to a quant type, for example ``{"last_matmul": "int8"}``. The optional flat
+        options argument is retained for direct adapter callers that do not construct a ``Model``.
         """
-        base_method, placement = desugar_algo_config(extra_options)
-        self.quantization_algo = base_method
-        self.matmul_mixed_precision = placement
+        if extra_options is not None:
+            self.quantization_algo, self.matmul_mixed_precision = desugar_algo_config(extra_options)
+            return
+
+        self.quantization_algo = self.quant_config.weights.method
+        self.matmul_mixed_precision = {
+            override.match["preset"]: override.type
+            for override in self.quant_config.weights.overrides
+            if "preset" in override.match and override.type is not None
+        }
 
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
@@ -1416,8 +1430,9 @@ class Model:
                 callback=callback,
             )
 
-        # Delete temporary cache dir if empty
-        if not os.listdir(self.cache_dir):
+        # Delete temporary cache dir if empty. The MTP head shares the main model's
+        # cache dir and saves afterwards, so it may already be gone.
+        if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
@@ -3352,14 +3367,23 @@ class Model:
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
         outputs = [output, present_conv]
+        attributes = {
+            "ndim": kwargs.get("ndim", 1),
+            "activation": kwargs.get("activation", "silu"),
+        }
+        # state_window=W widens past_conv_state / present_conv_state to [W, B, C, K-1]: the carry
+        # states after the last W positions, right-aligned. Slot W-1 is the state after the final
+        # position (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "CausalConvWithState",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            ndim=kwargs.get("ndim", 1),
-            activation=kwargs.get("activation", "silu"),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
@@ -3376,16 +3400,25 @@ class Model:
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         outputs = [output, present_recurrent]
+        attributes = {
+            "q_num_heads": kwargs["q_num_heads"],
+            "kv_num_heads": kwargs["kv_num_heads"],
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+        # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+        # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            q_num_heads=kwargs["q_num_heads"],
-            kv_num_heads=kwargs["kv_num_heads"],
-            update_rule=kwargs.get("update_rule", "gated_delta"),
-            scale=kwargs.get("scale", 1.0),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
@@ -4690,10 +4723,44 @@ class Model:
         matmul_basename = f"{basename}/MatMul"
         root_input = self.layernorm_attrs["output_0"]
 
-        # Sequence dimension for shape annotations ("sequence_length" normally, 1 when pruned)
+        # Sequence dimension used for LM-head shape annotations.
         seq_dim = "sequence_length"
 
-        if self.prune_lm_head:
+        if self.use_paged_attention and self.prune_lm_head:
+            # Select the final packed token from every sequence before applying the LM head:
+            #
+            # cumulative_sequence_lengths --> Slice[1:] --> Sub(1) --+
+            # hidden_states -----------------------------------------> Gather(axis=0)
+            #
+            # This reduces the expensive LM-head projection from num_tokens rows to batch_size rows.
+            seq_dim = "batch_size"
+            indices_basename = f"{basename}/last_token_indices"
+            slice_name = f"{indices_basename}/Slice"
+            slice_inputs = [
+                self.input_names["cumulative_sequence_lengths"],
+                "/model/constants/INT64/[1]",
+                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+                "/model/constants/INT64/[0]",
+            ]
+            self.make_slice(slice_name, slice_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            sub_name = f"{indices_basename}/Sub"
+            sub_inputs = [f"{slice_name}/output_0", "/model/constants/INT32/1"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            gather_name = f"{basename}/last_hidden_state/Gather"
+            gather_inputs = [root_input, f"{sub_name}/output_0"]
+            self.make_gather(
+                gather_name,
+                gather_inputs,
+                dtype=self.io_dtype,
+                shape=["batch_size", self.hidden_size],
+                axis=0,
+            )
+            root_input = f"{gather_name}/output_0"
+            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
+
+        elif self.prune_lm_head:
             # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
             # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
             # during prefill, reducing compute by ~S×.

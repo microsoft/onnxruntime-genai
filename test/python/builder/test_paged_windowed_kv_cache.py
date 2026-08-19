@@ -82,9 +82,10 @@ def test_ring_honours_the_windowed_kv_cache_opt_out():
 # ===========================================================================
 
 
-def _make_layer_model(use_ring, local_layers=(0, 2)):
+def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
     model = Model.__new__(Model)
     model.use_windowed_paged_kv_cache = use_ring
+    model.num_layers = num_layers
     if local_layers is not None:
         model.is_local = lambda layer_id: layer_id in local_layers
     return model
@@ -115,9 +116,7 @@ def test_model_without_alternating_attention_uses_no_ring():
 
 
 def _make_layer_count_model(use_ring, local_layers=(0, 2), num_layers=4):
-    model = _make_layer_model(use_ring, local_layers)
-    model.num_layers = num_layers
-    return model
+    return _make_layer_model(use_ring, local_layers, num_layers)
 
 
 def test_ring_is_emitted_when_some_layer_is_local():
@@ -132,6 +131,10 @@ def test_ring_is_not_emitted_without_local_layers():
 
 def test_ring_is_not_emitted_when_it_is_off():
     assert _make_layer_count_model(use_ring=False).has_windowed_paged_layers() is False
+
+
+def test_ring_is_not_emitted_when_every_layer_is_local():
+    assert _make_layer_count_model(use_ring=True, local_layers=(0, 1), num_layers=2).has_windowed_paged_layers() is False
 
 
 # ===========================================================================
@@ -165,6 +168,12 @@ def test_global_layer_keeps_the_shared_block_count():
 
 def test_every_layer_keeps_the_shared_block_count_without_the_ring():
     model = _make_shape_model(use_ring=False)
+
+    assert model.make_key_value_cache_shape(0, list(_PAGED_CACHE_SHAPE)) == _PAGED_CACHE_SHAPE
+
+
+def test_all_local_layers_keep_the_shared_block_count():
+    model = _make_shape_model(use_ring=True, local_layers=(0, 1, 2, 3))
 
     assert model.make_key_value_cache_shape(0, list(_PAGED_CACHE_SHAPE)) == _PAGED_CACHE_SHAPE
 
@@ -265,6 +274,15 @@ def test_graph_drops_the_windowed_block_table_when_no_layer_reads_it():
     assert "block_table" in model.model.graph.inputs
 
 
+def test_graph_drops_the_windowed_block_table_when_every_layer_is_local():
+    model = _make_graph_model(use_ring=True, local_layers=(0, 1), num_layers=2)
+
+    model.make_inputs_and_outputs()
+
+    assert "block_table_windowed" not in model.model.graph.inputs
+    assert "block_table" in model.model.graph.inputs
+
+
 # ===========================================================================
 # make_attention_op: which block table each layer reads
 # ===========================================================================
@@ -309,6 +327,14 @@ def test_every_layer_reads_the_growing_block_table_without_the_ring():
     assert model.paged_attention_calls[-1]["block_table"] == "block_table"
 
 
+def test_all_local_layers_read_the_growing_block_table():
+    model = _make_attention_model(use_ring=True, local_layers=(0, 1, 2, 3))
+
+    model.make_attention_op("/attn", layer_id=0)
+
+    assert model.paged_attention_calls[-1]["block_table"] == "block_table"
+
+
 # ===========================================================================
 # make_genai_config: the sliding_window block and the chunk_size default
 # ===========================================================================
@@ -321,7 +347,14 @@ class _NoGenerationConfig:
 
 
 def _write_genai_config(
-    monkeypatch, out_dir, window_size, extra_options=None, num_layers=4, use_ring=True, has_local_layers=True
+    monkeypatch,
+    out_dir,
+    window_size,
+    extra_options=None,
+    num_layers=4,
+    use_ring=True,
+    has_local_layers=True,
+    all_local_layers=False,
 ):
     hf_config = SimpleNamespace(eos_token_id=[2])
     monkeypatch.setattr(base_module, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: hf_config))
@@ -352,7 +385,7 @@ def _write_genai_config(
     model.window_kv_cache_slack = 0
     # Alternating attention: even layers are sliding-window layers.
     if has_local_layers:
-        model.is_local = lambda layer_id: layer_id % 2 == 0
+        model.is_local = lambda layer_id: all_local_layers or layer_id % 2 == 0
     model.input_names = {
         "input_ids": "input_ids",
         "block_table": "block_table",
@@ -415,6 +448,15 @@ def test_genai_config_omits_the_ring_when_it_is_off(monkeypatch, tmp_path):
 def test_genai_config_omits_the_ring_without_local_layers(monkeypatch, tmp_path):
     # sliding_window in the model config, but no layer the builder can point the ring at.
     config = _write_genai_config(monkeypatch, tmp_path, window_size=128, has_local_layers=False)
+
+    assert "sliding_window" not in config["model"]["decoder"]
+    assert "chunk_size" not in config["search"]
+    assert "block_table_windowed" not in config["model"]["decoder"]["inputs"]
+    assert config["model"]["decoder"]["inputs"]["block_table"] == "block_table"
+
+
+def test_genai_config_omits_the_ring_when_every_layer_is_local(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128, all_local_layers=True)
 
     assert "sliding_window" not in config["model"]["decoder"]
     assert "chunk_size" not in config["search"]
