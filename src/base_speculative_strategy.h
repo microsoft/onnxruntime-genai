@@ -15,12 +15,23 @@ struct BaseSpeculativeStrategy final : SpeculativeDecodingStrategy {
   explicit BaseSpeculativeStrategy(Generator& g);
 
  protected:
-  Proposal Propose(Generator& g, int K, int seed_length) override;
+  Proposal Propose(Generator& g, int K, int seed_length,
+                   std::mt19937& round_rng) override;
   void Advance(Generator& g,
                const Proposal& proposal,
                int n_direct,
                int32_t final_token,
                int seed_length) override;
+  void ReconcileProposer(Generator& g,
+                         int floor,
+                         std::span<const int32_t> committed,
+                         int committed_length,
+                         bool record_stats) override;
+  void FinalizeGuidanceProposer(Generator& g,
+                                int seed_length,
+                                int proposal_length,
+                                std::span<const int32_t> committed) override;
+  void ResetProposer() override {}
 
  private:
   SpeculativeDecodingState& spec_state_;

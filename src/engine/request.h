@@ -280,6 +280,8 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
+  std::mt19937 rng_;
+  std::mt19937 transaction_rng_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
