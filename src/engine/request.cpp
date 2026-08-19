@@ -9,6 +9,13 @@
 
 namespace Generators {
 
+RequestAdmissionPreparation::RequestAdmissionPreparation() = default;
+RequestAdmissionPreparation::~RequestAdmissionPreparation() = default;
+RequestAdmissionPreparation::RequestAdmissionPreparation(
+    RequestAdmissionPreparation&&) noexcept = default;
+RequestAdmissionPreparation& RequestAdmissionPreparation::operator=(
+    RequestAdmissionPreparation&&) noexcept = default;
+
 namespace {
 
 DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
@@ -66,24 +73,44 @@ bool Request::IsExternallyAbandoned() const noexcept {
 }
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
+  auto preparation = PrepareAdmission();
+  CommitAdmission(std::move(engine), std::move(preparation));
+}
+
+RequestAdmissionPreparation Request::PrepareAdmission() const {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
   if (prefill_input_ids_.empty()) {
     throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
   }
-  engine_ = engine;
-  status_ = RequestStatus::Assigned;
 
+  RequestAdmissionPreparation preparation;
+  preparation.search = CreateSearch(*params_);
+  preparation.search->DeferCompletion(true);
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
+  preparation.search->AppendTokens(device_tokens);
+  preparation.prompt_sequence_length = preparation.search->GetSequenceLength();
+  preparation.seen_sequence_length = preparation.prompt_sequence_length;
+  preparation.tokens_host.reserve(params_->search.max_length);
+  preparation.unseen_token_indices.reserve(params_->search.max_length);
+  preparation.tokens_host.insert(
+      preparation.tokens_host.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
+  return preparation;
+}
+
+void Request::CommitAdmission(std::shared_ptr<Engine> engine,
+                              RequestAdmissionPreparation&& preparation) noexcept {
+  search_ = std::move(preparation.search);
+  batched_sampler_state_ = std::move(preparation.sampling_state);
+  tokens_host_ = std::move(preparation.tokens_host);
+  unseen_token_indices_ = std::move(preparation.unseen_token_indices);
+  prompt_sequence_length_ = preparation.prompt_sequence_length;
+  seen_sequence_length_ = preparation.seen_sequence_length;
   processed_sequence_length_ = 0;
-  search_->AppendTokens(device_tokens);
-  prompt_sequence_length_ = CurrentSequenceLength();
-  seen_sequence_length_ = CurrentSequenceLength();
-  tokens_host_.reserve(params_->search.max_length);
-  unseen_token_indices_.reserve(params_->search.max_length);
-  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
+  engine_ = std::move(engine);
+  status_ = RequestStatus::Assigned;
 }
 
 void Request::Schedule() {
@@ -433,6 +460,12 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
   if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
     batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
   return *batched_sampler_state_;
+}
+
+void Request::CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept {
+  if (state) {
+    batched_sampler_state_ = std::move(state);
+  }
 }
 
 void Request::CompleteGeneration() {
