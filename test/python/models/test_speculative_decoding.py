@@ -993,49 +993,6 @@ class TestSpeculativeGeneration:
         assert stats["adaptive_k_throughput"] > 0.0
         assert 2 <= stats["effective_k"] <= 16
 
-    def test_adaptive_k_qwen_greedy_collects_throughput_telemetry(
-            self, decoder_only_model_path, tmp_path):
-        max_k = 8
-        max_length = len(_PROMPT) + 24
-        spec_path = _build_self_spec(
-            decoder_only_model_path, tmp_path / "adaptive_qwen_greedy", max_k)
-
-        result, stats = _greedy(
-            spec_path, _PROMPT, max_length, k=max_k, min_adaptive_k=2)
-
-        assert result
-        assert stats["rounds"] > 0
-        assert stats["acceptance_rate"] >= 0.9
-        assert stats["adaptive_k_observations"] > 0
-        assert stats["adaptive_k_throughput"] > 0.0
-        assert 2 <= stats["effective_k"] <= 16
-
-    @pytest.mark.parametrize("seed", [0, 7, 1234])
-    def test_adaptive_k_qwen_sampling_collects_throughput_telemetry(
-            self, decoder_only_model_path, tmp_path, seed):
-        max_k = 8
-        max_length = len(_PROMPT) + 24
-        spec_path = _build_self_spec(
-            decoder_only_model_path,
-            tmp_path / f"adaptive_qwen_sampling_{seed}",
-            max_k,
-        )
-        options = {
-            "k": max_k,
-            "top_k": 40,
-            "top_p": 0.95,
-            "temperature": 0.8,
-            "min_adaptive_k": 2,
-        }
-
-        result, stats = _sample(
-            spec_path, _PROMPT, max_length, seed=seed, **options)
-
-        assert result
-        assert stats["adaptive_k_observations"] > 0
-        assert stats["adaptive_k_throughput"] > 0.0
-        assert 2 <= stats["effective_k"] <= 16
-
     def test_stats_are_consistent(self, decoder_only_model_path, tmp_path):
         max_length = len(_PROMPT) + 16
         spec_path = _build_self_spec(decoder_only_model_path, tmp_path / "selfspec_stats", 4)
