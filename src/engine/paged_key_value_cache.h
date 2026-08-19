@@ -15,6 +15,15 @@
 
 namespace Generators {
 
+size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
+                                 float gpu_utilization_factor,
+                                 size_t reserved_memory_bytes,
+                                 size_t block_size,
+                                 size_t num_key_value_heads,
+                                 size_t head_size,
+                                 size_t full_layer_count,
+                                 size_t element_size);
+
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
  * The cache is divided into blocks, each containing a fixed number of slots. Each slot holds
@@ -27,7 +36,7 @@ namespace Generators {
  */
 struct PagedKeyValueCache {
  public:
-  PagedKeyValueCache(std::shared_ptr<Model> model);
+  explicit PagedKeyValueCache(std::shared_ptr<Model> model);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 

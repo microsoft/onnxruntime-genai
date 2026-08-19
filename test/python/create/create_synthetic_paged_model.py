@@ -20,6 +20,8 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 VOCAB_SIZE = 64
+NUM_LAYERS = 6
+PAGED_LAYERS = [1, 4]
 BLOCK_SIZE = 4
 NUM_BLOCKS = 128
 MAX_BATCH_SIZE = 8
@@ -88,13 +90,15 @@ def _decoder_graph():
 
     # Write tokens to the key and value caches.
     node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
-    node("Reshape", ["past_key_values.0.key", "flat"], ["past_key_flat"])
-    node("Reshape", ["past_key_values.0.value", "flat"], ["past_value_flat"])
+    node("Reshape", ["past_key_values.1.key", "flat"], ["past_key_flat"])
+    node("Reshape", ["past_key_values.1.value", "flat"], ["past_value_flat"])
     node("Unsqueeze", ["phys", "axis1"], ["scatter_index"])
     node("ScatterND", ["past_key_flat", "scatter_index", "token_f"], ["present_key_flat"])
     node("ScatterND", ["past_value_flat", "scatter_index", "token_f"], ["present_value_flat"])
-    node("Reshape", ["present_key_flat", "cache_shape"], ["present.0.key"])
-    node("Reshape", ["present_value_flat", "cache_shape"], ["present.0.value"])
+    node("Reshape", ["present_key_flat", "cache_shape"], ["present.1.key"])
+    node("Reshape", ["present_value_flat", "cache_shape"], ["present.1.value"])
+    node("Identity", ["past_key_values.4.key"], ["present.4.key"])
+    node("Identity", ["past_key_values.4.value"], ["present.4.value"])
 
     # Read the request's first token and the current token through the cache.
     node("Gather", ["block_table_i64", "c0"], ["first_block_id"], axis=1)
@@ -128,13 +132,17 @@ def _decoder_graph():
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
         helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
-        helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("past_key_values.1.key", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("past_key_values.1.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("past_key_values.4.key", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("past_key_values.4.value", TensorProto.FLOAT, cache_shape),
     ]
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT16, ["batch_size", VOCAB_SIZE]),
-        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("present.1.key", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("present.1.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("present.4.key", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("present.4.value", TensorProto.FLOAT, cache_shape),
     ]
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
@@ -171,20 +179,38 @@ def create_config(output_dir):
                 "num_key_value_heads": 1,
                 "head_size": 1,
                 "hidden_size": 1,
-                "num_hidden_layers": 1,
+                "num_hidden_layers": NUM_LAYERS,
                 "inputs": {
                     "input_ids": "input_ids",
                     "block_table": "block_table",
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
-                    "past_key_names": "past_key_values.%d.key",
-                    "past_value_names": "past_key_values.%d.value",
+                    # Intentionally absent from the graph: the Engine must use the
+                    # explicit state-group bindings instead of these legacy templates.
+                    "past_key_names": "legacy_past.%d.key",
+                    "past_value_names": "legacy_past.%d.value",
                 },
                 "outputs": {
                     "logits": "logits",
-                    "present_key_names": "present.%d.key",
-                    "present_value_names": "present.%d.value",
+                    "present_key_names": "legacy_present.%d.key",
+                    "present_value_names": "legacy_present.%d.value",
                 },
+                "state_groups": [
+                    {
+                        "kind": "paged_kv",
+                        "layer_ids": PAGED_LAYERS,
+                        "bindings": {
+                            "key": {
+                                "input": "past_key_values.%d.key",
+                                "output": "present.%d.key",
+                            },
+                            "value": {
+                                "input": "past_key_values.%d.value",
+                                "output": "present.%d.value",
+                            },
+                        },
+                    }
+                ],
             },
         },
         "search": {"max_length": CONTEXT_LENGTH, "do_sample": False},
