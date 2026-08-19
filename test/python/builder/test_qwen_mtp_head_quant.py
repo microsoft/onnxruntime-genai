@@ -12,7 +12,8 @@ import torch
 
 from models.builders.base import Model
 from models.builders.quant_config import QuantConfig
-from models.builders.qwen import Qwen35MoeTextModel, Qwen35MtpHead, Qwen35TextModel
+from models.builders.qwen import Qwen35MoeTextModel, Qwen35TextModel
+from models.builders.qwen_mtp import Qwen35MtpHead
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):

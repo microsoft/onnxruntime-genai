@@ -324,7 +324,7 @@ shape, so `GeneratorParams::max_graph_capture_length` is set to `num_speculative
   `(length, recurrent variant)` pair, so ORT captures and replays an independent graph per shape.
 
 `HiddenStatesInputs` / `HiddenStatesOutputs`
-([src/models/hidden_states_inputs.h](../src/models/hidden_states_inputs.h)) keep one dedicated
+([src/models/hidden_states.h](../src/models/hidden_states.h)) keep one dedicated
 static buffer per captured length and a single shared dynamic buffer for everything else (prompt
 prefill), so the prompt does not leave a per-length buffer behind. `HiddenStatesInputs::Update`
 validates the source element type and byte count, then prefers a stream-ordered device-to-device
