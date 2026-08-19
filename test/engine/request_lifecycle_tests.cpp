@@ -38,62 +38,6 @@ static_assert(noexcept(std::declval<Request&>().CommitStep(
     std::declval<const RequestStepPlan&>(),
     std::declval<const RequestStepResult&>())));
 
-class FailingAllocationDevice final : public DeviceInterface {
- public:
-  explicit FailingAllocationDevice(DeviceInterface& inner) : inner_{inner} {}
-
-  DeviceType GetType() const override { return inner_.GetType(); }
-  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
-    inner_.InitOrt(api, allocator);
-  }
-  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
-  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
-    return inner_.GetMemoryInfo();
-  }
-  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    if (fail_allocation_) {
-      throw std::runtime_error("Injected request preparation allocation failure.");
-    }
-    return inner_.AllocateBase(size);
-  }
-  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
-    return inner_.WrapMemoryBase(memory, size);
-  }
-  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
-    return inner_.CreateGreedy(params);
-  }
-  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
-    return inner_.CreateBeam(params);
-  }
-  void Synchronize() override { inner_.Synchronize(); }
-
-  void SetFailAllocation(bool fail) { fail_allocation_ = fail; }
-
- private:
-  DeviceInterface& inner_;
-  bool fail_allocation_{true};
-};
-
-class FailingAdmissionScheduler final : public DynamicBatchScheduler {
- public:
-  FailingAdmissionScheduler(std::shared_ptr<Model> model,
-                            std::shared_ptr<CacheManager> cache_manager)
-      : DynamicBatchScheduler(std::move(model), std::move(cache_manager)) {}
-
-  SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& request) override {
-    if (fail_preparation_) {
-      throw std::runtime_error("Injected scheduler admission preparation failure.");
-    }
-    return DynamicBatchScheduler::PrepareAddRequest(request);
-  }
-
-  void SetFailPreparation(bool fail) { fail_preparation_ = fail; }
-
- private:
-  bool fail_preparation_{true};
-};
-
 class RequestLifecycleTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -128,62 +72,6 @@ TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
 
   EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
-}
-
-TEST_F(RequestLifecycleTest,
-       DevicePreparationFailureLeavesAdmissionUnassignedAndRetryAppendsPromptOnce) {
-  const auto prompt = Prompt();
-  auto request = NewRequest();
-  request->AddTokens(prompt);
-  auto params = request->Params();
-  FailingAllocationDevice failing_device{*params->p_device};
-  params->p_device = &failing_device;
-
-  EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
-  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
-  EXPECT_FALSE(engine_.engine->HasPendingRequests());
-  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
-
-  failing_device.SetFailAllocation(false);
-  EXPECT_NO_THROW(engine_.engine->AddRequest(request));
-  EXPECT_EQ(request->Status(), RequestStatus::Assigned);
-  EXPECT_EQ(request->CurrentSequenceLength(),
-            static_cast<int64_t>(prompt.size()));
-  EXPECT_TRUE(engine_.engine->HasPendingRequests());
-  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
-  params->p_device = model_->p_device_scoring_;
-}
-
-TEST_F(RequestLifecycleTest,
-       SchedulerPreparationFailureLeavesAdmissionUnassignedAndRetryAppendsPromptOnce) {
-  const auto prompt = Prompt();
-  auto request = NewRequest();
-  request->AddTokens(prompt);
-
-  auto cache =
-      std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
-  auto scheduler =
-      std::make_unique<FailingAdmissionScheduler>(model_, cache);
-  auto* scheduler_observer = scheduler.get();
-  auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, EosToken(*model_));
-  EngineDependencies dependencies{
-      cache, std::move(scheduler), std::move(executor)};
-  auto engine =
-      std::make_shared<Engine>(model_, std::move(dependencies));
-
-  EXPECT_THROW(engine->AddRequest(request), std::runtime_error);
-  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
-  EXPECT_FALSE(engine->HasPendingRequests());
-  EXPECT_EQ(cache->AllocatedCount(), 0u);
-
-  scheduler_observer->SetFailPreparation(false);
-  EXPECT_NO_THROW(engine->AddRequest(request));
-  EXPECT_EQ(request->Status(), RequestStatus::Assigned);
-  EXPECT_EQ(request->CurrentSequenceLength(),
-            static_cast<int64_t>(prompt.size()));
-  EXPECT_TRUE(engine->HasPendingRequests());
-  EXPECT_EQ(cache->AllocatedCount(), 0u);
 }
 
 // An append that would exceed the model's max length is rejected before any tokens are buffered, so

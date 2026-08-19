@@ -8,7 +8,6 @@
 #include "search_cuda.h"
 #include "kernels.h"
 #include "cuda_topk.h"
-#include "sampler_state_index_pool.h"
 #include <charconv>
 #include <cstdarg>
 #include <cstring>
@@ -93,22 +92,26 @@ struct CudaSamplerStatePool {
     }
   }
 
-  template <typename Create>
-  auto AcquireOwned(int random_seed, Create&& create) {
-    return indices_.AcquireOwned(
-        [this, random_seed](int index, int required_size) {
-          EnsureCapacity(required_size);
-          const unsigned long long seed =
-              random_seed == -1
-                  ? static_cast<unsigned long long>(std::random_device{}())
-                  : static_cast<unsigned long long>(random_seed);
-          cuda::LaunchInitCurandState(
-              seed, states_.Span().data() + index, GetStream());
-        },
-        std::forward<Create>(create));
+  int Acquire(int random_seed) {
+    int index;
+    if (free_indices_.empty()) {
+      index = size_++;
+      EnsureCapacity(size_);
+    } else {
+      index = free_indices_.back();
+      free_indices_.pop_back();
+    }
+
+    const unsigned long long seed = random_seed == -1
+                                        ? static_cast<unsigned long long>(std::random_device{}())
+                                        : static_cast<unsigned long long>(random_seed);
+    cuda::LaunchInitCurandState(seed, states_.Span().data() + index, GetStream());
+    return index;
   }
 
-  void Release(int index) noexcept { indices_.Release(index); }
+  void Release(int index) {
+    free_indices_.push_back(index);
+  }
 
   curandState* Data() { return states_.Span().data(); }
 
@@ -119,9 +122,9 @@ struct CudaSamplerStatePool {
 
     const int new_capacity = std::max(required_capacity, std::max(4, capacity_ * 2));
     auto new_states = AllocateCudaSpan<curandState>(new_capacity);
-    if (indices_.Size() > 0) {
+    if (size_ > 1) {
       CUDA_CHECK(cudaMemcpyAsync(new_states.Span().data(), states_.Span().data(),
-                                 static_cast<size_t>(indices_.Size()) * sizeof(curandState),
+                                 static_cast<size_t>(size_ - 1) * sizeof(curandState),
                                  cudaMemcpyDeviceToDevice, GetStream()));
       CUDA_CHECK(cudaStreamSynchronize(GetStream()));
     }
@@ -130,7 +133,8 @@ struct CudaSamplerStatePool {
   }
 
   DeviceSpan<curandState> states_;
-  SamplerStateIndexPool indices_;
+  std::vector<int> free_indices_;
+  int size_{};
   int capacity_{};
 };
 
@@ -138,7 +142,7 @@ struct CudaBatchedSamplerState final : BatchedSamplerState {
   CudaBatchedSamplerState(std::shared_ptr<CudaSamplerStatePool> pool, int index)
       : pool_{std::move(pool)}, index_{index} {}
 
-  ~CudaBatchedSamplerState() noexcept override { pool_->Release(index_); }
+  ~CudaBatchedSamplerState() override { pool_->Release(index_); }
 
   std::shared_ptr<CudaSamplerStatePool> pool_;
   int index_{};
@@ -160,12 +164,7 @@ struct CudaBatchedSampler final : BatchedSampler {
   }
 
   std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
-    auto pool = state_pool_;
-    return state_pool_->AcquireOwned(
-        random_seed,
-        [pool = std::move(pool)](int index) {
-          return std::make_unique<CudaBatchedSamplerState>(pool, index);
-        });
+    return std::make_unique<CudaBatchedSamplerState>(state_pool_, state_pool_->Acquire(random_seed));
   }
 
   bool OwnsState(const BatchedSamplerState& state) const override {

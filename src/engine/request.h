@@ -39,21 +39,6 @@ struct RequestStepResult {
 // one generated-output index.
 inline constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
 
-struct RequestAdmissionPreparation {
-  RequestAdmissionPreparation();
-  ~RequestAdmissionPreparation();
-  RequestAdmissionPreparation(RequestAdmissionPreparation&&) noexcept;
-  RequestAdmissionPreparation& operator=(RequestAdmissionPreparation&&) noexcept;
-  RequestAdmissionPreparation(const RequestAdmissionPreparation&) = delete;
-  RequestAdmissionPreparation& operator=(const RequestAdmissionPreparation&) = delete;
-
-  std::unique_ptr<Search> search;
-  std::unique_ptr<BatchedSamplerState> sampling_state;
-  std::vector<int32_t> tokens_host;
-  int64_t prompt_sequence_length{};
-  int64_t seen_sequence_length{};
-};
-
 /**
  * @class Request
  * @brief Manages the state and lifecycle of a user request within the engine.
@@ -73,12 +58,13 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   Request(std::shared_ptr<GeneratorParams> params);
 
-  // Compatibility helper for tests and direct scheduler clients. Engine admission uses the
-  // prepare/commit methods below so no ownership is published until every throwing step succeeds.
+  /**
+   * @brief Assigns this request to a specific engine for processing.
+   * @param engine Shared pointer to the Engine to be used for processing this request.
+   *
+   * Once assigned, the request will finalize the prefill tokens and prepare for scheduling.
+   */
   void Assign(std::shared_ptr<Engine> engine);
-  RequestAdmissionPreparation PrepareAdmission() const;
-  void CommitAdmission(std::shared_ptr<Engine> engine,
-                       RequestAdmissionPreparation&& preparation) noexcept;
 
   /**
    * @brief Updates the status of the request to Active and prepares it for processing.
@@ -294,7 +280,6 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Returns this request's persistent random state for the given batched sampler.
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
-  void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
 
   /**
    * @brief Retrieves the generator parameters associated with this request.
