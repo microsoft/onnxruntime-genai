@@ -169,11 +169,6 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   bool IsTurnComplete() const;
 
-  /**
-   * @brief Compatibility alias for IsTurnComplete().
-   */
-  bool IsDone() const;
-
   RequestStatus Status() const noexcept { return status_; }
 
   /**

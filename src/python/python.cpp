@@ -403,15 +403,6 @@ void SetLogCallback(std::optional<const pybind11::function> callback) {
   }
 }
 
-bool IsRequestDoneDeprecated(const OgaRequest& request) {
-  if (PyErr_WarnEx(PyExc_DeprecationWarning,
-                   "Request.is_done() is deprecated; use Request.is_turn_complete() instead.",
-                   1) < 0) {
-    throw pybind11::error_already_set();
-  }
-  return request.IsTurnComplete();
-}
-
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -745,7 +736,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
-      .def("is_done", &IsRequestDoneDeprecated, "Deprecated compatibility alias for is_turn_complete().")
       .def_property_readonly("status", &OgaRequest::GetStatus)
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
       .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {

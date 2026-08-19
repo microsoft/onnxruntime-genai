@@ -136,7 +136,7 @@ the beginning of a decode step: the token sampled by the previous step.
 ### `TurnComplete`
 
 The current generation turn reached an end condition, such as EOS or maximum length. Generated
-output remains available. `IsTurnComplete()` is the precise API for testing this state. `IsDone()` is a temporary compatibility alias for `IsTurnComplete()`; it remains turn-scoped and does not mean permanent request termination or removal.
+output remains available. `IsTurnComplete()` is the API for testing this state; it does not mean permanent request termination or removal.
 
 A generated EOS/stop token is not appended to the logical sequence or returned as unseen output.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by

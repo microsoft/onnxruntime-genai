@@ -1368,10 +1368,6 @@ OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
   OGA_CATCH
 }
 
-OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
-  return OgaRequestIsTurnComplete(request, out);
-}
-
 OgaResult* OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out) {
   OGA_TRY
   switch (request->Status()) {

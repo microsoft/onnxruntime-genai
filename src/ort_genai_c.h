@@ -1350,19 +1350,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request,
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsTurnComplete(const OgaRequest* request, bool* out);
 
 /**
- * \brief Deprecated compatibility alias for OgaRequestIsTurnComplete.
- *
- * This function reports completion of the current generation turn; it does not report permanent request closure.
- *
- * \deprecated Use OgaRequestIsTurnComplete instead.
- *
- * \param[in] request The request whose current turn should be checked.
- * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
- * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
-
-/**
  * \brief Gets the request lifecycle status.
  *
  * \param[in] request The request to inspect.

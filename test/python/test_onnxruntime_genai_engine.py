@@ -68,17 +68,6 @@ def test_request_status_names():
     assert not hasattr(og.RequestStatus, "IN_PROGRESS")
 
 
-def test_request_is_done_compatibility_alias_warns(model):
-    params = og.GeneratorParams(model)
-    request = og.Request(params)
-    expected = request.is_turn_complete()
-
-    with pytest.warns(DeprecationWarning, match=r"is_done.*is_turn_complete"):
-        actual = request.is_done()
-
-    assert actual == expected
-
-
 def _add_request(engine, model, prompt, max_new_tokens, sink):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)

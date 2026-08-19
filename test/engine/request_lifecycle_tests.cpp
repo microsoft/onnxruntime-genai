@@ -162,7 +162,6 @@ TEST_F(RequestLifecycleTest, ContinueAfterTurnCompleteQueuesNextTurn) {
   EXPECT_EQ(engine_.engine->Step(), request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_TRUE(request->IsTurnComplete());
-  EXPECT_TRUE(request->IsDone());  // Compatibility alias.
 }
 
 TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {

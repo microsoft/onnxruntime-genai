@@ -912,16 +912,6 @@ struct OgaRequest : OgaAbstract {
     return is_turn_complete;
   }
 
-  /**
-   * \brief Deprecated compatibility alias for IsTurnComplete().
-   *
-   * \deprecated Use IsTurnComplete() instead.
-   */
-  [[deprecated("Use IsTurnComplete() instead.")]]
-  bool IsDone() const {
-    return IsTurnComplete();
-  }
-
   OgaRequestStatus GetStatus() const {
     OgaRequestStatus status;
     OgaCheckResult(OgaRequestGetStatus(this, &status));

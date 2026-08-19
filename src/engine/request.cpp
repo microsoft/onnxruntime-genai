@@ -312,10 +312,6 @@ bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
 }
 
-bool Request::IsDone() const {
-  return IsTurnComplete();
-}
-
 bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
 }
