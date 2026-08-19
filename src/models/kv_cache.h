@@ -104,6 +104,12 @@ struct DefaultKeyValueCache : KeyValueCache {
   // Support for per-layer KV cache shapes (for models with alternating attention patterns)
   std::vector<std::array<int64_t, 4>> layer_shapes_;
 
+  // Sequence capacity allocated for sliding-window layers, or 0 when no layer is windowed.
+  // Only the most recent windowed_cache_size_ positions of those layers are retained, which bounds
+  // how far RewindTo can go back.
+  int windowed_cache_size_{0};
+  int current_length_{0};  // Total sequence length seen by the most recent Update()
+
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> empty_pasts_;  // Per-layer empty past tensors (for varying head_dim)
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
@@ -200,6 +206,10 @@ struct LFM2Cache : KeyValueCache {
 };
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
+
+// Returns true when the runtime uses a non-rewindable windowed KV cache.
+bool UsesNonRewindableWindowedKeyValueCache(
+    const Model& model, const Config::Model::Decoder& decoder);
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
 

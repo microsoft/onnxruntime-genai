@@ -62,6 +62,7 @@ typedef enum OgaElementType {
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
+typedef struct OgaSpeculativeStats OgaSpeculativeStats;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
@@ -512,6 +513,42 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchNumber(const OgaGe
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
+ * \brief Set a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens" or "ngram_size").
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGeneratorParams* params, const char* name, double value);
+
+/**
+ * \brief Get a numerical value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
+ * \brief Set a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option.
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeBool(OgaGeneratorParams* params, const char* name, bool value);
+
+/**
+ * \brief Get a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeBool(const OgaGeneratorParams* params, const char* name, bool* value);
+
+/**
  * \brief Creates a generator from the given model and generator params.
  * \param[in] model The model to use for generation.
  * \param[in] params The parameters to use for generation.
@@ -525,6 +562,43 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
  * \param[in] generator The generator to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
+
+/* Multi-Token-Prediction (MTP) self-speculative decoding (e.g. Qwen3.6). The MtpGenerator
+ * composes a main decoder and an MTP draft head and runs the draft/verify loop in-engine,
+ * keeping the hidden-state handoff on-device. Greedy, batch size 1; the output is identical to
+ * plain greedy decoding (lossless). */
+typedef struct OgaMtpGenerator OgaMtpGenerator;
+
+/**
+ * \brief Creates an MTP self-speculative generator from a main model and an MTP-head model.
+ * \param[in] main_model The main decoder (exported with include_hidden_states).
+ * \param[in] mtp_model The MTP head (mtp.onnx, with a hidden_states input).
+ * \param[in] params The generation parameters (greedy, batch size 1).
+ * \param[out] out The created MTP generator.
+ * \return OgaResult containing the error message on failure.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_model, const OgaModel* mtp_model, const OgaGeneratorParams* params, OgaMtpGenerator** out);
+
+/** \brief Seed the prompt (runs the main model's prefill). */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
+/** \brief Produce the next token via the draft/verify loop. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator);
+/** \brief Whether generation has reached EOS or max length. */
+OGA_EXPORT bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator);
+/** \brief Number of committed tokens (prompt + generated). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetSequenceCount(const OgaMtpGenerator* generator);
+/** \brief Pointer to the committed token data (valid until the next call). */
+OGA_EXPORT const int32_t* OGA_API_CALL OgaMtpGenerator_GetSequenceData(const OgaMtpGenerator* generator);
+/** \brief Number of main-model forward passes run (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGenerator* generator);
+/** \brief Number of accepted drafts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator);
+/** \brief Number of draft attempts (speculative stats). */
+OGA_EXPORT size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator);
+/** \brief Returns speculative-decoding statistics using the shared OgaSpeculativeStats schema. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(const OgaMtpGenerator* generator, OgaSpeculativeStats** out);
+/** \brief Destroys the given MTP generator. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* generator);
 
 /**
  * \brief Returns true if the generator has finished generating all the sequences.
@@ -615,6 +689,28 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
 
 /**
+ * \brief Snapshots the generator's recurrent state (conv/linear-attention state) so a later
+ *        OgaGenerator_RewindTo can roll it back. Used for speculative decoding (e.g. MTP) on
+ *        hybrid models, whose recurrent state cannot be partially cropped like the KV cache.
+ *        Take the snapshot at the length you might roll back to, then RewindTo that length to
+ *        restore it. A no-op for models without recurrent state.
+ * \param[in] generator The generator whose recurrent state is snapshotted.
+ * \return OgaResult containing the error message if the snapshot failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SnapshotState(OgaGenerator* generator);
+
+/**
+ * \brief Stages a hidden_states tensor as the model's hidden_states input for the next step.
+ *        Used by the MTP self-speculative head, which consumes the main model's last hidden
+ *        state. A no-op for models without a hidden_states input. The tensor is [batch,
+ *        sequence_length, hidden_size] of the model's io dtype.
+ * \param[in] generator The generator to set the hidden_states input on.
+ * \param[in] hidden_states The hidden state values to feed on the next step.
+ * \return OgaResult containing the error message if the call failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetHiddenStates(OgaGenerator* generator, OgaTensor* hidden_states);
+
+/**
  * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
  *       and will be released when the OgaTensor is destroyed
  * \param[in] generator The generator to run the GetInput on the name provided and the out pointer to store the input.
@@ -671,6 +767,23 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
  *         be used after the OgaGenerator is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
+
+/** \brief Creates an immutable snapshot of the accumulated speculative-decoding statistics.
+ *  Values are zero for non-speculative models. The caller must destroy the returned object. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSpeculativeStats(const OgaGenerator* generator, OgaSpeculativeStats** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* stats);
+
+/** \brief Gets an integer counter from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
+    const OgaSpeculativeStats* stats, const char* name, uint64_t* value);
+
+/** \brief Gets a timing, rate, ratio, average, or speedup value from a statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
+    const OgaSpeculativeStats* stats, const char* name, double* value);
+
+/** \brief Gets a boolean value from a speculative statistics snapshot. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetBool(
+    const OgaSpeculativeStats* stats, const char* name, bool* value);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
@@ -1061,6 +1174,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
 
 /**
  * \brief Destroys the given engine.
+ *
+ * Remove every submitted request with OgaEngineRemoveRequest before destroying the engine.
  * \param[in] engine The engine to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
@@ -1078,7 +1193,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
  *
  * \param[in] engine The engine instance to run a processing step on.
  * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
- *                     If the engine has no ready requests, this will be set to a nullptr.
+ *                     If the engine has no ready requests, this will be set to a nullptr. Each non-null handle
+ *                     returned by this function must be released with OgaDestroyRequest. Releasing this handle
+ *                     does not remove the request from the engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
@@ -1087,6 +1204,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest**
  * \brief Checks if the engine has any pending requests to process.
  *
  * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
+ * A false result does not mean the engine owns no requests: turn-complete requests remain owned
+ * until removed or abandoned.
  *
  * \param[in] engine The engine instance to check for pending requests.
  * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
@@ -1099,9 +1218,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
  * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
+ * On success, the engine retains ownership after the current generation turn completes. OgaEngineRemoveRequest
+ * releases that ownership immediately. If the caller instead
+ * releases every external handle, the request is marked abandoned and reclaimed before the engine's next
+ * OgaEngineAddRequest or OgaEngineStep boundary.
  *
  * \param[in] engine The engine instance to which the request is being added.
- * \param[in] request The request to add to the engine. The request must remain valid until it is removed or processed.
+ * \param[in] request The request to add to the engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
@@ -1109,11 +1232,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaReq
 /**
  * \brief Removes a request from the OgaEngine.
  *
- * This function removes a request from the engine, allowing it to be cleaned up. The request must have been previously added
- * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed by the engine.
+ * This function logically closes a request, after which it will no longer be processed and cannot be reused.
+ * A nonterminal request must belong to this engine. Removing an already closed request is an engine-agnostic successful
+ * no-op because the request no longer has an owner. Dynamic removal releases cache ownership immediately; a resident
+ * static-batch row may remain physically retained until its shared batch is recycled.
+ * The caller remains responsible for releasing every request handle with OgaDestroyRequest.
  *
  * \param[in] engine The engine instance from which the request is being removed.
- * \param[in] request The request to remove from the engine. The request must have been previously added to the engine.
+ * \param[in] request The request to remove. A nonterminal request must have been previously added to this engine.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
@@ -1123,6 +1249,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
  *
  * This function initializes a new request object that can be used to submit input sequences for model inference.
  * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
+ * The returned handle is owned by the caller. Explicit removal is recommended for deterministic resource release;
+ * otherwise releasing the final external handle marks a submitted request for deferred Engine reclamation.
  *
  * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
  * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
@@ -1131,10 +1259,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
 
 /**
- * \brief Adds input sequences to the request.
+ * \brief Adds initial input sequences to a created request.
  *
- * This function sets the input sequences for the request. The input sequences are used to seed the generation process.
- * The request must have been created using OgaCreateRequest before calling this function.
+ * This function is valid only before the request is submitted to an Engine. Use OgaRequestContinue to begin another
+ * generation turn after OgaRequestIsTurnComplete returns true.
+ * Input must leave room for at least one generated token below max_length.
  *
  * \param[in] request The request to set the input sequences on.
  * \param[in] tokens The input sequences to set on the request.
@@ -1143,12 +1272,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
 
 /**
+ * \brief Queues another generation turn using the request's resident model state.
+ *
+ * This function is valid only after OgaRequestIsTurnComplete returns true. Subsequent OgaEngineStep calls process
+ * the appended input.
+ *
+ * \param[in] request The request to continue.
+ * \param[in] tokens The new input sequence for the next turn.
+ * \return OgaResult containing the error message if continuation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens);
+
+/**
  * \brief Destroys the given request.
  *
- * This function cleans up the resources associated with the request, including any input sequences and parameters.
- * It should be called when the request is no longer needed, either after it has been processed.
+ * This function releases one external request handle. Releasing the final handle marks a submitted request abandoned;
+ * its Engine reclaims it before the next OgaEngineAddRequest or OgaEngineStep call. Call OgaEngineRemoveRequest first
+ * when resources must be released immediately. Every handle returned by OgaCreateRequest or OgaEngineStep must be
+ * released once.
  *
- * \param[in] request The request to be destroyed. The request must have been created using OgaCreateRequest.
+ * \param[in] request A request handle returned by OgaCreateRequest or OgaEngineStep.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
 
@@ -1205,17 +1348,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* r
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
 
 /**
- * \brief Checks if the request is done processing.
+ * \brief Checks if the current generation turn is complete.
  *
- * This function checks if the request has finished processing. The request is done when one of the termination
- * conditions has been reached (e.g. end of sequence token is encountered or the request was cancelled).
- * If the request is done, it will return true; otherwise, it will return false.
+ * This function reports completion of the current turn. It does not mean that the request is permanently closed;
+ * OgaRequestContinue may queue another turn while state remains resident.
  *
- * \param[in] request The request to check if it is done.
- * \param[out] out Boolean flag that will be set to true if the request is done, or false otherwise.
+ * \param[in] request The request whose current turn should be checked.
+ * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
  * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsTurnComplete(const OgaRequest* request, bool* out);
 
 /**
  * \brief Registers an execution provider library with ONNXRuntime API.

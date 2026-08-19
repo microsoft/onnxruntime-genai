@@ -3,9 +3,33 @@
 
 #pragma once
 
+#include "../config.h"
+#include "../smartptrs.h"
 #include "kv_cache.h"
 
 namespace Generators {
+
+// ---------------------------------------------------------------------------
+// GQA-based windowed KV cache helpers (used by DefaultKeyValueCache).
+//
+// These EPs hold a KV cache smaller than max_length for sliding-window layers;
+// the GQA kernel itself evicts old entries by compaction (sliding_window_cache=1).
+// ---------------------------------------------------------------------------
+
+// Returns the windowed cache capacity C for the given execution provider, or 0
+// if the configuration does not call for a windowed cache on this EP.
+// C = W + slack, where slack is the larger of:
+//   - chunk_size - 1 (to fit a whole prefill chunk without staging), and
+//   - the per-EP default (0 for CUDA, 16 for CPU) or the user's cache_slack override.
+// The result is clamped to [0, max_length].
+int ComputeWindowedKvCacheSize(DeviceType device_type,
+                               const Config::Model::Decoder& decoder,
+                               const Config::Search& search,
+                               int max_length);
+
+// Throws if rewinding to `index` is not safe because the windowed KV cache has
+// already evicted the positions needed at that point.
+void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, size_t index);
 
 struct WindowedKeyValueCache : KeyValueCache {
   WindowedKeyValueCache(State& state);

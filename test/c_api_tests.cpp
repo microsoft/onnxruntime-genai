@@ -298,7 +298,7 @@ TEST(CAPITests, SequencesOutOfBoundsAccess) {
   EXPECT_EQ(sequences->SequenceCount(0), tokens.size());
   EXPECT_NE(sequences->SequenceData(0), nullptr);
 
-  // Out-of-bounds indices must not read past the underlying storage.
+  // Indices outside the stored range return empty results.
   EXPECT_EQ(sequences->SequenceCount(1), 0u);
   EXPECT_EQ(sequences->SequenceData(1), nullptr);
   EXPECT_EQ(sequences->SequenceCount(1000), 0u);
@@ -338,28 +338,6 @@ TEST(CAPITests, MaxLength) {
   EXPECT_THROW(generator->AppendTokens(input_ids_2.data(), input_ids_2.size()), std::runtime_error);
 #endif
 }
-
-#if ENABLE_ENGINE_TESTS
-TEST(CAPIEngineTests, MaxLength) {
-  std::vector<int32_t> input_ids{1, 2, 3, 5, 8, 2, 1, 4, 5, 7};
-
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto engine = OgaEngine::Create(*model);
-
-  auto sequence = OgaSequences::Create();
-  sequence->Append(input_ids.data(), input_ids.size());
-
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) - 1);  // Set max_length to one less than input size
-  auto request = OgaRequest::Create(*params);
-  EXPECT_THROW(request->AddTokens(*sequence), std::runtime_error);
-
-  params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + 1);  // Set max_length to one more than input size
-  request->AddTokens(*sequence);
-  ASSERT_TRUE(request != nullptr);
-  ASSERT_FALSE(request->IsDone());
-}
-#endif
 
 // DML doesn't support batch_size > 1
 // TODO: WebGPU should support batch_size > 1, investigate why it's failing
@@ -439,6 +417,33 @@ TEST(CAPITests, MarianBatchIOContract) {
   EXPECT_EQ(generator->GetSequenceCount(0), generator->GetSequenceCount(1));
 }
 
+// The decoder turns each row's attention-mask sum into its selected token.
+// Unequal prompt lengths therefore validate both per-row EOS insertion and
+// the actual mask values rather than only tensor dimensions.
+TEST(CAPITests, MarianBatchAttentionMaskValues) {
+  auto model = OgaModel::Create(MODEL_PATH "marian-batch-values");
+
+  const std::array<int32_t, 1> first{5};
+  const std::array<int32_t, 2> second{7, 8};
+  auto sequences = OgaSequences::Create();
+  sequences->Append(first.data(), first.size());
+  sequences->Append(second.data(), second.size());
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("batch_size", 2);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*sequences);
+  const auto generated_start = generator->TokenCount();
+  generator->GenerateNextToken();
+
+  ASSERT_EQ(generated_start, 2U);
+  ASSERT_GT(generator->GetSequenceCount(0), generated_start);
+  ASSERT_GT(generator->GetSequenceCount(1), generated_start);
+  EXPECT_EQ(generator->GetSequenceData(0)[generated_start], 2);
+  EXPECT_EQ(generator->GetSequenceData(1)[generated_start], 3);
+}
+
 // Beam search makes every graph tensor batch*beam wide. The prompt length is
 // load-bearing: at two tokens the correct sequence width is 3 and sizing the
 // prompt buffer by batch*beam gives 4, so the fixture rejects the regression.
@@ -457,142 +462,17 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*sequences);
   generator->GenerateNextToken();
+  ASSERT_FALSE(generator->IsDone());
+  auto logits = generator->GetLogits();
+  EXPECT_EQ(logits->Shape(), (std::vector<int64_t>{4, 1, 32001}));
+  generator->GenerateNextToken();
+
+  auto next_tokens = generator->GetNextTokens();
+  constexpr std::array<int32_t, 4> expected_tokens{2, 2, 4, 4};
+  ASSERT_EQ(next_tokens.size(), expected_tokens.size());
+  for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
+    EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
 }
-
-#if ENABLE_ENGINE_TESTS
-TEST(CAPIEngineTests, EndToEndPhiBatch) {
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto engine = OgaEngine::Create(*model);
-  auto tokenizer = OgaTokenizer::Create(*model);
-
-  constexpr size_t batch_size = 3;
-  const char* input_strings[] = {
-      "This is a test.",
-      "Rats are awesome pets!",
-      "The quick brown fox jumps over the lazy dog.",
-  };
-
-  std::vector<std::unique_ptr<OgaRequest>> requests;
-  std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
-  std::array<std::vector<int32_t>, batch_size> generated_tokens;
-  for (auto& string : input_strings) {
-    auto input_sequences = OgaSequences::Create();
-    tokenizer->Encode(string, *input_sequences);
-    generated_tokens[requests.size()] = std::vector<int32_t>(input_sequences->SequenceData(0),
-                                                             input_sequences->SequenceData(0) +
-                                                                 input_sequences->SequenceCount(0));
-    params.emplace_back(OgaGeneratorParams::Create(*model));
-    params.back()->SetSearchOption("max_length", 40);
-    requests.push_back(OgaRequest::Create(*params.back()));
-    requests.back()->AddTokens(*input_sequences);
-    requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
-
-    engine->Add(*requests.back());
-  }
-
-  while (auto request = engine->Step()) {
-    while (request->HasUnseenTokens()) {
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
-      tokens->push_back(request->GetUnseenToken());
-    }
-  }
-
-  for (size_t i = 0; i < batch_size; i++) {
-    auto out_string = tokenizer->Decode(generated_tokens[i].data(), generated_tokens[i].size());
-    std::cout << "Decoded string:" << out_string << std::endl;
-  }
-
-  // Verify outputs match expected outputs
-  std::vector<std::vector<int32_t>> expected_output{
-      {1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330,
-       1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82,
-       21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6,
-       14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684},
-      {49, 1381, 389, 7427, 17252, 0, 198, 50284, 37811, 628, 50256},
-      {464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13,
-       198, 50284, 37811, 628, 50256}};
-
-  for (size_t i = 0; i < batch_size; i++) {
-    ASSERT_LE(generated_tokens[i].size(), 40);
-    EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
-    EXPECT_EQ(expected_output[i], generated_tokens[i]);
-  }
-}
-#endif
-
-#if ENABLE_ENGINE_TESTS
-TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto engine = OgaEngine::Create(*model);
-  auto tokenizer = OgaTokenizer::Create(*model);
-
-  constexpr size_t batch_size = 3;
-  const char* input_strings[] = {
-      "This is a test.",
-      "Rats are awesome pets!",
-      "The quick brown fox jumps over the lazy dog.",
-  };
-
-  std::vector<std::unique_ptr<OgaRequest>> requests;
-  std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-  std::vector<std::unique_ptr<OgaTokenizerStream>> streams;
-  std::array<std::vector<int32_t>, batch_size> generated_tokens;
-  for (auto& string : input_strings) {
-    auto input_sequences = OgaSequences::Create();
-    tokenizer->Encode(string, *input_sequences);
-    generated_tokens[requests.size()] = std::vector<int32_t>(input_sequences->SequenceData(0),
-                                                             input_sequences->SequenceData(0) +
-                                                                 input_sequences->SequenceCount(0));
-    params.emplace_back(OgaGeneratorParams::Create(*model));
-    params.back()->SetSearchOption("max_length", 40);
-    requests.push_back(OgaRequest::Create(*params.back()));
-    requests.back()->AddTokens(*input_sequences);
-    requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
-    streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
-  }
-
-  // Add the first request to the engine
-  engine->Add(*requests[0]);
-
-  size_t num_steps = 0;
-  while (auto request = engine->Step()) {
-    num_steps++;
-    while (request->HasUnseenTokens()) {
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
-      tokens->push_back(request->GetUnseenToken());
-    }
-
-    if (num_steps == 5)
-      engine->Add(*requests[1]);  // Stagger the second request
-
-    if (num_steps == 10)
-      engine->Add(*requests[2]);  // Stagger the third request
-  }
-
-  for (size_t i = 0; i < batch_size; i++) {
-    auto out_string = tokenizer->Decode(generated_tokens[i].data(), generated_tokens[i].size());
-    std::cout << "Decoded string:" << out_string << std::endl;
-  }
-
-  // Verify outputs match expected outputs
-  std::vector<std::vector<int32_t>> expected_output{
-      {1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330,
-       1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82,
-       21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6,
-       14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684},
-      {49, 1381, 389, 7427, 17252, 0, 198, 50284, 37811, 628, 50256},
-      {464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13,
-       198, 50284, 37811, 628, 50256}};
-
-  for (size_t i = 0; i < batch_size; i++) {
-    ASSERT_LE(generated_tokens[i].size(), 40);
-    EXPECT_EQ(expected_output[i].size(), generated_tokens[i].size());
-    EXPECT_EQ(expected_output[i], generated_tokens[i]);
-  }
-}
-#endif
 
 TEST(CAPITests, EndToEndPhi) {
 #if TEST_PHI2
@@ -676,49 +556,6 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 #endif
 }
-
-#if ENABLE_ENGINE_TESTS
-TEST(CAPIEngineTests, EndToEndPhi) {
-  auto model = OgaModel::Create(PHI2_PATH);
-  auto engine = OgaEngine::Create(*model);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto streaming_tokenizer = OgaTokenizerStream::Create(*tokenizer);
-
-  const char* input_string = "This is a test.";
-  auto input_sequence = OgaSequences::Create();
-  tokenizer->Encode(input_string, *input_sequence);
-
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 40);
-  auto request = OgaRequest::Create(*params);
-  request->AddTokens(*input_sequence);
-
-  engine->Add(*request);
-  std::string out_string;
-  std::vector<int32_t> generated_tokens(input_sequence->SequenceData(0), input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
-
-  while (auto ready_request = engine->Step()) {
-    while (ready_request->HasUnseenTokens()) {
-      generated_tokens.push_back(ready_request->GetUnseenToken());
-      out_string += streaming_tokenizer->Decode(generated_tokens.back());
-    }
-  }
-
-  engine->Remove(*request);
-
-  std::cout << "Decoded string:" << out_string << std::endl;
-
-  // Verify outputs match expected outputs
-  std::vector<int32_t> expected_output{
-      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
-      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
-      6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
-
-  ASSERT_LE(generated_tokens.size(), 40);
-
-  EXPECT_EQ(expected_output, generated_tokens);
-}
-#endif
 
 TEST(CAPITests, LoadModelFromMemory) {
 #if TEST_PHI2
@@ -1094,6 +931,11 @@ struct Phi2Test {
     }
 
     for (size_t i = 0; i < batch_size_; i++) {
+      EXPECT_TRUE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+      EXPECT_FALSE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+
       auto out_string = tokenizer_->Decode(generated_tokens[i].data(), generated_tokens[i].size());
       std::cout << "Decoded string:" << out_string << std::endl;
     }
@@ -1182,9 +1024,8 @@ INSTANTIATE_TEST_SUITE_P(TopKCAPITest,
                          ParametrizedTopKTopPCAPITestsTests,
                          ::testing::Values(false, true));
 
-// Regression test: a top_k value larger than the model's vocab_size must be
-// rejected at generator creation time instead of triggering an out-of-bounds
-// read/write in std::partial_sort inside SampleTopK/SampleTopKTopP.
+// A top_k value larger than the model's vocab_size must be rejected during
+// generator creation.
 TEST(CAPITests, TopKExceedsVocabSizeThrows) {
   Phi2Test test;
 

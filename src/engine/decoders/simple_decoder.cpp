@@ -26,7 +26,7 @@ bool IsPureDecodeStep(ScheduledRequests& scheduled_requests) {
     return false;
   }
   for (auto& request : scheduled_requests) {
-    if (request->IsPrefill() || request->UnprocessedTokens().size() != 1) {
+    if (request->IsPrefill() || request->ScheduledTokenCount() != 1) {
       return false;
     }
   }
@@ -35,33 +35,33 @@ bool IsPureDecodeStep(ScheduledRequests& scheduled_requests) {
 
 }  // namespace
 
-void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
-  cache_manager_->Step();
-
+void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
+                           ExecutionContext& context) {
   const bool capture = graph_buffers_ != nullptr &&
                        graph_buffers_->Fits(scheduled_requests.size()) &&
-                       IsPureDecodeStep(scheduled_requests);
+                       (context.plan ? context.plan->graph_capture_eligible
+                                     : IsPureDecodeStep(scheduled_requests));
 
   std::unique_ptr<DecoderIO> decoder_state =
       cache_manager_->SupportsDynamicBatching()
           ? static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<VarlenDecoderIO>(
-                model_, scheduled_requests, cache_manager_, capture ? graph_buffers_.get() : nullptr))
+                model_, scheduled_requests, cache_manager_, &context,
+                capture ? graph_buffers_.get() : nullptr))
           : static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
 
-  auto run_options = scheduled_requests.RunOptions();
   if (graph_buffers_ != nullptr) {
     // -1 tells the CUDA EP to run eagerly. Otherwise every distinct decode shape gets its own
     // annotation id: the EP runs that id once eagerly, captures it on the next occurrence, and
     // replays from then on.
     const std::string graph_id =
         capture ? std::to_string(VarlenGraphBuffers::GraphId(scheduled_requests.size(),
-                                                             cache_manager_->BlockTableColumns()))
+                                                             context.block_table_columns))
                 : std::string("-1");
-    run_options->AddConfigEntry("gpu_graph_id", graph_id.c_str());
+    context.run_options->AddConfigEntry("gpu_graph_id", graph_id.c_str());
   }
 
   decoder_state->DumpInputs();
-  model_->session_decoder_->Run(run_options.get(),
+  model_->session_decoder_->Run(context.run_options.get(),
                                 decoder_state->input_names_.data(),
                                 decoder_state->inputs_.data(),
                                 decoder_state->input_names_.size(),

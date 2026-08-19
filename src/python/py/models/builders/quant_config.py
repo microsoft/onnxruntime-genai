@@ -13,8 +13,8 @@ resolved ``QuantConfig`` later without changing this file.
 Scope note: this covers the targets the model builder implements today — dense
 ``weights`` (MatMul), ``moe`` (QMoE) experts, and layout-only ``runtime`` knobs —
 together with per-node/per-layer ``overrides`` (used for mixed precision). The
-KV-cache and auxiliary-model (MTP) targets from the broader design are out of
-scope here.
+KV cache is out of scope. Auxiliary models such as MTP consume an independent
+``QuantConfig`` instance rather than adding an auxiliary-model target here.
 """
 
 from __future__ import annotations
@@ -47,7 +47,9 @@ class DtypeDescriptor:
 
 
 # Only the dtypes the builder supports today. Float dtypes are I/O pass-through
-# (no weight quantization). ``mxfp4`` fixes block size 32 and is MoE-only.
+# (no weight quantization). The microscaling FP4 dtypes are MoE-only and fix their
+# block size: ``mxfp4`` -> 32 (ue8m0 block scales), ``nvfp4`` -> 16 (FP8-E4M3 block
+# scales + per-expert FP32 global scale).
 _DTYPES: dict[str, DtypeDescriptor] = {
     "fp32": DtypeDescriptor("fp32", "float", 32),
     "fp16": DtypeDescriptor("fp16", "float", 16),
@@ -57,6 +59,7 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),
+    "nvfp4": DtypeDescriptor("nvfp4", "mx", 4, block_size=16),
     "none": DtypeDescriptor("none", "float", 0),  # explicit "do not quantize this target"
 }
 
@@ -220,7 +223,7 @@ class MoEConfig:
         descriptor = resolve_dtype(self.type)
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx":
-            # mxfp4 mandates block size 32.
+            # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
             self.block_size = descriptor.block_size
         if self.weights_prepacked not in (-1, 0, 1):
             raise ValueError(f"moe.weights_prepacked must be -1, 0, or 1, got {self.weights_prepacked}")
@@ -400,9 +403,11 @@ class QuantConfig:
         # --- moe ---------------------------------------------------------
         moe_quant_type = extra_options.get("moe_quant_type")
         if moe_quant_type is None:
-            # int8 precision quantizes MoE experts to 8-bit to match the dense weights.
+            # Match the model precision unless the MoE target is configured independently.
             if precision == "int8" or extra_options.get("use_8bits_moe", False):
                 moe_quant_type = "int8"
+            elif precision in IO_DTYPES:
+                moe_quant_type = "none"
             else:
                 moe_quant_type = "int4"
         # QMoE default block size: 128 on TRT-RTX, 32 elsewhere (mxfp4 is pinned to 32 in MoEConfig).

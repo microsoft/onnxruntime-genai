@@ -3,7 +3,67 @@
 
 #include "cache_manager.h"
 
+#include <optional>
+
 namespace Generators {
+
+namespace {
+
+class PagedCacheStepReservation final : public CacheStepReservation {
+ public:
+  PagedCacheStepReservation(PagedKeyValueCache& cache,
+                            std::vector<std::shared_ptr<Request>>& allocated_requests,
+                            const StepPlan& plan)
+      : allocated_requests_{allocated_requests} {
+    std::vector<PagedCacheReservationRequest> requests;
+    requests.reserve(plan.requests.size());
+    newly_admitted_.reserve(plan.requests.size());
+    for (const auto& entry : plan.requests) {
+      requests.push_back(PagedCacheReservationRequest{
+          entry.request_id,
+          entry.target_cache_slots,
+          entry.newly_admitted,
+          entry.whole_sequence_cache_slots,
+      });
+      if (entry.newly_admitted) {
+        newly_admitted_.push_back(entry.request);
+      }
+    }
+
+    allocated_requests_.reserve(allocated_requests_.size() + newly_admitted_.size());
+    reservation_.emplace(cache.Reserve(requests));
+  }
+
+  PagedCacheReservation* PagedReservation() override {
+    return &*reservation_;
+  }
+
+  void Commit() override {
+    if (committed_) {
+      throw std::logic_error("Paged cache step reservation can only be committed once.");
+    }
+    reservation_->Commit();
+    allocated_requests_.insert(allocated_requests_.end(),
+                               newly_admitted_.begin(),
+                               newly_admitted_.end());
+    committed_ = true;
+  }
+
+  void Release() override {
+    if (committed_) {
+      throw std::logic_error("Cannot release a committed paged cache step reservation.");
+    }
+    reservation_->Release();
+  }
+
+ private:
+  std::vector<std::shared_ptr<Request>>& allocated_requests_;
+  std::vector<std::shared_ptr<Request>> newly_admitted_;
+  std::optional<PagedCacheReservation> reservation_;
+  bool committed_{};
+};
+
+}  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
   if (model->config_->engine.dynamic_batching) {
@@ -23,7 +83,8 @@ bool StaticCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>
 
   if (std::all_of(cache_allocated_requests_.begin(), cache_allocated_requests_.end(),
                   [](const std::shared_ptr<Request>& request) {
-                    return request->status_ == RequestStatus::Completed;
+                    return IsTurnComplete(request->status_) ||
+                           IsClosed(request->status_);
                   })) {
     return true;
   }
@@ -37,9 +98,10 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
   if (!cache_allocated_requests_.empty() &&
       std::all_of(cache_allocated_requests_.begin(), cache_allocated_requests_.end(),
                   [](const std::shared_ptr<Request>& request) {
-                    return request->status_ == RequestStatus::Completed;
+                    return IsTurnComplete(request->status_) ||
+                           IsClosed(request->status_);
                   })) {
-    // If all requests are completed, we can deallocate them before allocating the new requests.
+    // If every request is TurnComplete or Closed, recycle the static batch before allocating new requests.
     Deallocate(cache_allocated_requests_);
   }
 
@@ -97,6 +159,11 @@ std::vector<std::shared_ptr<Request>> StaticCacheManager::AllocatedRequests() co
   return cache_allocated_requests_;
 }
 
+bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
+  return std::find(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request) !=
+         cache_allocated_requests_.end();
+}
+
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)),
@@ -127,7 +194,7 @@ void PagedCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& re
 
 void PagedCacheManager::Step() {
   for (auto& request : cache_allocated_requests_) {
-    if (request->status_ == RequestStatus::Completed) {
+    if (IsTurnComplete(request->status_)) {
       continue;
     }
 
@@ -139,6 +206,23 @@ void PagedCacheManager::Step() {
   }
 
   key_value_cache_->UpdateState(*key_value_cache_state_, cache_allocated_requests_);
+}
+
+void PagedCacheManager::PrepareStep(
+    const std::vector<std::shared_ptr<Request>>& requests,
+    ExecutionContext& context) {
+  if (!context.cache_reservation) {
+    Step();
+    return;
+  }
+  if (!context.plan) {
+    throw std::logic_error("Transactional cache preparation requires a step plan.");
+  }
+
+  key_value_cache_->UpdateState(*key_value_cache_state_,
+                                requests,
+                                *context.cache_reservation,
+                                context.plan->proposed_block_table_columns);
 }
 
 void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
@@ -158,6 +242,16 @@ bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
 std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;
+}
+
+bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
+  return std::find(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request) !=
+         cache_allocated_requests_.end();
+}
+
+std::unique_ptr<CacheStepReservation> PagedCacheManager::ReserveStep(const StepPlan& plan) {
+  return std::make_unique<PagedCacheStepReservation>(
+      *key_value_cache_, cache_allocated_requests_, plan);
 }
 
 }  // namespace Generators

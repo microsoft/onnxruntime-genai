@@ -13,6 +13,81 @@
 
 namespace Generators {
 
+// ---------------------------------------------------------------------------
+// GQA-based windowed KV cache helpers
+// ---------------------------------------------------------------------------
+
+int ComputeWindowedKvCacheSize(DeviceType device_type,
+                               const Config::Model::Decoder& decoder,
+                               const Config::Search& search,
+                               int max_length) {
+  // Three EPs keep a KV cache smaller than max_length for sliding-window layers:
+  //   NvTensorRtRtx -- evicts inside the EP; cache is exactly window_size, no slack.
+  //   CUDA          -- evicts by compaction inside GQA (sliding_window_cache=1);
+  //                    attention is O(W) regardless of C, launch overhead dominates and
+  //                    is flat in C => optimal C == W. Default slack is 0.
+  //   CPU           -- evicts by compaction inside GQA (sliding_window_cache=1);
+  //                    attention scans O(C) entries, so C = W+16 is the measured
+  //                    minimum (drifting layout amortises shift traffic). Default slack 16.
+  const bool ep_supports_windowed_kv_cache =
+      device_type == DeviceType::NvTensorRtRtx ||
+      device_type == DeviceType::CUDA ||
+      device_type == DeviceType::CPU;
+
+  if (!ep_supports_windowed_kv_cache ||
+      !decoder.sliding_window.has_value() ||
+      decoder.sliding_window->window_size <= 0) {
+    return 0;
+  }
+
+  const int window_size = decoder.sliding_window->window_size;
+
+  // NvTensorRtRtx evicts internally — allocate exactly the window.
+  if (device_type == DeviceType::NvTensorRtRtx) {
+    return std::min(max_length, window_size);
+  }
+
+  // CUDA/CPU: apply slack.
+  // Per-EP default when cache_slack is 0 (the sentinel meaning "use EP default").
+  const int default_ep_slack = (device_type == DeviceType::CPU) ? 16 : 0;
+
+  // chunk_size is an unsigned config value and cache_slack is user-supplied, so the
+  // slack is computed in size_t and clamped to max_length before narrowing to int.
+  // A huge or negative configured value therefore can never wrap into a bogus size.
+  const auto& chunk_size_opt = search.chunk_size;
+  const size_t chunk_slack =
+      (chunk_size_opt.has_value() && *chunk_size_opt > 0) ? *chunk_size_opt - 1 : 0;
+  const int raw_config_slack = decoder.sliding_window->cache_slack;
+  const size_t config_slack = static_cast<size_t>(
+      std::max(0, raw_config_slack > 0 ? raw_config_slack : default_ep_slack));
+  const size_t desired = static_cast<size_t>(window_size) + std::max(chunk_slack, config_slack);
+  return desired >= static_cast<size_t>(max_length) ? max_length : static_cast<int>(desired);
+}
+
+void CheckWindowedKvCacheRewind(int windowed_cache_size, int current_length, size_t index) {
+  // Sliding-window layers hold only the most recent windowed_cache_size positions, anchored
+  // at cache index 0.  Once anything has been evicted, position i no longer lives at cache
+  // offset i, so a rewind would silently read misaligned keys.  Refuse instead of returning
+  // wrong logits.
+  //
+  // Note: this rejects rewinds to an index that is still resident as well.  With a shared
+  // past/present buffer the rewind is purely logical; the kernel re-derives the resident range
+  // from seqlens_k as [T - min(T, C), T).  Rewinding to i would make it read
+  // [i - min(i, C), i) while the buffer still physically holds [T - min(T, C), T).  Those
+  // ranges only coincide when nothing has been evicted; supporting the resident case would
+  // require left-shifting every sliding layer's cache, which is not implemented.
+  if (windowed_cache_size > 0 && current_length > windowed_cache_size &&
+      index < static_cast<size_t>(current_length)) {
+    throw std::runtime_error(
+        "Cannot rewind to " + std::to_string(index) +
+        ": the sliding-window KV cache holds only the last " +
+        std::to_string(windowed_cache_size) + " of " + std::to_string(current_length) +
+        " positions, so the tokens needed at that point have already been evicted. Increase "
+        "model.decoder.sliding_window.cache_slack in genai_config.json to keep more positions "
+        "resident, or rewind before the cache fills.");
+  }
+}
+
 namespace {
 
 std::vector<size_t> MakeAllLayerIndices(size_t layer_count) {

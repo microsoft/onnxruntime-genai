@@ -19,6 +19,18 @@ parameters:
   type: string
 - name: wheelDir
   type: string
+- name: testPath
+  type: string
+  default: 'test/python/integration'
+- name: extraPytestArgs
+  type: string
+  default: ''
+- name: resultPrefix
+  type: string
+  default: 'integration'
+- name: testRunTitlePrefix
+  type: string
+  default: 'integration'
 
 steps:
 - ${{ if eq(parameters.os, 'win') }}:
@@ -28,10 +40,15 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test\python\requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime-gpu==1.26.0
+      if ("${{ parameters.ep }}" -eq "cuda") {
+        python -m pip install onnxruntime-gpu==1.28.0 `
+          --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+      } else {
+        python -m pip install onnxruntime==1.28.0
+      }
       python -m pip install $wheel.FullName
       if ("${{ parameters.ep }}" -eq "webgpu") {
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.1
       }
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -44,10 +61,10 @@ steps:
         $env:PATH = "$cudaBin;$env:PATH"
         nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
       }
-      python -m pytest test\python\integration -sv `
+      python -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} `
         --execution-provider ${{ parameters.ep }} `
         --model "${{ parameters.model }}" `
-        --junitxml=$(Common.TestResultsDirectory)\integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+        --junitxml=$(Common.TestResultsDirectory)\${{ parameters.resultPrefix }}-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
     displayName: 'Run integration test'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -74,13 +91,14 @@ steps:
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
           \$PYTHON_EXE -m pip install -r test/python/requirements.txt
           \$PYTHON_EXE -m pip install pytest
-          \$PYTHON_EXE -m pip install onnxruntime-gpu==1.26.0
+          \$PYTHON_EXE -m pip install onnxruntime-gpu==1.28.0 \
+            --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
           \$PYTHON_EXE -m pip install /wheel/*.whl
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
-          \$PYTHON_EXE -m pytest test/python/integration -sv \
+          \$PYTHON_EXE -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
             --execution-provider ${{ parameters.ep }} \
             --model '${{ parameters.model }}' \
-            --junitxml=/results/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+            --junitxml=/results/${{ parameters.resultPrefix }}-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
         "
     displayName: 'Run integration test in CUDA container'
 
@@ -97,10 +115,10 @@ steps:
   - bash: |
       set -e -x
       export ORTGENAI_MODEL_ROOT="${{ parameters.modelRoot }}"
-      python3 -m pytest test/python/integration -sv \
+      python3 -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
         --execution-provider ${{ parameters.ep }} \
         --model "${{ parameters.model }}" \
-        --junitxml=$(Common.TestResultsDirectory)/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+        --junitxml=$(Common.TestResultsDirectory)/${{ parameters.resultPrefix }}-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
     displayName: 'Run integration test'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -112,10 +130,10 @@ steps:
       python -m pip install --upgrade pip
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
-      python -m pip install onnxruntime==1.26.0
+      python -m pip install onnxruntime==1.28.0
       python -m pip install ${{ parameters.wheelDir }}/*.whl
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
-        python -m pip install onnxruntime-ep-webgpu==0.1.0
+        python -m pip install onnxruntime-ep-webgpu==0.2.1
       fi
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -124,10 +142,10 @@ steps:
       set -e -x
       source $(Agent.TempDirectory)/genai-venv/bin/activate
       export ORTGENAI_MODEL_ROOT="${{ parameters.modelRoot }}"
-      python -m pytest test/python/integration -sv \
+      python -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
         --execution-provider ${{ parameters.ep }} \
         --model "${{ parameters.model }}" \
-        --junitxml=$(Common.TestResultsDirectory)/integration-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
+        --junitxml=$(Common.TestResultsDirectory)/${{ parameters.resultPrefix }}-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
     displayName: 'Run integration test'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -135,7 +153,7 @@ steps:
   condition: succeededOrFailed()
   inputs:
     testResultsFormat: 'JUnit'
-    testResultsFiles: '$(Common.TestResultsDirectory)/integration-*.xml'
-    testRunTitle: 'integration ${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}'
+    testResultsFiles: '$(Common.TestResultsDirectory)/${{ parameters.resultPrefix }}-*.xml'
+    testRunTitle: '${{ parameters.testRunTitlePrefix }} ${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}'
     mergeTestResults: true
     failTaskOnFailedTests: true

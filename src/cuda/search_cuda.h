@@ -16,7 +16,14 @@ struct Search_Cuda : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const {
-    cudaStreamSynchronize(GetStream());
+    // done_cpu_ is pinned host memory written by CheckForEOSAndPad on the device, so it is only
+    // meaningful once the stream has drained. Tracking whether such a launch is outstanding lets a
+    // caller that has already synchronized (see GreedySearch_Cuda::CompleteGeneration) skip a
+    // redundant synchronization here.
+    if (done_pending_) {
+      CUDA_CHECK(cudaStreamSynchronize(GetStream()));
+      done_pending_ = false;
+    }
     return *done_cpu_;
   }  // TODO: Use an event
   void ResetDone();
@@ -40,6 +47,20 @@ struct Search_Cuda : Search {
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   cuda_host_unique_ptr<bool> done_cpu_;
+  // Set when a device launch that may write done_cpu_ is outstanding.
+  mutable bool done_pending_{false};
+
+ protected:
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
+  void RestoreStateForTransactionImpl() override;
+  void SynchronizeStateForTransactionImpl() override;
+  void CompleteStateRestoreForTransactionImpl() override;
+
+ private:
+  cuda_unique_ptr<int32_t> transaction_sequence_lengths_;
+  cuda_unique_ptr<bool> transaction_eos_seen_;
+  bool transaction_done_{};
+  bool transaction_saved_sequence_lengths_{};
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
@@ -48,18 +69,48 @@ struct GreedySearch_Cuda : Search_Cuda {
   DeviceSpan<int32_t> GetNextTokens() override;
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
-  void SelectTop() override { SampleTopKTopP(1, 0.0, 1.0); }
-  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 1.0, t); }
-  void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
-  void SampleTopKTopP(int k, float p, float t) override;
+  void SelectTop() override { SampleTopKTopPImpl(1, 0.0, 1.0); }
+  void SampleTopK(int k, float t, std::mt19937& rng) override { SampleTopKTopP(k, 1.0, t, rng); }
+  void SampleTopP(float p, float t, std::mt19937& rng) override { SampleTopKTopP(-1, p, t, rng); }
+  void SampleTopKTopP(int k, float p, float t, std::mt19937& rng) override;
+  void CommitToken(int32_t token) override;
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
+  void DeferCompletion(bool defer) override { defer_completion_ = defer; }
+  void CompleteGeneration() override;
+  bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override;
+  bool SupportsBatchedSampling() const override { return params_->BatchBeamSize() == 1; }
+  void OnNextTokensSampled() override;
+
  private:
+  void SampleTopKTopPImpl(int k, float p, float temperature);
+  void AppendTokensToSequences(DeviceSpan<int32_t>& tokens);
+  void MarkDoneAtMaxLength();
+
   DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
-  std::unique_ptr<cuda::SamplingData> samplingdata_;
+  std::unique_ptr<cuda::SamplingData> sampling_data_;
+
+  bool defer_completion_{false};
+  bool completion_pending_{false};
+  // Set when the next tokens live in a caller-owned shared buffer that the caller copies to the
+  // host itself, so CompleteGeneration() must not copy again.
+  bool external_host_copy_{false};
+
+  void EnsureSamplingData();
+  void LaunchNextTokensTail();
+
+ protected:
+  void SaveStateForTransactionImpl(bool checkpoint_local_state) override;
+  void RestoreStateForTransactionImpl() override;
+  void CompleteStateRestoreForTransactionImpl() override;
+
+ private:
+  cuda_unique_ptr<int32_t> transaction_next_tokens_;
+  cuda_unique_ptr<curandState> transaction_curand_states_;
+  bool transaction_saved_sampling_state_{};
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
