@@ -98,7 +98,9 @@ Configuration loading rejects unknown kinds or layouts, missing or incompatible 
 
 When an explicit manifest is present, model loading expands every binding and verifies that its decoder input and output exist with compatible dtype and shape. Paged bindings must also have compatible rank-four geometry throughout their group.
 
-This manifest does not change Engine execution on this branch. The current dynamic path still owns only dense sequential paged KV and does not bind fixed state. Dynamic Engine construction fails with a clear compatibility error for other state or layout contracts. Later Engine changes must consume the manifest before sparse or fixed state is supported.
+The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
+
+Fixed groups remain unsupported by the Engine and are rejected until request-owned fixed-state storage and transactions are implemented.
 
 ## Request lifecycle
 
