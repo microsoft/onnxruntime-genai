@@ -872,6 +872,7 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  std::unique_ptr<OrtSession> session;
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -887,11 +888,20 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
                                       external_initializers_path.string().c_str());
     }
-    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+    session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+  } else {
+    session = OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
   }
 
-  // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  if (config_->model.decoder.state_groups &&
+      config_->model.decoder.pipeline.empty() &&
+      model_filename == config_->model.decoder.filename) {
+    SessionInfo decoder_session_info;
+    decoder_session_info.Add(*session);
+    ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
+  }
+
+  return session;
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

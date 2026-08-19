@@ -4,13 +4,14 @@
 // Portions of this file consist of AI generated content.
 #include "generators.h"
 #include "models/model_type.h"
+#include "models/model_state_manifest.h"
 #include "runtime_settings.h"
 #include "json.h"
 #include <algorithm>
 #include <cctype>
 #include <fstream>
-#include <sstream>
 #include <limits>
+#include <sstream>
 #include <cmath>
 #include <stdexcept>
 
@@ -439,6 +440,112 @@ struct IntArray_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+using DecoderStateGroup = Config::Model::Decoder::StateGroup;
+using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+struct StateBinding_Element : JSON::Element {
+  explicit StateBinding_Element(Config::Model::Decoder::StateBinding& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input") {
+      v_.input = JSON::Get<std::string_view>(value);
+    } else if (name == "output") {
+      v_.output = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Decoder::StateBinding& v_;
+};
+
+struct StateBindings_Element : JSON::Element {
+  explicit StateBindings_Element(DecoderStateGroup& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    std::optional<Config::Model::Decoder::StateBinding>* binding{};
+    std::unique_ptr<StateBinding_Element>* element{};
+    if (name == "key") {
+      binding = &v_.key;
+      element = &key_;
+    } else if (name == "value") {
+      binding = &v_.value;
+      element = &value_;
+    } else if (name == "state") {
+      binding = &v_.state;
+      element = &state_;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+
+    if (binding->has_value()) {
+      throw std::runtime_error("Duplicate decoder state binding semantic '" + std::string{name} + "'");
+    }
+    binding->emplace();
+    *element = std::make_unique<StateBinding_Element>(binding->value());
+    return **element;
+  }
+
+ private:
+  DecoderStateGroup& v_;
+  std::unique_ptr<StateBinding_Element> key_;
+  std::unique_ptr<StateBinding_Element> value_;
+  std::unique_ptr<StateBinding_Element> state_;
+};
+
+struct StateGroup_Element : JSON::Element {
+  explicit StateGroup_Element(DecoderStateGroup& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "kind") {
+      const auto kind = JSON::Get<std::string_view>(value);
+      if (kind == "paged_kv") {
+        v_.kind = DecoderStateGroupKind::PagedKeyValue;
+      } else if (kind == "fixed") {
+        v_.kind = DecoderStateGroupKind::Fixed;
+      } else {
+        throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+      }
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "bindings") {
+      return bindings_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "layer_ids") {
+      return layer_ids_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  DecoderStateGroup& v_;
+  IntArray_Element layer_ids_{v_.layer_ids};
+  StateBindings_Element bindings_{v_};
+};
+
+struct StateGroups_Element : JSON::Element {
+  explicit StateGroups_Element(std::vector<DecoderStateGroup>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& group = v_.emplace_back();
+    current_ = std::make_unique<StateGroup_Element>(group);
+    return *current_;
+  }
+
+ private:
+  std::vector<DecoderStateGroup>& v_;
+  std::unique_ptr<StateGroup_Element> current_;
+};
+
 struct StringStringMap_Element : JSON::Element {
   explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
 
@@ -675,6 +782,11 @@ struct Decoder_Element : JSON::Element {
       layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
       return *layer_types_;
     }
+    if (name == "state_groups") {
+      v_.state_groups.emplace();
+      state_groups_ = std::make_unique<StateGroups_Element>(*v_.state_groups);
+      return *state_groups_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -688,6 +800,7 @@ struct Decoder_Element : JSON::Element {
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
+  std::unique_ptr<StateGroups_Element> state_groups_;
 };
 
 struct MtpInputs_Element : JSON::Element {
@@ -1898,9 +2011,12 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
-  Root_Element root{config};
+  Config candidate{config};
+  Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  std::swap(config, candidate);
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {
@@ -1997,6 +2113,7 @@ void ValidateModelPaths(const Config& config) {
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+  ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

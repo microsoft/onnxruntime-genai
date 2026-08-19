@@ -85,6 +85,21 @@ to 2048. Both limits are positive and independent.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
+## Decoder state manifest
+
+`model.decoder.state_groups` can describe decoder-owned state without identifying a model family. The supported group kinds are `paged_kv` and `fixed`. Each group has logical layer IDs and typed input/output binding templates. Paged KV groups have key and value bindings; fixed groups have one state binding. Binding templates contain one `%d` placeholder for the logical layer ID. A layer may own both paged and fixed state, and multiple fixed groups may cover the same layer when it owns more than one independent state tensor. Layers omitted from a group do not own that kind of state.
+
+The group kind defines the state transition:
+
+- Paged KV grows by appending token slots and commits by advancing logical occupancy.
+- Fixed convolution and recurrent state replace one request-indexed state value and require a staged output to be published at commit.
+
+Configuration loading rejects unknown kinds or layouts, missing or incompatible bindings, malformed templates, duplicate IDs or logical layers, and conflicting resolved bindings. Overlay application validates a complete copy and publishes it only on success. When `state_groups` is absent, the typed configuration API synthesizes one dense paged-KV group over `0..num_hidden_layers-1` using the existing decoder key/value templates.
+
+When an explicit manifest is present, model loading expands every binding and verifies that its decoder input and output exist with compatible dtype and shape. Paged bindings must also have compatible rank-four geometry throughout their group.
+
+This manifest does not change Engine execution on this branch. The current dynamic path still owns only dense sequential paged KV and does not bind fixed state. Dynamic Engine construction fails with a clear compatibility error for other state or layout contracts. Later Engine changes must consume the manifest before sparse or fixed state is supported.
+
 ## Request lifecycle
 
 A `Request` is one sequence. Engine requests currently require:
