@@ -35,7 +35,6 @@ def run(args: argparse.Namespace):
     # one resident request and use continue_with().
     use_dml_replay = args.execution_provider == "dml"
     logical_token_history = [int(token) for token in system_tokens]
-    eos_token_ids = {int(token) for token in tokenizer.eos_token_ids}
 
     request = None
     if not use_dml_replay:
@@ -77,8 +76,7 @@ def run(args: argparse.Namespace):
             while ready_request := engine.step():
                 while ready_request.has_unseen_tokens():
                     token = int(ready_request.get_unseen_token())
-                    if token not in eos_token_ids:
-                        logical_token_history.append(token)
+                    logical_token_history.append(token)
                     print(
                         streaming_tokenizer.decode(token),
                         end="",

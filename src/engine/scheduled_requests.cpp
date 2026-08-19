@@ -76,10 +76,9 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
     const auto remaining =
         static_cast<size_t>(entry.request->CurrentSequenceLength() -
                             entry.request->ProcessedSequenceLength());
-    entry.request->PrepareForStep(
-        entry.unprocessed_token_count == remaining
-            ? kMaxGeneratedTokenIndicesPerStep
-            : 0);
+    if (entry.unprocessed_token_count == remaining) {
+      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
+    }
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(
