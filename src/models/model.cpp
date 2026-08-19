@@ -659,9 +659,29 @@ Model::~Model() {
 #endif
 }
 
+static void AppendSessionProviders(Model& model,
+                                   const Config::SessionOptions& config_session_options,
+                                   OrtSessionOptions& session_options,
+                                   bool is_primary_session_options,
+                                   bool disable_graph_capture = false) {
+  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                                  config_session_options.provider_options, is_primary_session_options,
+                                                  *model.config_, disable_graph_capture);
+
+  if (!model.p_device_) {
+    model.p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != model.p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
+  }
+}
+
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
-                                           bool cloned_from_parent) const {
+                                           bool is_primary_session_options,
+                                           bool disable_graph_capture,
+                                           bool cloned_from_parent,
+                                           bool append_providers) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -779,35 +799,30 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
-}
 
-void Model::AppendSessionProviders(const Config::SessionOptions& config_session_options,
-                                   OrtSessionOptions& session_options,
-                                   bool is_primary_session_options,
-                                   bool disable_graph_capture) {
-  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
-                                                  config_session_options.provider_options, is_primary_session_options,
-                                                  *config_, disable_graph_capture);
-
-  if (!p_device_) {
-    p_device_ = session_device;
-  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
-    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
-                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
+  if (append_providers) {
+    AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options, disable_graph_capture);
   }
 }
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                 *session_options_,
+                                 true,    // is_primary_session_options
+                                 false,   // disable_graph_capture
+                                 false,   // cloned_from_parent
+                                 false);  // append_providers. Note: providers are only appended to the main options after
+                                          //                         (potentially) cloning it for the pipeline models.
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
+      Config::SessionOptions session_options = *pipeline_model.session_options;
       if (pipeline_model.inherit_session_options) {
         // Update config ProviderOptions for pipeline model with values from top-level options
         InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
-                                     pipeline_model.session_options->provider_options);
+                                     session_options.provider_options);
       }
 
       // When inheriting, clone the main OrtSessionOptions to use as the base, then overlay the options explicitly set
@@ -815,17 +830,18 @@ void Model::CreateSessionOptions() {
       auto emplaced = pipeline_model.inherit_session_options
                           ? pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone())
                           : pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options,
+      CreateSessionOptionsFromConfig(session_options,
                                      *emplaced.first->second,
-                                     pipeline_model.inherit_session_options);
-
-      AppendSessionProviders(*pipeline_model.session_options, *emplaced.first->second, false);
+                                     false,  // is_primary_session_options
+                                     false,  // disable_graph_capture
+                                     pipeline_model.inherit_session_options,
+                                     true);  // append_providers
     }
   }
 
   // Append providers to the main session options only after cloning it for pipeline components, so that inheriting
   // components do not get the top level providers appended twice.
-  AppendSessionProviders(config_->model.decoder.session_options, *session_options_, true);
+  AppendSessionProviders(*this, config_->model.decoder.session_options, *session_options_, true);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
