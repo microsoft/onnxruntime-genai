@@ -93,16 +93,19 @@ struct CudaSamplerStatePool {
     }
   }
 
-  int Acquire(int random_seed) {
-    return indices_.Acquire([this, random_seed](int index, int required_size) {
-      EnsureCapacity(required_size);
-      const unsigned long long seed =
-          random_seed == -1
-              ? static_cast<unsigned long long>(std::random_device{}())
-              : static_cast<unsigned long long>(random_seed);
-      cuda::LaunchInitCurandState(
-          seed, states_.Span().data() + index, GetStream());
-    });
+  template <typename Create>
+  auto AcquireOwned(int random_seed, Create&& create) {
+    return indices_.AcquireOwned(
+        [this, random_seed](int index, int required_size) {
+          EnsureCapacity(required_size);
+          const unsigned long long seed =
+              random_seed == -1
+                  ? static_cast<unsigned long long>(std::random_device{}())
+                  : static_cast<unsigned long long>(random_seed);
+          cuda::LaunchInitCurandState(
+              seed, states_.Span().data() + index, GetStream());
+        },
+        std::forward<Create>(create));
   }
 
   void Release(int index) noexcept { indices_.Release(index); }
@@ -157,7 +160,12 @@ struct CudaBatchedSampler final : BatchedSampler {
   }
 
   std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
-    return std::make_unique<CudaBatchedSamplerState>(state_pool_, state_pool_->Acquire(random_seed));
+    auto pool = state_pool_;
+    return state_pool_->AcquireOwned(
+        random_seed,
+        [pool = std::move(pool)](int index) {
+          return std::make_unique<CudaBatchedSamplerState>(pool, index);
+        });
   }
 
   bool OwnsState(const BatchedSamplerState& state) const override {

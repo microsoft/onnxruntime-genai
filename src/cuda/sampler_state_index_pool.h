@@ -32,6 +32,17 @@ class SamplerStateIndexPool {
     return index;
   }
 
+  template <typename Prepare, typename Create>
+  auto AcquireOwned(Prepare&& prepare, Create&& create) {
+    const int index = Acquire(std::forward<Prepare>(prepare));
+    try {
+      return std::forward<Create>(create)(index);
+    } catch (...) {
+      Release(index);
+      throw;
+    }
+  }
+
   void Release(int index) noexcept {
     assert(index >= 0 && index < size_);
     assert(std::find(free_indices_.begin(), free_indices_.end(), index) ==
