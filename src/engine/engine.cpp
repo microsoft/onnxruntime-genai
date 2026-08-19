@@ -61,8 +61,8 @@ void Engine::AddRequest(std::shared_ptr<Request> request) {
   }
 
   auto request_preparation = request->PrepareAdmission();
-  auto scheduler_preparation = scheduler_->PrepareAddRequest(request);
   tracked_requests_.reserve(tracked_requests_.size() + 1);
+  auto scheduler_preparation = scheduler_->PrepareAddRequest(request);
 
   request_preparation.sampling_state =
       std::move(scheduler_preparation.sampling_state);

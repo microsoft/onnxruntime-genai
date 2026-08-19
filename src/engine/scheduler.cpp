@@ -51,12 +51,12 @@ SchedulerAdmissionPreparation StaticBatchScheduler::PrepareAddRequest(
     throw std::runtime_error(
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
   }
+  requests_pool_.reserve(requests_pool_.size() + 1);
   SchedulerAdmissionPreparation preparation;
   if (auto* sampler = GetBatchedSampler()) {
     preparation.sampling_state =
         sampler->CreateState(request->SearchOptions().random_seed);
   }
-  requests_pool_.reserve(requests_pool_.size() + 1);
   return preparation;
 }
 
@@ -150,12 +150,12 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
 
 SchedulerAdmissionPreparation DynamicBatchScheduler::PrepareAddRequest(
     const std::shared_ptr<Request>& request) {
+  requests_pool_.reserve(requests_pool_.size() + 1);
   SchedulerAdmissionPreparation preparation;
   if (auto* sampler = GetBatchedSampler()) {
     preparation.sampling_state =
         sampler->CreateState(request->SearchOptions().random_seed);
   }
-  requests_pool_.reserve(requests_pool_.size() + 1);
   return preparation;
 }
 
