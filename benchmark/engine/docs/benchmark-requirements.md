@@ -11,7 +11,8 @@ The tool should support:
 - shared-prefix, partially shared-prefix, and unrelated-prefix workloads;
 - staggered arrivals, request cancellation, continuation, and memory-pressure scenarios;
 - prefill-only, decode-only, and mixed prefill/decode phases;
-- fixed seeds and captured outputs so performance changes also detect correctness regressions;
+- ~~fixed seeds and captured outputs so performance changes also detect correctness regressions;~~
+  **(Decided later: deprioritized, see note below)**
 - warmup and repeated measured runs with JSON/CSV output suitable for before/after comparison;
 - configurable model, execution provider, block count/size, token budget, chunk size, and
   concurrency without modifying the benchmark source.
@@ -24,7 +25,9 @@ Record at minimum:
 - peak and steady device memory, model/workspace/cache bytes, blocks used/free, prefix-cache hit
   rate, preemption count, recomputed tokens, preemption resume latency, and peak transient
   prefill-chunk activation/workspace memory;
-- failures, rejected admissions, output mismatches, and incomplete requests.
+- ~~failures, rejected admissions, output mismatches, and incomplete requests.~~
+  **(Decided later: keep failures/rejected admissions/incomplete requests; output mismatches deprioritized, see note below)**
+- failures, rejected admissions, and incomplete requests.
 
 The primary benchmark matrix is:
 
@@ -48,11 +51,18 @@ Initial performance gates:
 - no request starves, and memory-pressure admission is explicit and reproducible;
 - under the mixed workload, every runnable decode request is scheduled at least once within a
   configured maximum scheduling delay; report the bound and fail the run when it is exceeded;
-- a fixed-seed request produces the same token stream alone and when co-scheduled with unrelated
-  requests;
+- ~~a fixed-seed request produces the same token stream alone and when co-scheduled with unrelated
+  requests;~~ **(Decided later: deprioritized, see note below)**
 - benchmark results include enough environment metadata to compare commits and model builds.
 
 Implement the benchmark as a native C++ executable using the public C++ interface and C ABI where
 ABI coverage is required. Python may orchestrate optional experiments or visualize saved results,
 but must not be required to run or qualify the benchmark. Back it with native Engine telemetry;
 do not derive core scheduler/cache measurements from Python wall-clock timing alone.
+
+> **Note (post-review decision):** Full correctness verification (captured/hashed outputs,
+> fixed-seed token-stream comparison across standalone and co-scheduled runs, output-mismatch
+> detection) is deprioritized for now in favor of performance work; the crossed-out items above
+> reflect the original design intent. We still detect and report **incomplete requests**
+> (a request generating fewer tokens than requested) via a `completed` flag per request in
+> `raw_requests`, which now fails the run's `status` instead of silently reporting `success`.

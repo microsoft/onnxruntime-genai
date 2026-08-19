@@ -56,14 +56,24 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
     const ScenarioExecutionOutput output = Execute(config, context);
 
     nlohmann::json raw_requests = nlohmann::json::array();
+    int incomplete_count = 0;
     for (const auto& request : output.requests) {
       raw_requests.push_back({{"request_id", request.request_id},
                               {"ttft_ms", request.ttft_ms},
-                              {"inter_token_latency_ms", request.inter_token_latency_ms}});
+                              {"inter_token_latency_ms", request.inter_token_latency_ms},
+                              {"completed", request.completed}});
+      incomplete_count += request.completed ? 0 : 1;
     }
 
-    result["status"] = "success";
-    result["error"] = nullptr;
+    // A request that returns fewer tokens than requested must not be reported as a success.
+    if (incomplete_count > 0) {
+      result["status"] = "failed";
+      result["error"] = std::to_string(incomplete_count) + " of " + std::to_string(output.requests.size()) +
+                         " request(s) completed with fewer tokens than requested";
+    } else {
+      result["status"] = "success";
+      result["error"] = nullptr;
+    }
     result["core_metrics"] = {
         {"summary",
          {{"ttft_ms", {{"p50", output.ttft_p50_ms}, {"p95", output.ttft_p95_ms}}},
