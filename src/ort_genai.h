@@ -957,9 +957,10 @@ struct OgaEngine : OgaAbstract {
   }
 
   /**
-   * \brief Submits a request and gives the engine ownership until Remove() is called.
+   * \brief Submits a request to the engine.
    *
-   * Ownership continues after the current turn completes. Remove the request before releasing its final handle.
+   * Ownership continues after the current turn completes. Remove() releases resources immediately;
+   * releasing the final external handle instead defers reclamation until the next Add() or Step().
    */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
