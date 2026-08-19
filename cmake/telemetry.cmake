@@ -149,6 +149,9 @@ if(ANDROID)
   set(ORTGENAI_TELEMETRY_LICENSE_FILE "${cpp_client_telemetry_SOURCE_DIR}/LICENSE")
   target_sources(mat PRIVATE
     "${PROJECT_SOURCE_DIR}/cmake/telemetry/android_telemetry_bridge.cpp")
+
+  # https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+  target_link_options(mat PRIVATE "LINKER:-z,max-page-size=16384")
 endif()
 foreach(_ortgenai_1ds_cache_var
     BUILD_UNIT_TESTS
