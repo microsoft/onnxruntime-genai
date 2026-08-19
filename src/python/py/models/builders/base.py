@@ -25,7 +25,6 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 )
 from tqdm import tqdm
 from transformers import (
-    AutoConfig,
     AutoModelForCausalLM,
     AutoModelForSpeechSeq2Seq,
     AutoTokenizer,
@@ -44,7 +43,8 @@ from quantization import CudaQuantizer, QuantConfig, desugar_algo_config, resolv
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
-        self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
+        self.context_length = getattr(config, "seq_length", config.max_position_embeddings)
+
         # Transformers v5 standardizes RoPE settings under `rope_parameters`; older
         # versions used `rope_scaling` (kept as a backward-compatible alias in v5).
         # Read whichever the installed transformers version provides.
@@ -57,16 +57,19 @@ class Model:
             and "original_max_position_embeddings" in rope_params
             else self.context_length
         )
-        self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
+        self.window_size = getattr(config, "sliding_window", -1)  # default is -1 in GroupQueryAttention kernel
+
         # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
         # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
         self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+
         # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
         # 0 means "use the EP default at runtime"; set explicitly to override.
         # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
         # CPU  optimal: 16 (amortises O(C) shift traffic; measured minimum at W+16 on EPYC).
         self.window_kv_cache_slack = 0  # runtime will apply the EP default when this is 0
-        self.intermediate_size = config.ffn_hidden_size if hasattr(config, "ffn_hidden_size") else config.intermediate_size
+
+        self.intermediate_size = getattr(config, "ffn_hidden_size", config.intermediate_size)
         self.hidden_size = config.hidden_size
         self.num_kv_heads = (
             config.num_key_value_heads
@@ -88,17 +91,22 @@ class Model:
             if hasattr(config, "num_hidden_layers")
             else config.num_layers
         )
-        self.layer_types = (
-            config.layer_types
-            if hasattr(config, "layer_types")
-            else ["full_attention"] * self.num_layers
-        )
+        self.layer_types = getattr(config, "layer_types", ["full_attention"] * self.num_layers)
         self.vocab_size = config.vocab_size
         self.activation = (
             config.hidden_activation
             if getattr(config, "hidden_activation", None) is not None
             else config.hidden_act
         )
+
+        self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
+        self.linear_value_head_dim = getattr(config, "linear_value_head_dim", 128)
+        self.linear_num_key_heads = getattr(config, "linear_num_key_heads", 16)
+        self.linear_num_value_heads = getattr(config, "linear_num_value_heads", 16)
+        self.linear_conv_kernel_dim = getattr(config, "linear_conv_kernel_dim", 4)
+        self.linear_key_dim = self.linear_num_key_heads * self.linear_key_head_dim
+        self.linear_value_dim = self.linear_num_value_heads * self.linear_value_head_dim
+        self.linear_conv_dim = self.linear_key_dim * 2 + self.linear_value_dim
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
@@ -110,10 +118,6 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
-        # Default to False so transformers `from_pretrained()` calls do not
-        # execute arbitrary Python from a Hugging Face repository unless the
-        # caller has explicitly opted in via `hf_remote=true` in
-        # `--extra_options`. See the security note in builder.py.
         self.hf_remote = extra_options.get("hf_remote", False)
         self.extra_options = extra_options
 
@@ -152,64 +156,75 @@ class Model:
         # Initialize EP-specific expansions
         self.make_ep_expansions_init()
 
-        # TODO: add conv and recurrent defaults to inputs and outputs
         # Map input names to their types and shapes
         self.input_names = {
-            "input_ids": "input_ids",
-            "attention_mask": "attention_mask",
-            "position_ids": "position_ids",
-            "inputs_embeds": "inputs_embeds",
-            "past_key_values.key": {i: f"past_key_values.{i}.key" for i in range(self.num_layers)},
-            "past_key_values.value": {i: f"past_key_values.{i}.value" for i in range(self.num_layers)},
-            "block_table": "block_table",                                                                        # For paged attention models
-            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
-            "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
-            "attention_metadata": "attention_metadata",                                                          # For paged attention models
+            "input_ids": "input_ids",                                                                                                # For standard models
+            "attention_mask": "attention_mask",                                                                                      # For standard models
+            "position_ids": "position_ids",                                                                                          # For standard models
+            "inputs_embeds": "inputs_embeds",                                                                                        # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
+            "past_key_values.key": self.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.key"),            # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": self.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.value"),        # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "past.conv": self.make_cache_names(["conv", "linear_attention"], "past.conv"),                                           # For causal convolution models
+            "past.recurrent": self.make_cache_names(["linear_attention"], "past.recurrent"),                                         # For linear attention models
+            "block_table": "block_table",                                                                                            # For paged attention models
+            "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                                            # For paged attention models
+            "past_sequence_lengths": "past_sequence_lengths",                                                                        # For paged attention models
+            "attention_metadata": "attention_metadata",                                                                              # For paged attention models
         }
         self.input_types = {
-            "input_ids": ir.DataType.INT64,                                                                      # For standard models
-            "attention_mask": ir.DataType.INT64,                                                                 # For standard models
-            "position_ids": ir.DataType.INT64,                                                                   # For standard models
-            "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
-            "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
-            "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
-            "block_table": ir.DataType.INT32,                                                                    # For paged attention models
-            "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
-            "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
-            "attention_metadata": ir.DataType.INT32,                                                             # For paged attention models
+            "input_ids": ir.DataType.INT64,                                                                                          # For standard models
+            "attention_mask": ir.DataType.INT64,                                                                                     # For standard models
+            "position_ids": ir.DataType.INT64,                                                                                       # For standard models
+            "inputs_embeds": self.io_dtype,                                                                                          # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
+            "past_key_values.key": self.io_dtype,                                                                                    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": self.io_dtype,                                                                                  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "past.conv": self.io_dtype,                                                                                              # For causal convolution models
+            "past.recurrent": self.io_dtype,                                                                                         # For linear attention models
+            "block_table": ir.DataType.INT32,                                                                                        # For paged attention models
+            "cumulative_sequence_lengths": ir.DataType.INT32,                                                                        # For paged attention models
+            "past_sequence_lengths": ir.DataType.INT32,                                                                              # For paged attention models
+            "attention_metadata": ir.DataType.INT32,                                                                                 # For paged attention models
         }
         self.input_shapes = {
-            "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
-            "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
-            "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
-            "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
-            "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
-            "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
-            "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
-            "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
-            "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
-            "attention_metadata": [2],                                                                           # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "input_ids": ["batch_size", "sequence_length"],                                                                          # For standard models
+            "attention_mask": ["batch_size", "total_sequence_length"],                                                               # For standard models
+            "position_ids": ["batch_size", "sequence_length"],                                                                       # For standard models
+            "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                                    # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
+            "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],                        # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],                      # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "past.conv": ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1],                                      # For causal convolution models
+            "past.recurrent": ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim],     # For linear attention models
+            "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
+            "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
+            "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
+            "attention_metadata": [2],                                                                                               # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
         # Map output names to their types and shapes
         self.output_names = {
-            "hidden_states": "hidden_states",                                                                    # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": "logits",                                                                                  # For standard models
-            "present.key": {i: f"present.{i}.key" for i in range(self.num_layers)},                              # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": {i: f"present.{i}.value" for i in range(self.num_layers)},                          # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "hidden_states": "hidden_states",                                                                                        # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": "logits",                                                                                                      # For standard models
+            "present.key": self.make_cache_names(["full_attention", "sliding_attention"], "present.key"),                            # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.make_cache_names(["full_attention", "sliding_attention"], "present.value"),                        # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "present.conv": self.make_cache_names(["conv", "linear_attention"], "present.conv"),                                     # For causal convolution models
+            "present.recurrent": self.make_cache_names(["linear_attention"], "present.recurrent"),                                   # For linear attention models
         }
         self.output_types = {
-            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": self.io_dtype,                                                                             # For standard models
-            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "hidden_states": self.io_dtype,                                                                                          # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": self.io_dtype,                                                                                                 # For standard models
+            "present.key": self.io_dtype,                                                                                            # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype,                                                                                          # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "present.conv": self.io_dtype,                                                                                           # For causal convolution models (note that `present.conv` is written this way to match Hugging Face format)
+            "present.recurrent": self.io_dtype,                                                                                      # For linear attention models (note that `present.recurrent` is written this way to match Hugging Face format)
         }
         self.output_shapes = {
-            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
-            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],           # For standard models (note that `present.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
-            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],         # For standard models (note that `present.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                                    # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": ["batch_size", "sequence_length", self.vocab_size],                                                            # For standard models
+            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],                               # For standard models (note that `present.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],                             # For standard models (note that `present.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
+            "present.conv": ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1],                                   # For causal convolution models
+            "present.recurrent": ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim],  # For linear attention models
         }
         self.make_outputs_init()
 
@@ -358,6 +373,7 @@ class Model:
         moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
+
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
         # (expert_weight_bits, QMoE quant_type):
         #   "int4"  -> (4, "int")  INT4 QMoE (default)
@@ -367,6 +383,7 @@ class Model:
         expert_weight_bits = moe_descriptor.bits
         qmoe_quant_type = "fp4" if moe_descriptor.kind == "mx" else "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
+
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
         # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
@@ -400,12 +417,14 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.) — all sourced from `self.quant_config`.
         weights_cfg = self.quant_config.weights
         self.matmul_block_size = weights_cfg.block_size
+
         # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
         self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
+
         # QMoE block size (MXFP4 is pinned to a block size of 32 inside MoEConfig).
         self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
@@ -450,13 +469,30 @@ class Model:
         else:
             return
 
+    def make_cache_names(self, valid_layer_types, input_format_name):
+        """Return cache names for layers whose type is in the valid layer types."""
+        name_prefix, cache_type = input_format_name.rsplit(".", 1)
+        return {
+            layer_id: f"{name_prefix}.{layer_id}.{cache_type}"
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in valid_layer_types
+        }
+
     def make_inputs_init(self):
+        # Manage the inputs for the embedding
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             del self.input_names["input_ids"]
         else:
             del self.input_names["inputs_embeds"]
 
+        # Manage the inputs for linear attention + causal conv
+        if "conv" not in self.layer_types and "linear_attention" not in self.layer_types:
+            del self.input_names["past.conv"]
+        if "linear_attention" not in self.layer_types:
+            del self.input_names["past.recurrent"]
+
+        # Manage the inputs for paged attention
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
@@ -472,18 +508,25 @@ class Model:
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
+        # Manage the outputs for paged attention
         if self.use_paged_attention:
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
             self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
 
+        # Manage the outputs for linear attention + causal conv
+        if "conv" not in self.layer_types and "linear_attention" not in self.layer_types:
+            del self.output_names["present.conv"]
+        if "linear_attention" not in self.layer_types:
+            del self.output_names["present.recurrent"]
+
+        # Manage the outputs for the LM head and hidden states
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
         if self.prune_lm_head and self.exclude_lm_head:
-            print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
             self.prune_lm_head = False
 
         if not (self.include_hidden_states or self.exclude_lm_head):
@@ -518,7 +561,7 @@ class Model:
             return
 
         if "beta_fast" in rope_params:
-            # For models that use YARN (e.g. OpenAI OS-minier, Ministral3)
+            # For models that use YARN (e.g. GPT-OSS, Ministral-3)
             factor = rope_params["factor"] if "factor" in rope_params else 0
             beta_slow = rope_params["beta_slow"] if "beta_slow" in rope_params else 0
             beta_fast = rope_params["beta_fast"] if "beta_fast" in rope_params else 0
@@ -547,7 +590,7 @@ class Model:
             self.rope_attrs["rescale_factors"] = factor
 
         elif "mrope_section" in rope_params:
-            # For models that use MRoPE (e.g. Qwen 2.5 VL, Qwen 3 VL)
+            # For models that use MRoPE (e.g. Qwen-2.5 VL, Qwen-3 VL)
             self.rope_attrs["op_type"] = "MRotaryEmbedding"
             self.rope_attrs["mrope_section"] = rope_params["mrope_section"]  # Sections for MRoPE
 
@@ -630,7 +673,7 @@ class Model:
                     "for models that use short and long rotary caches."
                 )
             self.attention_attrs["op_type"] = "PagedAttention"
-            print("PagedAttention is used in this model.")
+            print("PagedAttention (PA) is used in this model.")
 
             # Packed Q/K/V MatMul is used unless disabled by LoRA/QLoRA or Q/K norm.
             self.attention_attrs["use_packed_matmul"] = (
@@ -899,16 +942,12 @@ class Model:
             "",
         )
 
-    # TODO: make conv and recurrent caches auto populate here
-    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+    def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
-        config = AutoConfig.from_pretrained(
-            model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-        )
         try:
             # Override search attributes in config based on values in generation_config.json
             gen_config = GenerationConfig.from_pretrained(
-                model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+                config._name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
             )
             defaults = {
                 "bos_token_id": None,
@@ -946,9 +985,9 @@ class Model:
         if "past_key_values.value" in self.input_names:
             inputs["past_value_names"] = "past_key_values.%d.value"
         if "past.conv" in self.input_names:
-            inputs["past_conv_names"] = self.input_names["past.conv"]
+            inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
-            inputs["past_recurrent_names"] = self.input_names["past.recurrent"]
+            inputs["past_recurrent_names"] = "past.%d.recurrent"
 
         # Create outputs dict
         outputs = {}
@@ -959,9 +998,9 @@ class Model:
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
         if "present.conv" in self.output_names:
-            outputs["present_conv_names"] = self.output_names["present.conv"]
+            outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
-            outputs["present_recurrent_names"] = self.output_names["present.recurrent"]
+            outputs["present_recurrent_names"] = "present.%d.recurrent"
 
         bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
         eos_token_id = config.eos_token_id
@@ -1698,7 +1737,7 @@ class Model:
             ndim=kwargs.get("ndim", 1),
             activation=kwargs.get("activation", "silu"),
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", self.linear_conv_dim, "sequence_length"])
+        self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"

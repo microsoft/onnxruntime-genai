@@ -140,8 +140,6 @@ class Qwen35TextModel(Model):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.make_config_init(config)
-
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
         # SkipSimplifiedLayerNormalization can be used directly.
@@ -153,58 +151,9 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
 
-    def make_config_init(self, config):
-        # Store linear attention config
-        self.linear_key_head_dim = getattr(config, "linear_key_head_dim", 128)
-        self.linear_value_head_dim = getattr(config, "linear_value_head_dim", 128)
-        self.linear_num_key_heads = getattr(config, "linear_num_key_heads", 16)
-        self.linear_num_value_heads = getattr(config, "linear_num_value_heads", 16)
-        self.linear_conv_kernel_dim = getattr(config, "linear_conv_kernel_dim", 4)
-
-        # Derived dimensions for GatedDeltaNet
-        self.linear_key_dim = self.linear_num_key_heads * self.linear_key_head_dim
-        self.linear_value_dim = self.linear_num_value_heads * self.linear_value_head_dim
-        self.linear_conv_dim = self.linear_key_dim * 2 + self.linear_value_dim
-
     def make_inputs_and_outputs(self):
         # Qwen-3.5 uses 3D position_ids
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
-
-        # Identify which layers are using linear attention
-        full_attn_layers, linear_attn_layers = [], []
-        for i, layer_type in enumerate(self.layer_types):
-            if layer_type == "linear_attention":
-                linear_attn_layers.append(i)
-            else:
-                full_attn_layers.append(i)
-
-        # Input KV cache state
-        self.input_names["past_key_values.key"] = {i: f"past_key_values.{i}.key" for i in full_attn_layers}
-        self.input_names["past_key_values.value"] = {i: f"past_key_values.{i}.value" for i in full_attn_layers}
-
-        # Input conv state
-        self.input_names["past.conv"] = {i: f"past.{i}.conv" for i in linear_attn_layers}
-        self.input_types["past.conv"] = self.io_dtype
-        self.input_shapes["past.conv"] = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
-
-        # Input recurrent state
-        self.input_names["past.recurrent"] = {i: f"past.{i}.recurrent" for i in linear_attn_layers}
-        self.input_types["past.recurrent"] = self.io_dtype
-        self.input_shapes["past.recurrent"] = ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim]
-
-        # Output KV cache state
-        self.output_names["present.key"] = {i: f"present.{i}.key" for i in full_attn_layers}
-        self.output_names["present.value"] = {i: f"present.{i}.value" for i in full_attn_layers}
-
-        # Output conv state
-        self.output_names["present.conv"] = {i: f"present.{i}.conv" for i in linear_attn_layers}
-        self.output_types["present.conv"] = self.io_dtype
-        self.output_shapes["present.conv"] = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
-
-        # Output recurrent state
-        self.output_names["present.recurrent"] = {i: f"present.{i}.recurrent" for i in linear_attn_layers}
-        self.output_types["present.recurrent"] = self.io_dtype
-        self.output_shapes["present.recurrent"] = ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim]
 
         super().make_inputs_and_outputs()
 
@@ -330,6 +279,7 @@ class Qwen35TextModel(Model):
             bias=conv_bias_name,
             past_conv_state=self.input_names["past.conv"][layer_id],
             present_conv_state=self.output_names["present.conv"][layer_id],
+            channels=self.linear_conv_dim,
         )
         conv_output = f"{conv_op_name}/output_0"
 
@@ -537,56 +487,6 @@ class Qwen35TextModel(Model):
             ["batch_size", "sequence_length", total_dim],
         )
         return unflat_out
-
-    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        """Generate genai_config.json for the decoder (text-only) model.
-
-        Temporarily adjusts attributes so the base class produces the correct
-        config for Qwen3.5's hybrid architecture (sparse KV cache, nested
-        token IDs in ``text_config``).
-        """
-        # Flatten text_config token IDs onto the HF config so the base class
-        # can access them.  Save to out_dir so AutoConfig.from_pretrained
-        # picks up the patched version.
-        hf_config = AutoConfig.from_pretrained(
-            model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-        )
-        text_cfg = getattr(hf_config, "text_config", hf_config)
-        for attr in ("eos_token_id", "bos_token_id", "pad_token_id"):
-            val = getattr(text_cfg, attr, None)
-            if val is not None:
-                setattr(hf_config, attr, val)
-        hf_config.save_pretrained(out_dir)
-
-        # Temporarily restore the KV cache template keys and adjust attributes
-        # so the base class generates the right entries.
-        saved = {
-            "num_layers": self.num_layers,
-            "model_type": self.model_type,
-        }
-        self.num_layers = len(self.layer_types)
-        self.input_names["past_key_values.key"] = "past_key_values.%d.key"
-        self.input_names["past_key_values.value"] = "past_key_values.%d.value"
-        self.input_names["past.conv"] = "past.%d.conv"
-        self.input_names["past.recurrent"] = "past.%d.recurrent"
-        self.output_names["present.key"] = "present.%d.key"
-        self.output_names["present.value"] = "present.%d.value"
-        self.output_names["present.conv"] = "present.%d.conv"
-        self.output_names["present.recurrent"] = "present.%d.recurrent"
-
-        super().make_genai_config(out_dir, {}, out_dir)
-
-        # Restore
-        self.num_layers = saved["num_layers"]
-        self.model_type = saved["model_type"]
-        del self.input_names["past_key_values.key"]
-        del self.input_names["past_key_values.value"]
-        del self.input_names["past.conv"]
-        del self.input_names["past.recurrent"]
-        del self.output_names["present.key"]
-        del self.output_names["present.value"]
-        del self.output_names["present.conv"]
-        del self.output_names["present.recurrent"]
 
 
 class Qwen35MoETextModel(Qwen35TextModel):

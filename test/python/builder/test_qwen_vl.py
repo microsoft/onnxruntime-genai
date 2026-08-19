@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -222,28 +223,66 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.hf_token = None
     model.hf_remote = False
-    model.num_layers = 24
-    model.layer_types = ["linear_attention"] * 24
+    model.use_paged_attention = False
+    model.input_names = {
+        "input_ids": "input_ids",
+        "past_key_values.key": {1: "past_key_values.1.key"},
+        "past_key_values.value": {1: "past_key_values.1.value"},
+        "past.conv": {0: "past.0.conv"},
+        "past.recurrent": {0: "past.0.recurrent"},
+    }
+    model.output_names = {
+        "logits": "logits",
+        "present.key": {1: "present.1.key"},
+        "present.value": {1: "present.1.value"},
+        "present.conv": {0: "present.0.conv"},
+        "present.recurrent": {0: "present.0.recurrent"},
+    }
+    model.context_length = 128
+    model.filename = "model.onnx"
+    model.head_size = 128
+    model.hidden_size = 2048
+    model.num_attn_heads = 16
+    model.num_layers = 2
+    model.num_kv_heads = 4
     model.model_type = "qwen3_5_text"
-    model.input_names = {}
-    model.output_names = {}
-    observed = {}
+    model.vocab_size = 32000
+    model.extra_options = {}
+    model.past_present_share_buffer = False
+    model.ep = "cpu"
+    model.eps_with_windowed_kv_cache = {"cpu"}
+    model.window_size = -1
 
-    config = types.SimpleNamespace(save_pretrained=lambda _path: None)
-    monkeypatch.setattr(qwen_module.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    config = types.SimpleNamespace(
+        _name_or_path="model",
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    monkeypatch.setattr(base_module.GenerationConfig, "from_pretrained", lambda *_args, **_kwargs: config)
 
-    def capture_names(self, *_args, **_kwargs):
-        observed["inputs"] = self.input_names.copy()
-        observed["outputs"] = self.output_names.copy()
+    Model.make_genai_config(model, config, {}, tmp_path)
 
-    monkeypatch.setattr(Model, "make_genai_config", capture_names)
+    with open(tmp_path / "genai_config.json") as config_file:
+        decoder = json.load(config_file)["model"]["decoder"]
 
-    model.make_genai_config("model", {}, tmp_path)
+    assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
+    assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
+    assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
+    assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
 
-    assert observed["inputs"]["past.conv"] == "past.%d.conv"
-    assert observed["inputs"]["past.recurrent"] == "past.%d.recurrent"
-    assert observed["outputs"]["present.conv"] == "present.%d.conv"
-    assert observed["outputs"]["present.recurrent"] == "present.%d.recurrent"
+
+def test_qwen35_cache_names_follow_layer_types():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.layer_types = ["linear_attention", "full_attention", "sliding_attention", "linear_attention"]
+
+    kv_names = model.make_cache_names(["full_attention", "sliding_attention"], "past_key_values.key")
+    conv_names = model.make_cache_names(["linear_attention"], "past.conv")
+    recurrent_names = model.make_cache_names(["linear_attention"], "past.recurrent")
+
+    assert kv_names == {1: "past_key_values.1.key", 2: "past_key_values.2.key"}
+    assert conv_names == {0: "past.0.conv", 3: "past.3.conv"}
+    assert recurrent_names == {0: "past.0.recurrent", 3: "past.3.recurrent"}
 
 
 def test_qwen35_applies_mrope_to_q_and_k(monkeypatch):
