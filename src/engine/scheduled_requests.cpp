@@ -11,6 +11,10 @@ namespace Generators {
 
 namespace {
 
+// Engine Request is constrained to one sequence and one beam, so a chunk-complete step can append
+// at most one generated-output index.
+constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
+
 // Collapses Request::GenerateNextTokens' dispatch into the single (k, p, temperature) triple that
 // each branch ends up handing to the sampler on CUDA, where SelectTop() is SampleTopKTopP(1, 0, 1),
 // SampleTopK(k, t) is SampleTopKTopP(k, 1, t) and SampleTopP(p, t) is SampleTopKTopP(-1, p, t).
@@ -39,6 +43,11 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
   // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
   for (auto& request : requests_) {
     request->ScheduleTokens();
+    const size_t max_generated_token_indices =
+        IsExecuting(request->status_) && request->IsChunkComplete()
+            ? kMaxGeneratedTokenIndicesPerStep
+            : 0;
+    request->PrepareForStep(max_generated_token_indices);
   }
 }
 
@@ -68,6 +77,18 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
           "The dynamic step token count must be positive and no greater than the remaining tokens.");
     }
     request_ids.push_back(entry.request_id);
+  }
+  // Complete every potentially allocating output-bookkeeping operation before binding the plan or
+  // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
+  // request can append at most one generated index.
+  for (const auto& entry : plan.requests) {
+    const auto remaining =
+        static_cast<size_t>(entry.request->CurrentSequenceLength() -
+                            entry.request->ProcessedSequenceLength());
+    entry.request->PrepareForStep(
+        entry.unprocessed_token_count == remaining
+            ? kMaxGeneratedTokenIndicesPerStep
+            : 0);
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(

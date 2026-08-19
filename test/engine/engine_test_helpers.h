@@ -16,6 +16,27 @@
 namespace Generators {
 namespace test {
 
+// Narrow friend-only observations for Request's generated-output bookkeeping. Production callers do
+// not need these representation details.
+struct RequestTestAccess {
+  static void PrepareForStep(Request& request,
+                             size_t max_generated_token_indices) {
+    request.PrepareForStep(max_generated_token_indices);
+  }
+
+  static size_t UnseenTokenIndexCapacity(const Request& request) {
+    return request.unseen_token_indices_.capacity();
+  }
+
+  static size_t UnseenTokenIndexCount(const Request& request) {
+    return request.unseen_token_indices_.size();
+  }
+
+  static size_t NextUnseenTokenIndex(const Request& request) {
+    return request.next_unseen_token_index_;
+  }
+};
+
 // Loads the tiny checked-in decoder model used by the engine component tests. The model only has to
 // load as a decoder-only Generators::Model on CPU: the tests drive the scheduler and engine with the
 // recording doubles in engine_test_doubles.h, so the ONNX graph is never executed. Minting a Request

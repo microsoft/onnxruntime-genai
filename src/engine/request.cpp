@@ -81,9 +81,52 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   prompt_sequence_length_ = CurrentSequenceLength();
   seen_sequence_length_ = CurrentSequenceLength();
   tokens_host_.reserve(params_->search.max_length);
-  unseen_token_indices_.reserve(params_->search.max_length);
   tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
+}
+
+void Request::PrepareForStep(size_t max_generated_token_indices) {
+  if (next_unseen_token_index_ > unseen_token_indices_.size()) {
+    throw std::logic_error("The unseen token cursor is outside the generated-token index queue.");
+  }
+
+  const size_t unread_token_count =
+      unseen_token_indices_.size() - next_unseen_token_index_;
+  const bool append_would_grow =
+      max_generated_token_indices >
+      unseen_token_indices_.capacity() - unseen_token_indices_.size();
+  if (next_unseen_token_index_ != 0 &&
+      (append_would_grow ||
+       next_unseen_token_index_ >= unread_token_count)) {
+    const auto unread_begin =
+        unseen_token_indices_.begin() +
+        static_cast<std::vector<size_t>::difference_type>(
+            next_unseen_token_index_);
+    std::move(unread_begin, unseen_token_indices_.end(),
+              unseen_token_indices_.begin());
+    unseen_token_indices_.resize(unread_token_count);
+    next_unseen_token_index_ = 0;
+  }
+
+  if (max_generated_token_indices >
+      unseen_token_indices_.max_size() - unseen_token_indices_.size()) {
+    throw std::length_error(
+        "The generated-token index queue cannot represent this step.");
+  }
+  const size_t required_capacity =
+      unseen_token_indices_.size() + max_generated_token_indices;
+  if (required_capacity <= unseen_token_indices_.capacity()) {
+    return;
+  }
+
+  // Grow geometrically from the actual unread output needed by this step. Unlike reserving
+  // max_length, this keeps a streaming caller's index storage small while avoiding one allocation
+  // per token when output is allowed to accumulate.
+  const size_t target_capacity =
+      required_capacity > unseen_token_indices_.max_size() / 2
+          ? unseen_token_indices_.max_size()
+          : required_capacity * 2;
+  unseen_token_indices_.reserve(target_capacity);
 }
 
 void Request::Schedule() {
@@ -362,6 +405,8 @@ void Request::CommitStateForTransaction() {
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
   if (result.token_appended) {
+    // ScheduledRequests reserved this append before model execution. tokens_host_ retains its
+    // existing max-length reservation, so neither push allocates at this commit boundary.
     const size_t token_index = tokens_host_.size();
     tokens_host_.push_back(result.token);
     unseen_token_indices_.push_back(token_index);

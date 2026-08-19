@@ -46,6 +46,8 @@ plan a runnable batch
     |
 reserve all KV-cache growth needed by that plan
     |
+preflight generated-output bookkeeping
+    |
 checkpoint request and sampler state
     |
 pack request tokens into one variable-length model input
@@ -185,6 +187,20 @@ logical sequence:
 | `next_unseen_token_index_` | Cursor into `unseen_token_indices_`; entries at and after this cursor have not been consumed |
 
 Unread generated output is one globally ordered stream for the request across all turns. The unseen-output API does not tag tokens with a turn, so callers that need per-turn attribution must track the boundaries themselves.
+
+The generated-token index queue is not reserved to `max_length`. Before a scheduled request can
+execute, it compacts a consumed prefix when that avoids growth or when the consumed prefix is at
+least as large as the unread suffix. It then reserves geometrically from the actual unread count
+plus the maximum indices the step can append. An Engine request has one sequence, so a
+chunk-complete step reserves one append and a partial-prefill step reserves none.
+
+This preparation runs in both static and dynamic `ScheduledRequests` construction. The static
+scheduler also prepares newly admitted rows before publishing its immediate cache allocation and
+prepares queued residents before moving them to `Active`; construction then finds the required
+capacity already available. Preparation therefore finishes before model execution or search-state
+advancement and before any request or cache state commits. `Request::CommitStep()` can consequently
+remain allocation-free and `noexcept`; static `CompleteGeneration()` uses the same prepared
+capacity while retaining its existing append behavior.
 
 The unprocessed tokens are:
 
@@ -353,6 +369,10 @@ While the reservation is active, decoder input preparation can view a combined b
 - Blocks held by this transaction's reservation.
 
 This allows the model to write into the future cache layout without publishing that layout as committed state.
+
+After reservation, `ScheduledRequests` validates the selected requests and preflights their
+generated-output index capacity. If that allocation fails, the reservation is released before
+request checkpointing, model execution, or cache commit.
 
 ### 6. Checkpoint request and sampler state
 

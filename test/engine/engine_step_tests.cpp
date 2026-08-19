@@ -289,6 +289,50 @@ TEST_F(EngineStepTest, ContinueRejectsUndrainedReadyNotificationWithoutMutation)
             before.current_sequence_length + static_cast<int64_t>(continuation.size()));
 }
 
+TEST_F(EngineStepTest, UnseenPreflightCompactsContinuedOutputWithoutReordering) {
+  constexpr int kLargeMaxLength = 100'000;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  request->Params()->search.max_length = kLargeMaxLength;
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(RequestTestAccess::UnseenTokenIndexCapacity(*request), 0u);
+
+  // The initial scheduled-request construction reserves bounded append capacity before decode.
+  ASSERT_EQ(engine.engine->Step(), request);
+  EXPECT_GE(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1u);
+  EXPECT_LT(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1024u);
+
+  engine.executor->SetForcedToken(6);
+  ASSERT_EQ(engine.engine->Step(), request);
+  engine.executor->SetForcedToken(7);
+  ASSERT_EQ(engine.engine->Step(), request);
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(RequestTestAccess::UnseenTokenIndexCount(*request), 3u);
+
+  EXPECT_EQ(request->UnseenToken(), 5);
+  EXPECT_EQ(request->UnseenToken(), 6);
+  ASSERT_EQ(RequestTestAccess::NextUnseenTokenIndex(*request), 2u);
+
+  const std::vector<int32_t> continuation{8, 9};
+  request->Continue(continuation);
+  engine.executor->SetForcedToken(10);
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  // Continued-step preflight removed the consumed prefix before CommitStep appended token 10.
+  EXPECT_EQ(RequestTestAccess::NextUnseenTokenIndex(*request), 0u);
+  EXPECT_EQ(RequestTestAccess::UnseenTokenIndexCount(*request), 2u);
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  EXPECT_EQ(request->UnseenToken(), 7);
+  EXPECT_EQ(request->UnseenToken(), 10);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
 // Under capacity backpressure Step decodes only the requests that fit, then forms a fresh batch for
 // the deferred request on a later step -- one decode per internal cycle, never an over-capacity run.
 //

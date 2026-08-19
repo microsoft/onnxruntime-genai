@@ -17,6 +17,12 @@
 namespace Generators {
 
 struct Request;
+struct ScheduledRequests;
+struct StaticBatchScheduler;
+
+namespace test {
+struct RequestTestAccess;
+}
 
 template <>
 struct ExternalRefCountedTraits<Request> {
@@ -310,11 +316,17 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t seen_sequence_length_{};
   friend struct Engine;
   friend struct ExternalRefCounted<Request>;
+  friend struct ScheduledRequests;
+  friend struct StaticBatchScheduler;
+  friend struct test::RequestTestAccess;
 
   void CompleteClose();
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
   bool IsExternallyAbandoned() const noexcept;
+  // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
+  // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
+  void PrepareForStep(size_t max_generated_token_indices);
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
