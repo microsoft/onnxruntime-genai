@@ -12,7 +12,7 @@ The current dynamic path manages paged KV decoder state together with per-reques
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
-> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes status and unseen-output access as well as lifecycle mutation. Final handle release only publishes an atomic abandonment marker; cleanup runs at the next serialized Engine boundary. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
+> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes completion and unseen-output access as well as lifecycle mutation. Final handle release only publishes an atomic abandonment marker; cleanup runs at the next serialized Engine boundary. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
 
 The main implementation is under `src/engine/`:
 
@@ -439,7 +439,7 @@ The result records:
 - Whether a token was appended.
 - Whether generation is complete.
 
-These results are staged. The request's host token mirror, processed-length counter, and public status are not updated yet.
+These results are staged. The request's host token mirror, processed-length counter, and internal lifecycle state are not updated yet.
 
 Requests that appended a token or became complete are placed in a staged ready list. The list is not exposed until the complete transaction commits.
 
@@ -516,6 +516,8 @@ The engine stores the fatal error and rethrows it on later `Step()` calls. Conti
 | `FatalExecutionFailure` | Execution or rollback failed in a way that makes continued use unsafe |
 
 When some requests fit and others are deferred, the step still executes the fitting subset. `capacity_deferred` is also recorded in transaction metrics for that successful planning pass.
+
+If `Continue()` fails while appending tokens and its Search checkpoint also cannot be restored, the request is closed and the Engine is marked fatally unhealthy. Reusing either would risk combining committed KV state with corrupted Search state.
 
 ## Paged KV-cache ownership
 
