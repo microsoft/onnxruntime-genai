@@ -491,10 +491,10 @@ def _sanitize_path_value(value):
 
 
 def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
-    """Stringify extra options for telemetry, excluding secrets and redacting local paths."""
+    """Exclude authentication/internal HF state and recursively scrub user-facing options."""
     sanitized = {}
     for key, value in extra_options.items():
-        if key == "hf_token":
+        if key in {"hf_token", "hf_details"}:
             continue
         sanitized[key] = scrub_value_for_telemetry(value)
     return sanitized

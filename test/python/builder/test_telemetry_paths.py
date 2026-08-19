@@ -66,9 +66,17 @@ def test_extra_options_redact_relative_pathlike_values():
             "adapter_path": Path("private/adapter"),
             "nested": {"scale_path": Path("private/scales.json")},
             "batch_size": 4,
+            "hf_token": "hf-secret",
+            "hf_details": {
+                "extra_kwargs": {"cache_dir": Path("private/cache")},
+                "hf_name": "microsoft/model",
+                "hf_config": object(),
+            },
         }
     )
 
+    assert "hf_token" not in sanitized
+    assert "hf_details" not in sanitized
     assert sanitized["adapter_path"] == "[path]"
     assert sanitized["nested"]["scale_path"] == "[path]"
     assert sanitized["batch_size"] == 4
