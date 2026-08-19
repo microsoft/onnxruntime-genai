@@ -101,7 +101,7 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
                     return IsTurnComplete(request->status_) ||
                            IsClosed(request->status_);
                   })) {
-    // If all requests are completed, we can deallocate them before allocating the new requests.
+    // If every request is TurnComplete or Closed, recycle the static batch before allocating new requests.
     Deallocate(cache_allocated_requests_);
   }
 
