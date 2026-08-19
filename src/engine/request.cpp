@@ -194,7 +194,8 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
 
   if (status_ != RequestStatus::Unassigned) {
     if (IsTurnComplete()) {
-      throw std::runtime_error("AddTokens only accepts initial input; use Continue for another turn.");
+      throw std::runtime_error(
+          "AddTokens only accepts initial input; use the continuation API for another turn.");
     }
     if (IsClosed(status_)) {
       throw std::runtime_error("Cannot add tokens to a closed request.");

@@ -337,7 +337,7 @@ def test_request_lifecycle_status(model):
     assert request.status == og.RequestStatus.TURN_COMPLETE
     assert request.is_turn_complete()
 
-    with pytest.raises(RuntimeError, match="use Continue"):
+    with pytest.raises(RuntimeError, match="use the continuation API"):
         request.add_tokens(np.asarray([12], dtype=np.int32))
     request.continue_with(np.asarray([12], dtype=np.int32))
     assert request.status == og.RequestStatus.QUEUED
