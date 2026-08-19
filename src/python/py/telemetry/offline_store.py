@@ -27,7 +27,9 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+
+SCHEMA_VERSION = 3
 
 
 def _chmod_best_effort(path: str, mode: int) -> None:
@@ -72,11 +74,20 @@ class OfflineEventStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS events "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL, available_at REAL NOT NULL DEFAULT 0)"
+                "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL, "
+                "available_at REAL NOT NULL DEFAULT 0, acknowledged INTEGER NOT NULL DEFAULT 0)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+            if "available_at" not in columns:
+                conn.execute("ALTER TABLE events ADD COLUMN available_at REAL NOT NULL DEFAULT 0")
+            if "acknowledged" not in columns:
+                conn.execute("ALTER TABLE events ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0")
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.commit()
+            conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
             self._conn = conn
             self._harden_permissions()
         except Exception:
@@ -84,6 +95,19 @@ class OfflineEventStore:
                 with suppress(Exception):
                     conn.close()
             self._conn = None
+
+    @contextmanager
+    def _bounded_busy_timeout(self, deadline: float | None):
+        if deadline is None or self._conn is None:
+            yield
+            return
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        self._conn.execute(f"PRAGMA busy_timeout={min(self._busy_timeout_ms, remaining_ms)}")
+        try:
+            yield
+        finally:
+            with suppress(Exception):
+                self._conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
 
     def _harden_permissions(self) -> None:
         _chmod_best_effort(os.path.dirname(self._db_path), 0o700)
@@ -136,17 +160,42 @@ class OfflineEventStore:
 
     def get_batch(self, max_count: int) -> list[tuple[int, bytes]]:
         """Return up to ``max_count`` oldest events as (id, payload) pairs."""
+        return self.get_batch_for_upload(max_count) or []
+
+    def get_batch_for_upload(
+        self, max_count: int, deadline: float | None = None
+    ) -> list[tuple[int, bytes]] | None:
+        """Return an uploadable batch, or None when local storage failed."""
         with self._lock:
             if self._conn is None:
-                return []
+                return None
             try:
-                rows = self._conn.execute(
-                    "SELECT id, payload FROM events WHERE available_at <= ? ORDER BY id ASC LIMIT ?",
-                    (time.time(), max_count if max_count > 0 else -1),
-                ).fetchall()
+                with self._bounded_busy_timeout(deadline):
+                    rows = self._conn.execute(
+                        "SELECT id, payload FROM events "
+                        "WHERE available_at <= ? AND acknowledged=0 ORDER BY id ASC LIMIT ?",
+                        (time.time(), max_count if max_count > 0 else -1),
+                    ).fetchall()
                 return [(r[0], bytes(r[1])) for r in rows]
             except Exception:
-                return []
+                return None
+
+    def get_acknowledged_ids(
+        self, max_count: int, deadline: float | None = None
+    ) -> list[int] | None:
+        """Return terminally handled rows that only need local deletion."""
+        with self._lock:
+            if self._conn is None:
+                return None
+            try:
+                with self._bounded_busy_timeout(deadline):
+                    rows = self._conn.execute(
+                        "SELECT id FROM events WHERE acknowledged=1 ORDER BY id ASC LIMIT ?",
+                        (max_count if max_count > 0 else -1,),
+                    ).fetchall()
+                return [int(row[0]) for row in rows]
+            except Exception:
+                return None
 
     def release(self, row_id: int, payload: bytes | None = None) -> bool:
         """Make a reserved event drainable, optionally replacing its payload."""
@@ -168,19 +217,37 @@ class OfflineEventStore:
                     self._conn.rollback()
                 return False
 
-    def delete(self, ids: list[int]) -> bool:
+    def acknowledge(self, ids: list[int], deadline: float | None = None) -> bool:
+        """Persist that rows were delivered or permanently rejected."""
+        if not ids:
+            return True
+        with self._lock:
+            if self._conn is None:
+                return False
+            try:
+                with self._bounded_busy_timeout(deadline):
+                    self._conn.executemany("UPDATE events SET acknowledged=1 WHERE id=?", [(i,) for i in ids])
+                    self._conn.commit()
+                return True
+            except Exception:
+                with suppress(Exception):
+                    self._conn.rollback()
+                return False
+
+    def delete(self, ids: list[int], deadline: float | None = None) -> bool:
         """Remove rows by id (after a successful upload or a permanent drop)."""
         if not ids:
             return True
         with self._lock:
             if self._conn is None:
                 return False
-            # Failed deletes leave rows durable for a later drain attempt.
             try:
-                self._conn.executemany("DELETE FROM events WHERE id=?", [(i,) for i in ids])
-                self._conn.commit()
+                with self._bounded_busy_timeout(deadline):
+                    self._conn.executemany("DELETE FROM events WHERE id=?", [(i,) for i in ids])
+                    self._conn.commit()
                 return True
             except Exception:
+                # Failed deletes leave acknowledged rows durable for deletion-only retry.
                 with suppress(Exception):
                     self._conn.rollback()
                 return False

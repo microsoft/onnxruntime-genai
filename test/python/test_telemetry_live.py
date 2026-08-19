@@ -52,8 +52,14 @@ def main():
 
     original_send = transport_mod.HttpJsonPostTransport.send
 
-    def recording_send(self, payload, timeout_sec, item_count=1):
-        succeeded, status_code = original_send(self, payload, timeout_sec, item_count)
+    def recording_send(self, payload, timeout_sec, item_count=1, on_send_admitted=None):
+        succeeded, status_code = original_send(
+            self,
+            payload,
+            timeout_sec,
+            item_count,
+            on_send_admitted=on_send_admitted,
+        )
         with results_lock:
             transmission_results.append(
                 {

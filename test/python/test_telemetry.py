@@ -85,7 +85,9 @@ class _HermeticTelemetryTestCase(unittest.TestCase):
 
         self.sent_payloads = []
 
-        def _record_send(payload, timeout_sec, item_count=1):
+        def _record_send(payload, timeout_sec, item_count=1, on_send_admitted=None):
+            if on_send_admitted is not None:
+                on_send_admitted()
             self.sent_payloads.append(bytes(payload))
             return (True, 204)
 
@@ -299,6 +301,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertIn("GenAIModelBuild", names)
 
     def test_runtime_disable_is_process_latched(self):
+        from telemetry.offline_store import OfflineEventStore
         from telemetry.telemetry import GenAITelemetry
 
         with patch("telemetry.telemetry.EventUploader.start"):
@@ -306,12 +309,16 @@ class TestOptOut(_HermeticTelemetryTestCase):
         self.assertTrue(t._enabled)
         self.assertIsNotNone(t._store)
         self.assertEqual(t._store.count(), 1)
+        db_path = t._store.db_path
         t.disable_telemetry()
         t.log_model_build(action="create_model", duration_ms=1.0, success=True)
         t.disable_telemetry()
         self.assertFalse(t._enabled)
         self.assertTrue(t._telemetry_disabled)
-        self.assertEqual(t._store.count(), 1)
+        self.assertIsNone(t._store)
+        retained = OfflineEventStore(db_path)
+        self.addCleanup(retained.close)
+        self.assertEqual(retained.count(), 1)
         t.shutdown()
 
         self.assertIs(GenAITelemetry(), t)
@@ -322,6 +329,7 @@ class TestOptOut(_HermeticTelemetryTestCase):
     def test_disable_during_heartbeat_collection_retains_reserved_row(self):
         import threading
 
+        from telemetry.offline_store import OfflineEventStore
         from telemetry.telemetry import GenAITelemetry
 
         release_heartbeat = threading.Event()
@@ -335,13 +343,17 @@ class TestOptOut(_HermeticTelemetryTestCase):
             side_effect=get_system_info,
         ), patch("telemetry.telemetry.EventUploader.start"):
             telemetry = GenAITelemetry()
+            db_path = telemetry._store.db_path
             telemetry.disable_telemetry()
             release_heartbeat.set()
             telemetry._heartbeat_thread.join(5)
             telemetry.disable_telemetry()
 
-        self.assertEqual(telemetry._store.count(), 1)
-        self.assertEqual(telemetry._store.get_batch(10), [])
+        self.assertIsNone(telemetry._store)
+        retained = OfflineEventStore(db_path)
+        self.addCleanup(retained.close)
+        self.assertEqual(retained.count(), 1)
+        self.assertEqual(retained.get_batch(10), [])
         self.assertEqual(self._sent_event_names(), [])
 
     def test_heartbeat_is_durable_before_system_enrichment(self):
@@ -936,6 +948,10 @@ class TestPathRedaction(unittest.TestCase):
             "model dir /_apikey:top-secret": "model dir [path]",
             "arg /1token=top-secret": "arg [path]",
             "connect /2fa_token=top-secret": "connect [path]",
+            "args ['--api-key', 'top-secret']": "args ['--api-key', '[path]",
+            'args ["/password", "top-secret"]': 'args ["/password", "[path]',
+            '--password "-abc"': '--password "[path]',
+            "args ['--api-key', '-abc']": "args ['--api-key', '[path]",
         }
         for value, expected in cases.items():
             with self.subTest(value=value):
@@ -2007,7 +2023,7 @@ class TestHttpTransport(unittest.TestCase):
         request = urllib.request.Request("https://example.invalid", data=b"{}", method="POST")
 
         with patch("telemetry.library.transport.urllib.request.urlopen", return_value=context) as urlopen:
-            self.assertEqual(HttpJsonPostTransport._do_request(request, 1.0), (True, 204))
+            self.assertEqual(HttpJsonPostTransport._do_request_blocking(request, 1.0), (True, 204))
 
         urlopen.assert_called_once()
         response.read.assert_not_called()
@@ -2026,11 +2042,62 @@ class TestHttpTransport(unittest.TestCase):
             ) as urlopen,
             patch("telemetry.library.transport.time.monotonic", side_effect=[10.0, 10.0, 10.75]),
         ):
-            self.assertEqual(HttpJsonPostTransport._do_request(request, 1.0), (False, None))
+            self.assertEqual(HttpJsonPostTransport._do_request_blocking(request, 1.0), (False, None))
 
         self.assertEqual(urlopen.call_count, 2)
         self.assertAlmostEqual(urlopen.call_args_list[0].kwargs["timeout"], 1.0)
         self.assertAlmostEqual(urlopen.call_args_list[1].kwargs["timeout"], 0.25)
+
+    def test_wall_clock_deadline_reuses_late_same_payload_result(self):
+        import threading
+        import time
+
+        from telemetry.library.options import CompressionType
+        from telemetry.library.transport import HttpJsonPostTransport
+
+        transport = HttpJsonPostTransport(
+            endpoint="https://example.invalid",
+            ikey="abc-def",
+            compression=CompressionType.NO_COMPRESSION,
+        )
+        release = threading.Event()
+        calls = []
+
+        def blocked_request(_request, _timeout):
+            calls.append(1)
+            self.assertTrue(release.wait(5))
+            return (True, 204)
+
+        with patch(
+            "telemetry.library.transport.HttpJsonPostTransport._do_request_blocking",
+            side_effect=blocked_request,
+        ):
+            started = time.monotonic()
+            self.assertEqual(transport.send(b"{}", 0.05), (False, None))
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertEqual(transport.send(b"{}", 0.05), (False, None))
+            self.assertEqual(len(calls), 1)
+            release.set()
+            transport._inflight_worker.join(5)
+            self.assertEqual(transport.send(b"{}", 0.05), (True, 204))
+            self.assertEqual(len(calls), 1)
+
+    def test_http_error_body_is_not_read(self):
+        import urllib.error
+        import urllib.request
+
+        from telemetry.library.transport import HttpJsonPostTransport
+
+        request = urllib.request.Request("https://example.invalid", data=b"{}", method="POST")
+        error = urllib.error.HTTPError(request.full_url, 400, "bad", None, MagicMock())
+        error.read = MagicMock()
+        error.close = MagicMock()
+
+        with patch("telemetry.library.transport.urllib.request.urlopen", side_effect=error):
+            self.assertEqual(HttpJsonPostTransport._do_request_blocking(request, 1.0), (False, 400))
+
+        error.close.assert_called_once()
+        error.read.assert_not_called()
 
     def test_all_server_errors_are_retryable(self):
         from telemetry.library.transport import HttpJsonPostTransport
@@ -2147,6 +2214,41 @@ class TestOfflineEventStore(unittest.TestCase):
             self.assertTrue(s.release(row_id, b'{"enriched":1}'))
             self.assertEqual([payload for _, payload in s.get_batch(10)], [b'{"enriched":1}'])
 
+    def test_store_schema_version_and_acknowledgement_migration(self):
+        import sqlite3
+        import tempfile
+
+        from telemetry.offline_store import SCHEMA_VERSION, OfflineEventStore
+
+        db_path = os.path.join(tempfile.mkdtemp(), "legacy.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)")
+        conn.execute("INSERT INTO events (payload) VALUES (?)", (sqlite3.Binary(b'{"legacy":1}'),))
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+        conn.close()
+
+        store = OfflineEventStore(db_path)
+        self.addCleanup(store.close)
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(events)")}
+        self.assertEqual(columns, {"id", "payload", "available_at", "acknowledged"})
+        self.assertEqual(store._conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+        self.assertEqual(store.get_batch(1)[0][1], b'{"legacy":1}')
+
+    def test_store_operations_bound_busy_timeout_to_deadline(self):
+        s = self._new_store()
+        s.store(b'{"a":1}')
+        row_id = s.get_batch(1)[0][0]
+        statements = []
+        s._conn.set_trace_callback(statements.append)
+
+        with patch("telemetry.offline_store.time.monotonic", return_value=100.0):
+            self.assertTrue(s.delete([row_id], deadline=100.025))
+
+        bounded = [statement for statement in statements if statement.startswith("PRAGMA busy_timeout=")]
+        self.assertIn(bounded[0], {"PRAGMA busy_timeout=24", "PRAGMA busy_timeout=25"})
+        self.assertEqual(bounded[-1], "PRAGMA busy_timeout=3000")
+
     def test_delete(self):
         s = self._new_store()
         s.store(b'{"a":1}')
@@ -2238,40 +2340,133 @@ class TestUploaderDrainLogic(unittest.TestCase):
         return store, uploader
 
     def test_success_deletes(self):
+        from telemetry.uploader import DrainOutcome
+
         store, uploader = self._setup()
         store.store(b'{"ok":1}')
         uploader._transport.send = lambda *a, **k: (True, 204)
-        delivered, left = uploader.drain_once()
-        self.assertEqual((delivered, left), (1, 0))
+        result = uploader.drain_once()
+        self.assertEqual((result.delivered, result.left, result.outcome), (1, 0, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
 
     def test_delete_failure_retries_without_reposting(self):
+        from telemetry.uploader import DrainOutcome
+
         store, uploader = self._setup()
         store.store(b'{"ok":1}')
         uploader._transport.send = MagicMock(return_value=(True, 204))
         original_delete = store.delete
         delete_attempts = 0
 
-        def flaky_delete(ids):
+        def flaky_delete(ids, deadline=None):
             nonlocal delete_attempts
             delete_attempts += 1
-            return False if delete_attempts == 1 else original_delete(ids)
+            return False if delete_attempts == 1 else original_delete(ids, deadline)
 
         store.delete = flaky_delete
 
-        self.assertEqual(uploader.drain_once(), (0, 1))
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.DELETE_RETRY)
         self.assertEqual(store.count(), 1)
-        self.assertEqual(uploader.drain_once(), (1, 0))
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
         self.assertEqual(store.count(), 0)
         uploader._transport.send.assert_called_once()
 
+    def test_acknowledgement_failure_retries_without_reposting(self):
+        from telemetry.uploader import DrainOutcome
+
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        uploader._transport.send = MagicMock(return_value=(True, 204))
+        original_acknowledge = store.acknowledge
+        attempts = 0
+
+        def flaky_acknowledge(ids, deadline=None):
+            nonlocal attempts
+            attempts += 1
+            return False if attempts == 1 else original_acknowledge(ids, deadline)
+
+        store.acknowledge = flaky_acknowledge
+
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.ACKNOWLEDGE_RETRY)
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
+        self.assertEqual(store.count(), 0)
+        uploader._transport.send.assert_called_once()
+
+    def test_acknowledged_rows_delete_without_repost_after_restart(self):
+        from telemetry.offline_store import OfflineEventStore
+        from telemetry.uploader import DrainOutcome, EventUploader
+
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        uploader._transport.send = MagicMock(return_value=(True, 204))
+        original_delete = store.delete
+        store.delete = MagicMock(return_value=False)
+
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.DELETE_RETRY)
+        self.assertEqual(store._conn.execute("SELECT acknowledged FROM events").fetchone()[0], 1)
+        db_path = store.db_path
+        store.delete = original_delete
+        store.close()
+
+        reopened = OfflineEventStore(db_path)
+        restarted = EventUploader(reopened, instrumentation_key="abc-def")
+        self.addCleanup(reopened.close)
+        self.addCleanup(restarted.close)
+        restarted._transport.send = MagicMock()
+
+        self.assertEqual(restarted.drain_once().outcome, DrainOutcome.PROGRESS)
+        self.assertEqual(reopened.count(), 0)
+        restarted._transport.send.assert_not_called()
+
+    def test_runtime_retention_preserves_inflight_success(self):
+        import threading
+
+        from telemetry.uploader import DrainOutcome
+
+        store, uploader = self._setup()
+        store.store(b'{"ok":1}')
+        entered = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def blocked_send(*_args, **kwargs):
+            kwargs["on_send_admitted"]()
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return (True, 204)
+
+        uploader._transport.send = blocked_send
+        drain_thread = threading.Thread(target=lambda: results.append(uploader.drain_once()))
+        drain_thread.start()
+        self.assertTrue(entered.wait(5))
+        uploader.retain_queued_rows()
+        release.set()
+        drain_thread.join(5)
+
+        self.assertFalse(drain_thread.is_alive())
+        self.assertEqual(results[0].outcome, DrainOutcome.TRANSPORT_RETRY)
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(store._conn.execute("SELECT acknowledged FROM events").fetchone()[0], 0)
+
+    def test_storage_failure_has_explicit_outcome(self):
+        from telemetry.uploader import DrainOutcome
+
+        _, uploader = self._setup()
+        uploader._store.get_acknowledged_ids = MagicMock(return_value=None)
+        uploader._transport.send = MagicMock()
+
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.STORAGE_RETRY)
+        uploader._transport.send.assert_not_called()
+
     def test_drain_uses_only_remaining_deadline(self):
+        from telemetry.uploader import DrainOutcome
+
         store, uploader = self._setup()
         store.store(b'{"ok":1}')
         uploader._transport.send = MagicMock(return_value=(False, None))
 
         with patch("telemetry.uploader.time.monotonic", return_value=100.75):
-            self.assertEqual(uploader.drain_once(deadline=101.0), (0, 1))
+            self.assertEqual(uploader.drain_once(deadline=101.0).outcome, DrainOutcome.TRANSPORT_RETRY)
 
         self.assertAlmostEqual(uploader._transport.send.call_args.args[1], 0.25)
 
@@ -2295,42 +2490,51 @@ class TestUploaderDrainLogic(unittest.TestCase):
         self.assertEqual(store.count(), 0)  # dropped, not retried forever
 
     def test_transient_5xx_retained(self):
+        from telemetry.uploader import DrainOutcome
+
         store, uploader = self._setup()
         store.store(b'{"later":1}')
         uploader._transport.send = lambda *a, **k: (False, 503)
-        delivered, left = uploader.drain_once()
-        self.assertEqual((delivered, left), (0, 1))
+        result = uploader.drain_once()
+        self.assertEqual((result.delivered, result.left, result.outcome), (0, 1, DrainOutcome.TRANSPORT_RETRY))
         self.assertEqual(store.count(), 1)  # kept for retry
 
     def test_uncommon_5xx_responses_are_retained(self):
+        from telemetry.uploader import DrainOutcome
+
         for status in (507, 520):
             with self.subTest(status=status):
                 store, uploader = self._setup()
                 store.store(b'{"later":1}')
                 uploader._transport.send = lambda *a, status=status, **k: (False, status)
-                self.assertEqual(uploader.drain_once(), (0, 1))
+                self.assertEqual(uploader.drain_once().outcome, DrainOutcome.TRANSPORT_RETRY)
                 self.assertEqual(store.count(), 1)
 
     def test_content_rejection_isolates_bad_event(self):
+        from telemetry.uploader import DrainOutcome
+
         store, uploader = self._setup()
         store.store(b'{"bad":1}')
         store.store(b'{"valid":1}')
 
-        def send(payload, timeout, item_count=1):
+        def send(payload, timeout, item_count=1, on_send_admitted=None):
+            if on_send_admitted is not None:
+                on_send_admitted()
             if item_count > 1 or b'"bad"' in payload:
                 return (False, 400)
             return (True, 204)
 
         uploader._transport.send = MagicMock(side_effect=send)
 
-        self.assertEqual(uploader.drain_once(), (0, 2))
-        self.assertEqual(uploader.drain_once(), (1, 0))
-        self.assertEqual(uploader.drain_once(), (1, 0))
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.SPLIT)
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
+        self.assertEqual(uploader.drain_once().outcome, DrainOutcome.PROGRESS)
         self.assertEqual(store.count(), 0)
         self.assertEqual(uploader._transport.send.call_count, 3)
 
     def test_oversized_first_row_is_dropped(self):
         import telemetry.uploader as uploader_module
+        from telemetry.uploader import DrainOutcome
 
         store, uploader = self._setup()
         store.store(b"12345")
@@ -2340,8 +2544,8 @@ class TestUploaderDrainLogic(unittest.TestCase):
             "DEFAULT_MAX_PAYLOAD_SIZE_BYTES",
             4,
         ):
-            delivered, left = uploader.drain_once()
-        self.assertEqual((delivered, left), (1, 0))
+            result = uploader.drain_once()
+        self.assertEqual((result.delivered, result.left, result.outcome), (1, 0, DrainOutcome.PROGRESS))
         self.assertEqual(store.count(), 0)
         uploader._transport.send.assert_not_called()
 
@@ -2423,7 +2627,7 @@ class TestShutdownSafety(unittest.TestCase):
         self.assertIs(telemetry._uploader, old_uploader)
         self.assertFalse(telemetry._enabled)
         self.assertTrue(telemetry._telemetry_disabled)
-        old_uploader.signal_stop.assert_called_once()
+        old_uploader.retain_queued_rows.assert_called_once()
         old_uploader.stop_loop.assert_called_once_with(0)
         telemetry._store.clear.assert_not_called()
 

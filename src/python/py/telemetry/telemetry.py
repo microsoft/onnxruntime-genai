@@ -285,13 +285,14 @@ class GenAITelemetry:
 
     def _emit(self, event_name: str, attributes: dict[str, Any] | None = None) -> None:
         """Serialize an event to a Common Schema envelope and persist it durably."""
-        if not self.accepts_detailed_events:
-            return
-        try:
-            if self._persist(event_name, attributes) and self._uploader is not None:
-                self._uploader.request_drain()
-        except Exception:
-            return
+        with self._lock:
+            if not self.accepts_detailed_events:
+                return
+            try:
+                if self._persist(event_name, attributes) and self._uploader is not None:
+                    self._uploader.request_drain()
+            except Exception:
+                return
 
     @property
     def accepts_detailed_events(self) -> bool:
@@ -570,15 +571,16 @@ class GenAITelemetry:
             type(self)._process_disabled = True
             self._telemetry_disabled = True
             self._enabled = False
+            uploader_stopped = True
             if self._uploader is not None:
-                # Signal the daemon thread to wind down without joining, so opting
-                # out never blocks the caller. The thread releases the drain lock on
-                # exit; an in-flight send may finish, while remaining queued events
-                # stay on disk for the next run.
-                self._uploader.signal_stop()
-                if self._uploader.stop_loop(0):
-                    self._uploader.close()
-                    self._uploader = None
+                self._uploader.retain_queued_rows()
+                uploader_stopped = self._uploader.stop_loop(0)
+            if self._uploader is not None and uploader_stopped:
+                self._uploader.close()
+                self._uploader = None
+            if self._uploader is None and self._store is not None:
+                self._store.close()
+                self._store = None
 
     def shutdown(self, flush_seconds: float = 5.0) -> None:
         """Best-effort shutdown within one overall time budget.

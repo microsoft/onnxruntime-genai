@@ -144,11 +144,20 @@ def _secret_value_start(
     while separator < len(value) and value[separator] in _ASCII_WHITESPACE:
         separator += 1
     assignment = separator < len(value) and value[separator] in "=:"
+    delimited_cli_value = False
+    if cli_option and not assignment:
+        separator = key_end
+        while separator < len(value) and (
+            value[separator] in _ASCII_WHITESPACE or value[separator] in "\"',[](){}"
+        ):
+            if value[separator] in "\"',[](){}":
+                delimited_cli_value = True
+            separator += 1
     separated_cli_value = (
         cli_option
         and separator > before_whitespace
         and separator < len(value)
-        and value[separator] != "-"
+        and (value[separator] != "-" or delimited_cli_value)
     )
     if not assignment and not separated_cli_value:
         return None
