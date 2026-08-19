@@ -87,13 +87,21 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
       ready_requests_.begin(),
       ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
   ready_request_index_ = 0;
-  std::erase(ready_requests_, request);
-  std::erase(staged_ready_requests_, request);
+  ready_requests_.erase(
+      std::remove(ready_requests_.begin(), ready_requests_.end(), request),
+      ready_requests_.end());
+  staged_ready_requests_.erase(
+      std::remove(staged_ready_requests_.begin(), staged_ready_requests_.end(), request),
+      staged_ready_requests_.end());
   request->CompleteClose();
-  std::erase_if(tracked_requests_, [&request](const std::weak_ptr<Request>& tracked) {
-    const auto owned = tracked.lock();
-    return !owned || owned == request;
-  });
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&request](const std::weak_ptr<Request>& tracked) {
+            const auto owned = tracked.lock();
+            return !owned || owned == request;
+          }),
+      tracked_requests_.end());
 }
 
 void Engine::ReclaimAbandonedRequests() {
@@ -102,18 +110,22 @@ void Engine::ReclaimAbandonedRequests() {
   // release, ready-notification purge, and terminal close.
   std::vector<std::shared_ptr<Request>> abandoned_requests;
   abandoned_requests.reserve(tracked_requests_.size());
-  std::erase_if(tracked_requests_, [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
-    const auto request = tracked.lock();
-    if (!request) {
-      return true;
-    }
-    if (!IsClosed(request->status_) &&
-        request->engine_.lock().get() == this &&
-        request->IsExternallyAbandoned()) {
-      abandoned_requests.push_back(request);
-    }
-    return false;
-  });
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
+            const auto request = tracked.lock();
+            if (!request) {
+              return true;
+            }
+            if (!IsClosed(request->status_) &&
+                request->engine_.lock().get() == this &&
+                request->IsExternallyAbandoned()) {
+              abandoned_requests.push_back(request);
+            }
+            return false;
+          }),
+      tracked_requests_.end());
 
   for (const auto& request : abandoned_requests) {
     // Recheck defensively in case an external owner was reacquired before this serialized boundary.
