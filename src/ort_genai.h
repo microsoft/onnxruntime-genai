@@ -912,12 +912,6 @@ struct OgaRequest : OgaAbstract {
     return is_turn_complete;
   }
 
-  OgaRequestStatus GetStatus() const {
-    OgaRequestStatus status;
-    OgaCheckResult(OgaRequestGetStatus(this, &status));
-    return status;
-  }
-
   bool HasUnseenTokens() const {
     bool has_unseen_tokens{};
     OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
@@ -969,7 +963,7 @@ struct OgaEngine : OgaAbstract {
   /**
    * \brief Removes a request and releases engine ownership.
    *
-   * Repeated calls after the request reaches OgaRequestStatus_closed are successful no-ops.
+   * Repeated calls after the request has already been removed are successful no-ops.
    */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));

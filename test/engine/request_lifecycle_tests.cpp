@@ -34,6 +34,71 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   return logits;
 }
 
+struct FailingContinuationControl {
+  bool fail_append{};
+  bool fail_restore{};
+};
+
+class FailingContinuationSearch final : public GreedySearch_Cpu {
+ public:
+  FailingContinuationSearch(
+      const GeneratorParams& params,
+      std::shared_ptr<FailingContinuationControl> control)
+      : GreedySearch_Cpu(params), control_{std::move(control)} {}
+
+  void AppendTokens(DeviceSpan<int32_t>& tokens) override {
+    if (control_->fail_append) {
+      throw std::runtime_error("Injected continuation append failure.");
+    }
+    GreedySearch_Cpu::AppendTokens(tokens);
+  }
+
+ protected:
+  void RestoreStateForTransactionImpl() override {
+    if (control_->fail_restore) {
+      throw std::runtime_error("Injected continuation restore failure.");
+    }
+    GreedySearch_Cpu::RestoreStateForTransactionImpl();
+  }
+
+ private:
+  std::shared_ptr<FailingContinuationControl> control_;
+};
+
+class FailingContinuationDevice final : public DeviceInterface {
+ public:
+  FailingContinuationDevice(
+      DeviceInterface& inner,
+      std::shared_ptr<FailingContinuationControl> control)
+      : inner_{inner}, control_{std::move(control)} {}
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<FailingContinuationSearch>(params, control_);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+  std::shared_ptr<FailingContinuationControl> control_;
+};
+
 static_assert(noexcept(std::declval<Request&>().CommitStep(
     std::declval<const RequestStepPlan&>(),
     std::declval<const RequestStepResult&>())));
@@ -182,6 +247,33 @@ TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {
   EXPECT_EQ(after.status, before.status);
   EXPECT_EQ(after.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(after.processed_sequence_length, before.processed_sequence_length);
+}
+
+TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEngine) {
+  auto params = MakeGreedyParams(*model_);
+  auto control = std::make_shared<FailingContinuationControl>();
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  engine_.engine->AddRequest(request);
+  ASSERT_EQ(engine_.engine->Step(), request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
+
+  control->fail_append = true;
+  control->fail_restore = true;
+  try {
+    request->Continue(std::vector<int32_t>{5});
+    FAIL() << "Expected continuation restore failure.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind, StepOutcomeKind::FatalExecutionFailure);
+  }
+
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_THROW(request->Continue(std::vector<int32_t>{6}), std::runtime_error);
+  EXPECT_THROW(static_cast<void>(engine_.engine->Step()), EngineStepError);
 }
 
 TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {

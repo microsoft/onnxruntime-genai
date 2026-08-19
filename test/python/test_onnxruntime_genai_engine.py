@@ -63,11 +63,6 @@ def model(device):
     return og.Model(config)
 
 
-def test_request_status_names():
-    assert hasattr(og.RequestStatus, "ACTIVE")
-    assert not hasattr(og.RequestStatus, "IN_PROGRESS")
-
-
 def _add_request(engine, model, prompt, max_new_tokens, sink):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)
@@ -107,7 +102,7 @@ def _generate_isolated(model, prompt, max_new_tokens):
     engine = og.Engine(model)
     request = _add_request(engine, model, prompt, max_new_tokens, sink)
     _run(engine)
-    assert request.status == og.RequestStatus.CLOSED
+    assert not request.is_turn_complete()
     del engine
     gc.collect()
     return sink.tokens
@@ -165,7 +160,7 @@ def test_isolated_matches_simultaneous(model):
 
     assert sink_a.tokens == isolated_a, "request A diverged when batched with B"
     assert sink_b.tokens == isolated_b, "request B diverged when batched with A"
-    assert all(request.status == og.RequestStatus.CLOSED for request in requests)
+    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_staggered_admission(model):
@@ -189,8 +184,8 @@ def test_staggered_admission(model):
 
     assert sink_a.tokens == expected_a
     assert sink_b.tokens == expected_b
-    assert request_a.status == og.RequestStatus.CLOSED
-    assert request_b.status == og.RequestStatus.CLOSED
+    assert not request_a.is_turn_complete()
+    assert not request_b.is_turn_complete()
 
 
 def test_max_length_stops(model):
@@ -229,8 +224,8 @@ def test_completion_isolation(model):
 
     assert short_sink.tokens == predicted_tokens(_PROMPT_A, short_new)
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
-    assert short_request.status == og.RequestStatus.CLOSED
-    assert long_request.status == og.RequestStatus.CLOSED
+    assert not short_request.is_turn_complete()
+    assert not long_request.is_turn_complete()
 
 
 def test_continuation_while_peer_remains_active(model):
@@ -297,49 +292,43 @@ def test_request_cannot_be_removed_from_another_engine(model):
 
     owner.remove_request(request)
     other.remove_request(request)
-    assert request.status == og.RequestStatus.CLOSED
+    assert not request.is_turn_complete()
 
 
-def test_request_lifecycle_status(model):
+def test_request_lifecycle_operations(model):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=64)
     request = og.Request(params)
-    assert request.status == og.RequestStatus.CREATED
 
     request.add_tokens(np.asarray(_PROMPT_A, dtype=np.int32))
     sink = _Sink()
     request.set_opaque_data(sink)
     engine = og.Engine(model)
     engine.add_request(request)
-    assert request.status == og.RequestStatus.QUEUED
 
     ready = engine.step()
     assert ready is not None
     _drain(ready)
-    assert request.status == og.RequestStatus.ACTIVE
     assert not request.is_turn_complete()
 
     while not request.is_turn_complete():
         ready = engine.step()
         assert ready is not None
         _drain(ready)
-    assert request.status == og.RequestStatus.TURN_COMPLETE
     assert request.is_turn_complete()
 
     with pytest.raises(RuntimeError, match="use the continuation API"):
         request.add_tokens(np.asarray([12], dtype=np.int32))
     request.continue_with(np.asarray([12], dtype=np.int32))
-    assert request.status == og.RequestStatus.QUEUED
+    assert not request.is_turn_complete()
 
     engine.remove_request(request)
-    assert request.status == og.RequestStatus.CLOSED
     assert not request.is_turn_complete()
     with pytest.raises(RuntimeError, match="closed request"):
         request.add_tokens(np.asarray([12], dtype=np.int32))
     with pytest.raises(RuntimeError, match="closed request"):
         request.continue_with(np.asarray([12], dtype=np.int32))
     engine.remove_request(request)
-    assert request.status == og.RequestStatus.CLOSED
 
 
 def test_last_handle_release_reclaims_retained_capacity(model):
@@ -366,7 +355,7 @@ def test_last_handle_release_reclaims_retained_capacity(model):
     _run(engine)
 
     assert replacement_sink.tokens == predicted_tokens(_PROMPT_A, 4)
-    assert replacement.status == og.RequestStatus.CLOSED
+    assert not replacement.is_turn_complete()
 
 
 def test_remove_request_freezes_output(model):
@@ -392,7 +381,7 @@ def test_remove_request_freezes_output(model):
 
     assert sink_a.tokens == frozen_a, "removed request kept producing tokens"
     assert sink_b.tokens == sibling_expected, "sibling did not complete after removal"
-    assert request_b.status == og.RequestStatus.CLOSED
+    assert not request_b.is_turn_complete()
 
 
 def test_engine_teardown_and_recreation(model):
@@ -404,7 +393,7 @@ def test_engine_teardown_and_recreation(model):
     first_request = _add_request(first, model, _PROMPT_A, max_new, sink1)
     _run(first)
     assert sink1.tokens == expected
-    assert first_request.status == og.RequestStatus.CLOSED
+    assert not first_request.is_turn_complete()
     del first
     gc.collect()
 
@@ -414,4 +403,4 @@ def test_engine_teardown_and_recreation(model):
     second_request = _add_request(second, model, _PROMPT_A, max_new, sink2)
     _run(second)
     assert sink2.tokens == expected
-    assert second_request.status == og.RequestStatus.CLOSED
+    assert not second_request.is_turn_complete()

@@ -113,7 +113,7 @@ def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0
     engine = og.Engine(model)
     request = _add_request(engine, model, prompt_tokens, max_new_tokens, sink, min_new_tokens=min_new_tokens)
     _run(engine)
-    assert request.status == og.RequestStatus.CLOSED
+    assert not request.is_turn_complete()
     del engine
     gc.collect()
     return sink.tokens
@@ -212,8 +212,8 @@ def test_staggered_admission(bundle):
 
     assert sink_a.tokens == isolated_a
     assert sink_b.tokens == isolated_b
-    assert request_a.status == og.RequestStatus.CLOSED
-    assert request_b.status == og.RequestStatus.CLOSED
+    assert not request_a.is_turn_complete()
+    assert not request_b.is_turn_complete()
 
 
 def test_isolated_matches_batched(bundle):
@@ -232,7 +232,7 @@ def test_isolated_matches_batched(bundle):
     _run(engine)
 
     assert sinks[prompt].tokens == isolated, "batched output diverged from the isolated run"
-    assert all(request.status == og.RequestStatus.CLOSED for request in requests)
+    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_output_isolation(bundle):
@@ -253,7 +253,7 @@ def test_output_isolation(bundle):
 
     assert s0.tokens == isolated0
     assert s1.tokens == isolated1
-    assert all(request.status == og.RequestStatus.CLOSED for request in requests)
+    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_completion_isolation(bundle):
@@ -273,8 +273,8 @@ def test_completion_isolation(bundle):
 
     assert len(short_sink.tokens) == short_new, "forced-length request did not stop at its bound"
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
-    assert short_request.status == og.RequestStatus.CLOSED
-    assert long_request.status == og.RequestStatus.CLOSED
+    assert not short_request.is_turn_complete()
+    assert not long_request.is_turn_complete()
 
 
 def test_max_length_stops(bundle):
@@ -339,7 +339,7 @@ def test_remove_request_stops_output(bundle):
 
     assert len(sink_a.tokens) == frozen_a, "removed request kept producing tokens"
     assert sink_b.tokens == sibling_isolated, "sibling diverged after request removal"
-    assert request_b.status == og.RequestStatus.CLOSED
+    assert not request_b.is_turn_complete()
 
 
 def test_engine_teardown_and_recreation(bundle):
@@ -352,7 +352,7 @@ def test_engine_teardown_and_recreation(bundle):
     first_request = _add_request(first, bundle.model, prompt_tokens, max_new, sink1)
     _run(first)
     assert sink1.tokens == expected
-    assert first_request.status == og.RequestStatus.CLOSED
+    assert not first_request.is_turn_complete()
     del first
     gc.collect()
 
@@ -362,4 +362,4 @@ def test_engine_teardown_and_recreation(bundle):
     second_request = _add_request(second, bundle.model, prompt_tokens, max_new, sink2)
     _run(second)
     assert sink2.tokens == expected
-    assert second_request.status == og.RequestStatus.CLOSED
+    assert not second_request.is_turn_complete()

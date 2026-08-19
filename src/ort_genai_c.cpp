@@ -1368,29 +1368,6 @@ OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
   OGA_CATCH
 }
 
-OgaResult* OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out) {
-  OGA_TRY
-  switch (request->Status()) {
-    case Generators::RequestStatus::Unassigned:
-      *out = OgaRequestStatus_created;
-      break;
-    case Generators::RequestStatus::Assigned:
-      *out = OgaRequestStatus_queued;
-      break;
-    case Generators::RequestStatus::Active:
-      *out = OgaRequestStatus_active;
-      break;
-    case Generators::RequestStatus::TurnComplete:
-      *out = OgaRequestStatus_turn_complete;
-      break;
-    case Generators::RequestStatus::Closed:
-      *out = OgaRequestStatus_closed;
-      break;
-  }
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OgaRequestSetOpaqueData(OgaRequest* request, void* data) {
   OGA_TRY
   request->SetOpaqueData(data);

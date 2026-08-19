@@ -215,8 +215,8 @@ void Request::Continue(std::span<const int32_t> tokens) {
     try {
       search_->RestoreStateForTransaction();
     } catch (...) {
-      throw std::runtime_error(
-          "Continue failed and the request search state could not be restored.");
+      engine->HandleContinuationRestoreFailure(
+          shared_from_this(), append_error, std::current_exception());
     }
     std::rethrow_exception(append_error);
   }

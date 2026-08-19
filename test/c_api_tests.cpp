@@ -931,10 +931,8 @@ struct Phi2Test {
     }
 
     for (size_t i = 0; i < batch_size_; i++) {
-      EXPECT_EQ(requests_[i]->GetStatus(), OgaRequestStatus_turn_complete);
       EXPECT_TRUE(requests_[i]->IsTurnComplete());
       EXPECT_NO_THROW(engine->Remove(*requests_[i]));
-      EXPECT_EQ(requests_[i]->GetStatus(), OgaRequestStatus_closed);
       EXPECT_FALSE(requests_[i]->IsTurnComplete());
       EXPECT_NO_THROW(engine->Remove(*requests_[i]));
 

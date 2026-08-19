@@ -161,6 +161,29 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
   }
 }
 
+[[noreturn]] void Engine::HandleContinuationRestoreFailure(
+    const std::shared_ptr<Request>& request,
+    std::exception_ptr append_error,
+    std::exception_ptr restore_error) {
+  std::string message = AddExceptionCause(
+      "Continuation append failed and its Search state could not be restored.",
+      append_error);
+  try {
+    RemoveRequest(request);
+  } catch (...) {
+    message = AddExceptionCause(
+        std::move(message) + " Closing the poisoned request also failed.",
+        std::current_exception());
+    request->CompleteClose();
+  }
+  MarkUnhealthyAndThrow(
+      StepOutcomeKind::FatalExecutionFailure,
+      /*transaction_id=*/0,
+      request.get(),
+      std::move(message),
+      restore_error);
+}
+
 std::shared_ptr<Request> Engine::Step() {
   ReclaimAbandonedRequests();
   if (auto request = DrainReadyRequest()) {
