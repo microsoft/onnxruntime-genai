@@ -345,6 +345,33 @@ def test_request_lifecycle_status(model):
     assert request.status == og.RequestStatus.CLOSED
 
 
+def test_last_handle_release_reclaims_retained_capacity(model):
+    engine = og.Engine(model)
+    sinks = [_Sink() for _ in range(8)]
+    requests = [
+        _add_request(engine, model, [5 + index, 9, 13], 1, sinks[index])
+        for index in range(8)
+    ]
+
+    while not all(request.is_turn_complete() for request in requests):
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+
+    # Every TurnComplete request still owns one of the eight resident slots. Dropping all public
+    # handles must mark them abandoned so the next admission can reclaim that capacity.
+    requests.clear()
+    del ready
+    gc.collect()
+
+    replacement_sink = _Sink()
+    replacement = _add_request(engine, model, _PROMPT_A, 4, replacement_sink)
+    _run(engine)
+
+    assert replacement_sink.tokens == predicted_tokens(_PROMPT_A, 4)
+    assert replacement.status == og.RequestStatus.CLOSED
+
+
 def test_remove_request_freezes_output(model):
     max_new = 40
     sibling_new = 16
