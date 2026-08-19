@@ -152,22 +152,35 @@ class ObservingPagedCacheManager final : public PagedCacheManager {
 // and raise a retryable failure.
 class RetryableAfterRealDecodeExecutor final : public ModelExecutor {
  public:
+  enum class FailurePoint {
+    None,
+    BeforeSearchMutation,
+    AfterSearchMutation,
+  };
+
   explicit RetryableAfterRealDecodeExecutor(
-      std::unique_ptr<ModelExecutor> inner)
-      : inner_{std::move(inner)} {}
+      std::unique_ptr<ModelExecutor> inner,
+      std::shared_ptr<ObservingPagedCacheManager> cache)
+      : inner_{std::move(inner)}, cache_{std::move(cache)} {}
 
   void Decode(ScheduledRequests& scheduled_requests,
               ExecutionContext& context) override {
     inner_->Decode(scheduled_requests, context);
     ++completed_real_decodes_;
 
-    if (!fail_next_decode_) {
+    auto failure_point = failure_point_;
+    if (failure_point == FailurePoint::AfterSearchMutation &&
+        context.plan && !context.plan->requests.empty() &&
+        context.plan->requests.front().target_cache_slots !=
+            failure_target_cache_slots_) {
+      failure_point = FailurePoint::None;
+    } else {
+      failure_point_ = FailurePoint::None;
+    }
+    if (failure_point == FailurePoint::None) {
       return;
     }
-    fail_next_decode_ = false;
 
-    const auto logits = scheduled_requests.ProcessLogits();
-    observed_real_logits_ = logits.size() == scheduled_requests.size();
     if (!context.plan || context.plan->requests.size() != 1) {
       throw std::logic_error(
           "Windowed rollback fault expected one planned request.");
@@ -175,6 +188,23 @@ class RetryableAfterRealDecodeExecutor final : public ModelExecutor {
     const auto& entry = context.plan->requests.front();
     failed_unprocessed_token_count_ = entry.unprocessed_token_count;
     failed_target_cache_slots_ = entry.target_cache_slots;
+    if (failure_point == FailurePoint::AfterSearchMutation) {
+      request_before_failure_ = entry.request->Snapshot();
+      cache_before_failure_ = cache_->Snapshot();
+      std::vector<RequestStepResult> staged_results;
+      scheduled_requests.GenerateNextTokensForTransaction(
+          *context.plan, staged_results);
+      observed_real_logits_ =
+          staged_results.size() == scheduled_requests.size();
+      staged_sequence_length_ =
+          entry.request->CurrentSequenceLength();
+      staged_search_mutation_ =
+          staged_sequence_length_ > entry.sequence_length_before;
+    } else {
+      const auto logits = scheduled_requests.ProcessLogits();
+      observed_real_logits_ =
+          logits.size() == scheduled_requests.size();
+    }
     injected_failure_ = true;
     throw ModelExecutionError{
         ExecutionFailureKind::RetryableAbort,
@@ -182,7 +212,14 @@ class RetryableAfterRealDecodeExecutor final : public ModelExecutor {
     };
   }
 
-  void FailNextDecode() { fail_next_decode_ = true; }
+  void FailNextDecode() {
+    failure_point_ = FailurePoint::BeforeSearchMutation;
+  }
+  void FailNextDecodeAfterSearchMutationAtTarget(
+      size_t target_cache_slots) {
+    failure_point_ = FailurePoint::AfterSearchMutation;
+    failure_target_cache_slots_ = target_cache_slots;
+  }
 
   bool InjectedFailure() const { return injected_failure_; }
   bool ObservedRealLogits() const { return observed_real_logits_; }
@@ -193,15 +230,31 @@ class RetryableAfterRealDecodeExecutor final : public ModelExecutor {
   size_t FailedTargetCacheSlots() const {
     return failed_target_cache_slots_;
   }
+  bool StagedSearchMutation() const { return staged_search_mutation_; }
+  int64_t StagedSequenceLength() const {
+    return staged_sequence_length_;
+  }
+  const RequestStateSnapshot& RequestBeforeFailure() const {
+    return request_before_failure_;
+  }
+  const PagedCacheSnapshot& CacheBeforeFailure() const {
+    return cache_before_failure_;
+  }
 
  private:
   std::unique_ptr<ModelExecutor> inner_;
-  bool fail_next_decode_{};
+  std::shared_ptr<ObservingPagedCacheManager> cache_;
+  FailurePoint failure_point_{FailurePoint::None};
+  size_t failure_target_cache_slots_{};
   bool injected_failure_{};
   bool observed_real_logits_{};
+  bool staged_search_mutation_{};
   size_t completed_real_decodes_{};
   size_t failed_unprocessed_token_count_{};
   size_t failed_target_cache_slots_{};
+  int64_t staged_sequence_length_{};
+  RequestStateSnapshot request_before_failure_;
+  PagedCacheSnapshot cache_before_failure_;
 };
 
 struct FaultInjectingEngine {
@@ -216,7 +269,7 @@ FaultInjectingEngine MakeFaultInjectingEngine(
       std::make_shared<ObservingPagedCacheManager>(model);
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RetryableAfterRealDecodeExecutor>(
-      ModelExecutor::Create(model, cache));
+      ModelExecutor::Create(model, cache), cache);
   auto* executor_observer = executor.get();
   EngineDependencies dependencies{
       cache, std::move(scheduler), std::move(executor)};
@@ -376,6 +429,82 @@ TEST(WindowedTransactionTest,
   EXPECT_EQ(request->Status(), RequestStatus::TurnComplete);
   EXPECT_EQ(request->CurrentSequenceLength(), 14);
   EXPECT_EQ(faulting.cache->ActiveReservations(), 0u);
+
+  faulting.engine->RemoveRequest(request);
+}
+
+TEST(WindowedTransactionTest,
+     ContinuedRingWritesAndStagedSearchRollbackTogetherBeforeRetry) {
+  const auto clean_replay_output = RunCleanReplay();
+  ASSERT_EQ(clean_replay_output, kSecondTurnOutput);
+
+  auto model = LoadWindowedMultiwrapModel();
+  auto faulting = MakeFaultInjectingEngine(model);
+  auto request = MintRequest(*model, kInitialPrompt);
+  faulting.engine->AddRequest(request);
+  ASSERT_EQ(RunTurn(faulting.engine, request), kFirstTurnOutput);
+  request->Continue(kContinuation);
+
+  ASSERT_EQ(request->Status(), RequestStatus::Assigned);
+  ASSERT_FALSE(request->HasUnseenTokens());
+
+  const size_t reservations_before =
+      faulting.cache->ReservationCount();
+  const size_t commits_before = faulting.cache->CommitCount();
+  const size_t releases_before = faulting.cache->ReleaseCount();
+  // Step commits four two-token continuation chunks before its final one-token prefill. Inject only
+  // at target 12: that transaction writes absolute position 11 into ring slot 3 after multiple
+  // wraps, then stages token 28 in Search before raising the retryable failure.
+  faulting.executor->FailNextDecodeAfterSearchMutationAtTarget(12);
+
+  try {
+    static_cast<void>(faulting.engine->Step());
+    FAIL() << "Expected retryable failure after staged Search mutation.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::RetryableBatchAbort);
+  }
+
+  EXPECT_TRUE(faulting.executor->InjectedFailure());
+  EXPECT_TRUE(faulting.executor->ObservedRealLogits());
+  EXPECT_TRUE(faulting.executor->StagedSearchMutation());
+  EXPECT_EQ(faulting.executor->StagedSequenceLength(), 13);
+  EXPECT_EQ(faulting.executor->FailedUnprocessedTokenCount(), 1u);
+  EXPECT_EQ(faulting.executor->FailedTargetCacheSlots(), 12u);
+
+  const auto& request_before =
+      faulting.executor->RequestBeforeFailure();
+  const auto& cache_before =
+      faulting.executor->CacheBeforeFailure();
+  ASSERT_EQ(request_before.status, RequestStatus::Active);
+  ASSERT_EQ(request_before.current_sequence_length, 12);
+  ASSERT_EQ(request_before.processed_sequence_length, 11);
+
+  const auto request_after = request->Snapshot();
+  EXPECT_EQ(request_after.status, request_before.status);
+  EXPECT_EQ(request_after.current_sequence_length,
+            request_before.current_sequence_length);
+  EXPECT_EQ(request_after.processed_sequence_length,
+            request_before.processed_sequence_length);
+  EXPECT_FALSE(request->HasUnseenTokens());
+  EXPECT_TRUE(faulting.engine->HasPendingRequests());
+
+  const auto cache_after = faulting.cache->Snapshot();
+  ExpectCacheOwnershipRestored(cache_after, cache_before);
+  EXPECT_EQ(faulting.cache->ReservationCount(),
+            reservations_before + 5);
+  EXPECT_EQ(faulting.cache->CommitCount(), commits_before + 4);
+  EXPECT_EQ(faulting.cache->ReleaseCount(),
+            releases_before + 1);
+  EXPECT_EQ(faulting.cache->ActiveReservations(), 0u);
+  EXPECT_NO_THROW(ThrowIfInvariantsViolated(
+      cache_after, std::vector<RequestStateSnapshot>{request_after}));
+
+  const auto retry_output = RunTurn(faulting.engine, request);
+  EXPECT_EQ(retry_output, clean_replay_output);
+  EXPECT_EQ(retry_output, kSecondTurnOutput);
+  EXPECT_EQ(request->Status(), RequestStatus::TurnComplete);
+  EXPECT_EQ(request->CurrentSequenceLength(), 14);
 
   faulting.engine->RemoveRequest(request);
 }

@@ -61,6 +61,13 @@ return ready requests one at a time
 
 The step is transactional. Planning and reservation do not immediately change committed request or cache state. If a recoverable failure occurs before commit, the engine restores the request search state and releases the reserved cache blocks. A failure during the commit boundary is considered fatal because the engine can no longer guarantee that all cooperating components agree on the committed state.
 
+Diagnostic invariant snapshots cross-check each committed full-cache table's used slots against its
+Request's `processed_sequence_length_`. For windowed caches, the full and ring-cache owner sets must
+match. Full-cache tables, ring-cache tables, and active reservation deltas must all refer to known
+Request snapshots, and each reservation records both its full-cache and window-cache block ownership
+so inconsistent membership or unattributed reserved blocks are detectable. These checks are test and
+diagnostic machinery; they do not add validation to the runtime hot path.
+
 ## How the dynamic path is selected
 
 `Engine::CreateDependencies()` creates three collaborators from the model:
@@ -113,15 +120,20 @@ The request is not owned by an engine. `AddTokens()` accumulates the initial pro
 
 ### `Assigned`
 
-`Engine::AddRequest()` validates the request, calls `Request::Assign()`, and adds it to the scheduler pool.
+`Engine::AddRequest()` validates the request, prepares a detached search sequence, device prompt,
+host mirrors, sampler state, scheduler capacity, and Engine tracking capacity, then commits the
+request and inserts it into the scheduler using nonthrowing moves into reserved storage.
 
 This is the queued state. `Engine::AddRequest()` moves a new request here before first admission.
 `Continue()` also moves a cache-resident `TurnComplete` request here while its next input waits for
 execution.
 
-For a new request, assignment moves the prompt into `Search`, creates the host-side token mirror,
-initializes the sequence counters, and records the owning Engine. `AddTokens()` and `Continue()` are
-both rejected while already queued. Input must leave room for at least one generated token below
+For a new request, admission does not publish Engine ownership or queued status until all request and
+scheduler preparation succeeds. A preparation failure therefore leaves the request `Unassigned`
+with its original prompt intact and eligible for retry. Commit moves the prepared prompt into
+`Search`, installs the host-side token mirror and sampler state, initializes the sequence counters,
+records the owning Engine, and inserts the request into the scheduler. `AddTokens()` and `Continue()`
+are both rejected while already queued. Input must leave room for at least one generated token below
 `max_length`.
 
 `max_length` is the cumulative total sequence limit for the entire session: the initial prompt, generated output, and every continuation input all count against the same limit. `Continue()` does not reset it, and it is not a per-turn generation budget.
