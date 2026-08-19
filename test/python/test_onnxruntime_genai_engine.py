@@ -116,8 +116,9 @@ def _run(engine, *, max_steps=_MAX_STEPS):
 def _generate_isolated(model, prompt, max_new_tokens):
     sink = _Sink()
     engine = og.Engine(model)
-    _add_request(engine, model, prompt, max_new_tokens, sink)
+    request = _add_request(engine, model, prompt, max_new_tokens, sink)
     _run(engine)
+    assert request.status == og.RequestStatus.CLOSED
     del engine
     gc.collect()
     return sink.tokens
@@ -166,13 +167,16 @@ def test_isolated_matches_simultaneous(model):
 
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
-    _add_request(engine, model, _PROMPT_A, max_new, sink_a)
-    _add_request(engine, model, _PROMPT_B, max_new, sink_b)
+    requests = [
+        _add_request(engine, model, _PROMPT_A, max_new, sink_a),
+        _add_request(engine, model, _PROMPT_B, max_new, sink_b),
+    ]
     assert engine.has_pending_requests()
     _run(engine)
 
     assert sink_a.tokens == isolated_a, "request A diverged when batched with B"
     assert sink_b.tokens == isolated_b, "request B diverged when batched with A"
+    assert all(request.status == og.RequestStatus.CLOSED for request in requests)
 
 
 def test_staggered_admission(model):
@@ -182,7 +186,7 @@ def test_staggered_admission(model):
 
     engine = og.Engine(model)
     sink_a = _Sink()
-    _add_request(engine, model, _PROMPT_A, max_new, sink_a)
+    request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
 
     for _ in range(3):
         if not engine.has_pending_requests():
@@ -191,11 +195,13 @@ def test_staggered_admission(model):
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    _add_request(engine, model, _PROMPT_B, max_new, sink_b)
+    request_b = _add_request(engine, model, _PROMPT_B, max_new, sink_b)
     _run(engine)
 
     assert sink_a.tokens == expected_a
     assert sink_b.tokens == expected_b
+    assert request_a.status == og.RequestStatus.CLOSED
+    assert request_b.status == og.RequestStatus.CLOSED
 
 
 def test_max_length_stops(model):
@@ -228,12 +234,14 @@ def test_completion_isolation(model):
 
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
-    _add_request(engine, model, _PROMPT_A, short_new, short_sink)
-    _add_request(engine, model, _PROMPT_LONG, long_new, long_sink)
+    short_request = _add_request(engine, model, _PROMPT_A, short_new, short_sink)
+    long_request = _add_request(engine, model, _PROMPT_LONG, long_new, long_sink)
     _run(engine)
 
     assert short_sink.tokens == predicted_tokens(_PROMPT_A, short_new)
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
+    assert short_request.status == og.RequestStatus.CLOSED
+    assert long_request.status == og.RequestStatus.CLOSED
 
 
 def test_continuation_while_peer_remains_active(model):
@@ -380,7 +388,7 @@ def test_remove_request_freezes_output(model):
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
     request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
-    _add_request(engine, model, _PROMPT_B, sibling_new, sink_b)
+    request_b = _add_request(engine, model, _PROMPT_B, sibling_new, sink_b)
 
     for _ in range(4):
         if not engine.has_pending_requests():
@@ -395,6 +403,7 @@ def test_remove_request_freezes_output(model):
 
     assert sink_a.tokens == frozen_a, "removed request kept producing tokens"
     assert sink_b.tokens == sibling_expected, "sibling did not complete after removal"
+    assert request_b.status == og.RequestStatus.CLOSED
 
 
 def test_engine_teardown_and_recreation(model):
@@ -403,15 +412,17 @@ def test_engine_teardown_and_recreation(model):
 
     first = og.Engine(model)
     sink1 = _Sink()
-    _add_request(first, model, _PROMPT_A, max_new, sink1)
+    first_request = _add_request(first, model, _PROMPT_A, max_new, sink1)
     _run(first)
     assert sink1.tokens == expected
+    assert first_request.status == og.RequestStatus.CLOSED
     del first
     gc.collect()
 
     second = og.Engine(model)
     assert not second.has_pending_requests()
     sink2 = _Sink()
-    _add_request(second, model, _PROMPT_A, max_new, sink2)
+    second_request = _add_request(second, model, _PROMPT_A, max_new, sink2)
     _run(second)
     assert sink2.tokens == expected
+    assert second_request.status == og.RequestStatus.CLOSED
