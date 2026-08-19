@@ -257,8 +257,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
     kDeterministic,
   };
 
-  // Proposer output. The mode defines how verification interprets the tokens; probability storage
-  // is data for draft-model sampling, not an implicit behavior signal.
+  // Proposer output. The mode defines how verification interprets the tokens; sparse distribution
+  // storage is data for draft-model sampling, not an implicit behavior signal.
   struct Proposal {
     Proposal() = default;
     explicit Proposal(ProposalMode proposal_mode) : mode{proposal_mode} {}
@@ -267,17 +267,17 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
     ProposalMode mode{ProposalMode::kUnset};
     std::vector<int32_t> tokens;
-    std::vector<std::vector<float>> probs;
+    std::vector<TargetTokenSelection> distributions;
+  };
+
+  enum class RoundPhase {
+    kIdle,
+    kDraining,
+    kFinalizing,
+    kReconcilePending,
   };
 
   struct RoundState {
-    enum class Phase {
-      kIdle,
-      kDraining,
-      kFinalizing,
-      kReconcilePending,
-    };
-
     enum class Kind {
       kStandard,
       kGuidance,
@@ -285,8 +285,8 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
 
     // Normal: Idle/ReconcilePending -> Draining -> Finalizing -> Idle/ReconcilePending.
     // Interruption: Draining -> ReconcilePending -> Idle after committed tokens are replayed.
-    bool IsActive() const { return phase == Phase::kDraining; }
-    bool NeedsReconciliation() const { return phase != Phase::kIdle; }
+    bool IsActive() const { return phase == RoundPhase::kDraining; }
+    bool NeedsReconciliation() const { return phase != RoundPhase::kIdle; }
 
     // Sampling rounds keep exactly one post-output checkpoint per queued token. This explicit mode
     // flag lets an empty checkpoint queue be diagnosed as an underrun instead of mistaken for a
@@ -314,7 +314,7 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
       pending_rng_states.pop_front();
     }
 
-    Phase phase{Phase::kIdle};
+    RoundPhase phase{RoundPhase::kIdle};
     Kind kind{Kind::kStandard};
     bool discarded{};
     bool uses_rng_checkpoints{};
@@ -433,12 +433,12 @@ struct SpeculativeDecodingStrategy : DecodingStrategy {
   // re-anchor once the buffer empties (so hitting EOS mid-round skips the wasted target pass).
   void RunRound(Generator& g);
   void DrainOne(Generator& g);
-  RoundState::Phase FinalizeRound(Generator& g);
+  RoundPhase FinalizeRound(Generator& g);
   bool EmitToken(Generator& g, int32_t tok);
   void BeginRound(int K, int evaluated, int accepted, size_t queued, bool formula_supported,
                   bool filled_proposal_budget, float propose_ms, float target_ms,
                   RoundState::Kind kind);
-  void FinishRound(RoundState::Phase final_phase);
+  void FinishRound(RoundPhase final_phase);
   void DiscardPendingTokens();
   void ClearPendingExternalLogits();
   void PrepareForCooldownStep(Generator& g);

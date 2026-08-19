@@ -91,7 +91,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
-  std::unique_ptr<cuda::SamplingData> samplingdata_;
+  std::unique_ptr<cuda::SamplingData> sampling_data_;
 
   bool defer_completion_{false};
   bool completion_pending_{false};

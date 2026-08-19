@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <random>
 #include <vector>
 #include "span.h"
 #include "sampling_distribution.h"
@@ -17,6 +18,43 @@ struct TargetTokenSelection {
   std::vector<int32_t> indices;
   std::vector<float> probs;
 };
+
+inline float GetSparseTokenProbability(std::span<const int32_t> indices,
+                                       std::span<const float> probs,
+                                       int32_t token) {
+  for (size_t i = 0; i < indices.size(); i++) {
+    if (indices[i] == token)
+      return probs[i];
+  }
+  return 0.0f;
+}
+
+inline int32_t SampleSparseToken(std::span<const int32_t> indices,
+                                 std::span<const float> probs,
+                                 std::mt19937& rng) {
+  std::discrete_distribution<int> distribution(probs.begin(), probs.end());
+  return indices[static_cast<size_t>(distribution(rng))];
+}
+
+inline int32_t SampleCorrectionToken(std::span<const int32_t> target_indices,
+                                     std::span<const float> target_probs,
+                                     std::span<const int32_t> draft_indices,
+                                     std::span<const float> draft_probs,
+                                     std::mt19937& rng) {
+  std::vector<float> residual(target_indices.size());
+  float sum = 0.0f;
+  for (size_t i = 0; i < target_indices.size(); ++i) {
+    const float diff = target_probs[i] -
+                       GetSparseTokenProbability(draft_indices, draft_probs, target_indices[i]);
+    residual[i] = diff > 0.0f ? diff : 0.0f;
+    sum += residual[i];
+  }
+  if (sum > 0.0f) {
+    std::discrete_distribution<int> distribution(residual.begin(), residual.end());
+    return target_indices[static_cast<size_t>(distribution(rng))];
+  }
+  return SampleSparseToken(target_indices, target_probs, rng);
+}
 
 inline void ComputeTargetTokenSelection(std::span<const float> logits, int current_length,
                                         std::span<const int32_t> prefix, bool greedy,
@@ -41,11 +79,51 @@ inline void ComputeTargetTokenSelection(std::span<const float> logits, int curre
 }
 
 inline float GetTargetTokenProbability(const TargetTokenSelection& selection, int32_t token) {
-  for (size_t i = 0; i < selection.indices.size(); i++) {
-    if (selection.indices[i] == token)
-      return selection.probs[i];
+  return GetSparseTokenProbability(selection.indices, selection.probs, token);
+}
+
+inline int32_t SampleTargetToken(const TargetTokenSelection& selection, std::mt19937& rng) {
+  return SampleCategoricalToken(selection.indices, selection.probs, rng);
+}
+
+struct DeterministicProposalVerification {
+  int accepted_count{};
+  int evaluated_count{};
+  int32_t final_token{-1};
+  bool used_bonus{};
+};
+
+inline DeterministicProposalVerification VerifyDeterministicProposal(
+    std::span<const int32_t> proposal_tokens,
+    const TargetTokenSelection& first_target,
+    std::span<const TargetTokenSelection> subsequent_targets,
+    std::mt19937& rng,
+    std::vector<std::mt19937>* states_after_draw = nullptr) {
+  if (proposal_tokens.empty() || subsequent_targets.size() < proposal_tokens.size())
+    throw std::invalid_argument(
+        "Deterministic proposal verification requires one proposal and next-target row per token.");
+  if (states_after_draw) {
+    states_after_draw->clear();
+    states_after_draw->reserve(proposal_tokens.size() + 1);
   }
-  return 0.0f;
+
+  DeterministicProposalVerification result;
+  for (size_t i = 0; i < proposal_tokens.size(); i++) {
+    const TargetTokenSelection& target = i == 0 ? first_target : subsequent_targets[i - 1];
+    result.evaluated_count++;
+    result.final_token = SampleTargetToken(target, rng);
+    if (states_after_draw)
+      states_after_draw->push_back(rng);
+    if (result.final_token != proposal_tokens[i])
+      return result;
+    result.accepted_count++;
+  }
+
+  result.final_token = SampleTargetToken(subsequent_targets[proposal_tokens.size() - 1], rng);
+  if (states_after_draw)
+    states_after_draw->push_back(rng);
+  result.used_bonus = true;
+  return result;
 }
 
 inline int32_t SampleTargetToken(const TargetTokenSelection& selection, std::mt19937& rng) {

@@ -77,6 +77,8 @@ struct RecordingCacheManager : CacheManager {
 
   size_t MaxBatchSize() const override { return capacity_; }
 
+  size_t MaxQueryTokensPerRequest() const override { return max_query_tokens_per_request_; }
+
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
@@ -194,6 +196,9 @@ struct RecordingCacheManager : CacheManager {
   void SetCapacityDeferredRequest(const std::shared_ptr<Request>& request) {
     capacity_deferred_request_id_ = request.get();
   }
+  void SetMaxQueryTokensPerRequest(size_t token_count) {
+    max_query_tokens_per_request_ = token_count;
+  }
   size_t AllocatedCount() const { return allocated_.size(); }
 
   // Recorded call counts.
@@ -204,6 +209,7 @@ struct RecordingCacheManager : CacheManager {
 
  private:
   size_t capacity_;
+  size_t max_query_tokens_per_request_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
@@ -260,6 +266,7 @@ enum class ScriptedExecutionFailure {
   None,
   RetryableBeforeExecution,
   RetryableDuringExecution,
+  CapacityExceeded,
   Fatal,
   PostProcessing,
 };
@@ -296,6 +303,10 @@ struct RecordingModelExecutor : ModelExecutor {
     if (failure == ScriptedExecutionFailure::RetryableDuringExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable in-execution failure."};
+    }
+    if (failure == ScriptedExecutionFailure::CapacityExceeded) {
+      throw ModelExecutionError{ExecutionFailureKind::CapacityExceeded,
+                                "Injected execution capacity failure."};
     }
     if (failure == ScriptedExecutionFailure::Fatal) {
       throw std::runtime_error("Injected fatal execution failure.");

@@ -365,6 +365,40 @@ TEST_F(SchedulerContractTest, PrefillRespectsChunkAndGlobalCaps) {
   EXPECT_FALSE(plan.graph_capture_eligible);
 }
 
+TEST_F(SchedulerContractTest, CacheQueryCapBoundsOversizedRequestChunk) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  cache->SetMaxQueryTokensPerRequest(2);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto request = Assigned(10);
+  request->Params()->search.chunk_size = 7;
+  scheduler.AddRequest(request);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.token_count, 2u);
+}
+
+TEST_F(SchedulerContractTest, CacheQueryCapBoundsUnchunkedRequest) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  cache->SetMaxQueryTokensPerRequest(2);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto request = Assigned(10);
+  request->Params()->search.chunk_size = 0;
+  scheduler.AddRequest(request);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.token_count, 2u);
+}
+
 TEST_F(SchedulerContractTest, GlobalCapChunksPromptWithoutSearchChunkSize) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;

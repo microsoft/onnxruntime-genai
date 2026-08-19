@@ -26,12 +26,14 @@ struct Config {
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
+    static constexpr std::string_view HiddenStatesName = "hidden_states";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
     static constexpr std::string_view CumulativeSequenceLengthsName = "cumulative_sequence_lengths";
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -384,8 +386,16 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+
+        // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
+        // Empty unless the model graph takes a hidden_states input.
+        std::string hidden_states;
 
         // RNNT decoder inputs
         std::string targets;
@@ -407,6 +417,7 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
+        std::string hidden_states;                          // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;
@@ -438,6 +449,39 @@ struct Config {
       std::vector<PipelineModel> pipeline;
 
     } decoder;
+
+    // Multi-token-prediction (MTP) self-speculative head metadata (e.g. Qwen3.6). The caller
+    // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
+    // hidden-state output and the head's feedback output.
+    struct Mtp {
+      std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      int num_hidden_layers{1};  // The MTP head has a single decoder layer.
+      int num_key_value_heads{};
+      int head_size{};
+
+      // Name of the main decoder's hidden-states output that feeds the MTP head.
+      // The main model must be exported with this output exposed (include_hidden_states).
+      std::string main_hidden_states{Defaults::HiddenStatesName};
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string hidden_states{Defaults::HiddenStatesName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::LogitsName};
+        std::string hidden_states{"hidden_states_out"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+      } outputs;
+    } mtp;
 
     std::optional<Decoder> draft;
 

@@ -6,18 +6,24 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 
+import copy
+import glob
+import json
 import os
+from types import SimpleNamespace
+
 import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import (
     AutoConfig,
-    Qwen2ForCausalLM,
     Qwen2_5_VLForConditionalGeneration,
+    Qwen2ForCausalLM,
     Qwen3VLForConditionalGeneration,
 )
 
 from .base import Model
+from .quant_config import QuantConfig, resolve_dtype
 
 
 class QwenModel(Model):
@@ -452,9 +458,7 @@ class Qwen25VLTextModel(Model):
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
-        self.make_gather(
-            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0
-        )
+        self.make_gather(seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], 0)
 
         # Calculate Total Tokens = B * S
         mul_len_node = f"{basename}/TotalLen/Mul"
@@ -466,7 +470,10 @@ class Qwen25VLTextModel(Model):
         range_node = f"{basename}/Range"
         range_out = f"{range_node}/output_0"
         self.make_range(
-            range_node, ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], ir.DataType.INT64, ["total_token_count"]
+            range_node,
+            ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            ["total_token_count"],
         )
         range_out = f"{range_node}/output_0"
 
@@ -964,6 +971,9 @@ class Qwen35TextModel(Model):
     Both layer types use OffsetRMSNorm (the ``1 + weight`` variant).
     """
 
+    def _get_model_type(self, config):
+        return "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
@@ -1005,9 +1015,18 @@ class Qwen35TextModel(Model):
         else:
             self.layer_types = ["full_attention"] * num_layers
 
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # ModelOpt's FP8 KV-cache metadata maps to the generic fp8_per_tensor path in builder.py.
+        # Without a calibration file, preserve the checkpoint's shared unit-scale convention.
+        quantization_config = getattr(config, "quantization_config", {})
+        self.fp8_kv_cache = extra_options.get("kv_cache_quant_type", "none") == "fp8_per_tensor"
+        self._legacy_fp8_kv_cache = (
+            quantization_config.get("quant_method") == "modelopt"
+            and self.fp8_kv_cache
+            and not extra_options.get("kv_cache_scale_file", None)
+        )
+        self._kv_cache_scale_created = False
 
-        self.model_type = "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
@@ -1058,6 +1077,33 @@ class Qwen35TextModel(Model):
         # Disable fused RoPE in attention op - we apply mRoPE manually
         self.attention_attrs["use_rope_in_attn"] = False
 
+        # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
+        # states (`state_window=W`): past/present_key_values.%d.{conv,recurrent}_state become
+        # [W, B, ...] instead of [B, ...], right-aligned, with slot W-1 holding the state after the
+        # final token of the forward (i.e. the unwindowed state) and being the only slot the op
+        # reads back. This lets a multi-token (num_speculative_tokens>1) MTP self-speculative loop
+        # CROP the recurrent state to the accepted prefix on partial accept -- copying slot `a`
+        # into slot W-1 -- instead of running a full-cost main-model replay forward.
+        #
+        # W must be at least num_speculative_tokens+1 (the length of a verify forward).
+        # 0 (the default) disables the window entirely and produces
+        # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
+        # Requires ORT kernels that understand the `state_window` attribute.
+        self._state_window = int(extra_options.get("state_window", 0))
+        if self._state_window < 0:
+            raise ValueError("state_window must be >= 0")
+        # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
+        self._state_window_dims = [self._state_window] if self._state_window else []
+
+        # Collapse the float32 gate glue around LinearAttention into the fused com.microsoft
+        # `LinearAttentionGate` and `GatedRMSNorm` ops. The reference model computes both the decay
+        # and the output gate in float32 (exp(g) in the recurrence exponentially amplifies precision
+        # loss), so the exported graph is a Cast -> ... -> Cast sandwich: 11 launches per layer on
+        # tensors of a few thousand elements. The fused kernels keep the same float32 intermediates
+        # in registers and cut that to 2 launches, which also returns the per-node CUDA-graph replay
+        # overhead of the ~9 removed nodes per layer. Set false for A/B or for EPs without the ops.
+        self.fuse_linear_attn_gates = self.ep == "cuda"
+
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
 
@@ -1088,45 +1134,123 @@ class Qwen35TextModel(Model):
                 # Fused CausalConvWithState + LinearAttention ops use same dtype as activations.
                 state_dtype = self.io_dtype
 
-                # linear_attention: add conv_state + recurrent_state
-                self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
-                self.input_types[f"past_state.{i}.conv"] = state_dtype
-                self.input_shapes[f"past_state.{i}.conv"] = [
+                # linear_attention: add conv_state + recurrent_state. With state_window=W the
+                # window axis leads the batch axis on both the past and present side (the op
+                # reads slot W-1 and writes the last W positions), so each slot is one
+                # contiguous [batch_size, ...] block.
+                conv_state_shape = [
+                    *self._state_window_dims,
                     "batch_size",
                     self.linear_conv_dim,
                     self.linear_conv_kernel_dim - 1,
                 ]
+                recurrent_state_shape = [
+                    *self._state_window_dims,
+                    "batch_size",
+                    self.linear_num_value_heads,
+                    self.linear_key_head_dim,
+                    self.linear_value_head_dim,
+                ]
+
+                self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
+                self.input_types[f"past_state.{i}.conv"] = state_dtype
+                self.input_shapes[f"past_state.{i}.conv"] = list(conv_state_shape)
 
                 self.input_names[f"past_state.{i}.recurrent"] = f"past_key_values.{i}.recurrent_state"
                 self.input_types[f"past_state.{i}.recurrent"] = state_dtype
-                self.input_shapes[f"past_state.{i}.recurrent"] = [
-                    "batch_size",
-                    self.linear_num_value_heads,
-                    self.linear_key_head_dim,
-                    self.linear_value_head_dim,
-                ]
+                self.input_shapes[f"past_state.{i}.recurrent"] = list(recurrent_state_shape)
 
                 self.output_names[f"present_state.{i}.conv"] = f"present.{i}.conv_state"
                 self.output_types[f"present_state.{i}.conv"] = state_dtype
-                self.output_shapes[f"present_state.{i}.conv"] = [
-                    "batch_size",
-                    self.linear_conv_dim,
-                    self.linear_conv_kernel_dim - 1,
-                ]
+                self.output_shapes[f"present_state.{i}.conv"] = list(conv_state_shape)
 
                 self.output_names[f"present_state.{i}.recurrent"] = f"present.{i}.recurrent_state"
                 self.output_types[f"present_state.{i}.recurrent"] = state_dtype
-                self.output_shapes[f"present_state.{i}.recurrent"] = [
-                    "batch_size",
-                    self.linear_num_value_heads,
-                    self.linear_key_head_dim,
-                    self.linear_value_head_dim,
-                ]
+                self.output_shapes[f"present_state.{i}.recurrent"] = list(recurrent_state_shape)
 
         self.input_names["past_key_values.key"] = filtered_key_inputs
         self.input_names["past_key_values.value"] = filtered_value_inputs
         self.output_names["present.key"] = filtered_key_outputs
         self.output_names["present.value"] = filtered_value_outputs
+
+    def get_kv_cache_scale_inputs(self, **kwargs):
+        # ModelOpt compatibility mode: every layer shares ONE unit PER_TENSOR scale initializer
+        # named `kv_cache_scale`, created lazily at the first GroupQueryAttention node. The
+        # ModelOpt checkpoint exports no calibrated k/v scale, so this is a straight E4M3
+        # round-trip of the KV cache. Keeping the shared name and the lazy creation point keeps
+        # the exported graph (and the external-data layout) identical to the released RC model.
+        if self._legacy_fp8_kv_cache:
+            if not self._kv_cache_scale_created:
+                self.make_initializer(torch.tensor([1.0], dtype=torch.float32), "kv_cache_scale", to=ir.DataType.FLOAT)
+                self._kv_cache_scale_created = True
+            return "kv_cache_scale", "kv_cache_scale"
+        return super().get_kv_cache_scale_inputs(**kwargs)
+
+    def extend_with_optional_inputs(self, inputs, optional_inputs):
+        # The ModelOpt compatibility export emits all four trailing optional GroupQueryAttention
+        # inputs (k_scale, v_scale, q_norm_weight, k_norm_weight), including empty placeholders,
+        # rather than trimming the unused trailing ones. Reproduce that byte-for-byte.
+        if self._legacy_fp8_kv_cache and any(optional_inputs):
+            inputs.extend(optional_inputs)
+            return
+        super().extend_with_optional_inputs(inputs, optional_inputs)
+
+    def make_kv_cache_scale_initializers(self):
+        """Emit KV cache quantization scales only for the layers that own a KV cache.
+
+        Qwen3.5/3.6 is a hybrid stack, so only ``full_attention`` layers run
+        GroupQueryAttention. The calibration file may therefore be indexed either by absolute
+        layer id (``num_layers`` entries) or by full-attention order (one entry per KV layer).
+        """
+        if self._legacy_fp8_kv_cache:
+            # The single shared scale is created on demand in `get_kv_cache_scale_inputs`.
+            return
+
+        kv_layers = [i for i, lt in enumerate(self.layer_types) if lt == "full_attention"]
+        per_channel = self.kv_quant_type == "PER_CHANNEL"
+        scale_size = self.num_kv_heads * self.head_size if per_channel else 1
+
+        scale_file = self.extra_options.get("kv_cache_scale_file", None)
+        if scale_file is None:
+            raise ValueError(
+                "Quantized KV cache requires calibrated scales; provide them via extra_options['kv_cache_scale_file']."
+            )
+
+        with open(scale_file, encoding="utf-8") as file:
+            scale_data = json.load(file)
+        # The MTP head is a separate graph with its own single KV-cache layer whose activation
+        # distribution differs from the main stack, so it carries its own calibrated scales in an
+        # optional `mtp` section of the same file. This keeps one `kv_cache_scale_file` covering
+        # both `text.onnx` and `mtp.onnx`, which is all the builder CLI accepts.
+        if getattr(self, "is_mtp_head", False) and "mtp" in scale_data:
+            scale_data = scale_data["mtp"]
+        try:
+            k_scales = scale_data["scales"]["k_scales"]
+            v_scales = scale_data["scales"]["v_scales"]
+        except (KeyError, TypeError) as error:
+            raise ValueError("kv_cache_scale_file must contain scales.k_scales and scales.v_scales.") from error
+        if len(k_scales) != len(v_scales) or len(k_scales) not in (self.num_layers, len(kv_layers)):
+            raise ValueError(
+                f"kv_cache_scale_file must provide {self.num_layers} (per layer) or "
+                f"{len(kv_layers)} (per KV layer) scales, got k={len(k_scales)} v={len(v_scales)}"
+            )
+        # Absolute layer ids when the file covers every layer, else full-attention order.
+        by_layer_id = len(k_scales) == self.num_layers
+        scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
+
+        def make_scale(per_layer, index, layer_id):
+            scale = np.asarray(per_layer[index], dtype=np.float32).reshape(-1)
+            if scale.size != scale_size:
+                raise ValueError(f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}")
+            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
+            return scale.reshape(scale_shape)
+
+        for order, layer_id in enumerate(kv_layers):
+            index = layer_id if by_layer_id else order
+            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
+            self.make_initializer(make_scale(k_scales, index, layer_id), k_scale_name)
+            self.make_initializer(make_scale(v_scales, index, layer_id), v_scale_name)
 
     def make_position_ids_reformatting(self):
         if self.is_text_only:
@@ -1688,7 +1812,8 @@ class Qwen35TextModel(Model):
             past_conv_state=past_conv,
             present_conv_state=present_conv,
             output_shape=["batch_size", conv_dim, "sequence_length"],
-            present_conv_shape=["batch_size", conv_dim, kernel_size - 1],
+            present_conv_shape=[*self._state_window_dims, "batch_size", conv_dim, kernel_size - 1],
+            state_window=self._state_window,
         )
         silu_output = f"{conv_op_name}/output_0"
 
@@ -1730,7 +1855,8 @@ class Qwen35TextModel(Model):
             update_rule="gated_delta",
             scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
             output_shape=["batch_size", "sequence_length", v_dim],
-            present_recurrent_shape=["batch_size", n_kv, hk, hv],
+            present_recurrent_shape=[*self._state_window_dims, "batch_size", n_kv, hk, hv],
+            state_window=self._state_window,
         )
         la_output = f"{la_op_name}/output_0"
 
@@ -1830,14 +1956,10 @@ class Qwen35TextModel(Model):
         q_scaled_output = f"{q_scaled_name}/output_0"
 
         # beta = sigmoid(b)
-        beta_name = f"{basename}/beta/Sigmoid"
-        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", n_kv])
-        beta_output = f"{beta_name}/output_0"
-
         # g = -exp(A_log) * softplus(a + dt_bias)
-        # The reference model computes this entirely in float32 to prevent
+        # The reference model computes the decay entirely in float32 to prevent
         # precision loss that is exponentially amplified by exp(g) in the
-        # recurrence.  Cast inputs to fp32, compute, then cast result back.
+        # recurrence.
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
@@ -1845,27 +1967,47 @@ class Qwen35TextModel(Model):
         neg_exp_a = (-linear_attn.A_log.data.exp()).detach()
         self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
 
+        gate_shape = ["batch_size", "sequence_length", n_kv]
+
+        if self.fuse_linear_attn_gates:
+            # One kernel for both gates; the float32 intermediates stay in registers.
+            gate_name = f"{basename}/gate/LinearAttentionGate"
+            g_output = f"{gate_name}/output_0"
+            beta_output = f"{gate_name}/output_1"
+            self.make_node(
+                "LinearAttentionGate",
+                [f"{a_name}/output_0", dt_bias_init, neg_exp_a_name, f"{b_name}/output_0"],
+                [g_output, beta_output],
+                name=gate_name,
+                domain="com.microsoft",
+            )
+            self.make_value(g_output, self.io_dtype, gate_shape)
+            self.make_value(beta_output, self.io_dtype, gate_shape)
+            return q_scaled_output, k_norm_out, v_out, g_output, beta_output
+
+        beta_name = f"{basename}/beta/Sigmoid"
+        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, gate_shape)
+        beta_output = f"{beta_name}/output_0"
+
         # Cast a projection output to fp32
         a_cast_name = f"{basename}/decay/a_cast/Cast"
-        self.make_cast(a_cast_name, f"{a_name}/output_0", ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
+        self.make_cast(a_cast_name, f"{a_name}/output_0", ir.DataType.FLOAT, gate_shape)
 
         a_plus_dt_name = f"{basename}/decay/Add"
-        self.make_add(
-            a_plus_dt_name, [f"{a_cast_name}/output_0", dt_bias_init], ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv]
-        )
+        self.make_add(a_plus_dt_name, [f"{a_cast_name}/output_0", dt_bias_init], ir.DataType.FLOAT, gate_shape)
         a_plus_dt_output = f"{a_plus_dt_name}/output_0"
 
         softplus_name = f"{basename}/decay/Softplus"
-        self.make_softplus(softplus_name, a_plus_dt_output, ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
+        self.make_softplus(softplus_name, a_plus_dt_output, ir.DataType.FLOAT, gate_shape)
         softplus_output = f"{softplus_name}/output_0"
 
         g_fp32_name = f"{basename}/decay/Mul"
-        self.make_mul(g_fp32_name, [neg_exp_a_name, softplus_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", n_kv])
+        self.make_mul(g_fp32_name, [neg_exp_a_name, softplus_output], ir.DataType.FLOAT, gate_shape)
         g_fp32_output = f"{g_fp32_name}/output_0"
 
         # Cast decay back to io_dtype for the kernel
         g_cast_name = f"{basename}/decay/g_cast/Cast"
-        self.make_cast(g_cast_name, g_fp32_output, self.io_dtype, ["batch_size", "sequence_length", n_kv])
+        self.make_cast(g_cast_name, g_fp32_output, self.io_dtype, gate_shape)
         g_output = f"{g_cast_name}/output_0"
 
         return q_scaled_output, k_norm_out, v_out, g_output, beta_output
@@ -1960,6 +2102,27 @@ class Qwen35TextModel(Model):
         hv = self.linear_value_head_dim
         nv = self.linear_num_value_heads
 
+        # Norm weight (NO offset — Qwen3_5RMSNormGated uses raw weight, not 1+w)
+        norm_weight = f"model.layers.{layer_id}.linear_attn.norm.weight"
+        self.make_initializer(norm_module.weight, norm_weight, to=self.io_dtype)
+
+        if self.fuse_linear_attn_gates:
+            # GatedRMSNorm normalizes over each contiguous group of len(scale) elements, so the
+            # per-head norm runs directly on the packed [B, S, nv * hv] tensor and the Reshape
+            # pair, the float32 SiLU chain and the three Casts all disappear.
+            gated_name = f"{basename}/GatedRMSNorm"
+            gated_output = f"{gated_name}/output_0"
+            self.make_node(
+                "GatedRMSNorm",
+                [input_name, norm_weight, gate_name],
+                [gated_output],
+                name=gated_name,
+                domain="com.microsoft",
+                epsilon=self.layernorm_attrs["epsilon"],
+            )
+            self.make_value(gated_output, self.io_dtype, ["batch_size", "sequence_length", v_dim])
+            return gated_output
+
         # Reshape input to [B, S, N, H] for per-head norm (avoids Shape ops
         # that would run on CPU and block CUDA graph capture)
         flat_name = f"{basename}/input_flat/Reshape"
@@ -1970,10 +2133,6 @@ class Qwen35TextModel(Model):
             self.io_dtype,
             ["batch_size", "sequence_length", nv, hv],
         )
-
-        # Norm weight (NO offset — Qwen3_5RMSNormGated uses raw weight, not 1+w)
-        norm_weight = f"model.layers.{layer_id}.linear_attn.norm.weight"
-        self.make_initializer(norm_module.weight, norm_weight, to=self.io_dtype)
 
         # SimplifiedLayerNormalization (com.microsoft, no offset for gated norm)
         norm_name = f"{basename}/SimplifiedLayerNormalization"
@@ -2022,12 +2181,17 @@ class Qwen35TextModel(Model):
         # output = norm * silu(z) in fp32
         gated_fp32_name = f"{basename}/gated_fp32/Mul"
         self.make_mul(
-            gated_fp32_name, [f"{norm_cast_name}/output_0", z_silu_output], ir.DataType.FLOAT, ["batch_size", "sequence_length", v_dim]
+            gated_fp32_name,
+            [f"{norm_cast_name}/output_0", z_silu_output],
+            ir.DataType.FLOAT,
+            ["batch_size", "sequence_length", v_dim],
         )
 
         # Cast back to io_dtype
         gated_name = f"{basename}/gated/Cast"
-        self.make_cast(gated_name, f"{gated_fp32_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", v_dim])
+        self.make_cast(
+            gated_name, f"{gated_fp32_name}/output_0", self.io_dtype, ["batch_size", "sequence_length", v_dim]
+        )
         gated_output = f"{gated_name}/output_0"
 
         return gated_output
@@ -2074,6 +2238,47 @@ class Qwen35TextModel(Model):
         del self.output_names["present.key"]
         del self.output_names["present.value"]
 
+        # When the MTP head is exported, advertise it (and the main model's
+        # hidden-states output it consumes) in genai_config.json so the runtime
+        # can load mtp.onnx for self-speculative decoding.
+        if getattr(self, "enable_mtp", False):
+            self._add_mtp_to_genai_config(out_dir)
+
+    def _add_mtp_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        # Expose the main decoder's hidden-states output (the MTP head's input).
+        decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
+        decoder_outputs.setdefault("hidden_states", "hidden_states")
+
+        genai_config["model"]["mtp"] = {
+            "filename": "mtp.onnx",
+            "num_hidden_layers": 1,
+            "num_key_value_heads": self.num_kv_heads,
+            "head_size": self.head_size,
+            "main_hidden_states": "hidden_states",
+            "inputs": {
+                "input_ids": "input_ids",
+                "hidden_states": "hidden_states",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+            },
+            "outputs": {
+                "logits": "logits",
+                "hidden_states": "hidden_states_out",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+            },
+        }
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+        print("Added 'mtp' section to genai_config.json")
+
 
 class Qwen35MoeTextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
@@ -2088,6 +2293,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
     unchanged from the parent class.
     """
 
+    def _get_model_type(self, config):
+        return "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Map Qwen3.5-MoE config attributes to what the base class expects.
         if hasattr(config, "text_config"):
@@ -2101,14 +2309,19 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # The base builder derives the GenAI model.type by stripping the suffix
-        # after "For" and lowercasing, matching Qwen3.5 text-only export.
-        self.model_type = (
-            "Qwen3_5_Moe_textForCausalLM"
-            if self.is_text_only
-            else "Qwen3_5_MoeForConditionalGeneration"
-        )
+        # Keep the checkpoint's original FP8 (E4M3) weights instead of dequantizing them
+        # to fp16 and re-quantizing to int4/int8. Both the self-attention q/k/v/o projections
+        # and the GatedDeltaNet (linear-attention) ``in_proj_qkv`` / ``in_proj_z`` / ``out_proj``
+        # projections are emitted as the weight-only ``MatMulBlockQuantizedFp8Weight`` contrib op.
+        # ModelOpt FP8 KV-cache metadata is mapped onto the generic
+        # `kv_cache_quant_type=fp8_per_tensor` machinery before this model is initialized.
 
+        # Keep the checkpoint's original NVFP4 (E2M1) *dense* weights instead of dequantizing
+        # them to fp16 and re-quantizing to int4/int8. The shared-expert MLP and lm_head
+        # projections are emitted as the weight-only ``MatMulBlockQuantizedFp4Weight`` contrib op straight from
+        # the ModelOpt tensors (E2M1 codes + E4M3 block scale + fp32 global scale). NOTE: the
+        # NVFP4 *routed MoE experts* are controlled separately by ``moe_quant_type=nvfp4``
+        # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
         # MoE attributes specific to Qwen3.5-MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
@@ -2119,7 +2332,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
-        self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
+        self.shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", self.moe_intermediate_size
+        )
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
@@ -2128,6 +2343,299 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
             for k in keys_to_remove:
                 del algo_config.customized_weight_config[k]
+
+        # Keep the routing-critical projections out of INT4 quantization.
+        # The MoE router selects the top-k experts and the shared-expert gate
+        # scales the always-on expert. Both are tiny matmuls, but 4-bit rounding
+        # of their weights perturbs the routing logits enough to flip top-k
+        # expert selection (measured ~1.4 of 8 experts change per token), which
+        # injects a large error into every MoE layer. Excluding them costs only
+        # a few MB but materially improves quantized-model accuracy.
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.INT8}:
+            nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
+            for i in range(self.num_layers):
+                router_node = f"/model/layers.{i}/moe/router/MatMul"
+                shared_gate_node = f"/model/layers.{i}/shared_expert_gate/MatMul"
+                if router_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(router_node)
+                if shared_gate_node not in nodes_to_exclude:
+                    nodes_to_exclude.append(shared_gate_node)
+                # When keeping original FP8 weights, keep the GatedDeltaNet (linear-attention)
+                # projections out of int4/int8 quantization. ``in_proj_a`` / ``in_proj_b`` are
+                # BF16 in the checkpoint (and only 32 elements wide), so they stay fp16. The
+                # remaining projections are replaced by ``MatMulBlockQuantizedFp8Weight`` and
+                # never reach the int4/int8 quantizer.
+                if self.quant_type == "modelopt":
+                    for proj in ("in_proj_a", "in_proj_b"):
+                        linear_node = f"/model/layers.{i}/linear_attn/{proj}/MatMul"
+                        if linear_node not in nodes_to_exclude:
+                            nodes_to_exclude.append(linear_node)
+
+        # MTP (multi-token prediction) self-speculative head.
+        # When ``enable_mtp`` is set, an auxiliary ``mtp.onnx`` model is exported
+        # alongside the main model (see ``Qwen35MtpHead``). It is disabled for the
+        # MTP head itself (``is_mtp_head``) to avoid infinite recursion.
+        self.mtp_head = None
+        self.enable_mtp = str(extra_options.get("enable_mtp", "false")).lower() in ("1", "true", "yes")
+        self.enable_mtp = self.enable_mtp and not getattr(self, "is_mtp_head", False)
+        if self.enable_mtp:
+            include_hidden_states = str(extra_options.get("include_hidden_states", "false")).lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            exclude_lm_head = str(extra_options.get("exclude_lm_head", "false")).lower() in ("1", "true", "yes")
+            if not include_hidden_states:
+                raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
+            if exclude_lm_head:
+                raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
+            # Stash the constructor arguments so the MTP head can be built from a
+            # pristine config after the main model has been generated.
+            self._mtp_config = copy.deepcopy(config)
+            self._mtp_io_dtype = io_dtype
+            self._mtp_onnx_dtype = onnx_dtype
+            self._mtp_ep = ep
+            self._mtp_cache_dir = cache_dir
+            self._mtp_extra_options = copy.deepcopy(extra_options)
+            self._resolve_mtp_model_config(extra_options)
+
+    @staticmethod
+    def _mtp_dtypes_from_quant_config(quant_config):
+        io_dtype = {
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "fp32": ir.DataType.FLOAT,
+        }[quant_config.io_dtype]
+        weights = resolve_dtype(quant_config.weights.type)
+        if weights.kind == "mx":
+            raise ValueError(
+                f"MTP dense weights.type={weights.name} is not supported; use int4/int8/none for dense weights "
+                "and select mxfp4/nvfp4 independently through moe.type"
+            )
+        if weights.kind != "int":
+            return io_dtype, io_dtype
+
+        signed = weights.signed is not False and quant_config.weights.symmetric
+        if weights.bits == 8:
+            onnx_dtype = ir.DataType.INT8 if signed else ir.DataType.UINT8
+        else:
+            onnx_dtype = ir.DataType.INT4 if signed else ir.DataType.UINT4
+        return io_dtype, onnx_dtype
+
+    def _resolve_mtp_model_config(self, extra_options):
+        """Resolve an independent MTP model configuration.
+
+        Without an MTP-specific option, the head retains the main model's settings and native
+        ModelOpt tensor formats. ``mtp_quant_config`` accepts the structured ``QuantConfig``
+        JSON schema.
+        """
+        mtp_quant_config_value = extra_options.get("mtp_quant_config")
+        if mtp_quant_config_value is None:
+            return
+
+        inherited_options = {
+            key: copy.deepcopy(extra_options[key]) for key in ("hf_token", "hf_remote") if key in extra_options
+        }
+        quant_config = (
+            copy.deepcopy(mtp_quant_config_value)
+            if isinstance(mtp_quant_config_value, QuantConfig)
+            else QuantConfig.from_json(mtp_quant_config_value)
+        )
+
+        self._mtp_io_dtype, self._mtp_onnx_dtype = self._mtp_dtypes_from_quant_config(quant_config)
+        inherited_options["_quant_config"] = quant_config
+        self._mtp_extra_options = inherited_options
+
+    def make_model(self, input_path):
+        super().make_model(input_path)
+
+        # Then build the auxiliary MTP head (separate ONNX graph + file).
+        if self.enable_mtp:
+            print("Building MTP (multi-token prediction) head -> mtp.onnx")
+            mtp_extra_options = self._mtp_extra_options
+            mtp_extra_options.pop("enable_mtp", None)  # prevent recursion
+            mtp_extra_options["exclude_embeds"] = False  # MTP head embeds input_ids
+            mtp_extra_options["filename"] = "mtp.onnx"
+            # The MTP head is a leaf model whose decoder outputs are logits and its
+            # recurrent hidden state. It must not
+            # inherit the main model's hidden-states/lm-head output options, which
+            # would make the final-norm output double as a graph output and feed the
+            # lm_head, creating a graph cycle.
+            mtp_extra_options.pop("include_hidden_states", None)
+            mtp_extra_options.pop("exclude_lm_head", None)
+            self.mtp_head = Qwen35MtpHead(
+                self._mtp_config,
+                self._mtp_io_dtype,
+                self._mtp_onnx_dtype,
+                self._mtp_ep,
+                self._mtp_cache_dir,
+                mtp_extra_options,
+            )
+            self.mtp_head.make_model(input_path)
+
+    def save_model(self, out_dir):
+        super().save_model(out_dir)
+        if self.mtp_head is not None:
+            self.mtp_head.save_model(out_dir)
+            # Deduplicate the embedding + lm_head weights, which the MTP head shares
+            # bit-identically with the main model: redirect mtp.onnx's copies to the
+            # main model's external data file and pack them out of mtp.onnx.data
+            # (~2 GB on disk; the two sessions then mmap the same bytes on the host).
+            self._share_mtp_embedding_lm_head(out_dir, self.filename)
+
+    @staticmethod
+    def _share_mtp_embedding_lm_head(out_dir, main_file, mtp_file="mtp.onnx"):
+        """Redirect mtp.onnx's embed_tokens/lm_head external data to model.onnx.data
+        and remove the duplicated bytes from mtp.onnx.data.
+
+        Only tensors that are byte-identical (same name/dtype/shape and matching
+        bytes) are shared; anything that differs (e.g. a quantized main
+        lm_head vs an fp16 MTP lm_head) is left untouched. Failures are non-fatal —
+        the exported models remain valid (just larger) if sharing is skipped.
+        """
+        import onnx
+
+        main_onnx = os.path.join(out_dir, main_file)
+        mtp_onnx = os.path.join(out_dir, mtp_file)
+        main_data_name = main_file + ".data"
+        mtp_data_name = mtp_file + ".data"
+        main_data = os.path.join(out_dir, main_data_name)
+        mtp_data = os.path.join(out_dir, mtp_data_name)
+        if not (
+            os.path.exists(main_onnx)
+            and os.path.exists(mtp_onnx)
+            and os.path.exists(main_data)
+            and os.path.exists(mtp_data)
+        ):
+            return
+
+        def ext_info(tensor):
+            d = {e.key: e.value for e in tensor.external_data}
+            return d.get("location"), int(d.get("offset", 0)), int(d.get("length", 0))
+
+        def set_ext(tensor, location, offset, length):
+            del tensor.external_data[:]
+            tensor.data_location = onnx.TensorProto.EXTERNAL
+            for k, v in (("location", location), ("offset", str(offset)), ("length", str(length))):
+                entry = tensor.external_data.add()
+                entry.key, entry.value = k, str(v)
+
+        def external_data_equal(path_a, off_a, path_b, off_b, length, chunk_size=1 << 22):
+            with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+                fa.seek(off_a)
+                fb.seek(off_b)
+                remaining = length
+                while remaining:
+                    read_size = min(chunk_size, remaining)
+                    data_a = fa.read(read_size)
+                    data_b = fb.read(read_size)
+                    if len(data_a) != read_size or data_a != data_b:
+                        return False
+                    remaining -= read_size
+            return True
+
+        tmp_data = mtp_data + ".tmp"
+        tmp_onnx = mtp_onnx + ".tmp"
+        try:
+            main = onnx.load(main_onnx, load_external_data=False)
+            main_info = {}
+            for t in main.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc == main_data_name and (
+                    t.name == "model.embed_tokens.weight" or t.name.startswith("lm_head.MatMul.")
+                ):
+                    main_info[t.name] = (t.data_type, tuple(t.dims), off, ln)
+
+            mtp = onnx.load(mtp_onnx, load_external_data=False)
+            mtp_inits = {t.name: t for t in mtp.graph.initializer}
+
+            redirect, remove = {}, set()
+            for name in main_info:
+                if name not in mtp_inits or name not in main_info:
+                    continue
+                t = mtp_inits[name]
+                loc, off, ln = ext_info(t)
+                m_dt, m_dims, m_off, m_len = main_info[name]
+                if loc != mtp_data_name or t.data_type != m_dt or tuple(t.dims) != m_dims or ln != m_len:
+                    continue
+                if not external_data_equal(main_data, m_off, mtp_data, off, ln):
+                    continue
+                redirect[name] = (m_off, m_len)
+                remove.add((off, ln))
+
+            if not redirect:
+                return
+
+            # Rebuild mtp.onnx.data with the redirected tensors packed out, in
+            # ascending-offset order, assigning tight new offsets.
+            kept = []
+            for t in mtp.graph.initializer:
+                loc, off, ln = ext_info(t)
+                if loc != mtp_data_name or (t.name in redirect and (off, ln) in remove):
+                    continue
+                kept.append((off, ln, t))
+            kept.sort(key=lambda x: x[0])
+
+            with open(mtp_data, "rb") as fin, open(tmp_data, "wb") as fout:
+                new_off = 0
+                for old_off, ln, t in kept:
+                    fin.seek(old_off)
+                    remaining = ln
+                    while remaining:
+                        read_size = min(1 << 22, remaining)
+                        buf = fin.read(read_size)
+                        if len(buf) != read_size:
+                            raise EOFError(f"Unexpected end of {mtp_data_name} while copying initializer '{t.name}'.")
+                        fout.write(buf)
+                        remaining -= len(buf)
+                    set_ext(t, mtp_data_name, new_off, ln)
+                    new_off += ln
+            for name, (m_off, m_len) in redirect.items():
+                set_ext(mtp_inits[name], main_data_name, m_off, m_len)
+
+            # Stage both outputs before replacing either original. Saving this
+            # metadata-only model preserves its external-data references.
+            onnx.save(mtp, tmp_onnx)
+        except Exception as exc:
+            for tmp_path in (tmp_data, tmp_onnx):
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            print(
+                f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
+                f"the duplicated copies remain in {mtp_data_name}."
+            )
+            return
+
+        # Keep the original pair recoverable until both staged files are installed.
+        backup_data = mtp_data + ".bak"
+        backup_onnx = mtp_onnx + ".bak"
+        try:
+            os.replace(mtp_data, backup_data)
+            os.replace(mtp_onnx, backup_onnx)
+            os.replace(tmp_data, mtp_data)
+            os.replace(tmp_onnx, mtp_onnx)
+        except Exception as exc:
+            rollback_errors = []
+            for backup_path, original_path in ((backup_data, mtp_data), (backup_onnx, mtp_onnx)):
+                if os.path.exists(backup_path):
+                    try:
+                        os.replace(backup_path, original_path)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(rollback_exc)
+            for tmp_path in (tmp_data, tmp_onnx):
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            if rollback_errors:
+                raise RuntimeError("Failed to restore MTP files after replacement failure.") from exc
+            print(
+                f"Warning: could not commit shared MTP embedding/lm_head weights ({exc}); "
+                f"the duplicated copies remain in {mtp_data_name}."
+            )
+            return
+        os.remove(backup_data)
+        os.remove(backup_onnx)
+        saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
+        print(f"Shared MTP embedding + lm_head with the main model (saved {saved_mb:.0f} MB from {mtp_data_name})")
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
@@ -2165,8 +2673,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         router_reshape_name = f"{basename}/router/Reshape"
         self.make_reshape(
             router_reshape_name,
-            [f"{router_matmul_name}/output_0",
-             f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
+            [f"{router_matmul_name}/output_0", f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}"],
             dtype=self.io_dtype,
             shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
         )
@@ -2180,14 +2687,47 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
         # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...] for swiglu_fusion=1
-        raw_gate_up = mlp.experts.gate_up_proj
-        half = raw_gate_up.shape[1] // 2
-        interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(raw_gate_up)
+        # A ModelOpt checkpoint can contain native NVFP4 expert tensors. Preserve
+        # those when their scale metadata is present; otherwise quantize the
+        # checkpoint's dense expert tensors through the regular QMoE path.
+        first_expert = next(iter(mlp.experts), None)
+        is_nvfp4 = (
+            self.moe_attrs.get("quant_type") == "nvfp4"
+            and first_expert is not None
+            and getattr(first_expert.gate_proj, "weight_scale_2", None) is not None
+        )
+        gate_up_proj_global_scales = ""
+        down_proj_global_scales = ""
 
-        if op_type == "MoE":
+        if is_nvfp4:
+            # Consume the Model Optimizer NVFP4 experts directly (block-16 E2M1 weights,
+            # FP8-E4M3 block scales, per-expert FP32 global scale). No re-quantization.
+            self.moe_attrs["block_size"] = 16
+            gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
+            down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+            self.make_nvfp4_moe_initializers(
+                mlp.experts,
+                gate_up_proj_weight,
+                gate_up_proj_scales,
+                gate_up_proj_global_scales,
+                down_proj_weight,
+                down_proj_scales,
+                down_proj_global_scales,
+            )
+        elif op_type == "MoE":
+            raw_gate_up = mlp.experts.gate_up_proj
+            half = raw_gate_up.shape[1] // 2
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+                raw_gate_up
+            )
             self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
             self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
         else:
+            raw_gate_up = mlp.experts.gate_up_proj
+            half = raw_gate_up.shape[1] // 2
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+                raw_gate_up
+            )
             gate_up_qw_list, gate_up_sc_list = [], []
             down_qw_list, down_sc_list = [], []
             for i in range(self.moe_attrs["num_experts"]):
@@ -2218,6 +2758,8 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             weight2=down_proj_weight,
             scales2=down_proj_scales if op_type == "QMoE" else "",
             bias2=down_proj_bias,
+            global_scales1=gate_up_proj_global_scales,
+            global_scales2=down_proj_global_scales,
         )
 
         # --- Shared expert ---
@@ -2231,40 +2773,531 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
+    def make_nvfp4_moe_initializers(
+        self,
+        experts,
+        gate_up_weight_name,
+        gate_up_scales_name,
+        gate_up_global_name,
+        down_weight_name,
+        down_scales_name,
+        down_global_name,
+    ):
+        """Emit QMoE NVFP4 initializers for all routed experts of one layer.
+
+        Reads the Model Optimizer per-expert tensors (``weight`` uint8 ``[N, K/2]``,
+        ``weight_scale`` e4m3 ``[N, K/16]``, ``weight_scale_2`` f32 scalar), repacks the
+        E2M1 codes into the CUDA QMoE ``[E, K, N/2]`` layout, and interleaves gate/up
+        along N for ``swiglu_fusion=1``. gate and up share one per-expert global scale.
+        """
+        gate_up_qw, gate_up_sc, gate_up_g = [], [], []
+        down_qw, down_sc, down_g = [], [], []
+        for expert_id, expert in enumerate(experts):
+            gate_prefix = f"expert.{expert_id}.gate_proj"
+            up_prefix = f"expert.{expert_id}.up_proj"
+            down_prefix = f"expert.{expert_id}.down_proj"
+            g_codes = self.repack_modelopt_nvfp4_weight_codes(expert.gate_proj.weight)
+            u_codes = self.repack_modelopt_nvfp4_weight_codes(expert.up_proj.weight)
+            if g_codes.shape != u_codes.shape:
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
+                    f"got {tuple(g_codes.shape)} and {tuple(u_codes.shape)}."
+                )
+            inter = g_codes.shape[0]
+            fused_codes = torch.stack([g_codes, u_codes], dim=1).reshape(2 * inter, -1)  # [2*inter, K]
+            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
+
+            scale_shape = (inter, g_codes.shape[1] // 16)
+            g_sc = self.modelopt_e4m3_bytes(expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape)
+            u_sc = self.modelopt_e4m3_bytes(expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape)
+            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
+            gate_global = self.modelopt_positive_scalar(
+                expert.gate_proj.weight_scale_2, f"{gate_prefix}.weight_scale_2"
+            )
+            up_global = self.modelopt_positive_scalar(expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2")
+            if gate_global != up_global:
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
+                    f"got {gate_global} and {up_global}."
+                )
+            gate_up_g.append(gate_global)
+
+            d_codes = self.repack_modelopt_nvfp4_weight_codes(expert.down_proj.weight)
+            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))  # [inter, hidden/2]
+            down_scale_shape = (d_codes.shape[0], d_codes.shape[1] // 16)
+            down_sc.append(
+                self.modelopt_e4m3_bytes(
+                    expert.down_proj.weight_scale,
+                    f"{down_prefix}.weight_scale",
+                    down_scale_shape,
+                )
+            )
+            down_g.append(
+                self.modelopt_positive_scalar(expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2")
+            )
+
+        self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
+        self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_weight_name)
+        self.make_fp8e4m3_initializer(torch.stack(gate_up_sc, dim=0), gate_up_scales_name)
+        self.make_fp8e4m3_initializer(torch.stack(down_sc, dim=0), down_scales_name)
+        self.make_initializer(torch.tensor(gate_up_g, dtype=torch.float32), gate_up_global_name)
+        self.make_initializer(torch.tensor(down_g, dtype=torch.float32), down_global_name)
+
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        """Build shared expert SiLU-MLP with sigmoid gating."""
         basename = f"/model/layers.{layer_id}/shared_expert"
 
         gate_matmul = self.make_matmul(shared_expert.gate_proj, f"{basename}/gate_proj/MatMul", root_input)
         up_matmul = self.make_matmul(shared_expert.up_proj, f"{basename}/up_proj/MatMul", root_input)
 
         silu_sigmoid_name = f"{basename}/gate_proj/Sigmoid"
-        self.make_sigmoid(silu_sigmoid_name, f"{gate_matmul}/output_0", self.io_dtype,
-                          shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        self.make_sigmoid(
+            silu_sigmoid_name,
+            f"{gate_matmul}/output_0",
+            self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
         silu_mul_name = f"{basename}/gate_proj/Mul"
-        self.make_mul(silu_mul_name,
-                      [f"{gate_matmul}/output_0", f"{silu_sigmoid_name}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        self.make_mul(
+            silu_mul_name,
+            [f"{gate_matmul}/output_0", f"{silu_sigmoid_name}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
-        gate_up_mul_name = f"{basename}/Mul"
-        self.make_mul(gate_up_mul_name,
-                      [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size])
+        gate_up_mul_name = f"{basename}/gate_up/Mul"
+        self.make_mul(
+            gate_up_mul_name,
+            [f"{silu_mul_name}/output_0", f"{up_matmul}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.shared_expert_intermediate_size],
+        )
 
-        down_matmul = self.make_matmul(shared_expert.down_proj, f"{basename}/down_proj/MatMul",
-                                       f"{gate_up_mul_name}/output_0")
+        down_matmul = self.make_matmul(
+            shared_expert.down_proj, f"{basename}/down_proj/MatMul", f"{gate_up_mul_name}/output_0"
+        )
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
-        self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
-                          shape=["batch_size", "sequence_length", 1])
+        self.make_sigmoid(
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+        )
 
-        gated_mul_name = f"{basename}/Mul"
-        self.make_mul(gated_mul_name,
-                      [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
-                      dtype=self.io_dtype,
-                      shape=["batch_size", "sequence_length", self.hidden_size])
+        gated_mul_name = f"{basename}/gate/Mul"
+        self.make_mul(
+            gated_mul_name,
+            [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
         return f"{gated_mul_name}/output_0"
+
+
+class _LinearWeight:
+    """Lightweight stand-in for ``nn.Linear`` exposing only ``weight`` (and a
+    ``None`` bias), so ``make_matmul`` / ``make_lm_head`` can consume a raw weight
+    tensor loaded directly from safetensors."""
+
+    def __init__(self, weight, weight_scale=None, weight_scale_2=None, input_scale=None, bias=None):
+        self.weight = weight
+        self.weight_scale = weight_scale
+        self.weight_scale_2 = weight_scale_2
+        self.input_scale = input_scale
+        self.bias = bias
+
+
+class _RMSNormWeight:
+    """Lightweight stand-in for an RMSNorm module exposing only ``weight``."""
+
+    def __init__(self, weight):
+        self.weight = weight
+
+
+class Qwen35MtpHead(Qwen35MoeTextModel):
+    """Qwen3.6 multi-token-prediction (MTP) self-speculative head builder.
+
+    Emits a separate ``mtp.onnx`` graph that predicts token ``t_{i+2}`` from the
+    main model's last hidden state ``h_i`` (post-final-norm) and the just-emitted
+    token ``t_{i+1}``::
+
+        h'_i   = fc(concat[ pre_fc_norm_embedding(embed(t_{i+1})),
+                            pre_fc_norm_hidden(h_i) ])
+        h''_i  = MtpDecoderLayer(h'_i)       # one full-attention + MoE layer
+        logits = lm_head(mtp.norm(h''_i))
+
+    The single MTP decoder layer is a ``full_attention`` GQA + MoE layer, so it
+    reuses the parent's ``_make_full_attention`` / ``make_moe`` / mRoPE machinery
+    unchanged. The ``mtp.*`` weights are loaded directly from the source
+    safetensors because HF ``transformers`` discards them on ``from_pretrained``.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Mark as the MTP head so the parent does not recursively build another.
+        self.is_mtp_head = True
+
+        # The MTP head is a single full-attention decoder layer.
+        config = copy.deepcopy(config)
+        text_config = getattr(config, "text_config", config)
+        text_config.num_hidden_layers = 1
+        text_config.layer_types = ["full_attention"]
+        config.num_hidden_layers = 1
+        config.layer_types = ["full_attention"]
+
+        # Keep a copy of the (single-layer, full-attention) text config so the HF
+        # ``Qwen3_5MoeDecoderLayer`` for the MTP layer can be instantiated later.
+        self._mtp_layer_config = copy.deepcopy(text_config)
+        self._mtp_layer_config.layer_types = ["full_attention"]
+        self._mtp_layer_config.num_hidden_layers = 1
+
+        # Force a single hidden layer regardless of the original config value.
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["num_hidden_layers"] = 1
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # With no explicit override, a ModelOpt checkpoint keeps the original
+        # per-tensor MTP formats instead of dequantizing and requantizing them.
+        self._preserve_modelopt_mtp = self._should_preserve_modelopt_mtp(self.quant_type, extra_options)
+
+        # The MTP head consumes the main model's last hidden state as an extra
+        # input (alongside the standard input_ids / position_ids / KV cache).
+        self.input_names["hidden_states"] = "hidden_states"
+        self.input_types["hidden_states"] = self.io_dtype
+        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+
+    @staticmethod
+    def _should_preserve_modelopt_mtp(quant_type, extra_options):
+        return quant_type == "modelopt" and "_quant_config" not in extra_options
+
+    def make_model(self, input_path):
+        # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
+        self.make_inputs_and_outputs()
+
+        if self.kv_cache_quant_type != "none":
+            self.make_kv_cache_scale_initializers()
+
+        # Load MTP-specific weights (discarded by HF ``from_pretrained``).
+        self._load_mtp_weights(input_path)
+
+        # Preprocessing: GQA mask (seqlens_k / total_seq_len) + mRoPE position_ids.
+        self.make_preprocessing_nodes()
+
+        # h'_i = fc(concat[pre_fc_norm_embedding(embed(t_{i+1})),
+        #                   pre_fc_norm_hidden(h_i)])
+        projected = self._make_mtp_input_projection()
+        self.layernorm_attrs["root_input"] = projected
+        self.layernorm_attrs["skip_input"] = projected
+        self.layernorm_attrs["first_layernorm"] = True
+
+        # One full-attention + MoE decoder layer (reuses parent machinery).
+        self.make_layer(0, self._mtp_layer)
+
+        # Final norm (mtp.norm) -> lm_head.
+        self.make_layernorm(1, _RMSNormWeight(self._mtp_norm_weight), skip=True, simple=True, location="final_norm")
+        # Capture the post-final-norm hidden BEFORE lm_head consumes it, so it can be
+        # exported as the recurrent feedback output for multi-token speculation.
+        mtp_norm_output = self.layernorm_attrs["output_0"]
+        self.make_lm_head(self._lm_head)
+
+        # A multi-token (num_speculative_tokens>1) loop feeds this back as the next chained
+        # draft's `hidden_states` input, since the module is recurrent:
+        # h_out = norm(layer(fc(embed, h_in))), same as vLLM's Qwen3.5 MTP. The name differs from
+        # the `hidden_states` INPUT to avoid an ONNX name collision, and it is harmless at N=1
+        # (genai's ExtraOutputs ignores unused outputs).
+        hs_out = "hidden_states_out"
+        self.make_node(
+            "Identity",
+            inputs=[mtp_norm_output],
+            outputs=[hs_out],
+            name="/model/mtp/hidden_states_out/Identity",
+        )
+        hs_val = self.make_value(hs_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.model.graph.outputs.append(hs_val)
+
+        self.make_postprocessing_nodes()
+
+        # Free the large MTP layer module now that the graph is built.
+        del self._mtp_layer
+
+    def _load_mtp_weights(self, input_path):
+        try:
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
+        except ImportError as exc:
+            raise ImportError(
+                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
+            ) from exc
+        import safetensors.torch as safetensors_torch
+
+        model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
+        shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
+        if not shards:
+            raise FileNotFoundError(f"No .safetensors files found in '{model_dir}' for MTP weight loading.")
+
+        mtp_state = {}
+        embed_weight = None
+        # The lm_head in a Model Optimizer NVFP4 checkpoint is stored packed:
+        # "lm_head.weight" is uint8 [N, K/2] E2M1 codes, with a per-block E4M3
+        # "lm_head.weight_scale" [N, K/16] and a per-tensor FP32 "lm_head.weight_scale_2".
+        # It must be dequantized to a plain BF16 [N, K] weight the same way the main
+        # model does (see ModeloptModel._dequant_linear); feeding the packed uint8
+        # tensor straight into make_lm_head halves K (K/2 read as K) and corrupts the
+        # LM head. Collect all three tensors and reconstruct below.
+        lm_head_weight = None
+        lm_head_weight_scale = None
+        lm_head_weight_scale_2 = None
+        # The embedding tensor name varies: plain text models use
+        # "model.embed_tokens.weight" while the Qwen3.6 VL checkpoint nests it
+        # under "model.language_model.embed_tokens.weight".
+        embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
+        for shard in shards:
+            with safetensors_torch.safe_open(shard, framework="pt") as f:
+                for key in f:
+                    if key.startswith("mtp."):
+                        mtp_state[key] = f.get_tensor(key)
+                    elif key in embed_keys:
+                        embed_weight = f.get_tensor(key)
+                    elif key == "lm_head.weight":
+                        lm_head_weight = f.get_tensor(key)
+                    elif key == "lm_head.weight_scale":
+                        lm_head_weight_scale = f.get_tensor(key)
+                    elif key == "lm_head.weight_scale_2":
+                        lm_head_weight_scale_2 = f.get_tensor(key)
+
+        if not mtp_state:
+            raise ValueError(f"No 'mtp.*' weights found in '{model_dir}'; this model has no MTP head.")
+        if embed_weight is None:
+            raise ValueError(
+                "Could not find the token embedding weight "
+                "('model.embed_tokens.weight' or 'model.language_model.embed_tokens.weight') "
+                "for the MTP head embedding."
+            )
+        if lm_head_weight is None:
+            raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
+
+        if self._preserve_modelopt_mtp:
+            modelopt_state = dict(mtp_state)
+            modelopt_state["lm_head.weight"] = lm_head_weight
+            if lm_head_weight_scale is not None:
+                modelopt_state["lm_head.weight_scale"] = lm_head_weight_scale
+            if lm_head_weight_scale_2 is not None:
+                modelopt_state["lm_head.weight_scale_2"] = lm_head_weight_scale_2
+            self._load_native_modelopt_mtp_weights(modelopt_state, embed_weight)
+            return
+
+        # An explicit precision override requantizes from plain BF16 tensors.
+        # Dequantize any native ModelOpt linears before loading the HF layer.
+        mtp_state = self._dequantize_modelopt_state(mtp_state)
+        lm_head_weight = self._dequantize_modelopt_weight(
+            lm_head_weight,
+            lm_head_weight_scale,
+            lm_head_weight_scale_2,
+            "lm_head.weight",
+        )
+
+        self._embed_weight = embed_weight
+        self._lm_head = _LinearWeight(lm_head_weight)
+        self._fc = _LinearWeight(mtp_state["mtp.fc.weight"])
+        self._pre_fc_norm_embedding_weight = mtp_state["mtp.pre_fc_norm_embedding.weight"]
+        self._pre_fc_norm_hidden_weight = mtp_state["mtp.pre_fc_norm_hidden.weight"]
+        self._mtp_norm_weight = mtp_state["mtp.norm.weight"]
+
+        # Build the single MTP decoder layer (full-attention + MoE) and load its
+        # weights from the ``mtp.layers.0.*`` entries.
+        mtp_layer = Qwen3_5MoeDecoderLayer(self._mtp_layer_config, layer_idx=0)
+        layer_state = {
+            key[len("mtp.layers.0.") :]: value for key, value in mtp_state.items() if key.startswith("mtp.layers.0.")
+        }
+        missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if unexpected:
+                details.append(f"unexpected={unexpected}")
+            raise ValueError("Invalid MTP decoder-layer weights: " + ", ".join(details))
+        mtp_layer.eval()
+        self._mtp_layer = mtp_layer
+
+    @staticmethod
+    def _dequantize_modelopt_weight(weight, weight_scale, weight_scale_2, name):
+        if weight_scale_2 is not None:
+            if weight_scale is None:
+                raise ValueError(f"ModelOpt NVFP4 tensor '{name}' is missing its weight_scale.")
+            if weight_scale_2.numel() != 1:
+                raise ValueError(f"ModelOpt NVFP4 tensor '{name}' weight_scale_2 must be a scalar.")
+            if weight_scale.dtype == torch.uint8:
+                weight_scale = weight_scale.view(torch.float8_e4m3fn)
+            elif weight_scale.dtype != torch.float8_e4m3fn:
+                raise ValueError(
+                    f"ModelOpt NVFP4 tensor '{name}' weight_scale must be float8_e4m3fn or uint8, "
+                    f"got {weight_scale.dtype}."
+                )
+            low = weight.to(torch.uint8) & 0x0F
+            high = weight.to(torch.uint8) >> 4
+            codes = torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1).long()
+            magnitudes = torch.tensor(
+                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+                dtype=torch.float32,
+            )[codes & 0x7]
+            values = torch.where((codes & 0x8) > 0, -magnitudes, magnitudes)
+            block_scales = weight_scale.float()
+            if (
+                block_scales.ndim != 2
+                or block_scales.shape[0] != values.shape[0]
+                or block_scales.shape[1] == 0
+                or values.shape[1] % block_scales.shape[1] != 0
+            ):
+                raise ValueError(
+                    f"ModelOpt NVFP4 tensor '{name}' has incompatible weight/scale shapes "
+                    f"{tuple(weight.shape)} and {tuple(weight_scale.shape)}."
+                )
+            block_scales = block_scales.repeat_interleave(values.shape[1] // block_scales.shape[1], dim=1)
+            return (values * block_scales * float(weight_scale_2.float().item())).to(torch.bfloat16)
+        if weight.dtype == torch.float8_e4m3fn:
+            if weight_scale is None or weight_scale.numel() != 1:
+                raise ValueError(f"ModelOpt FP8 tensor '{name}' must have a scalar weight_scale.")
+            return (weight.float() * float(weight_scale.float().item())).to(torch.bfloat16)
+        return weight
+
+    @classmethod
+    def _dequantize_modelopt_state(cls, state):
+        result = {}
+        metadata_suffixes = (".weight_scale", ".weight_scale_2", ".input_scale")
+        for name, tensor in state.items():
+            if name.endswith(metadata_suffixes):
+                continue
+            if not name.endswith(".weight"):
+                result[name] = tensor
+                continue
+            prefix = name.removesuffix(".weight")
+            result[name] = cls._dequantize_modelopt_weight(
+                tensor,
+                state.get(f"{prefix}.weight_scale"),
+                state.get(f"{prefix}.weight_scale_2"),
+                name,
+            )
+        return result
+
+    def _load_native_modelopt_mtp_weights(self, state, embed_weight):
+        """Build lightweight MTP modules while retaining ModelOpt scale metadata."""
+
+        def required(name):
+            tensor = state.get(name)
+            if tensor is None:
+                raise ValueError(f"ModelOpt MTP checkpoint is missing '{name}'.")
+            return tensor
+
+        def linear(prefix):
+            return _LinearWeight(
+                required(f"{prefix}.weight"),
+                weight_scale=state.get(f"{prefix}.weight_scale"),
+                weight_scale_2=state.get(f"{prefix}.weight_scale_2"),
+                input_scale=state.get(f"{prefix}.input_scale"),
+                bias=state.get(f"{prefix}.bias"),
+            )
+
+        def norm(name):
+            return _RMSNormWeight(required(name))
+
+        layer_prefix = "mtp.layers.0"
+        attention_prefix = f"{layer_prefix}.self_attn"
+        mlp_prefix = f"{layer_prefix}.mlp"
+        attention = SimpleNamespace(
+            q_proj=linear(f"{attention_prefix}.q_proj"),
+            k_proj=linear(f"{attention_prefix}.k_proj"),
+            v_proj=linear(f"{attention_prefix}.v_proj"),
+            o_proj=linear(f"{attention_prefix}.o_proj"),
+            q_norm=norm(f"{attention_prefix}.q_norm.weight"),
+            k_norm=norm(f"{attention_prefix}.k_norm.weight"),
+        )
+        experts = []
+        for expert_id in range(self.moe_attrs["num_experts"]):
+            expert_prefix = f"{mlp_prefix}.experts.{expert_id}"
+            experts.append(
+                SimpleNamespace(
+                    gate_proj=linear(f"{expert_prefix}.gate_proj"),
+                    up_proj=linear(f"{expert_prefix}.up_proj"),
+                    down_proj=linear(f"{expert_prefix}.down_proj"),
+                )
+            )
+        shared_prefix = f"{mlp_prefix}.shared_expert"
+        mlp = SimpleNamespace(
+            gate=linear(f"{mlp_prefix}.gate"),
+            experts=experts,
+            shared_expert=SimpleNamespace(
+                gate_proj=linear(f"{shared_prefix}.gate_proj"),
+                up_proj=linear(f"{shared_prefix}.up_proj"),
+                down_proj=linear(f"{shared_prefix}.down_proj"),
+            ),
+            shared_expert_gate=linear(f"{mlp_prefix}.shared_expert_gate"),
+        )
+        self._mtp_layer = SimpleNamespace(
+            input_layernorm=norm(f"{layer_prefix}.input_layernorm.weight"),
+            post_attention_layernorm=norm(f"{layer_prefix}.post_attention_layernorm.weight"),
+            self_attn=attention,
+            linear_attn=None,
+            mlp=mlp,
+        )
+        self._embed_weight = embed_weight
+        self._lm_head = linear("lm_head")
+        self._fc = linear("mtp.fc")
+        self._pre_fc_norm_embedding_weight = required("mtp.pre_fc_norm_embedding.weight")
+        self._pre_fc_norm_hidden_weight = required("mtp.pre_fc_norm_hidden.weight")
+        self._mtp_norm_weight = required("mtp.norm.weight")
+
+    def _make_offset_rmsnorm(self, name, root_input, weight_tensor):
+        """Build a non-skip SimplifiedLayerNormalization with the ``(1 + weight)``
+        offset (used by the two pre-fc RMSNorms in the MTP head)."""
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(weight_tensor + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+        output = f"{name}/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=[root_input, weight_name],
+            outputs=[output],
+            name=name,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        return output
+
+    def _make_mtp_input_projection(self):
+        """Build ``fc(concat[pre_fc_norm_embedding(embed(input_ids)),
+        pre_fc_norm_hidden(hidden_states)])`` and return its output name."""
+        basename = "/model/mtp"
+
+        # embed(input_ids) -> [B, S, H]
+        embed_weight = "model.embed_tokens.weight"
+        self.make_initializer(self._embed_weight, embed_weight, to=self.io_dtype)
+        embed_gather = f"{basename}/embed_tokens/Gather"
+        embed_out = f"{embed_gather}/output_0"
+        self.make_node(
+            "Gather",
+            inputs=[embed_weight, self.input_names["input_ids"]],
+            outputs=[embed_out],
+            name=embed_gather,
+        )
+        self.make_value(embed_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+
+        # pre_fc_norm_embedding(embed) and pre_fc_norm_hidden(hidden_states)
+        e_norm = self._make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_embedding", embed_out, self._pre_fc_norm_embedding_weight
+        )
+        h_norm = self._make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_hidden", self.input_names["hidden_states"], self._pre_fc_norm_hidden_weight
+        )
+
+        # concat([e_norm, h_norm], axis=-1) -> [B, S, 2H]
+        concat_name = f"{basename}/fc/Concat"
+        self.make_concat(
+            concat_name,
+            [e_norm, h_norm],
+            self.io_dtype,
+            ["batch_size", "sequence_length", 2 * self.hidden_size],
+            axis=-1,
+        )
+
+        # fc: [2H -> H]
+        fc_name = self.make_matmul(self._fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
+        return f"{fc_name}/output_0"

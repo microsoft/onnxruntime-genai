@@ -28,23 +28,23 @@ void ValidateProposal(const SpeculativeDecodingStrategy::Proposal& proposal,
       if (!target_uses_greedy)
         throw std::runtime_error(
             "Speculative decoding received a greedy-match proposal for sampling verification.");
-      if (!proposal.probs.empty())
+      if (!proposal.distributions.empty())
         throw std::runtime_error(
-            "Speculative decoding greedy-match proposals must not contain probability rows.");
+            "Speculative decoding greedy-match proposals must not contain distribution rows.");
       return;
     case ProposalMode::kDraftSampling:
       if (target_uses_greedy)
         throw std::runtime_error(
             "Speculative decoding received a draft-sampling proposal for greedy verification.");
-      if (static_cast<int>(proposal.probs.size()) != proposal_length)
+      if (static_cast<int>(proposal.distributions.size()) != proposal_length)
         throw std::runtime_error(
-            "Speculative draft returned " + std::to_string(proposal.probs.size()) +
-            " probability rows, expected " + std::to_string(proposal_length) + ".");
+            "Speculative draft returned " + std::to_string(proposal.distributions.size()) +
+            " distribution rows, expected " + std::to_string(proposal_length) + ".");
       return;
     case ProposalMode::kDeterministic:
-      if (!proposal.probs.empty())
+      if (!proposal.distributions.empty())
         throw std::runtime_error(
-            "Deterministic speculative proposals must not contain probability rows.");
+            "Deterministic speculative proposals must not contain distribution rows.");
       return;
     case ProposalMode::kUnset:
       throw std::runtime_error("Speculative decoding proposer did not set a proposal mode.");
@@ -191,7 +191,7 @@ void SpeculativeDecodingStrategy::Reset() {
   DiscardPendingTokens();
   ClearPendingExternalLogits();
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
   round_.kind = RoundState::Kind::kStandard;
   ff_carry_.clear();
   adaptive_k_.Reset();
@@ -215,7 +215,7 @@ void SpeculativeDecodingStrategy::PrepareForAppend(Generator& g) {
   DiscardPendingTokens();
   ClearPendingExternalLogits();
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
   round_.kind = RoundState::Kind::kStandard;
   ff_carry_.clear();
 
@@ -312,7 +312,7 @@ DeviceSpan<float> SpeculativeDecodingStrategy::GetFloatVerifyLogits(
 void SpeculativeDecodingStrategy::PrepareForCooldownStep(Generator& g) {
   if (!round_.NeedsReconciliation())
     return;
-  if (round_.phase != RoundState::Phase::kReconcilePending || !pending_anchor_token_)
+  if (round_.phase != RoundPhase::kReconcilePending || !pending_anchor_token_)
     throw std::runtime_error(
         "Speculative cooldown cannot reconcile a dirty round without a pending anchor token.");
 
@@ -333,7 +333,7 @@ void SpeculativeDecodingStrategy::PrepareForCooldownStep(Generator& g) {
   g.SetLogits(target_logits);
 
   pending_anchor_token_.reset();
-  round_.phase = RoundState::Phase::kIdle;
+  round_.phase = RoundPhase::kIdle;
 }
 
 void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted, size_t queued,
@@ -341,7 +341,7 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
                                              bool filled_proposal_budget,
                                              float propose_ms, float target_ms,
                                              RoundState::Kind kind) {
-  if (round_.IsActive() || round_.phase == RoundState::Phase::kFinalizing)
+  if (round_.IsActive() || round_.phase == RoundPhase::kFinalizing)
     throw std::runtime_error("Speculative decoding started a round before the previous round was settled.");
   if (queued == 0)
     throw std::runtime_error("Speculative decoding produced a round with no output tokens.");
@@ -352,7 +352,7 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   draft_evaluated_ += static_cast<size_t>(evaluated);
   draft_accepted_ += static_cast<size_t>(accepted);
   tokens_queued_ += queued;
-  round_.phase = RoundState::Phase::kDraining;
+  round_.phase = RoundPhase::kDraining;
   round_.kind = kind;
   round_.discarded = false;
   round_.evaluated = evaluated;
@@ -368,8 +368,8 @@ void SpeculativeDecodingStrategy::BeginRound(int K, int evaluated, int accepted,
   }
 }
 
-void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
-  if (!round_.IsActive() && round_.phase != RoundState::Phase::kFinalizing)
+void SpeculativeDecodingStrategy::FinishRound(RoundPhase final_phase) {
+  if (!round_.IsActive() && round_.phase != RoundPhase::kFinalizing)
     return;
   if (!round_.pending.empty())
     throw std::runtime_error("Speculative decoding settled a round while output tokens were still buffered.");
@@ -393,7 +393,7 @@ void SpeculativeDecodingStrategy::FinishRound(RoundState::Phase final_phase) {
         round_.k, round_.evaluated, round_.accepted, round_.emitted,
         round_.filled_proposal_budget, round_.propose_ms, round_.target_ms);
   }
-  round_.phase = round_.discarded ? RoundState::Phase::kReconcilePending : final_phase;
+  round_.phase = round_.discarded ? RoundPhase::kReconcilePending : final_phase;
   round_.discarded = false;
   round_.evaluated = 0;
   round_.accepted = 0;
@@ -412,7 +412,7 @@ void SpeculativeDecodingStrategy::DiscardPendingTokens() {
   }
   round_.pending_rng_states.clear();
   round_.uses_rng_checkpoints = false;
-  FinishRound(RoundState::Phase::kReconcilePending);
+  FinishRound(RoundPhase::kReconcilePending);
 }
 
 // Rewinds both inner caches to floor and replays the committed tokens back to the current length,
@@ -518,7 +518,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       reanchor_runs_++;
       total_reanchor_ms_ += reanchor_ms;
       pending_anchor_token_.reset();
-      round_.phase = RoundState::Phase::kIdle;
+      round_.phase = RoundPhase::kIdle;
     }
     total_propose_ms_ += ms_f(t_propose_end - t_propose_start).count();
     RunStandardDecodingStep(g);
@@ -589,7 +589,7 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.RunUnchunked(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
@@ -699,10 +699,6 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
   int n_evaluated = 0;
   int32_t final_token = -1;
 
-  // Draft-sampling scratch, lazily sized. Densification expands one truncated row into a full
-  // vocab vector; correction_buf holds the built correction distribution.
-  std::vector<float> dense_row;
-  std::vector<float> correction_buf;
   std::vector<std::mt19937> rng_states_after_output;
   if (!target_uses_greedy)
     rng_states_after_output.reserve(static_cast<size_t>(K + 1));
@@ -728,7 +724,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         accepted = (target.greedy_token == proposal.tokens[i]);
       } else {
         const float p_t = GetTargetTokenProbability(target, proposal.tokens[i]);
-        const float p_d = proposal.probs[i][proposal.tokens[i]];
+        const auto& draft = proposal.distributions[i];
+        const float p_d = GetTargetTokenProbability(draft, proposal.tokens[i]);
         accepted = (uni(round_rng) < ComputeAcceptProb(p_t, p_d));
       }
 
@@ -740,15 +737,9 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
         if (target_uses_greedy) {
           final_token = target.greedy_token;
         } else {
-          std::vector<float>& dense_t =
-              DensifyTargetTokenSelection(target, vocab_size, dense_row);
-          if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-          BuildCorrectionDistribution(
-              {dense_t.data(), static_cast<size_t>(vocab_size)},
-              {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-              {correction_buf.data(), static_cast<size_t>(vocab_size)});
-          std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-          final_token = dist(round_rng);
+          const auto& draft = proposal.distributions[i];
+          final_token = SampleCorrectionToken(target.indices, target.probs,
+                                              draft.indices, draft.probs, round_rng);
           rng_states_after_output.push_back(round_rng);
         }
         corrections_++;
@@ -762,10 +753,8 @@ void SpeculativeDecodingStrategy::RunRound(Generator& g) {
       if (target_uses_greedy) {
         final_token = bonus_target.greedy_token;
       } else {
-        std::vector<float>& dense_last =
-            DensifyTargetTokenSelection(bonus_target, vocab_size, dense_row);
-        std::discrete_distribution<int> dist(dense_last.begin(), dense_last.end());
-        final_token = dist(round_rng);
+        final_token = SampleSparseToken(
+            bonus_target.indices, bonus_target.probs, round_rng);
         rng_states_after_output.push_back(round_rng);
       }
       bonuses_++;
@@ -815,7 +804,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   if (g.search_->IsDone() || g.search_->GetSequenceLength() >= max_length) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     g.computed_logits_ = false;
     return;
   }
@@ -835,7 +824,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   if (g.search_->IsDone() || g.search_->GetSequenceLength() >= max_length) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     return;
   }
 
@@ -843,7 +832,7 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
       g.search_->GetSequenceLength() == g.phi3_rope_threshold_) {
     DiscardPendingTokens();
     ClearPendingExternalLogits();
-    round_.phase = RoundState::Phase::kReconcilePending;
+    round_.phase = RoundPhase::kReconcilePending;
     return;
   }
 
@@ -858,10 +847,10 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
   // Last token of the round just went out: re-anchor now. (Deferring it to here means an EOS
   // partway through the round skips the re-anchor and its wasted target pass.)
   if (round_.pending.empty() && round_.IsActive()) {
-    round_.phase = RoundState::Phase::kFinalizing;
+    round_.phase = RoundPhase::kFinalizing;
     ClearPendingExternalLogits();
     const auto finalize_start = clock::now();
-    const RoundState::Phase final_phase = FinalizeRound(g);
+    const RoundPhase final_phase = FinalizeRound(g);
     round_.target_ms += ms_f(clock::now() - finalize_start).count();
     FinishRound(final_phase);
   }
@@ -875,28 +864,28 @@ void SpeculativeDecodingStrategy::DrainOne(Generator& g) {
 //   * legacy path (K==1 / pruned target): run it through the target now. This keeps K==1
 //     byte-for-byte identical to plain greedy decoding.
 // Either way we then advance the draft model. Runs once the round's tokens have all been emitted.
-SpeculativeDecodingStrategy::RoundState::Phase
+SpeculativeDecodingStrategy::RoundPhase
 SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
   using clock = std::chrono::steady_clock;
   using ms_f = std::chrono::duration<float, std::milli>;
 
-  if (round_.phase != RoundState::Phase::kFinalizing)
+  if (round_.phase != RoundPhase::kFinalizing)
     throw std::runtime_error("Speculative decoding finalized a round from an invalid phase.");
 
   // Guidance round - hand off to FinalizeGuidanceRound.
   if (round_.kind == RoundState::Kind::kGuidance) {
     if (g.search_->IsDone()) {
       g.computed_logits_ = false;
-      return RoundState::Phase::kReconcilePending;
+      return RoundPhase::kReconcilePending;
     }
     g.SetLogits(FinalizeGuidanceRound(g));
     round_.kind = RoundState::Kind::kStandard;
-    return RoundState::Phase::kIdle;
+    return RoundPhase::kIdle;
   }
 
   if (g.search_->IsDone()) {
     g.computed_logits_ = false;
-    return RoundState::Phase::kReconcilePending;
+    return RoundPhase::kReconcilePending;
   }
 
   const auto& params = *g.search_->params_;
@@ -945,7 +934,7 @@ SpeculativeDecodingStrategy::FinalizeRound(Generator& g) {
 
   // Non-fold re-anchored the target to the committed length (caches match); the fold leaves the
   // target one token behind -> it stays dirty until the next round / PrepareForAppend.
-  return fold ? RoundState::Phase::kReconcilePending : RoundState::Phase::kIdle;
+  return fold ? RoundPhase::kReconcilePending : RoundPhase::kIdle;
 }
 
 // Runs one guidance round over the K proposal tokens - mask the target with the grammar,
@@ -995,7 +984,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
   target_input.CopyCpuToDevice();
 
   auto t_target_start = clock::now();
-  target_state_.RunUnchunked(seed_length + K, target_input, {});
+  target_state_.Run(seed_length + K, target_input, {});
   target_runs_++;
   target_verify_runs_++;
   auto t_target_end = clock::now();
@@ -1045,8 +1034,6 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       !target_uses_greedy && proposal.mode == ProposalMode::kDeterministic;
   const auto& search = params.search;
   std::uniform_real_distribution<float> uni(0.f, 1.f);
-  std::vector<float> correction_buf;  // reject path: max(0, p_target - p_draft), then normalized
-  std::vector<float> dense_target;    // reject path: dense target distribution from sparse selection
   TargetTokenSelection target_selection;
   SampledCategorical sampled_target;
   std::vector<std::mt19937> sampling_rng_states;
@@ -1080,7 +1067,7 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       if (!target_uses_greedy) {
         // Forced tokens consume no random draw, so they keep the current round RNG state.
         AppendGuidanceSamplingOutput(
-          committed, sampling_rng_states, f, round_rng);
+            committed, sampling_rng_states, f, round_rng);
       } else {
         committed.push_back(f);
       }
@@ -1158,8 +1145,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
       // Sampling - speculative sampling on the masked distributions. Accept with min(1, p_t/p_d), else
       // draw the correction from the leftover max(0, p_t - p_d).
       const int32_t dtok = proposal.tokens[i];
+      const auto& draft = proposal.distributions[i];
       const float accept_p = ComputeAcceptProb(GetTargetTokenProbability(target_selection, dtok),
-                                               proposal.probs[i][static_cast<size_t>(dtok)]);
+                                               GetTargetTokenProbability(draft, dtok));
       if (uni(round_rng) < accept_p) {
         AppendGuidanceSamplingOutput(
             committed, sampling_rng_states, dtok, round_rng);
@@ -1173,14 +1161,9 @@ void SpeculativeDecodingStrategy::RunGuidanceRound(Generator& g, const Proposal&
         for (int32_t fwd : CommitGuidanceToken(proc, dtok)) pending_forced.push_back(fwd);
       } else {
         rejected = true;
-        if (correction_buf.empty()) correction_buf.resize(static_cast<size_t>(vocab_size));
-        std::vector<float>& p_t =
-            DensifyTargetTokenSelection(target_selection, vocab_size, dense_target);
-        BuildCorrectionDistribution({p_t.data(), static_cast<size_t>(vocab_size)},
-                                    {proposal.probs[i].data(), static_cast<size_t>(vocab_size)},
-                                    {correction_buf.data(), static_cast<size_t>(vocab_size)});
-        std::discrete_distribution<int> dist(correction_buf.begin(), correction_buf.end());
-        const int32_t ctok = static_cast<int32_t>(dist(round_rng));
+        const int32_t ctok = SampleCorrectionToken(
+            target_selection.indices, target_selection.probs,
+            draft.indices, draft.probs, round_rng);
         AppendGuidanceSamplingOutput(
             committed, sampling_rng_states, ctok, round_rng);
         corrections_++;

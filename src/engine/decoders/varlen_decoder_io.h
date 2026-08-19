@@ -49,7 +49,8 @@ struct VarlenGraphBuffers {
  * - Past Sequence Lengths - int32[batch_size]
  * - Attention Metadata - int32[2] (CPU), optional
  * Outputs:
- * - Logits - float16/float32[total_num_tokens, vocab_size]
+ * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
+ *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.
  *
  * The inputs prepared by this class are compatible with models that use the
  * PagedAttention operator.
@@ -76,6 +77,7 @@ struct VarlenDecoderIO : DecoderIO {
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
+  bool logits_are_per_token_{true};
 };
 
 }  // namespace Generators

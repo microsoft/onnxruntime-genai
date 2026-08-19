@@ -395,14 +395,14 @@ The dynamic path separates failures into recoverable batch failures and fatal en
 
 ### Recoverable rollback
 
-Request validation and post-processing failures are treated as retryable batch aborts. Model execution can also explicitly report a retryable failure.
+Request validation and post-processing failures are treated as retryable batch aborts. Model execution can also explicitly report a retryable failure. A recognized execution-memory capacity failure follows the same rollback path but has its own outcome.
 
 Rollback performs both parts:
 
 1. Restore request search state and sampler state from their checkpoints.
 2. Release every block held by the paged-cache reservation.
 
-After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with `RetryableBatchAbort` and can call `Step()` again.
+After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
 
 The model may have written data into reserved cache memory before the failure. Releasing the reservation is still safe because those blocks were never added to committed block tables. Future users of those blocks overwrite the relevant slots before treating them as valid cache contents.
 
@@ -429,6 +429,7 @@ The engine stores the fatal error and rethrows it on later `Step()` calls. Conti
 | `UnserviceableRequest` | A request cannot fit the configured cache even at full availability |
 | `Committed` | An executable plan was produced and is expected to commit |
 | `RetryableBatchAbort` | The transaction was rolled back and may be retried |
+| `ExecutionCapacityExceeded` | Execution exceeded available memory; the transaction was rolled back and the engine remains healthy |
 | `ExecutionContractFailure` | Collaborators disagreed about planned or committed state |
 | `FatalExecutionFailure` | Execution or rollback failed in a way that makes continued use unsafe |
 
@@ -455,6 +456,43 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 - The ordered physical blocks used by the request.
 
 Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
+
+## Sliding-window paged layers
+
+The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV
+cache through the full context. This path is enabled only when all of the following are true:
+
+- `model.decoder.sliding_window` identifies the window size and layer indices.
+- `model.decoder.inputs.block_table_windowed` is configured and is an input of the exported model.
+- `search.chunk_size` is configured to a value greater than zero.
+- At least one decoder layer keeps the full sequence.
+
+Models without the windowed block-table input continue to use the normal full-sequence paged cache
+for every layer. The layer indices must be within the decoder layer range and the window size must be
+positive.
+
+Let $C$ be the model chunk size, $W$ the sliding-window size, and $B$ the paged-cache block size. A
+step can write $C$ new positions while its earliest query still reads $W - 1$ preceding positions,
+so each request receives
+
+$$
+R = \left\lceil \frac{C + W - 1}{B} \right\rceil
+$$
+
+window blocks at admission. The window blocks come from a separate pool and remain a fixed cost for
+the request. The window block table repeats those $R$ block IDs: column $j$ uses block
+$j \bmod R$, so position $p$ resolves to slot $p \bmod (R B)$. Positions outside the live window
+are overwritten in place.
+
+The dynamic scheduler treats $C$ as a physical per-request query limit. A request-level
+`chunk_size` that is absent, zero, or larger than $C$ is capped to $C$; a smaller positive override
+is preserved. This prevents a transactional step from wrapping the ring while older positions are
+still live.
+
+Window blocks participate in the same reservation, rollback, commit, removal, and invariant checks
+as full-context blocks, but accounting is validated independently for the two pools. CUDA graph
+capture is supported: the runtime builds a persistent window block table with the same bucketed
+shape as the full-context table.
 
 ## Prefill, decode, and mixed batches
 
