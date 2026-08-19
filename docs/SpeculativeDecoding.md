@@ -84,9 +84,9 @@ speculative_options = {
 }
 ```
 
-`get_speculative_options()` returns the effective configuration stored in
+`GeneratorParams.get_speculative_options()` returns the effective configuration stored in
 `GeneratorParams`. It does not return the controller's current adaptive width; use
-`get_speculative_stats()["effective_k"]` for that value.
+`generator.get_speculative_stats()["effective_k"]` for that value.
 
 ## Model configuration
 
@@ -116,8 +116,8 @@ The relevant shape is:
 
 This fragment omits required model architecture, input/output, token, and session fields. Copy
 the complete target `model.decoder` block and complete draft decoder block rather than using the
-fragment as a standalone configuration. A complete test configuration is available at
-[`test/test_models/qwen3-speculative/_spec/genai_config.json`](../test/test_models/qwen3-speculative/_spec/genai_config.json).
+fragment as a standalone configuration. For an end-to-end example, see
+[`test/python/models/test_speculative_decoding.py`](../test/python/models/test_speculative_decoding.py).
 
 The target and draft must:
 
