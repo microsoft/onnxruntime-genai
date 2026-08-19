@@ -173,8 +173,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
       // Each request record reports its own median inter-token latency, not the global one.
       auto& request_samples = request_itl_ms[static_cast<size_t>(i)];
+      const size_t actual_generated = request_tokens[static_cast<size_t>(i)].size() - prompt_token_count;
+      const bool completed = actual_generated == static_cast<size_t>(config.generation_tokens);
       output.requests.push_back(
-          {measured_run_index * config.concurrency + i, ttft_ms, Percentile(request_samples, 50.0)});
+          {measured_run_index * config.concurrency + i, ttft_ms, Percentile(request_samples, 50.0), completed});
 
       // Summary ITL percentiles are token-weighted: each inter-token gap contributes one sample.
       inter_token_latency_values.insert(

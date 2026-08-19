@@ -164,7 +164,7 @@ Core Metrics (all scenarios)
 Scenario-Specific Metrics (optional extensions)
 
 - ex. decode_baseline:
-	- output text capture for correctness checks
+	- ~~output text capture for correctness checks~~ **(Decided later: deprioritized, see note below)**
 	- optional inter-token latency distribution details
 
 Example `out/decode_baseline_results_001.json` shape:
@@ -204,12 +204,12 @@ Example `out/decode_baseline_results_001.json` shape:
                 "request_id": 0,
                 "ttft_ms": 0,
                 "e2e_ms": 0,
-                "generated_tokens_per_s": 0
+                "generated_tokens_per_s": 0,
+                "completed": true
             }
         ]
     },
     "scenario_metrics": {
-        "outputs": [],
         "inter_token_latency_ms": {
             "p50": 0,
             "p95": 0
@@ -217,6 +217,9 @@ Example `out/decode_baseline_results_001.json` shape:
     }
 }
 ```
+
+<!-- "outputs": [] was originally planned in scenario_metrics for captured-output correctness
+     checks; deprioritized post-review in favor of performance work, see benchmark-requirements.md. -->
 
 This hybrid model keeps cross-scenario comparison clean while still allowing each scenario to report what matters most.
 

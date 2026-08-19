@@ -48,6 +48,8 @@ struct RequestMetrics {
   int request_id{0};
   double ttft_ms{0.0};
   double inter_token_latency_ms{0.0};
+  // False when the request generated fewer tokens than config.generation_tokens.
+  bool completed{true};
 };
 
 struct ScenarioExecutionOutput {
