@@ -115,6 +115,7 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
 
   std::unordered_set<const void*> reservation_requests;
   std::unordered_set<size_t> blocks_assigned_to_delta;
+  std::unordered_set<size_t> window_blocks_assigned_to_delta;
   for (const auto& reservation : cache.reservations) {
     if (!reservation_requests.insert(reservation.request_id).second) {
       add("Request " + PtrId(reservation.request_id) +
@@ -129,6 +130,20 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
       add("Request " + PtrId(reservation.request_id) +
           " transaction tail-slot growth exceeds total growth.");
     }
+    const auto committed_owner = std::find_if(
+        cache.requests.begin(), cache.requests.end(),
+        [&reservation](const RequestBlockSnapshot& request) {
+          return request.request_id == reservation.request_id;
+        });
+    if (reservation.newly_admitted == (committed_owner != cache.requests.end())) {
+      add("Request " + PtrId(reservation.request_id) +
+          " transaction membership disagrees with committed cache ownership.");
+    }
+    if (committed_owner != cache.requests.end() &&
+        reservation.committed_slots != committed_owner->used_slots) {
+      add("Request " + PtrId(reservation.request_id) +
+          " transaction committed slots disagree with committed cache usage.");
+    }
     for (const size_t block_id : reservation.reserved_block_ids) {
       if (reserved_blocks.find(block_id) == reserved_blocks.end()) {
         add("Request " + PtrId(reservation.request_id) +
@@ -137,6 +152,12 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
       }
       if (!blocks_assigned_to_delta.insert(block_id).second) {
         add("Transaction-reserved block id " + std::to_string(block_id) +
+            " is assigned to more than one Request delta.");
+      }
+    }
+    for (const size_t block_id : reservation.reserved_window_block_ids) {
+      if (!window_blocks_assigned_to_delta.insert(block_id).second) {
+        add("Transaction-reserved window block id " + std::to_string(block_id) +
             " is assigned to more than one Request delta.");
       }
     }
@@ -185,6 +206,25 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     if (window_owner_of_block.find(block_id) != window_owner_of_block.end()) {
       add("Transaction-reserved window block id " + std::to_string(block_id) +
           " is also committed to a Request.");
+    }
+  }
+  if (window_blocks_assigned_to_delta != reserved_window_blocks) {
+    add("Not every transaction-reserved window block belongs to exactly one Request delta.");
+  }
+  if (window.total_blocks == 0 && !window_blocks_assigned_to_delta.empty()) {
+    add("A non-windowed cache has Request-attributed window reservations.");
+  }
+  if (window.total_blocks != 0) {
+    for (const auto& reservation : cache.reservations) {
+      const size_t expected_window_blocks =
+          reservation.newly_admitted ? window.blocks_per_request : 0;
+      if (reservation.reserved_window_block_ids.size() !=
+          expected_window_blocks) {
+        add("Request " + PtrId(reservation.request_id) + " owns " +
+            std::to_string(reservation.reserved_window_block_ids.size()) +
+            " transaction-reserved window blocks instead of " +
+            std::to_string(expected_window_blocks) + ".");
+      }
     }
   }
   if (window.free_blocks > window.total_blocks) {
@@ -253,6 +293,54 @@ std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cac
     if (known_requests.find(owner.request_id) == known_requests.end()) {
       violations.push_back(InvariantViolation{
           "Cache holds a block table for unknown Request " + PtrId(owner.request_id) + "."});
+    }
+  }
+  for (const auto& owner : cache.window_blocks.requests) {
+    if (known_requests.find(owner.request_id) == known_requests.end()) {
+      violations.push_back(InvariantViolation{
+          "Window cache holds a block table for unknown Request " +
+          PtrId(owner.request_id) + "."});
+    }
+  }
+  for (const auto& reservation : cache.reservations) {
+    if (known_requests.find(reservation.request_id) == known_requests.end()) {
+      violations.push_back(InvariantViolation{
+          "Cache holds a transaction reservation for unknown Request " +
+          PtrId(reservation.request_id) + "."});
+    }
+  }
+
+  std::unordered_map<const void*, size_t> processed_by_request;
+  for (const auto& request : requests) {
+    if (request.processed_sequence_length >= 0) {
+      processed_by_request.emplace(
+          request.request_id,
+          static_cast<size_t>(request.processed_sequence_length));
+    }
+  }
+  for (const auto& owner : cache.requests) {
+    const auto processed = processed_by_request.find(owner.request_id);
+    if (processed != processed_by_request.end() &&
+        owner.used_slots != processed->second) {
+      violations.push_back(InvariantViolation{
+          "Request " + PtrId(owner.request_id) + " committed cache usage (" +
+          std::to_string(owner.used_slots) + ") differs from processed sequence length (" +
+          std::to_string(processed->second) + ")."});
+    }
+  }
+
+  if (cache.window_blocks.total_blocks != 0) {
+    std::set<const void*> full_owners;
+    std::set<const void*> window_owners;
+    for (const auto& owner : cache.requests) {
+      full_owners.insert(owner.request_id);
+    }
+    for (const auto& owner : cache.window_blocks.requests) {
+      window_owners.insert(owner.request_id);
+    }
+    if (full_owners != window_owners) {
+      violations.push_back(InvariantViolation{
+          "Full-cache and window-cache owner sets disagree."});
     }
   }
 

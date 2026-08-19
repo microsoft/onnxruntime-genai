@@ -499,6 +499,15 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
       request_reservation.reserved_block_ids.push_back(
           reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
     }
+    request_reservation.reserved_window_block_ids.reserve(
+        delta.reserved_window_block_count);
+    for (size_t i = 0; i < delta.reserved_window_block_count; ++i) {
+      request_reservation.reserved_window_block_ids.push_back(
+          reservation.ReservedWindowBlocks()[
+              delta.reserved_window_block_offset + i]
+              ->Id());
+    }
+    request_reservation.newly_admitted = delta.newly_admitted;
     snapshot.reservations.push_back(std::move(request_reservation));
   }
   return snapshot;

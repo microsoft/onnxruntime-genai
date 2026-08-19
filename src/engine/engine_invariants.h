@@ -53,6 +53,8 @@ struct RequestReservationSnapshot {
   size_t target_slots{};
   size_t tail_slots_to_consume{};
   std::vector<size_t> reserved_block_ids;
+  std::vector<size_t> reserved_window_block_ids;
+  bool newly_admitted{};
 };
 
 struct WindowBlockPoolSnapshot {
