@@ -515,7 +515,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGene
 /**
  * \brief Set a numerical value for a speculative decoding option.
  * \param[in] params The generator params to set.
- * \param[in] name The name of the speculative option (e.g. "max_draft_tokens").
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens" or "ngram_size").
  * \param[in] value The value to set.
  * \return OgaResult containing the error message if setting the option failed.
  */
@@ -529,6 +529,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGen
  * \return OgaResult containing the error message if getting the option failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
+ * \brief Set a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option.
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeBool(OgaGeneratorParams* params, const char* name, bool value);
+
+/**
+ * \brief Get a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
  * \brief Creates a generator from the given model and generator params.
