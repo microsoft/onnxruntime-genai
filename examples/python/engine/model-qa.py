@@ -6,6 +6,8 @@ import json
 
 import onnxruntime_genai as og
 
+MAX_LENGTH = 1024
+
 
 def run(args: argparse.Namespace):
     config = og.Config(args.model_path)
@@ -20,7 +22,7 @@ def run(args: argparse.Namespace):
     params = og.GeneratorParams(model)
     params.set_search_options(
         do_sample=False,
-        max_length=1024,
+        max_length=MAX_LENGTH,
     )
 
     system_message = json.dumps([{"role": "system", "content": ""}])
@@ -53,8 +55,12 @@ def run(args: argparse.Namespace):
                 tokenizer.apply_chat_template(messages=user_message, add_generation_prompt=True),
             )
 
+            if len(logical_token_history) + len(turn_tokens) >= MAX_LENGTH:
+                print("Context exhausted; restart to begin a new conversation.")
+                break
+
+            logical_token_history.extend(int(token) for token in turn_tokens)
             if use_dml_replay:
-                logical_token_history.extend(int(token) for token in turn_tokens)
                 request = og.Request(params)
                 request.add_tokens(logical_token_history)
                 engine.add_request(request)
@@ -70,8 +76,8 @@ def run(args: argparse.Namespace):
 
             while ready_request := engine.step():
                 while ready_request.has_unseen_tokens():
-                    token = ready_request.get_unseen_token()
-                    if use_dml_replay and token not in eos_token_ids:
+                    token = int(ready_request.get_unseen_token())
+                    if token not in eos_token_ids:
                         logical_token_history.append(token)
                     print(
                         streaming_tokenizer.decode(token),
