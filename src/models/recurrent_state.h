@@ -25,8 +25,8 @@ struct RecurrentState {
   void RestoreSnapshot();
 
   // Per-position recurrent-state cropping (lossless multi-token MTP). When the model is exported
-  // with `recurrent_state_window=W`, the past/present conv + recurrent state tensors carry a
-  // window axis at position 1: slot j holds the state AFTER token (seq_len - W + j) of the
+  // with `state_window=W`, the past/present conv + recurrent state tensors carry a
+  // window axis at position 0: slot j holds the state AFTER token (seq_len - W + j) of the
   // forward, right-aligned, so slot W-1 is the state after the last token and is the only slot
   // the ops read back. On a partial-accept MTP step the controller crops the live state to the
   // accepted length by copying slot `position` into slot W-1 -- no full-cost main-model replay
