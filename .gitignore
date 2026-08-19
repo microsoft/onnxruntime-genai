@@ -44,12 +44,6 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
-!/test/models/engine/
-/test/models/engine/*
-!/test/models/engine/synthetic-windowed-multiwrap/
-/test/models/engine/synthetic-windowed-multiwrap/*
-!/test/models/engine/synthetic-windowed-multiwrap/decoder.onnx
-!/test/models/engine/synthetic-windowed-multiwrap/genai_config.json
 
 .ipynb_checkpoints/
 /src/java/.gradle
