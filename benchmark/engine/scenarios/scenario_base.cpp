@@ -68,7 +68,8 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
     // A request that returns fewer tokens than requested must not be reported as a success.
     if (incomplete_count > 0) {
       result["status"] = "failed";
-      result["error"] = std::to_string(incomplete_count) + " of " + std::to_string(output.requests.size()) +
+      result["error"] = std::to_string(incomplete_count) + " of " +
+                         std::to_string(output.requests.size()) +
                          " request(s) completed with fewer tokens than requested";
     } else {
       result["status"] = "success";
