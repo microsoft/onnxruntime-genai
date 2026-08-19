@@ -128,9 +128,7 @@ void Request::PrepareForStep(size_t max_generated_token_indices) {
         unseen_token_indices_.begin() +
         static_cast<std::vector<size_t>::difference_type>(
             next_unseen_token_index_);
-    std::move(unread_begin, unseen_token_indices_.end(),
-              unseen_token_indices_.begin());
-    unseen_token_indices_.resize(unread_token_count);
+    unseen_token_indices_.erase(unseen_token_indices_.begin(), unread_begin);
     next_unseen_token_index_ = 0;
   }
 
