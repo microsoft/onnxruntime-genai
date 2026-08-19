@@ -45,7 +45,7 @@ inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
   }
   StepPlan plan;
   plan.requests.push_back(std::move(entry));
-  ScheduledRequests scheduled{plan, model, nullptr, nullptr};
+  static_cast<void>(ScheduledRequests{plan, model, nullptr, nullptr});
 }
 
 // Mints a Request carrying `prompt_tokens` but does not assign it, leaving it Unassigned so it can be
