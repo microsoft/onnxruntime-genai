@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -225,17 +226,30 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidExplicitBindings) {
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
 }
 
-TEST(ModelStateManifestTest, RejectsSparsePagedDynamicEngineContract) {
+TEST(ModelStateManifestTest, RejectsFixedDynamicEngineContract) {
   auto decoder = MakeSparseDecoder();
   try {
     ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
-    FAIL() << "Expected the sparse state contract to be rejected";
+    FAIL() << "Expected the fixed state contract to be rejected";
   } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string{error.what()}.find("dense paged_kv"), std::string::npos) << error.what();
+    EXPECT_NE(std::string{error.what()}.find("fixed decoder state"), std::string::npos) << error.what();
   }
 }
 
-TEST(ModelStateManifestTest, RejectsDynamicEngineBindingsThatDifferFromLegacyNames) {
+TEST(ModelStateManifestTest, AcceptsSparsePagedDynamicEngineContract) {
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->erase(
+      std::remove_if(decoder.state_groups->begin(), decoder.state_groups->end(),
+                     [](const auto& group) {
+                       return group.kind == Config::Model::Decoder::StateGroupKind::Fixed;
+                     }),
+      decoder.state_groups->end());
+
+  EXPECT_NO_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
+}
+
+TEST(ModelStateManifestTest, AcceptsDynamicEngineBindingsThatDifferFromLegacyNames) {
   using Decoder = Config::Model::Decoder;
   Decoder decoder;
   decoder.num_hidden_layers = 1;
@@ -247,9 +261,8 @@ TEST(ModelStateManifestTest, RejectsDynamicEngineBindingsThatDifferFromLegacyNam
           Decoder::StateBinding{"custom.%d.value", "present.%d.value"},
           std::nullopt}};
 
-  EXPECT_THROW(
-      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder),
-      std::runtime_error);
+  EXPECT_NO_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
 }
 
 TEST(ModelStateManifestTest, AcceptsLegacyDynamicEngineContract) {
