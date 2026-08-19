@@ -8,13 +8,6 @@
 
 namespace Generators {
 
-namespace {
-
-// Static Engine requests are also constrained to one sequence and one beam.
-constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
-
-}  // namespace
-
 Scheduler::Scheduler(std::shared_ptr<Model> model)
     : model_{model} {
   constexpr size_t default_static_batch_size = 4;

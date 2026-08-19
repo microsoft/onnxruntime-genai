@@ -11,10 +11,6 @@ namespace Generators {
 
 namespace {
 
-// Engine Request is constrained to one sequence and one beam, so a chunk-complete step can append
-// at most one generated-output index.
-constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
-
 // Collapses Request::GenerateNextTokens' dispatch into the single (k, p, temperature) triple that
 // each branch ends up handing to the sampler on CUDA, where SelectTop() is SampleTopKTopP(1, 0, 1),
 // SampleTopK(k, t) is SampleTopKTopP(k, 1, t) and SampleTopP(p, t) is SampleTopKTopP(-1, p, t).

@@ -35,6 +35,10 @@ struct RequestStepResult {
   bool done{};
 };
 
+// Every Engine Request has one sequence and one beam, so a chunk-complete step can append at most
+// one generated-output index.
+inline constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
+
 struct RequestAdmissionPreparation {
   RequestAdmissionPreparation();
   ~RequestAdmissionPreparation();
