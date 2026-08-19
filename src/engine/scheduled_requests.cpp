@@ -39,11 +39,6 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
   // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
   for (auto& request : requests_) {
     request->ScheduleTokens();
-    const size_t max_generated_token_indices =
-        IsExecuting(request->status_) && request->IsChunkComplete()
-            ? kMaxGeneratedTokenIndicesPerStep
-            : 0;
-    request->PrepareForStep(max_generated_token_indices);
   }
 }
 
