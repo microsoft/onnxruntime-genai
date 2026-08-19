@@ -2481,10 +2481,10 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             # bit-identically with the main model: redirect mtp.onnx's copies to the
             # main model's external data file and pack them out of mtp.onnx.data
             # (~2 GB on disk; the two sessions then mmap the same bytes on the host).
-            self._share_mtp_embedding_lm_head(out_dir)
+            self._share_mtp_embedding_lm_head(out_dir, self.filename)
 
     @staticmethod
-    def _share_mtp_embedding_lm_head(out_dir, main_file="model.onnx", mtp_file="mtp.onnx"):
+    def _share_mtp_embedding_lm_head(out_dir, main_file, mtp_file="mtp.onnx"):
         """Redirect mtp.onnx's embed_tokens/lm_head external data to model.onnx.data
         and remove the duplicated bytes from mtp.onnx.data.
 
@@ -2606,10 +2606,34 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             )
             return
 
-        # Commit only fully staged files. A replacement failure is intentionally
-        # fatal: suppressing it could report success for an inconsistent pair.
-        os.replace(tmp_data, mtp_data)
-        os.replace(tmp_onnx, mtp_onnx)
+        # Keep the original pair recoverable until both staged files are installed.
+        backup_data = mtp_data + ".bak"
+        backup_onnx = mtp_onnx + ".bak"
+        try:
+            os.replace(mtp_data, backup_data)
+            os.replace(mtp_onnx, backup_onnx)
+            os.replace(tmp_data, mtp_data)
+            os.replace(tmp_onnx, mtp_onnx)
+        except Exception as exc:
+            rollback_errors = []
+            for backup_path, original_path in ((backup_data, mtp_data), (backup_onnx, mtp_onnx)):
+                if os.path.exists(backup_path):
+                    try:
+                        os.replace(backup_path, original_path)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(rollback_exc)
+            for tmp_path in (tmp_data, tmp_onnx):
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            if rollback_errors:
+                raise RuntimeError("Failed to restore MTP files after replacement failure.") from exc
+            print(
+                f"Warning: could not commit shared MTP embedding/lm_head weights ({exc}); "
+                f"the duplicated copies remain in {mtp_data_name}."
+            )
+            return
+        os.remove(backup_data)
+        os.remove(backup_onnx)
         saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
         print(f"Shared MTP embedding + lm_head with the main model (saved {saved_mb:.0f} MB from {mtp_data_name})")
 

@@ -192,8 +192,11 @@ def check_extra_options(
     if extra_options.get("enable_mtp", False):
         if not extra_options.get("include_hidden_states", False):
             raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
-        if extra_options.get("exclude_lm_head", False):
-            raise ValueError("enable_mtp cannot be combined with exclude_lm_head=true.")
+        incompatible_options = [
+            key for key in ("exclude_lm_head", "prune_lm_head") if extra_options.get(key, False)
+        ]
+        if incompatible_options:
+            raise ValueError("enable_mtp cannot be combined with " + ", ".join(incompatible_options) + ".")
 
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
@@ -748,7 +751,8 @@ def get_args():
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
                 enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
-                    Requires include_hidden_states=true, exclude_lm_head=false, and source safetensors containing mtp.* weights.
+                    Requires include_hidden_states=true, exclude_lm_head=false, prune_lm_head=false,
+                    and source safetensors containing mtp.* weights.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
                 state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).

@@ -372,7 +372,7 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_mtp=true include_hidden_states=true
 ```
 
-Note that `enable_mtp` is only supported for Qwen3.6 MoE models (`Qwen3_5MoeForConditionalGeneration`) that ship `mtp.*` weights in their safetensors. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load.
+Note that `enable_mtp` is only supported for Qwen3.6 MoE models (`Qwen3_5MoeForConditionalGeneration`) that ship `mtp.*` weights in their safetensors. It cannot be combined with `exclude_lm_head=true` or `prune_lm_head=true`. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load.
 
 By default the MTP head inherits the main model's settings. For a ModelOpt checkpoint, the builder preserves each original MTP tensor format: native NVFP4 linears and experts remain NVFP4, FP8 attention projections remain FP8, and unquantized tensors follow the requested graph precision.
 

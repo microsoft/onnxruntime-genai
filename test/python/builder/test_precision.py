@@ -232,6 +232,15 @@ def test_enable_mtp_requires_hidden_states(monkeypatch):
         _run_check_extra_options(monkeypatch, {"enable_mtp": "true"})
 
 
+@pytest.mark.parametrize("option", ["exclude_lm_head", "prune_lm_head"])
+def test_enable_mtp_rejects_incompatible_lm_head_options(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"enable_mtp": "true", "include_hidden_states": "true", option: "true"},
+        )
+
+
 def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
     options = {"enable_mtp": "true", "include_hidden_states": "true"}
 
