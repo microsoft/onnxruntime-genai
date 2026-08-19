@@ -83,7 +83,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
       plan ? plan->token_count
            : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
                              [](size_t sum, const std::shared_ptr<Request>& request) {
-                               return sum + request->UnprocessedTokens().size();
+                               return sum + request->ScheduledTokenCount();
                              });
   // On a capturable step the tensors are views onto buffers that were allocated once, so their
   // device addresses match the ones recorded in the graph. Otherwise each step allocates its own.
@@ -199,7 +199,7 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     }
   } else {
     for (auto& request : scheduled_requests) {
-      const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
+      const int32_t query_len = static_cast<int32_t>(request->ScheduledTokenCount());
       // KV length after the step is past length plus query length, which is the current length.
       const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
       max_query_len = std::max(max_query_len, query_len);
@@ -226,7 +226,7 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
         plan ? plan->token_count
              : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
                                [](size_t sum, const std::shared_ptr<Request>& request) {
-                                 return sum + request->UnprocessedTokens().size();
+                                 return sum + request->ScheduledTokenCount();
                                });
   }
   const std::vector<int64_t> logits_shape = {
@@ -263,8 +263,8 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
       }
     } else {
       for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
-        valid_token_indices[i] = running_length + scheduled_requests_[i]->UnprocessedTokens().size() - 1;
-        running_length += scheduled_requests_[i]->UnprocessedTokens().size();
+        valid_token_indices[i] = running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1;
+        running_length += scheduled_requests_[i]->ScheduledTokenCount();
       }
     }
   } else {
