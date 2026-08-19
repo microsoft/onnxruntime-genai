@@ -20,10 +20,6 @@ struct Request;
 struct ScheduledRequests;
 struct StaticBatchScheduler;
 
-namespace test {
-struct RequestTestAccess;
-}
-
 template <>
 struct ExternalRefCountedTraits<Request> {
   static constexpr bool notify_external_reference_changes = true;
@@ -318,7 +314,6 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct ExternalRefCounted<Request>;
   friend struct ScheduledRequests;
   friend struct StaticBatchScheduler;
-  friend struct test::RequestTestAccess;
 
   void CompleteClose();
   void OnFirstExternalReference() noexcept;

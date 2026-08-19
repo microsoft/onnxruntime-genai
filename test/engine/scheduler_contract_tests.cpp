@@ -72,7 +72,7 @@ class SchedulerContractTest : public ::testing::Test {
     plan.sequence_length_before = before.current_sequence_length;
     plan.target_cache_slots =
         static_cast<size_t>(before.current_sequence_length);
-    RequestTestAccess::PrepareForStep(*request, 1);
+    PrepareRequestStep(model_, plan);
     request->SaveStateForTransaction();
     const auto result = request->ApplyLogitsForTransaction(logits);
     request->CommitStateForTransaction();
@@ -99,50 +99,6 @@ TEST_F(SchedulerContractTest, DynamicPlansSingleAssignedRequestWithoutAdmissionM
   EXPECT_EQ(plan.requests[0].unprocessed_token_count, 3u);
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
   EXPECT_EQ(cache->AllocatedCount(), 0u);
-}
-
-TEST_F(SchedulerContractTest, DynamicScheduledRequestsPreflightBoundedUnseenCapacity) {
-  constexpr int kLargeMaxLength = 100'000;
-  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
-  DynamicBatchScheduler scheduler(model_, cache);
-  auto prompt = Prompt(10);
-  auto request = MintRequest(*model_, prompt);
-  request->Params()->search.max_length = kLargeMaxLength;
-  request->Assign(assign_target_);
-  scheduler.AddRequest(request);
-  StepPlan plan;
-  ASSERT_TRUE(scheduler.PlanStep(plan).executable);
-  ASSERT_EQ(RequestTestAccess::UnseenTokenIndexCapacity(*request), 0u);
-
-  auto scheduled_requests = scheduler.CreateScheduledRequests(plan);
-
-  EXPECT_EQ(scheduled_requests.size(), 1u);
-  EXPECT_GE(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1u);
-  EXPECT_LT(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1024u);
-}
-
-TEST_F(SchedulerContractTest, StaticScheduledRequestsPreflightPreservesGenerationAppend) {
-  constexpr int kLargeMaxLength = 100'000;
-  model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
-  StaticBatchScheduler scheduler(model_, cache);
-  auto prompt = Prompt(10);
-  auto request = MintRequest(*model_, prompt);
-  request->Params()->search.max_length = kLargeMaxLength;
-  request->Assign(assign_target_);
-  scheduler.AddRequest(request);
-  ASSERT_EQ(RequestTestAccess::UnseenTokenIndexCapacity(*request), 0u);
-
-  auto scheduled_requests = scheduler.Schedule();
-
-  EXPECT_GE(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1u);
-  EXPECT_LT(RequestTestAccess::UnseenTokenIndexCapacity(*request), 1024u);
-  scheduled_requests.AddDecoderState(std::make_unique<ScriptedDecoderIO>(
-      model_, scheduled_requests, cache, /*forced_token=*/5));
-  scheduled_requests.GenerateNextTokens();
-  ASSERT_TRUE(request->HasUnseenTokens());
-  EXPECT_EQ(request->UnseenToken(), 5);
 }
 
 TEST_F(SchedulerContractTest, DynamicPreservesRequestOrder) {

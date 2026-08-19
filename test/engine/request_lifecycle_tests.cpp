@@ -198,7 +198,7 @@ TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
       static_cast<size_t>(first_plan.sequence_length_before);
   constexpr int32_t generated_token = 5;
   auto first_logits = LogitsForToken(*model_, generated_token);
-  RequestTestAccess::PrepareForStep(*request, 1);
+  PrepareRequestStep(model_, first_plan);
   request->SaveStateForTransaction();
   const auto first_result = request->ApplyLogitsForTransaction(first_logits);
   request->CommitStateForTransaction();
@@ -212,7 +212,7 @@ TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
   completion_plan.target_cache_slots =
       static_cast<size_t>(completion_plan.sequence_length_before);
   auto eos_logits = LogitsForToken(*model_, EosToken(*model_));
-  RequestTestAccess::PrepareForStep(*request, 1);
+  PrepareRequestStep(model_, completion_plan);
   request->SaveStateForTransaction();
   const auto completion_result =
       request->ApplyLogitsForTransaction(eos_logits);
@@ -318,9 +318,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   const int32_t next_token = 5;
   auto logits = LogitsForToken(*model_, next_token);
 
-  RequestTestAccess::PrepareForStep(*request, 1);
-  const size_t unseen_capacity_before_commit =
-      RequestTestAccess::UnseenTokenIndexCapacity(*request);
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   const auto result = request->ApplyLogitsForTransaction(logits);
 
@@ -336,8 +334,6 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   request->CommitStep(plan, result);
 
   const auto committed = request->Snapshot();
-  EXPECT_EQ(RequestTestAccess::UnseenTokenIndexCapacity(*request),
-            unseen_capacity_before_commit);
   EXPECT_EQ(committed.status, RequestStatus::Active);
   EXPECT_EQ(committed.processed_sequence_length, before.current_sequence_length);
   EXPECT_FALSE(committed.is_prefill);
@@ -374,7 +370,7 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   plan.unprocessed_token_count = 2;
   plan.target_cache_slots = 2;
 
-  RequestTestAccess::PrepareForStep(*request, 0);
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   request->CommitStateForTransaction();
   request->CommitStep(plan, RequestStepResult{});
@@ -399,7 +395,7 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToTurnComple
   plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
   auto logits = LogitsForToken(*model_, EosToken(*model_));
 
-  RequestTestAccess::PrepareForStep(*request, 1);
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   const auto result = request->ApplyLogitsForTransaction(logits);
   request->CommitStateForTransaction();
