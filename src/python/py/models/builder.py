@@ -453,10 +453,6 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
@@ -481,10 +477,6 @@ def create_model(
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Mistral3ForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -521,36 +513,20 @@ def create_model(
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen2_5_vl_text"
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_vl_text"
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         onnx_model = Qwen35MoETextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_moe_text"
@@ -560,8 +536,7 @@ def create_model(
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        if not onnx_model.exclude_embeds:
-            onnx_model.model_type = "qwen2"  # TODO: check this
+        onnx_model.model_type = "qwen2"
     elif config.architectures[0] == "WhisperForConditionalGeneration":
         onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:

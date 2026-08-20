@@ -72,17 +72,14 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             self.position_ids_name = None
 
     def make_rope_init(self, config):
-        rope_params = self.get_rope_parameters(config)
-        if not isinstance(rope_params, Mapping):
-            return
-        if "short_factor" in rope_params:
+        if config.rope_parameters["rope_scaling"] == "longrope":
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
-            self.rope_attrs["mscale_policy"] = rope_params["type"]
-            short_factor = torch.tensor(rope_params["short_factor"], dtype=torch.float32)
-            long_factor = torch.tensor(rope_params["long_factor"], dtype=torch.float32)
+            self.rope_attrs["mscale_policy"] = config.rope_parameters["type"]
+            short_factor = torch.tensor(config.rope_parameters["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(config.rope_parameters["long_factor"], dtype=torch.float32)
 
-            short_mscale = rope_params["short_mscale"] if "short_mscale" in rope_params else 0
-            long_mscale = rope_params["long_mscale"] if "long_mscale" in rope_params else 0
+            short_mscale = config.rope_parameters["short_mscale"] if "short_mscale" in config.rope_parameters else 0
+            long_mscale = config.rope_parameters["long_mscale"] if "long_mscale" in config.rope_parameters else 0
             short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
             long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
 
@@ -542,7 +539,6 @@ class Phi3VModel(Phi3MiniLongRoPEModel):
 class Phi3MoELongRoPEModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        assert io_dtype == ir.DataType.FLOAT16, "This model only supports float16 io type."
         self.layernorm_attrs["simple"] = False
         self.moe_attrs["use_sparse_mixer"] = True
         self.make_rotary_embedding_multi_cache()

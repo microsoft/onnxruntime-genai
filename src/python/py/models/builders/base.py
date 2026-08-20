@@ -42,19 +42,13 @@ from quantization import CudaQuantizer, QuantConfig, desugar_algo_config, resolv
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.make_config_init(config)
+
         # Model attributes from config
         self.context_length = getattr(config, "seq_length", config.max_position_embeddings)
-
-        # Transformers v5 standardizes RoPE settings under `rope_parameters`; older
-        # versions used `rope_scaling` (kept as a backward-compatible alias in v5).
-        # Read whichever the installed transformers version provides.
-        rope_params = self.get_rope_parameters(config)
         self.original_context_length = (
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
-            else rope_params["original_max_position_embeddings"]
-            if isinstance(rope_params, Mapping)
-            and "original_max_position_embeddings" in rope_params
             else self.context_length
         )
         self.window_size = getattr(config, "sliding_window", -1)  # default is -1 in GroupQueryAttention kernel
@@ -108,6 +102,7 @@ class Model:
         self.linear_value_dim = self.linear_num_value_heads * self.linear_value_head_dim
         self.linear_conv_dim = self.linear_key_dim * 2 + self.linear_value_dim
 
+        # Global variables for model builder
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
         self.io_dtype = ir.DataType(io_dtype)
@@ -281,12 +276,8 @@ class Model:
         rope_theta = (
             config.rope_theta
             if hasattr(config, "rope_theta")
-            else config.rope_parameters.get("rope_theta", 10000)
-            if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict)
             else config.rope_embedding_base
             if hasattr(config, "rope_embedding_base")
-            else rope_params["rope_theta"]
-            if isinstance(rope_params, Mapping) and "rope_theta" in rope_params
             else 10000
         )
         self.rope_attrs = {
@@ -443,6 +434,38 @@ class Model:
         # Initialize tied embeddings
         self.make_tied_embeddings_init(config)
 
+    def make_config_init(self, config):
+        """
+        Initialize the model configuration.
+
+        This method can be overridden in subclasses to customize the initialization of the model configuration.
+        """
+        # Note: the order in which the below cases are executed does matter. There are some cases
+        # where a config.json file contains nested sections where all of them are covered below.
+        # Ex: there could be a rope_parameters section inside a text_config.
+        if hasattr(config, "text_config"):
+            # Collapse all options inside text_config to the top-level config for easier access.
+            text_config = config.text_config
+            for key in text_config:
+                if not hasattr(config, key):
+                    setattr(config, key, getattr(text_config, key))
+
+        if hasattr(config, "rope_scaling"):
+            # Collapse all options inside rope_scaling to rope_parameters for easier access.
+            rope_scaling = config.rope_scaling
+            for key in rope_scaling:
+                if not hasattr(config, "rope_parameters"):
+                    setattr(config, "rope_parameters", dict())
+                if not hasattr(config.rope_parameters, key):
+                    config.rope_parameters[key] = rope_scaling[key]
+
+        if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
+            # Collapse all options inside rope_parameters to the top-level config for easier access.
+            rope_params = config.rope_parameters
+            for key in rope_params:
+                if not hasattr(config, key):
+                    setattr(config, key, rope_params[key])
+
     def make_ep_expansions_init(self):
         """
         Replace the current class's methods with the appropriate expansion class's methods.
@@ -542,35 +565,22 @@ class Model:
             return ["num_tokens", last_dim]
         return ["batch_size", seq_dim, last_dim]
 
-    def get_rope_parameters(self, config):
-        """Return the RoPE parameters mapping from the model config.
-
-        Transformers v5 standardizes RoPE settings under `rope_parameters`.
-        Older versions (and the v5 backward-compatible alias) expose the same
-        data under `rope_scaling`. Prefer `rope_parameters` and fall back to
-        `rope_scaling` so the builder works across transformers versions.
-        """
-        rope_parameters = getattr(config, "rope_parameters", None)
-        if rope_parameters is not None:
-            return rope_parameters
-        return getattr(config, "rope_scaling", None)
-
     def make_rope_init(self, config):
-        rope_params = self.get_rope_parameters(config)
-        if not isinstance(rope_params, Mapping):
+        if not hasattr(config, "rope_parameters") or not isinstance(config.rope_parameters, dict):
+            # Early return if no RoPE parameters are set
             return
 
-        if "beta_fast" in rope_params:
+        if config.rope_parameters["rope_type"] == "yarn":
             # For models that use YARN (e.g. GPT-OSS, Ministral-3)
-            factor = rope_params["factor"] if "factor" in rope_params else 0
-            beta_slow = rope_params["beta_slow"] if "beta_slow" in rope_params else 0
-            beta_fast = rope_params["beta_fast"] if "beta_fast" in rope_params else 0
+            factor = config.rope_parameters["factor"] if "factor" in config.rope_parameters else 0
+            beta_slow = config.rope_parameters["beta_slow"] if "beta_slow" in config.rope_parameters else 0
+            beta_fast = config.rope_parameters["beta_fast"] if "beta_fast" in config.rope_parameters else 0
 
-            self.rope_attrs["mscale_policy"] = rope_params["rope_type"]
+            self.rope_attrs["mscale_policy"] = config.rope_parameters["rope_type"]
             self.rope_attrs["mscale"] = self.make_mscale(
-                rope_params["factor"],
-                config_mscale=rope_params.get("mscale", 0),
-                config_mscale_all_dim=rope_params.get("mscale_all_dim", 0),
+                factor,
+                config_mscale=config.rope_parameters.get("mscale", 0),
+                config_mscale_all_dim=config.rope_parameters.get("mscale_all_dim", 0),
             )
             self.rope_attrs["rescale_inv_freq"] = {
                 "factor": factor,
@@ -578,27 +588,19 @@ class Model:
                 "ntk_beta": beta_fast,
             }
 
-        elif (
-            rope_params.get("rope_type", rope_params.get("type")) == "linear"
-            and "factor" in rope_params
-        ):
-            # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
-            # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.
-            factor = float(rope_params["factor"])
-            if factor <= 0:
-                raise ValueError(f"rope_scaling.factor must be positive for linear RoPE scaling, got {factor}")
-            self.rope_attrs["rescale_factors"] = factor
-
-        elif "mrope_section" in rope_params:
+        elif config.rope_parameters["rope_type"] == "default" and "mrope_section" in config.rope_parameters and config.rope_parameters["mrope_section"] is not None:
             # For models that use MRoPE (e.g. Qwen-2.5 VL, Qwen-3 VL)
             self.rope_attrs["op_type"] = "MRotaryEmbedding"
-            self.rope_attrs["mrope_section"] = rope_params["mrope_section"]  # Sections for MRoPE
+            self.rope_attrs["mrope_section"] = config.rope_parameters["mrope_section"]  # Sections for MRoPE
 
-            # Some models (e.g. Qwen3-VL) store rope_theta inside the rope parameters
-            # instead of as a top-level config attribute. Override the default theta
-            # if the rope parameters provide one.
-            if "rope_theta" in rope_params:
-                self.rope_attrs["theta"] = rope_params["rope_theta"]
+        elif config.rope_parameters["rope_type"] == "linear":
+            # For models that use linear scaling (e.g. NeuTTS Nano)
+            # Hugging Face: modeling_rope_utils._compute_linear_scaling_rope_parameters — inv_freq /= factor
+            # Equivalent to inv_freq = 1 / (factor * theta ** (i / dim)) in make_rotary_embedding_caches_from_scratch.)
+            self.rope_attrs["rescale_factors"] = config.rope_parameters["factor"]
+
+        else:
+            raise NotImplementedError(f"The {config.rope_parameters['rope_type']} RoPE style is not currently supported.")
 
     def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
@@ -947,7 +949,7 @@ class Model:
         try:
             # Override search attributes in config based on values in generation_config.json
             gen_config = GenerationConfig.from_pretrained(
-                config._name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
             )
             defaults = {
                 "bos_token_id": None,

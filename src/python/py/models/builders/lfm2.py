@@ -39,7 +39,6 @@ class LFM2Model(Model):
         conv_cache_shape = ["batch_size", self.hidden_size, self.conv_L_cache - 1]
         self.input_shapes["past.conv"] = conv_cache_shape
         self.output_shapes["present.conv"] = conv_cache_shape
-
         super().make_inputs_and_outputs()
 
     def make_past_key_subgraph(self, basename):

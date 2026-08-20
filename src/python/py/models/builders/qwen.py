@@ -10,10 +10,7 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from transformers import (
-    AutoConfig,
-    Qwen2ForCausalLM,
-)
+from transformers import Qwen2ForCausalLM
 
 from .base import Model
 
@@ -95,31 +92,13 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         self.layernorm_attrs["cast"]["output_0"] = True
 
 
-# TODO: figure out why anything is needed in this class
-# Nothing should be necessary technically
 class VideoChatFlashQwenModel(QwenModel):
-    """
-    Builder for OpenGVLab/VideoChat-Flash models (VideoChatFlashQwenForCausalLM).
-
-    The language model backbone is standard Qwen2.5-7B with flat config and
-    standard weight keys (model.layers.*, lm_head.*). The model uses standard
-    2D RoPE (rope_scaling=None) and GQA (28 query heads, 4 KV heads).
-
-    This builder exports only the text decoder component. It sets exclude_embeds=True
-    so the decoder receives inputs_embeds from the embedding merger model, which
-    fuses the InternVideo2 visual tokens with text embeddings.
-    """
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Override model_type for the C++ runtime registration in model.cpp
-        # and genai_config.json. Same pattern as Qwen3VLTextModel.
-        # Base class transforms this to "videochat_flash_qwen" via:
-        #   model_type[:model_type.find("For")].lower()
-        self.model_type = "VideoChat_Flash_QwenForCausalLM"
-
     def load_weights(self, input_path):
+        # Load the standard Qwen2 backbone without importing the checkpoint's
+        # custom video modeling code and its optional dependencies.
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
         return Qwen2ForCausalLM.from_pretrained(
             self.model_name_or_path,
@@ -130,14 +109,6 @@ class VideoChatFlashQwenModel(QwenModel):
 
 class Qwen35TextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # rope parameters contain the actual rope_theta for Qwen-3.5
-        rope_params = self.get_rope_parameters(config)
-        if rope_params is not None:
-            if "rope_theta" in rope_params:
-                config.rope_theta = rope_params["rope_theta"]
-            if "partial_rotary_factor" in rope_params:
-                config.partial_rotary_factor = rope_params["partial_rotary_factor"]
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -154,7 +125,6 @@ class Qwen35TextModel(Model):
     def make_inputs_and_outputs(self):
         # Qwen-3.5 uses 3D position_ids
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
-
         super().make_inputs_and_outputs()
 
     def is_packed_matmul_supported(self):

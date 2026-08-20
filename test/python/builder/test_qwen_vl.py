@@ -182,6 +182,7 @@ def test_qwen3_vl_keeps_qk_norm_outputs_in_fp32(monkeypatch):
 
 def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     def initialize_base(self, config, *_args, **_kwargs):
+        self.make_config_init(config)
         self.head_size = 128
         self.q_size = 2048
         self.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
@@ -200,6 +201,7 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     config = types.SimpleNamespace(
         num_hidden_layers=1,
         rope_parameters={
+            "rope_type": "default",
             "mrope_section": [11, 11, 10],
             "mrope_interleaved": True,
             "partial_rotary_factor": 0.25,
