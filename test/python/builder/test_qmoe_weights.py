@@ -111,6 +111,66 @@ cuda_quantizer_module = sys.modules["quantization.cuda_quantizer"]
 qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
 gptoss_module = _load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
+phi_module = _load_builder_module("phi")
+Phi3MoELongRoPEModel = phi_module.Phi3MoELongRoPEModel
+
+
+def test_base_moe_orchestrates_model_hooks(monkeypatch):
+    model = Model.__new__(Model)
+    calls = []
+    moe = object()
+
+    monkeypatch.setattr(model, "make_moe_preprocessed", lambda *args: calls.append(("preprocess", args)), raising=False)
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append(("router", args)), raising=False)
+    monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append(("subgraph", args)), raising=False)
+
+    model.make_moe(3, moe, "hidden_states")
+
+    expected_args = (3, moe, "hidden_states")
+    assert calls == [
+        ("preprocess", expected_args),
+        ("router", expected_args),
+        ("subgraph", expected_args),
+    ]
+
+
+def test_phi_moe_uses_base_layer_route():
+    model = Phi3MoELongRoPEModel.__new__(Phi3MoELongRoPEModel)
+    moe = object()
+    layer = types.SimpleNamespace(block_sparse_moe=moe)
+
+    assert model.get_moe_module(2, layer) is moe
+
+    assert "make_layer" not in Phi3MoELongRoPEModel.__dict__
+
+
+def test_gptoss_moe_uses_base_layer_route():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    moe = object()
+    layer = types.SimpleNamespace(mlp=moe)
+
+    assert model.get_moe_module(2, layer) is moe
+    assert "make_layer" not in GPTOSSModel.__dict__
+
+
+def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    calls = []
+    moe = object()
+
+    monkeypatch.setattr(model, "make_moe_preprocessed", lambda *args: calls.append("preprocess"))
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append("router"))
+    monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append("subgraph"))
+    monkeypatch.setattr(model, "make_moe_decomposed", lambda *args: calls.append("decomposed"))
+
+    model.ep = "cuda"
+    model.make_moe(2, moe, "hidden_states")
+    assert calls == ["preprocess", "router", "subgraph"]
+
+    calls.clear()
+    model.ep = "dml"
+    model.make_moe(2, moe, "hidden_states")
+    assert calls == ["decomposed"]
 
 
 def _load_builder_cli_module(monkeypatch):
@@ -213,7 +273,7 @@ def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
     mlp = types.SimpleNamespace(experts=types.SimpleNamespace(fc1_weights=torch.empty(0), fc2_weights=torch.empty(0)))
 
     with pytest.raises(ValueError, match="pre-quantized Quark GPT-OSS experts"):
-        GPTOSSModel.make_moe_fused(model, 0, mlp, "root")
+        GPTOSSModel.make_moe_preprocessed(model, 0, mlp, "root")
 
 
 def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():

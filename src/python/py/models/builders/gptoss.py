@@ -123,8 +123,8 @@ class GPTOSSModel(Model):
         return packed.permute(0, 2, 3, 4, 1).reshape(blocks.shape[0], blocks.shape[2] * 32, blocks.shape[1] // 2).contiguous()
 
     def make_original_mxfp4_qmoe_initializers(self, layer_id, proj, weight_name, scales_name, global_scales_name):
-        blocks = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.mlp.experts.{proj}_blocks")
-        scales = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.mlp.experts.{proj}_scales")
+        blocks = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.moe.experts.{proj}_blocks")
+        scales = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.moe.experts.{proj}_scales")
         if scales.dtype != torch.uint8:
             scales = scales.to(torch.uint8)
         expected_scale_shape = blocks.shape[:-1]
@@ -137,31 +137,6 @@ class GPTOSSModel(Model):
         self.make_initializer(self.pack_original_mxfp4_blocks_for_qmoe(blocks), weight_name)
         self.make_fp8e8m0_initializer(scales, scales_name)
         self.make_initializer(torch.ones(blocks.shape[0], dtype=torch.float32), global_scales_name)
-
-    def make_layer(self, layer_id, layer):
-        # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> output_layernorm --> MoE
-        self.make_layernorm(
-            layer_id,
-            layer.input_layernorm,
-            skip=not self.layernorm_attrs["first_layernorm"],
-            simple=self.layernorm_attrs["simple"],
-            location="input",
-        )
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        self.make_layernorm(
-            layer_id,
-            layer.post_attention_layernorm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
-        )
-        self.make_moe(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
-
-        self.layernorm_attrs["first_layernorm"] = False
-        if layer_id == self.num_layers - 1:
-            # Norm after last decoder layer of model (last layer --> norm)
-            self.layernorm_attrs["last_layernorm"] = True
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -188,13 +163,16 @@ class GPTOSSModel(Model):
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
 
-    def make_moe(self, layer_id, mlp, root_input):
+    def make_moe(self, layer_id, moe, root_input):
         if self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
-            self.make_moe_fused(layer_id, mlp, root_input)
+            super().make_moe(layer_id, moe, root_input)
         else:
-            self.make_moe_decomposed(layer_id, mlp, root_input)
+            self.make_moe_decomposed(layer_id, moe, root_input)
 
-    def make_moe_decomposed(self, layer_id, mlp, root_input):
+    def get_moe_module(self, layer_id, layer):
+        return layer.mlp
+
+    def make_moe_decomposed(self, layer_id, moe, root_input):
         # Make nodes for the MoE subgraph
         #
         #                                              root_input
@@ -314,9 +292,9 @@ class GPTOSSModel(Model):
         #                                          +--> Softmax --> Unsqueeze --> Unsqueeze --> Cast
         #
         router_basename = f"{basename}/router/MatMul"
-        router_matmul_name = self.make_matmul(mlp.router, router_basename, root_input)
+        router_matmul_name = self.make_matmul(moe.router, router_basename, root_input)
         router_add_name = f"{basename}/router/Add"
-        self.make_add_bias(mlp.router.bias, router_add_name, root_input=f"{router_matmul_name}/output_0")
+        self.make_add_bias(moe.router.bias, router_add_name, root_input=f"{router_matmul_name}/output_0")
 
         if use_cast:
             topk_fp32_name = f"{basename}/topk_fp32/Cast"
@@ -352,13 +330,13 @@ class GPTOSSModel(Model):
 
         # Save initializers to use with Gather nodes
         gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.weight"
-        self.make_initializer(mlp.experts.gate_up_proj, gate_up_proj_weight, to=self.io_dtype)
+        self.make_initializer(moe.experts.gate_up_proj, gate_up_proj_weight, to=self.io_dtype)
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
+        self.make_initializer(moe.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.weight"
-        self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
+        self.make_initializer(moe.experts.down_proj, down_proj_weight, to=self.io_dtype)
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-        self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
+        self.make_initializer(moe.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
 
         # Make Gather nodes + Unsqueeze nodes for biases
         mlp1_weight_gather_name = f"{basename}/mlp1/weight/Gather"
@@ -651,47 +629,15 @@ class GPTOSSModel(Model):
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{weighted_sum_squeeze_name}/output_0"
 
-    def make_moe_fused(self, layer_id, mlp, root_input):
-        # Make nodes for the fused MoE subgraph
-        #
-        #               root_input
-        #               /        \
-        #             MatMul      |
-        #            (router)     |
-        #               |         |
-        #              Add        |
-        #            (router)     |
-        #               |         |
-        #            Reshape      |
-        #               |         |
-        #               +----+----+
-        #                    |
-        #                 MoE/QMoE
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
 
-        has_quark_experts = self.has_quark_experts(mlp.experts)
+        has_quark_experts = self.has_quark_experts(moe.experts)
         is_fp4_moe = self.moe_attrs.get("quant_type") == "fp4"
         if is_fp4_moe and has_quark_experts:
             raise ValueError("moe_quant_type=mxfp4 is not supported with pre-quantized Quark GPT-OSS experts.")
-
-        # Make router nodes
-        router_basename = f"{basename}/router/MatMul"
-        router_matmul_name = self.make_matmul(mlp.router, router_basename, root_input)
-        router_add_name = f"{basename}/router/Add"
-        self.make_add_bias(mlp.router.bias, router_add_name, root_input=f"{router_matmul_name}/output_0")
-        router_reshape_name = f"{basename}/router/Reshape"
-        router_reshape_inputs = [
-            f"{router_add_name}/output_0",
-            f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
-        ]
-        self.make_reshape(
-            router_reshape_name,
-            router_reshape_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
-        )
 
         gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
         gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
@@ -720,8 +666,8 @@ class GPTOSSModel(Model):
         # the original orientation swaps N and K, which silently corrupts the
         # quantized weights/scales and yields garbage output).
         if not has_quark_experts and not is_fp4_moe:
-            gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
-            down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
+            gate_up_proj_layout = moe.experts.gate_up_proj.transpose(-1, -2)
+            down_proj_layout = moe.experts.down_proj.transpose(-1, -2)
 
         if op_type == "MoE" and not has_quark_experts:
             # Save non-quantized MoE weights as initializers
@@ -755,14 +701,14 @@ class GPTOSSModel(Model):
                 if has_quark_experts:
                     # Use pre-quantized Quark experts
                     gate_up_proj_qweight_tensor, gate_up_proj_scales_tensor, gate_up_proj_zero_points_tensor = (
-                        mlp.experts.fc1_weights,
-                        mlp.experts.fc1_scales,
-                        mlp.experts.fc1_zero_points,
+                        moe.experts.fc1_weights,
+                        moe.experts.fc1_scales,
+                        moe.experts.fc1_zero_points,
                     )
                     down_proj_qweight_tensor, down_proj_scales_tensor, down_proj_zero_points_tensor = (
-                        mlp.experts.fc2_weights,
-                        mlp.experts.fc2_scales,
-                        mlp.experts.fc2_zero_points,
+                        moe.experts.fc2_weights,
+                        moe.experts.fc2_scales,
+                        moe.experts.fc2_zero_points,
                     )
 
                     # Save zero point as initializers
@@ -808,24 +754,58 @@ class GPTOSSModel(Model):
 
         # Save biases (shared for all paths)
         if has_quark_experts:
-            gate_up_bias = self.combine_quark_gate_up_biases_from_experts(mlp.experts)
-            down_bias = self.combine_quark_down_biases_from_experts(mlp.experts)
+            gate_up_bias = self.combine_quark_gate_up_biases_from_experts(moe.experts)
+            down_bias = self.combine_quark_down_biases_from_experts(moe.experts)
         else:
-            gate_up_bias = mlp.experts.gate_up_proj_bias
-            down_bias = mlp.experts.down_proj_bias
+            gate_up_bias = moe.experts.gate_up_proj_bias
+            down_bias = moe.experts.down_proj_bias
 
         self.make_initializer(gate_up_bias, gate_up_proj_bias, to=self.io_dtype)
         self.make_initializer(down_bias, down_proj_bias, to=self.io_dtype)
 
-        # Single make_moe_op call with EP-based zero_points
-        # TRT-RTX doesn't support zero_points inputs
-        moe_name = f"{basename}/{op_type}"
-        use_zero_points = has_quark_experts and self.ep != "trt-rtx"
+    def make_moe_router(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe/router"
+        router_matmul_name = self.make_matmul(moe.router, f"{basename}/MatMul", root_input)
+        router_add_name = f"{basename}/Add"
+        self.make_add_bias(moe.router.bias, router_add_name, root_input=f"{router_matmul_name}/output_0")
+        self.make_reshape(
+            f"{basename}/Reshape",
+            [
+                f"{router_add_name}/output_0",
+                f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
+            ],
+            dtype=self.io_dtype,
+            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
+        )
 
+    def make_moe_subgraph(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe"
+        op_type = self.moe_attrs["op_type"]
+        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
+        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
+        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
+        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
+        gate_up_proj_zero_points = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
+        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
+        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
+        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+        down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
+
+        has_quark_experts = self.has_quark_experts(moe.experts)
+        use_zero_points = has_quark_experts and self.ep != "trt-rtx"
+        use_global_scales = self.moe_attrs.get("quant_type") == "fp4" and not has_quark_experts
+        gate_up_proj_global_scales = (
+            f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales" if use_global_scales else ""
+        )
+        down_proj_global_scales = (
+            f"model.layers.{layer_id}.moe.experts.down_proj.global_scales" if use_global_scales else ""
+        )
+
+        moe_name = f"{basename}/{op_type}"
         self.make_moe_op(
             moe_name,
             root_input=root_input,
-            router_probs=f"{router_reshape_name}/output_0",
+            router_probs=f"{basename}/router/Reshape/output_0",
             weight1=gate_up_proj_weight,
             scales1=gate_up_proj_scales,
             bias1=gate_up_proj_bias,
@@ -837,8 +817,6 @@ class GPTOSSModel(Model):
             global_scales1=gate_up_proj_global_scales,
             global_scales2=down_proj_global_scales,
         )
-
-        # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
     def make_qmoe_weight_initializer_shapes(self, gate_up_proj_qweight_list, down_proj_qweight_list, has_quark_experts):

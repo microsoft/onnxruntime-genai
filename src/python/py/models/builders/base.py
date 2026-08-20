@@ -63,7 +63,13 @@ class Model:
         # CPU  optimal: 16 (amortises O(C) shift traffic; measured minimum at W+16 on EPYC).
         self.window_kv_cache_slack = 0  # runtime will apply the EP default when this is 0
 
-        self.intermediate_size = getattr(config, "ffn_hidden_size", config.intermediate_size)
+        self.intermediate_size = (
+            config.ffn_hidden_size
+            if hasattr(config, "ffn_hidden_size")
+            else config.moe_intermediate_size
+            if hasattr(config, "moe_intermediate_size")
+            else config.intermediate_size
+        )
         self.hidden_size = config.hidden_size
         self.num_kv_heads = (
             config.num_key_value_heads
@@ -344,6 +350,7 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
+            "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
         # Structured quantization config: parse the flat extra_options into a single QuantConfig
@@ -362,7 +369,13 @@ class Model:
 
         # MoE-specific variables
         moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
-        num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
+        num_experts = (
+            config.num_local_experts
+            if hasattr(config, "num_local_experts")
+            else config.num_experts
+            if hasattr(config, "num_experts")
+            else 0
+        )
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
 
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
@@ -3866,6 +3879,8 @@ class Model:
         else:
             raise NotImplementedError("The MLP layer type is not set.")
 
+        self.layernorm_attrs["skip_input"] = self.mlp_attrs["output_0"]
+
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
         gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
         if gate_up_linear is None:
@@ -3971,26 +3986,28 @@ class Model:
         #                |
         #           DownProjAdd
 
+        basename = f"/model/layers.{layer_id}/mlp"
+
         # Check if Add nodes need to be made (if bias exists)
         gate_bias_exists = mlp.gate_proj.bias is not None and torch.count_nonzero(mlp.gate_proj.bias) > 0
         up_bias_exists = mlp.up_proj.bias is not None and torch.count_nonzero(mlp.up_proj.bias) > 0
         down_bias_exists = mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0
 
         # Make Gate proj nodes
-        gate_matmul_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        gate_matmul_basename = f"{basename}/gate_proj/MatMul"
         gate_matmul_name = self.make_matmul(mlp.gate_proj, gate_matmul_basename, root_input)
         gate_name = gate_matmul_name
         if gate_bias_exists:
-            gate_add_name = f"/model/layers.{layer_id}/mlp/gate_proj/Add"
+            gate_add_name = f"{basename}/gate_proj/Add"
             self.make_add_bias(mlp.gate_proj.bias, gate_add_name, root_input=f"{gate_name}/output_0")
             gate_name = gate_add_name
 
         # Make Up proj nodes
-        up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_matmul_basename = f"{basename}/up_proj/MatMul"
         up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
         up_name = up_matmul_name
         if up_bias_exists:
-            up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
+            up_add_name = f"{basename}/up_proj/Add"
             self.make_add_bias(mlp.up_proj.bias, up_add_name, root_input=f"{up_name}/output_0")
             up_name = up_add_name
 
@@ -3998,7 +4015,7 @@ class Model:
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
 
         # Make Mul node after activation
-        mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+        mul_name = f"{basename}/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(
             mul_name,
@@ -4008,16 +4025,15 @@ class Model:
         )
 
         # Make output MatMul node
-        down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_matmul_basename = f"{basename}/down_proj/MatMul"
         down_matmul_name = self.make_matmul(mlp.down_proj, down_matmul_basename, f"{mul_name}/output_0")
         down_name = down_matmul_name
         if down_bias_exists:
-            down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
+            down_add_name = f"{basename}/down_proj/Add"
             self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{down_name}/output_0"
 
     def make_mlp_fc(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -4059,8 +4075,21 @@ class Model:
             self.make_add_bias(mlp.fc2.bias, fc2_add_name, root_input=f"{fc2_name}/output_0")
             fc2_name = fc2_add_name
 
-        # Assign output 0 of previous node as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{fc2_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{fc2_name}/output_0"
+
+    def make_moe(self, layer_id, moe, root_input):
+        self.make_moe_preprocessing(layer_id, moe, root_input)
+        self.make_moe_router(layer_id, moe, root_input)
+        self.make_moe_subgraph(layer_id, moe, root_input)
+
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        raise NotImplementedError("MoE weight preprocessing must be implemented by the model class.")
+
+    def make_moe_router(self, layer_id, moe, root_input):
+        raise NotImplementedError("MoE router construction must be implemented by the model class.")
+
+    def make_moe_subgraph(self, layer_id, moe, root_input):
+        raise NotImplementedError("MoE subgraph construction must be implemented by the model class.")
 
     def make_moe_op(self, name, **kwargs):
         op_type = self.moe_attrs["op_type"]
@@ -4400,100 +4429,6 @@ class Model:
             unsigned_full_range=True,
         )
 
-    def make_block_sparse_moe(self, layer_id, bsm, root_input):
-        # Make nodes for the QMoE block-sparse subgraph
-        #
-        #                  root_input
-        #                 /       \
-        #         router_MatMul    |
-        #             /     \      |
-        #         Shape      |     |
-        #           |        |     |
-        #         Gather     |     |
-        #           |        |     |
-        #       Unsqueeze    |     |
-        #           |        |    /
-        #        Concat     /    /
-        #             \    /    /
-        #             Reshape  /
-        #                 \   /
-        #                  QMoE
-        #                   |
-        #                 output
-        moe_name = f"/model/layers.{layer_id}/moe"
-        gate_ops_base = f"{moe_name}/gate"
-
-        # Make MoE nodes
-        gate_name = f"{gate_ops_base}/MatMul"
-        self.make_matmul(bsm.gate, gate_name, root_input)
-        shape_name = f"{gate_ops_base}/Shape"
-        self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
-        gather_name = f"{gate_ops_base}/Gather"
-        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
-        concat_name = f"{gate_ops_base}/Concat"
-        self.make_concat(concat_name, ["/model/constants/INT64/[-1]", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
-        gate_reshape_name = f"{gate_ops_base}/Reshape"
-        self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=["num_rows", self.moe_attrs["num_experts"]])
-
-        w1_list = []
-        w2_list = []
-        w3_list = []
-        w1_scale_list = []
-        w2_scale_list = []
-        w3_scale_list = []
-
-        for i in range(self.moe_attrs["num_experts"]):
-            # Quantize the weights with uint8
-            pre_qweight1, w1_scale = self.make_qmoe_weights(bsm.experts[i].w1.weight.T)
-            pre_qweight2, w2_scale = self.make_qmoe_weights(bsm.experts[i].w2.weight.T)
-            pre_qweight3, w3_scale = self.make_qmoe_weights(bsm.experts[i].w3.weight.T)
-
-            w1_list.append(pre_qweight1)
-            w2_list.append(pre_qweight2)
-            w3_list.append(pre_qweight3)
-
-            w1_scale_list.append(w1_scale)
-            w2_scale_list.append(w2_scale)
-            w3_scale_list.append(w3_scale)
-
-        moe_expert_weight_1_name = f"model.layers.{layer_id}.moe.weight_1"
-        moe_expert_weight_2_name = f"model.layers.{layer_id}.moe.weight_2"
-        moe_expert_weight_3_name = f"model.layers.{layer_id}.moe.weight_3"
-
-        moe_expert_scales_1_name = f"model.layers.{layer_id}.moe.scales_1"
-        moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
-        moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
-
-        def make_moe_initializer(w_list, moe_expert_name, dtype):
-            moe_experts_weight = torch.stack(w_list, dim=0)
-            self.make_initializer(moe_experts_weight, moe_expert_name, to=dtype)
-
-        make_moe_initializer(w1_list, moe_expert_weight_1_name, ir.DataType.UINT8)
-        make_moe_initializer(w2_list, moe_expert_weight_2_name, ir.DataType.UINT8)
-        make_moe_initializer(w3_list, moe_expert_weight_3_name, ir.DataType.UINT8)
-
-        # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.io_dtype)
-        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.io_dtype)
-        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.io_dtype)
-
-        self.make_moe_op(
-            moe_name,
-            root_input=root_input,
-            router_probs=f"{gate_reshape_name}/output_0",
-            weight1=moe_expert_weight_1_name,
-            scales1=moe_expert_scales_1_name,
-            weight2=moe_expert_weight_2_name,
-            scales2=moe_expert_scales_2_name,
-            weight3=moe_expert_weight_3_name,
-            scales3=moe_expert_scales_3_name,
-        )
-
-        # Assign output 0 of previous MoE as root input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = output
-
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):
         # Make nodes for this activation subgraph
         #
@@ -4502,7 +4437,8 @@ class Model:
         #   ActFunc  |
         #          \ |
         #           Mul
-        act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        basename = f"/model/layers.{layer_id}/mlp/act_fn"
+        act_name = f"{basename}/{activation}"
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
         self.make_value(
@@ -4511,7 +4447,7 @@ class Model:
             shape=self.hidden_state_shape(last_dim=self.intermediate_size),
         )
 
-        mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
+        mul_act_name = f"{basename}/Mul"
         mul_act_inputs = [root_input, act_output]
         self.make_mul(
             mul_act_name,
@@ -4697,11 +4633,15 @@ class Model:
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> output_layernorm --> MLP
+        # input_layernorm --> attention --> output_layernorm --> MLP/MoE
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, self.get_attn_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
-        self.make_mlp(layer_id, self.get_mlp_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
+
+        if self.moe_attrs["num_experts"] > 0:
+            self.make_moe(layer_id, self.get_moe_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
+        else:
+            self.make_mlp(layer_id, self.get_mlp_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
@@ -4713,6 +4653,9 @@ class Model:
 
     def get_mlp_module(self, layer_id, layer):
         return layer.mlp
+
+    def get_moe_module(self, layer_id, layer):
+        return layer.moe
 
     def load_weights(self, input_path):
         # Load weights of original model
@@ -4766,10 +4709,10 @@ class Model:
                 "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
                 "qwen3_vl_text": Qwen3VLForConditionalGeneration,
                 "Qwen3VL": Qwen3VLForConditionalGeneration,
-                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
-                "qwen3_5": Qwen3_5ForConditionalGeneration,
                 "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
                 "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
+                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
+                "qwen3_5": Qwen3_5ForConditionalGeneration,
                 "Whisper": AutoModelForSpeechSeq2Seq,
             }
             auto_class = AutoModelForCausalLM

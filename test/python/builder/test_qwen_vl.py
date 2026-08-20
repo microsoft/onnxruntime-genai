@@ -38,6 +38,57 @@ Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
 
 
+def test_base_mlp_assigns_published_output_to_skip_input(monkeypatch):
+    model = Model.__new__(Model)
+    model.mlp_attrs = {"use_proj": True, "use_fc": False, "output_0": ""}
+    model.layernorm_attrs = {"skip_input": "existing_skip"}
+
+    monkeypatch.setattr(model, "make_mlp_unpacked", lambda *_args: None)
+
+    def make_mlp_proj(*_args, **_kwargs):
+        model.mlp_attrs["output_0"] = "mlp_output"
+
+    monkeypatch.setattr(model, "make_mlp_proj", make_mlp_proj)
+
+    result = model.make_mlp(2, object(), "hidden_states")
+
+    assert result is None
+    assert model.mlp_attrs["output_0"] == "mlp_output"
+    assert model.layernorm_attrs["skip_input"] == "mlp_output"
+
+
+def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
+    calls = []
+
+    class FakeMoEModel:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            calls.append((cls, args, kwargs))
+            return cls()
+
+    class FakeDenseModel(FakeMoEModel):
+        pass
+
+    monkeypatch.setattr(base_module, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel)
+    monkeypatch.setattr(base_module, "Qwen3_5ForConditionalGeneration", FakeDenseModel)
+
+    model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.model_type = "qwen3_5_moe_text"
+    model.model_name_or_path = "Qwen/Qwen3.6-35B-A3B"
+    model.cache_dir = "/cache"
+    model.hf_token = True
+    model.hf_remote = False
+    model.quant_type = None
+    model.num_layers = 40
+    model.extra_options = {}
+
+    loaded_model = model.load_weights("")
+
+    assert isinstance(loaded_model, FakeMoEModel)
+    assert not isinstance(loaded_model, FakeDenseModel)
+    assert calls[0][0] is FakeMoEModel
+
+
 def _initialize_qwen_model(monkeypatch, model_class):
     def initialize_base(self, *_args, **_kwargs):
         self.layernorm_attrs = {
@@ -404,23 +455,16 @@ def test_qwen35_selects_layer_attention_module(layer_type, expected_attribute):
     model.layer_types = [layer_type]
     layer = types.SimpleNamespace(linear_attn=object(), self_attn=object())
 
-    assert model.get_attention_module(0, layer) is getattr(layer, expected_attribute)
+    assert model.get_attn_module(0, layer) is getattr(layer, expected_attribute)
     assert "make_layer" not in Qwen35TextModel.__dict__
 
 
-def test_qwen35_moe_delegates_only_layer_mlp(monkeypatch):
+def test_qwen35_moe_uses_base_layer_route():
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
-    layer = types.SimpleNamespace(mlp=object())
-    calls = []
-    monkeypatch.setattr(
-        model,
-        "make_moe",
-        lambda layer_id, mlp, root_input: calls.append((layer_id, mlp, root_input)),
-    )
+    moe = object()
+    layer = types.SimpleNamespace(mlp=moe)
 
-    model.make_layer_mlp(2, layer, "hidden_states")
-
-    assert calls == [(2, layer.mlp, "hidden_states")]
+    assert model.get_moe_module(2, layer) is moe
     assert "make_layer" not in Qwen35MoETextModel.__dict__
 
 
@@ -639,3 +683,36 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
             ["batch_size", "sequence_length", 16],
         )
     ]
+
+
+def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
+    model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.intermediate_size = 2048
+    model.shared_expert_intermediate_size = 512
+    model.mlp_attrs = {"output_0": ""}
+    shared_expert = object()
+    shared_expert_gate = object()
+    calls = []
+
+    def make_mlp_proj(layer_id, mlp, root_input):
+        calls.append((layer_id, mlp, root_input, model.intermediate_size))
+        model.mlp_attrs["output_0"] = "shared_output"
+
+    monkeypatch.setattr(model, "make_mlp_proj", make_mlp_proj)
+    monkeypatch.setattr(model, "make_matmul", lambda *_args: "/shared_expert_gate/MatMul")
+    monkeypatch.setattr(model, "make_sigmoid", lambda *_args, **_kwargs: None)
+
+    output, gate = model.make_shared_expert(3, shared_expert, shared_expert_gate, "hidden_states")
+
+    assert calls == [
+        (
+            3,
+            shared_expert,
+            "hidden_states",
+            512,
+        )
+    ]
+    assert model.intermediate_size == 2048
+    assert output == "shared_output"
+    assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
