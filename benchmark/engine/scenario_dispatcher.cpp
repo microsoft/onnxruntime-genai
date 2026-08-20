@@ -167,9 +167,7 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
       throw std::runtime_error("fork() failed while dispatching scenario: " + cfg.scenario);
     }
 
-    // fork returns twice, once in the child and once in the parent
-    // the child process returns 0, run the scenario in the child process
-    if (pid == 0) { 
+    if (pid == 0) {
       int exit_code = 1;
       try {
         const auto scenario = ScenarioBase::Create(cfg.scenario);
@@ -185,7 +183,6 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
       std::_Exit(exit_code);
     }
 
-    // The parent process waits for the child to finish and checks its exit code.
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
       throw std::runtime_error("waitpid() failed while dispatching scenario: " + cfg.scenario);
