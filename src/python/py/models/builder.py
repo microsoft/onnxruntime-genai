@@ -342,7 +342,7 @@ def check_extra_options(
 
     # Resolve shared_embeddings: use explicit value if provided, otherwise default to whether model ties embeddings
     if "shared_embeddings" not in extra_options:
-        extra_options["shared_embeddings"] = hf_tie_word_embeddings
+        extra_options["shared_embeddings"] = hf_tie_word_embeddings and not extra_options.get("qwen_vlm", False)
 
     if extra_options["shared_embeddings"]:
         # For an untied model (config.tie_word_embeddings is False) the token embedding and LM head are
