@@ -3,7 +3,6 @@
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
@@ -13,11 +12,19 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 
 
+def tool_result_fragment(tool_result):
+    return (
+        "<|im_end|>\n<|im_start|>user\n<tool_response>\n"
+        f"{json.dumps(tool_result)}\n"
+        "</tool_response><|im_end|>\n<|im_start|>assistant\n"
+    )
+
+
 def generate(engine, request, tokenizer):
     stream = tokenizer.create_stream()
     fragments = []
     token_ids = []
-    while not request.is_done():
+    while not request.is_turn_complete():
         ready_request = engine.step()
         if ready_request is None:
             raise RuntimeError("Engine stopped before the request completed")
@@ -63,12 +70,6 @@ def call_weather_tool(tool_call):
     }
 
 
-def uses_dynamic_batching(model_path):
-    with open(Path(model_path) / "genai_config.json", encoding="utf-8") as file:
-        config = json.load(file)
-    return config.get("engine", {}).get("dynamic_batching") is not None
-
-
 def run(args):
     config = og.Config(args.model_path)
     config.clear_providers()
@@ -111,36 +112,8 @@ def run(args):
     print(f"Tool call: {tool_call_output}")
     print(f"Tool result: {json.dumps(tool_result)}")
 
-    messages.extend(
-        [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{"type": "function", "function": tool_call}],
-            },
-            {"role": "tool", "content": json.dumps(tool_result)},
-        ]
-    )
-    continued_prompt = tokenizer.apply_chat_template(
-        messages=json.dumps(messages),
-        tools=json.dumps(tools),
-        add_generation_prompt=True,
-    )
-    continued_tokens = list(tokenizer.encode(continued_prompt))
-    cached_tokens = prompt_tokens + tool_call_tokens
-    if continued_tokens[: len(cached_tokens)] != cached_tokens:
-        raise RuntimeError("The continued chat template does not preserve the Engine request token prefix")
-    continuation_tokens = continued_tokens[len(cached_tokens) :]
-    if not continuation_tokens:
-        raise RuntimeError("The continued chat template produced no tool-response tokens")
-
-    if uses_dynamic_batching(args.model_path):
-        request.add_tokens(np.asarray(continuation_tokens, dtype=np.int32))
-    else:
-        engine.remove_request(request)
-        request = og.Request(params)
-        request.add_tokens(np.asarray(continued_tokens, dtype=np.int32))
-        engine.add_request(request)
+    continuation_tokens = tokenizer.encode(tool_result_fragment(tool_result))
+    request.continue_with(np.asarray(continuation_tokens, dtype=np.int32))
 
     final_output, _ = generate(engine, request, tokenizer)
     final_output = final_output.strip()
@@ -156,5 +129,5 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--execution_provider", required=True, choices=["cpu", "cuda", "dml", "webgpu"])
     parser.add_argument("--tools_file", required=True)
     parser.add_argument("--user_prompt", default="What is the weather in Redmond, WA?")
-    parser.add_argument("--max_length", type=int, default=256)
+    parser.add_argument("--max_length", type=int, default=512)
     run(parser.parse_args())

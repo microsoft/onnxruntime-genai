@@ -16,6 +16,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "decoding_strategy.h"
+#include "n_gram_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -26,6 +27,7 @@
 #include "webgpu/interface.h"
 #include "openvino/interface.h"
 #include "ryzenai/interface.h"
+#include "amdgpu/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -57,6 +59,20 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
 namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
+
+bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
+  // Some models fall back to CPU attention, where continuation is valid because their KV cache is
+  // also on CPU. Other listed providers preserve appendable KV state across generation turns.
+  constexpr std::array<DeviceType, 6> supported_devices{
+      DeviceType::CPU,
+      DeviceType::CUDA,
+      DeviceType::WEBGPU,
+      DeviceType::OpenVINO,
+      DeviceType::NvTensorRtRtx,
+      DeviceType::RyzenAI};
+  return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
+         supported_devices.end();
+}
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   bool ort_verbose_logging = false;
@@ -317,6 +333,17 @@ DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {
     if (!*cuda_library_)
       throw std::runtime_error("Shared library load failure (see first error)");
 
+    using GetInterfaceVersionFn = uint32_t (*)();
+    auto get_interface_version = reinterpret_cast<GetInterfaceVersionFn>(cuda_library_->GetSymbol("GetInterfaceVersion"));
+    if (!get_interface_version)
+      throw std::runtime_error(
+          "CUDA add-on library does not export GetInterfaceVersion; install a matching onnxruntime-genai-cuda package");
+    const uint32_t interface_version = get_interface_version();
+    if (interface_version != kDeviceInterfaceVersion)
+      throw std::runtime_error(
+          "CUDA add-on interface version mismatch: expected " + std::to_string(kDeviceInterfaceVersion) +
+          ", got " + std::to_string(interface_version) + "; install a matching onnxruntime-genai-cuda package");
+
     Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType, const OrtApi* ort_api);
     auto get_interface = reinterpret_cast<decltype(&GetInterface)>(cuda_library_->GetSymbol("GetInterface"));
     if (!get_interface)
@@ -368,6 +395,9 @@ DeviceInterface* OrtGlobals::GetDeviceInterface(DeviceType type) {
       owned_interfaces_.push_back(CreateRyzenAIInterface(*env_));
       slot = owned_interfaces_.back().get();
       break;
+    case DeviceType::AMDGPU:
+      slot = GetAMDGPUInterface();
+      break;
     case DeviceType::CPU:
     default:
       owned_interfaces_.push_back(CreateCpuInterface());
@@ -396,6 +426,8 @@ std::string to_string(DeviceType device_type) {
       return "NvTensorRtRtx";
     case DeviceType::RyzenAI:
       return "RyzenAI";
+    case DeviceType::AMDGPU:
+      return "AMDGPU";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -488,7 +520,23 @@ void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) 
 double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
   if (name == "max_draft_tokens")
     return static_cast<double>(speculative.max_draft_tokens);
+  if (name == "ngram_size")
+    return static_cast<double>(speculative.ngram_size);
+  if (name == "min_adaptive_k")
+    return static_cast<double>(speculative.min_adaptive_k);
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
+}
+
+void GeneratorParams::SetSpeculativeBool(std::string_view name, bool value) {
+  Generators::SetSpeculativeBool(speculative, name, value);
+}
+
+bool GeneratorParams::GetSpeculativeBool(std::string_view name) const {
+  if (name == "ngram_chained_lookup")
+    return speculative.ngram_chained_lookup;
+  if (name == "cooldown")
+    return speculative.cooldown;
+  throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeBool.");
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -501,9 +549,29 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return params.p_device->CreateGreedy(params);
 }
 
+std::mt19937 CreateRandomGenerator(int random_seed) {
+  if (random_seed >= 0)
+    return std::mt19937{static_cast<uint32_t>(random_seed)};
+
+  std::random_device random_device;
+  std::array<uint32_t, std::mt19937::state_size> seed_data;
+  for (uint32_t& value : seed_data)
+    value = random_device();
+  std::seed_seq seed_sequence(seed_data.begin(), seed_data.end());
+  return std::mt19937{seed_sequence};
+}
+
 Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
-      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)} {
+      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)},
+      rng_{CreateRandomGenerator(params.search.random_seed)} {
+  if (params.speculative.ngram_chained_lookup && params.speculative.ngram_size == 0)
+    throw std::runtime_error(
+        "speculative.ngram_chained_lookup requires speculative.ngram_size to enable "
+        "n-gram decoding.");
+  if (params.speculative.ngram_size > 0)
+    ValidateNGramDecoding(model, params);
+
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {
@@ -652,19 +720,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  // Some models fallback to CPU for the attention operator (for example, some decoder-pipeline NPU models).
-  // Continuous decoding is supported for this case as the kv cache for such models is always on CPU.
-  constexpr std::array<DeviceType, 6> devices_supporting_continuous_decoding{
-      DeviceType::CPU,
-      DeviceType::CUDA,
-      DeviceType::WEBGPU,
-      DeviceType::OpenVINO,
-      DeviceType::NvTensorRtRtx,
-      DeviceType::RyzenAI};
-
   if (search_->GetSequenceLength() != 0 &&
-      std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->model_.p_device_kvcache_->GetType(); }))
+      !SupportsContinuousDecoding(state_->model_.p_device_kvcache_->GetType()))
     // Support for continuous decoding should be based on the type of device used for KV cache
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
@@ -706,6 +763,28 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 
   generation_telemetry_.CompleteAppend(
       input_ids.size(), state_->params_->search.num_beams, append_input_modality);
+}
+
+void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokensDevice"};
+
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.empty())
+    throw std::runtime_error("input_ids is empty");
+  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() >
+      state_->params_->search.max_length)
+    throw std::runtime_error("device input_ids + current sequence length exceeds max length");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  if (set_extra_inputs_) {
+    state_->SetExtraInputs(extra_inputs_);
+    set_extra_inputs_ = false;
+  }
+
+  search_->AppendTokens(input_ids);
+  computed_logits_ = false;
+  ComputeLogits(input_ids);
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -900,6 +979,38 @@ DeviceSpan<float> Generator::GetLogits() {
     ComputeLogits(search_->GetNextTokens());
   }
   return search_->GetLogits();
+}
+
+void Generator::SnapshotState() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  state_->SnapshotState(search_->GetSequenceLength());
+}
+
+bool Generator::CanCropRecurrentState() const {
+  return state_->HasCroppableRecurrentState();
+}
+
+int64_t Generator::RecurrentStateWindow() const {
+  return state_->RecurrentStateWindow();
+}
+
+void Generator::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (new_length > search_->GetSequenceLength())
+    throw std::runtime_error("CropToAccepted: new_length exceeds current sequence length");
+  search_->RewindTo(new_length);
+  state_->CropToAccepted(new_length, recurrent_position);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
+  computed_logits_ = false;
+  last_action_ = Action::rewound;
+}
+
+void Generator::SetHiddenStates(std::shared_ptr<Tensor> hidden_states) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  hidden_states_input_ = std::move(hidden_states);  // keep alive until the feeder copies it
+  state_->SetHiddenStates(hidden_states_input_ ? hidden_states_input_->GetOrtTensor() : nullptr);
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {

@@ -37,20 +37,19 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
 }
 
 void GreedySearch_Cuda::EnsureSamplingData() {
-  if (samplingdata_)
+  if (sampling_data_)
     return;
-
-  unsigned long long random_seed = (params_->search.random_seed != -1)
-                                       ? params_->search.random_seed
-                                       : std::random_device{}();
 
   // Allocate a single buffer for all sampling data
   size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params_->search.batch_size, params_->config.model.vocab_size, GetStream());
   sampling_buffer_ = params_->p_device->Allocate<uint8_t>(sampling_buffer_size);
 
   // Create SamplingData with the externally allocated buffer
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
-                                                       sampling_buffer_.Span().data(), sampling_buffer_size);
+  // SamplingData requires initialized cuRAND states even before a stochastic call.
+  // Stochastic sampling replaces them from the caller-owned RNG in SampleTopKTopP;
+  // 0 is therefore only a deterministic initialization value.
+  sampling_data_ = std::make_unique<cuda::SamplingData>(0, params_->search.batch_size, params_->config.model.vocab_size, GetStream(),
+                                                        sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
@@ -134,7 +133,7 @@ void GreedySearch_Cuda::SaveStateForTransactionImpl(bool checkpoint_local_state)
 
     CUDA_CHECK(cudaMemcpyAsync(transaction_next_tokens_.get(), next_tokens_.data(),
                                next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
-    CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), samplingdata_->curand_states,
+    CUDA_CHECK(cudaMemcpyAsync(transaction_curand_states_.get(), sampling_data_->curand_states,
                                params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
   }
   transaction_saved_sampling_state_ = checkpoint_local_state;
@@ -145,7 +144,7 @@ void GreedySearch_Cuda::RestoreStateForTransactionImpl() {
   if (transaction_saved_sampling_state_) {
     CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), transaction_next_tokens_.get(),
                                next_tokens_.size_bytes(), cudaMemcpyDeviceToDevice, GetStream()));
-    CUDA_CHECK(cudaMemcpyAsync(samplingdata_->curand_states, transaction_curand_states_.get(),
+    CUDA_CHECK(cudaMemcpyAsync(sampling_data_->curand_states, transaction_curand_states_.get(),
                                params_->search.batch_size * sizeof(curandState), cudaMemcpyDeviceToDevice, GetStream()));
   }
   transaction_saved_sampling_state_ = false;
@@ -229,11 +228,18 @@ void BeamSearch_Cuda::SelectTop() {
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 }
 
-void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
+void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
+  EnsureSamplingData();
+  sampling_data_->ReInitCurandStates(static_cast<unsigned long long>(rng()),
+                                     params_->search.batch_size, GetStream());
+  SampleTopKTopPImpl(k, p, temperature);
+}
+
+void GreedySearch_Cuda::SampleTopKTopPImpl(int k, float p, float temperature) {
   EnsureSamplingData();
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
+  cuda::GetSample(sampling_data_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
                   params_->search.batch_size, k, p, temperature);
 
   external_host_copy_ = false;
@@ -388,8 +394,10 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
   ResetDone();
+  // For a nonzero rewind, preserve sequence[index] as the boundary token that the next
+  // generation step replays. Launch_GetLastTokens reads sequence_length - 1 so index + 1.
   if (index > 0)
-    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index), sequences_.max_length_, GetStream());
+    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index + 1), sequences_.max_length_, GetStream());
   else
     CUDA_CHECK(cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), GetStream()));
   sequences_.RewindTo(index);

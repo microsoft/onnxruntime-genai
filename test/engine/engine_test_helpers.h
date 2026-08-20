@@ -36,6 +36,18 @@ inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
   return params;
 }
 
+inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
+                               RequestStepPlan entry) {
+  if (entry.unprocessed_token_count == 0) {
+    entry.unprocessed_token_count =
+        static_cast<size_t>(entry.request->CurrentSequenceLength() -
+                            entry.request->ProcessedSequenceLength());
+  }
+  StepPlan plan;
+  plan.requests.push_back(std::move(entry));
+  static_cast<void>(ScheduledRequests{plan, model, nullptr, nullptr});
+}
+
 // Mints a Request carrying `prompt_tokens` but does not assign it, leaving it Unassigned so it can be
 // handed to Engine::AddRequest (which assigns it and enqueues it on the engine's scheduler).
 inline std::shared_ptr<Request> MintRequest(const Model& model, std::span<const int32_t> prompt_tokens) {

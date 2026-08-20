@@ -64,8 +64,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestRunsAfterCapacityIsReleased)
   plan.requests.push_back(PlanEntry(first, 5));
   plan.requests.push_back(PlanEntry(second, 5));
 
-  const auto result =
-      cache_->PlanStepResources(plan, /*committed_request_count=*/2);
+  const auto result = cache_->PlanStepResources(plan);
 
   ASSERT_TRUE(result.executable);
   EXPECT_TRUE(result.capacity_deferred);
@@ -95,8 +94,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestRunsAfterCapacityIsReleased)
   StepPlan next_plan;
   next_plan.requests.push_back(PlanEntry(second, 5));
 
-  const auto next_result =
-      cache_->PlanStepResources(next_plan, /*committed_request_count=*/1);
+  const auto next_result = cache_->PlanStepResources(next_plan);
 
   ASSERT_TRUE(next_result.executable);
   EXPECT_FALSE(next_result.capacity_deferred);
@@ -129,8 +127,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapaci
   plan.requests.push_back(PlanEntry(fitting, 4));
   plan.requests.push_back(PlanEntry(pending, 1, true));
 
-  const auto result =
-      cache_->PlanStepResources(plan, /*committed_request_count=*/2);
+  const auto result = cache_->PlanStepResources(plan);
 
   ASSERT_TRUE(result.executable);
   EXPECT_TRUE(result.capacity_deferred);
@@ -151,8 +148,7 @@ TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenIt
   plan.requests.push_back(PlanEntry(pending, /*target_cache_slots=*/1, /*newly_admitted=*/true,
                                     /*whole_sequence_cache_slots=*/13));
 
-  const auto result =
-      cache_->PlanStepResources(plan, /*committed_request_count=*/0);
+  const auto result = cache_->PlanStepResources(plan);
 
   EXPECT_FALSE(result.executable);
   EXPECT_EQ(result.unserviceable_request_id, pending.get());
@@ -173,14 +169,129 @@ TEST_F(PagedKeyValueCacheTest, AdmissionWaitsUntilTheWholePromptFits) {
   plan.requests.push_back(PlanEntry(pending, /*target_cache_slots=*/1, /*newly_admitted=*/true,
                                     /*whole_sequence_cache_slots=*/9));
 
-  const auto result =
-      cache_->PlanStepResources(plan, /*committed_request_count=*/1);
+  const auto result = cache_->PlanStepResources(plan);
 
   ASSERT_TRUE(result.executable);
   EXPECT_TRUE(result.capacity_deferred);
   EXPECT_EQ(result.unserviceable_request_id, nullptr);
   ASSERT_EQ(plan.requests.size(), 1u);
   EXPECT_EQ(plan.requests[0].request, committed);
+}
+
+TEST_F(PagedKeyValueCacheTest, OmittedResidentKeepsItsCommittedBlockTable) {
+  auto omitted = AddCommittedRequest({2, 3, 4, 5});
+  auto scheduled = AddCommittedRequest({6, 7, 8, 9});
+  const auto before = cache_->Snapshot();
+
+  StepPlan plan;
+  plan.requests.push_back(PlanEntry(scheduled, 5));
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  const std::array reservation_requests{
+      PagedCacheReservationRequest{scheduled.get(), 5, false},
+  };
+  auto reservation = cache_->Reserve(reservation_requests);
+  reservation.Commit();
+
+  const auto after = cache_->Snapshot();
+  ASSERT_EQ(before.requests.size(), 2u);
+  ASSERT_EQ(after.requests.size(), 2u);
+  EXPECT_EQ(after.requests[0].request_id, omitted.get());
+  EXPECT_EQ(after.requests[0].block_ids, before.requests[0].block_ids);
+  EXPECT_EQ(after.requests[0].used_slots, before.requests[0].used_slots);
+  EXPECT_EQ(after.requests[1].request_id, scheduled.get());
+  EXPECT_EQ(after.requests[1].used_slots, 5u);
+}
+
+TEST_F(PagedKeyValueCacheTest, OmittedResidentsStillLimitNewAdmissions) {
+  auto first = AddCommittedRequest({2, 3, 4, 5});
+  auto second = AddCommittedRequest({6, 7, 8, 9});
+  auto pending = MintAssignedRequest(
+      assign_target_, *model_, std::array<int32_t, 1>{10});
+
+  StepPlan plan;
+  plan.requests.push_back(PlanEntry(pending, 1, true, 1));
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  EXPECT_FALSE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  EXPECT_EQ(result.outcome.kind, StepOutcomeKind::CapacityDeferred);
+  EXPECT_TRUE(plan.requests.empty());
+}
+
+TEST_F(PagedKeyValueCacheTest, BlockedPrefillDoesNotPreventLaterAdmission) {
+  auto resident = AddCommittedRequest({2, 3, 4, 5});
+  auto blocked = MintAssignedRequest(
+      assign_target_, *model_, std::array<int32_t, 1>{10});
+  auto fitting = MintAssignedRequest(
+      assign_target_, *model_, std::array<int32_t, 1>{11});
+
+  StepPlan plan;
+  plan.requests.push_back(PlanEntry(resident, 4));
+  plan.requests.push_back(PlanEntry(blocked, 1, true, 9));
+  plan.requests.push_back(PlanEntry(fitting, 1, true, 4));
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_TRUE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, resident);
+  EXPECT_EQ(plan.requests[1].request, fitting);
+}
+
+TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedByIdentity) {
+  model_->config_->engine.dynamic_batching->max_batch_size = 3;
+  cache_ = std::make_unique<PagedKeyValueCache>(model_);
+
+  auto omitted = AddCommittedRequest({2, 3, 4, 5});
+  auto resident = AddCommittedRequest({6, 7, 8, 9});
+  auto pending = MintAssignedRequest(
+      assign_target_, *model_, std::array<int32_t, 1>{10});
+
+  StepPlan plan;
+  plan.requests.push_back(PlanEntry(pending, 1, true, 1));
+  plan.requests.push_back(PlanEntry(resident, 4));
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  EXPECT_FALSE(result.capacity_deferred);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, pending);
+  EXPECT_TRUE(plan.requests[0].newly_admitted);
+  EXPECT_EQ(plan.requests[1].request, resident);
+  EXPECT_FALSE(plan.requests[1].newly_admitted);
+
+  const auto snapshot = cache_->Snapshot();
+  ASSERT_EQ(snapshot.requests.size(), 2u);
+  EXPECT_EQ(snapshot.requests[0].request_id, omitted.get());
+  EXPECT_EQ(snapshot.requests[0].used_slots, 4u);
+}
+
+TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
+  auto pending = MintAssignedRequest(
+      assign_target_, *model_,
+      std::array<int32_t, 9>{2, 3, 4, 5, 6, 7, 8, 9, 10});
+
+  StepPlan plan;
+  plan.requests.push_back(
+      PlanEntry(pending, /*target_cache_slots=*/3,
+                /*newly_admitted=*/true,
+                /*whole_sequence_cache_slots=*/9));
+
+  const auto result = cache_->PlanStepResources(plan);
+
+  ASSERT_TRUE(result.executable);
+  const std::array reservation_requests{
+      PagedCacheReservationRequest{pending.get(), 3, true, 9},
+  };
+  auto reservation = cache_->Reserve(reservation_requests);
+  EXPECT_EQ(reservation.ReservedBlockCount(), 3u);
 }
 
 }  // namespace

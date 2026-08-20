@@ -360,6 +360,25 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (double)getSpeculativeNumber:(NSString*)key
                          error:(NSError**)error;
+
+/**
+ * Set a boolean speculative decoding option.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setSpeculativeBool:(NSString*)key
+                 boolValue:(BOOL)value
+                     error:(NSError**)error;
+
+/**
+ * Get a boolean speculative decoding option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (BOOL)getSpeculativeBool:(NSString*)key
+                     error:(NSError**)error;
 @end
 
 /**

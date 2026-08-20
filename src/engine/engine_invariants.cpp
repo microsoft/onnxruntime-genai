@@ -145,6 +145,60 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     add("Not every transaction-reserved block belongs to exactly one Request delta.");
   }
 
+  const auto& window = cache.window_blocks;
+  size_t allocated_window_blocks = 0;
+  std::unordered_map<size_t, const void*> window_owner_of_block;
+  std::unordered_set<const void*> window_requests;
+  for (const auto& request : window.requests) {
+    allocated_window_blocks += request.block_ids.size();
+    if (!window_requests.insert(request.request_id).second) {
+      add("Request " + PtrId(request.request_id) +
+          " appears in more than one window block table.");
+    }
+    if (request.block_ids.size() != window.blocks_per_request) {
+      add("Request " + PtrId(request.request_id) + " owns " +
+          std::to_string(request.block_ids.size()) + " window blocks instead of " +
+          std::to_string(window.blocks_per_request) + ".");
+    }
+    for (const size_t block_id : request.block_ids) {
+      if (block_id >= window.total_blocks) {
+        add("Request " + PtrId(request.request_id) + " owns out-of-range window block id " +
+            std::to_string(block_id) + " (total_blocks " +
+            std::to_string(window.total_blocks) + ").");
+      }
+      const auto [it, inserted] = window_owner_of_block.emplace(block_id, request.request_id);
+      if (!inserted) {
+        add("Window block id " + std::to_string(block_id) +
+            " is listed more than once.");
+      }
+    }
+  }
+
+  std::unordered_set<size_t> reserved_window_blocks;
+  for (const size_t block_id : window.transaction_reserved_block_ids) {
+    if (block_id >= window.total_blocks) {
+      add("Transaction reserves out-of-range window block id " + std::to_string(block_id) + ".");
+    }
+    if (!reserved_window_blocks.insert(block_id).second) {
+      add("Transaction reserves window block id " + std::to_string(block_id) + " more than once.");
+    }
+    if (window_owner_of_block.find(block_id) != window_owner_of_block.end()) {
+      add("Transaction-reserved window block id " + std::to_string(block_id) +
+          " is also committed to a Request.");
+    }
+  }
+  if (window.free_blocks > window.total_blocks) {
+    add("window free_blocks (" + std::to_string(window.free_blocks) +
+        ") exceeds total_blocks (" + std::to_string(window.total_blocks) + ").");
+  }
+  if (window.free_blocks + allocated_window_blocks + reserved_window_blocks.size() !=
+      window.total_blocks) {
+    add("window free (" + std::to_string(window.free_blocks) + ") + transaction_reserved (" +
+        std::to_string(reserved_window_blocks.size()) + ") + allocated (" +
+        std::to_string(allocated_window_blocks) + ") != total_blocks (" +
+        std::to_string(window.total_blocks) + ").");
+  }
+
   // The padded block-table width must be able to hold the widest Request's table.
   if (cache.block_table_columns != 0 && cache.block_table_columns < max_blocks_per_request) {
     add("block_table_columns (" + std::to_string(cache.block_table_columns) +

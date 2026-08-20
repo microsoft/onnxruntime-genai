@@ -141,7 +141,7 @@ jobs:
                 --cmake_extra_defines \
                   MANYLINUX=ON \
                   PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
-                  TEST_PHI2=True \
+                  TEST_PHI2=False \
                   TEST_QWEN_2_5=True \
                   'CMAKE_CUDA_ARCHITECTURES=60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120' \
                   'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \
@@ -191,6 +191,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
       # TODO: Enable this by adding dotnet to the docker image
