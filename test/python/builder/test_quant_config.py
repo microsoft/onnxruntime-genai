@@ -229,6 +229,7 @@ def test_extra_options_precision_float_disables_weight_quant():
     cfg = QuantConfig.from_extra_options({}, precision="bf16", execution_provider="cuda")
     assert cfg.io_dtype == "bf16"
     assert cfg.weights.type == "none"
+    assert cfg.moe.type == "none"
 
 
 def test_extra_options_cpu_default_block_size_and_accuracy_level():

@@ -6,13 +6,17 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 
+import copy
+import json
 import os
+
 import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import Qwen2ForCausalLM
 
 from .base import Model
+from .quant_config import QuantConfig
 
 
 class QwenModel(Model):
@@ -377,6 +381,28 @@ class Qwen35TextModel(Model):
         neg_exp_a = (-attention.A_log.data.exp()).detach()
         self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
 
+        gate_shape = ["batch_size", "sequence_length", n_kv]
+
+        if self.fuse_linear_attn_gates:
+            # One kernel for both gates; the float32 intermediates stay in registers.
+            gate_name = f"{basename}/gate/LinearAttentionGate"
+            g_output = f"{gate_name}/output_0"
+            beta_output = f"{gate_name}/output_1"
+            self.make_node(
+                "LinearAttentionGate",
+                [f"{a_name}/output_0", dt_bias_init, neg_exp_a_name, f"{b_name}/output_0"],
+                [g_output, beta_output],
+                name=gate_name,
+                domain="com.microsoft",
+            )
+            self.make_value(g_output, self.io_dtype, gate_shape)
+            self.make_value(beta_output, self.io_dtype, gate_shape)
+            return q_scaled_output, k_norm_out, v_out, g_output, beta_output
+
+        beta_name = f"{basename}/beta/Sigmoid"
+        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, gate_shape)
+        beta_output = f"{beta_name}/output_0"
+
         gate_name = f"{basename}/LinearAttentionGate"
         gate_shape = ["batch_size", "sequence_length", self.linear_num_value_heads]
         self.make_linear_attention_gate(
@@ -484,7 +510,9 @@ class Qwen35MoETextModel(Qwen35TextModel):
             self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
-        self.shared_expert_intermediate_size = getattr(config, "shared_expert_intermediate_size", self.moe_intermediate_size)
+        self.shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", self.moe_intermediate_size
+        )
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
@@ -517,6 +545,11 @@ class Qwen35MoETextModel(Qwen35TextModel):
             self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
             self.make_initializer(moe.experts.down_proj, down_proj_weight, to=self.io_dtype)
         else:
+            raw_gate_up = mlp.experts.gate_up_proj
+            half = raw_gate_up.shape[1] // 2
+            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+                raw_gate_up
+            )
             gate_up_qw_list, gate_up_sc_list = [], []
             down_qw_list, down_sc_list = [], []
             for i in range(self.moe_attrs["num_experts"]):
@@ -587,8 +620,77 @@ class Qwen35MoETextModel(Qwen35TextModel):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
+    def make_nvfp4_moe_initializers(
+        self,
+        experts,
+        gate_up_weight_name,
+        gate_up_scales_name,
+        gate_up_global_name,
+        down_weight_name,
+        down_scales_name,
+        down_global_name,
+    ):
+        """Emit QMoE NVFP4 initializers for all routed experts of one layer.
+
+        Reads the Model Optimizer per-expert tensors (``weight`` uint8 ``[N, K/2]``,
+        ``weight_scale`` e4m3 ``[N, K/16]``, ``weight_scale_2`` f32 scalar), repacks the
+        E2M1 codes into the CUDA QMoE ``[E, K, N/2]`` layout, and interleaves gate/up
+        along N for ``swiglu_fusion=1``. gate and up share one per-expert global scale.
+        """
+        gate_up_qw, gate_up_sc, gate_up_g = [], [], []
+        down_qw, down_sc, down_g = [], [], []
+        for expert_id, expert in enumerate(experts):
+            gate_prefix = f"expert.{expert_id}.gate_proj"
+            up_prefix = f"expert.{expert_id}.up_proj"
+            down_prefix = f"expert.{expert_id}.down_proj"
+            g_codes = self.repack_modelopt_nvfp4_weight_codes(expert.gate_proj.weight)
+            u_codes = self.repack_modelopt_nvfp4_weight_codes(expert.up_proj.weight)
+            if g_codes.shape != u_codes.shape:
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
+                    f"got {tuple(g_codes.shape)} and {tuple(u_codes.shape)}."
+                )
+            inter = g_codes.shape[0]
+            fused_codes = torch.stack([g_codes, u_codes], dim=1).reshape(2 * inter, -1)  # [2*inter, K]
+            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
+
+            scale_shape = (inter, g_codes.shape[1] // 16)
+            g_sc = self.modelopt_e4m3_bytes(expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape)
+            u_sc = self.modelopt_e4m3_bytes(expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape)
+            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
+            gate_global = self.modelopt_positive_scalar(
+                expert.gate_proj.weight_scale_2, f"{gate_prefix}.weight_scale_2"
+            )
+            up_global = self.modelopt_positive_scalar(expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2")
+            if gate_global != up_global:
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
+                    f"got {gate_global} and {up_global}."
+                )
+            gate_up_g.append(gate_global)
+
+            d_codes = self.repack_modelopt_nvfp4_weight_codes(expert.down_proj.weight)
+            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))  # [inter, hidden/2]
+            down_scale_shape = (d_codes.shape[0], d_codes.shape[1] // 16)
+            down_sc.append(
+                self.modelopt_e4m3_bytes(
+                    expert.down_proj.weight_scale,
+                    f"{down_prefix}.weight_scale",
+                    down_scale_shape,
+                )
+            )
+            down_g.append(
+                self.modelopt_positive_scalar(expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2")
+            )
+
+        self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
+        self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_weight_name)
+        self.make_fp8e4m3_initializer(torch.stack(gate_up_sc, dim=0), gate_up_scales_name)
+        self.make_fp8e4m3_initializer(torch.stack(down_sc, dim=0), down_scales_name)
+        self.make_initializer(torch.tensor(gate_up_g, dtype=torch.float32), gate_up_global_name)
+        self.make_initializer(torch.tensor(down_g, dtype=torch.float32), down_global_name)
+
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        """Build shared expert SiLU-MLP with sigmoid gating."""
         basename = f"/model/layers.{layer_id}/shared_expert"
 
         # Temporarily set new intermediate size from shared experts
@@ -600,7 +702,8 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
         gate_sigmoid_name = f"{basename}_gate/Sigmoid"
-        self.make_sigmoid(gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype,
-                          shape=["batch_size", "sequence_length", 1])
+        self.make_sigmoid(
+            gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
+        )
 
         return shared_output, f"{gate_sigmoid_name}/output_0"

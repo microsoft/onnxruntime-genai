@@ -16,6 +16,11 @@
 
 namespace Generators {
 
+enum class EngineHealth {
+  Healthy,
+  Unhealthy,
+};
+
 /**
  * @struct EngineDependencies
  * @brief Bundle of the collaborators the Engine drives.
@@ -32,6 +37,16 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
+};
+
+struct EngineTransactionMetrics {
+  uint64_t committed_steps{};
+  uint64_t capacity_deferrals{};
+  uint64_t reservation_failures{};
+  uint64_t rollbacks{};
+  uint64_t retryable_aborts{};
+  uint64_t post_processing_aborts{};
+  uint64_t fatal_execution_failures{};
 };
 
 /**
@@ -104,11 +119,37 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool HasPendingRequests() const;
 
  private:
-  std::shared_ptr<Model> model_;                         // The model used by the Engine.
-  std::shared_ptr<CacheManager> cache_manager_;          // The cache manager for handling cached data.
-  std::unique_ptr<Scheduler> scheduler_;                 // The scheduler responsible for managing execution order.
-  std::unique_ptr<ModelExecutor> model_executor_;        // The executor responsible for running the model.
-  std::queue<std::shared_ptr<Request>> ready_requests_;  // The list of requests that are ready for the application to process.
+  void ReclaimAbandonedRequests();
+  std::shared_ptr<Request> DrainReadyRequest();
+  std::shared_ptr<Request> StepDynamic();
+  std::shared_ptr<Request> StepStatic();
+  void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
+  [[noreturn]] void HandleContinuationRestoreFailure(
+      const std::shared_ptr<Request>& request,
+      std::exception_ptr append_error,
+      std::exception_ptr restore_error);
+  [[noreturn]] void MarkUnhealthyAndThrow(StepOutcomeKind outcome,
+                                          StepTransactionId transaction_id,
+                                          const void* request_id,
+                                          std::string message,
+                                          std::exception_ptr error);
+
+  std::shared_ptr<Model> model_;                   // The model used by the Engine.
+  std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
+  std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
+  std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  EngineHealth health_{EngineHealth::Healthy};
+  std::exception_ptr fatal_error_;
+  StepTransactionId next_transaction_id_{1};
+  EngineTransactionMetrics transaction_metrics_;
+  StepPlan step_plan_;
+  std::vector<RequestStepResult> step_results_;
+  std::vector<std::weak_ptr<Request>> tracked_requests_;
+  std::vector<std::shared_ptr<Request>> ready_requests_;
+  std::vector<std::shared_ptr<Request>> staged_ready_requests_;
+  size_t ready_request_index_{};
+
+  friend struct Request;
 };
 
 }  // namespace Generators

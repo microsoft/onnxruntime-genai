@@ -38,6 +38,12 @@ python model-mm.py -m {path to model folder} -e {execution provider}
 python model-mm.py -m {path to model folder} -e {execution provider} --image_paths image1.jpg image2.jpg --non_interactive
 ```
 
+```bash
+# The `qwen-3.6-mtp` script runs Qwen3.6 with its multi-token-prediction (MTP) head for
+# self-speculative decoding. See qwen-3.6-mtp.md for export instructions and design details.
+python qwen-3.6-mtp.py -m {path to main model folder} -d {path to MTP head folder}
+```
+
 ## Execution Providers
 
 The ONNX Runtime GenAI Python package supports the following execution providers (EPs):

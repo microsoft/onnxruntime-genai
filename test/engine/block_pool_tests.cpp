@@ -69,6 +69,14 @@ TEST(BlockTest, AddSlotOverflowRejected) {
   EXPECT_EQ(block.Size(), kBlockSize);
 }
 
+TEST(BlockTest, AddSlotsAdvancesInBulk) {
+  Block block(/*id=*/0, /*slots=*/1, kBlockSize);
+  block.AddSlots(3);
+  EXPECT_EQ(block.Size(), kBlockSize);
+  EXPECT_THROW(block.AddSlots(1), std::runtime_error);
+  EXPECT_EQ(block.Size(), kBlockSize);
+}
+
 TEST(BlockTest, IdentityAndSlotIdsAreStable) {
   Block block(/*id=*/3, /*slots=*/0, kBlockSize);
   block.AddSlot();

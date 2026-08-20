@@ -30,12 +30,14 @@ struct Config {
     static constexpr std::string_view PresentValueName = "present.%d.value";
     static constexpr std::string_view PresentConvName = "present.%d.conv";
     static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent";
+    static constexpr std::string_view HiddenStatesName = "hidden_states";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
     static constexpr std::string_view CumulativeSequenceLengthsName = "cumulative_sequence_lengths";
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -389,9 +391,17 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+
+        // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
+        // Empty unless the model graph takes a hidden_states input.
+        std::string hidden_states;
 
         // RNNT decoder inputs
         std::string targets;
@@ -414,6 +424,7 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string hidden_states;                          // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;
@@ -446,6 +457,41 @@ struct Config {
 
     } decoder;
 
+    // Multi-token-prediction (MTP) self-speculative head metadata (e.g. Qwen3.6). The caller
+    // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
+    // hidden-state output and the head's feedback output.
+    struct Mtp {
+      std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      int num_hidden_layers{1};  // The MTP head has a single decoder layer.
+      int num_key_value_heads{};
+      int head_size{};
+
+      // Name of the main decoder's hidden-states output that feeds the MTP head.
+      // The main model must be exported with this output exposed (include_hidden_states).
+      std::string main_hidden_states{Defaults::HiddenStatesName};
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string hidden_states{Defaults::HiddenStatesName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::LogitsName};
+        std::string hidden_states{"hidden_states_out"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+      } outputs;
+    } mtp;
+
+    std::optional<Decoder> draft;
+
   } model;
 
   struct Search {
@@ -469,12 +515,25 @@ struct Config {
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
   } search;
 
+  struct Speculative {
+    // Fixed proposal width when min_adaptive_k is 0. Four conservatively amortizes target
+    // verification without excessive draft work; the best value depends on acceptance and EP cost.
+    int max_draft_tokens{4};
+    int ngram_size{};             // 0 disables n-gram decoding; 2-16 matches the last N-1 tokens.
+    bool ngram_chained_lookup{};  // Refill the proposal by repeatedly looking up synthetic context.
+    // 0 disables adaptation. Values 1-16 enable it and set the starting width and floor;
+    // adjacent-width probes may grow the effective width up to the hard limit of 16.
+    int min_adaptive_k{};
+    bool cooldown{};  // Skip one speculative attempt after three zero-accept rounds.
+  } speculative;
+
   struct Engine {
     struct DynamicBatching {
       size_t block_size{256};                       // Total number of slots per block.
       std::optional<size_t> num_blocks;             // Total number of blocks per layer.
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
+      size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -495,6 +554,8 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

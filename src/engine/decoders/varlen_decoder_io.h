@@ -49,7 +49,8 @@ struct VarlenGraphBuffers {
  * - Past Sequence Lengths - int32[batch_size]
  * - Attention Metadata - int32[2] (CPU), optional
  * Outputs:
- * - Logits - float16/float32[total_num_tokens, vocab_size]
+ * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
+ *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.
  *
  * The inputs prepared by this class are compatible with models that use the
  * PagedAttention operator.
@@ -58,6 +59,7 @@ struct VarlenDecoderIO : DecoderIO {
   VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
+                  const ExecutionContext* execution_context = nullptr,
                   VarlenGraphBuffers* graph_buffers = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
@@ -70,10 +72,12 @@ struct VarlenDecoderIO : DecoderIO {
   // Non-null when this step is being captured or replayed, in which case the tensors below are
   // borrowed from the holder instead of being allocated fresh.
   VarlenGraphBuffers* graph_buffers_{};
+  const ExecutionContext* execution_context_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
+  bool logits_are_per_token_{true};
 };
 
 }  // namespace Generators

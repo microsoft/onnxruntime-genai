@@ -521,6 +521,39 @@ TEST(ModelTests, BatchSizeZeroThrows) {
 
   EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
 }
+
+TEST(ModelTests, NumReturnSequencesExceedsNumBeamsThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 8);  // exceeds num_beams (4)
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumReturnSequencesZeroThrows) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 0);  // below lower bound of 1
+
+  EXPECT_THROW(OgaGenerator::Create(*model, *params), std::runtime_error);
+}
+
+TEST(ModelTests, NumReturnSequencesValidWithinBounds) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 20);
+  params->SetSearchOption("batch_size", 1);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("num_return_sequences", 2);  // valid: 1 <= 2 <= 4
+
+  EXPECT_NO_THROW(OgaGenerator::Create(*model, *params));
+}
 #endif
 // --- Validation tests (no model files required) ---
 

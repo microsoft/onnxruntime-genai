@@ -71,6 +71,7 @@ def _load_builder_entrypoint_module():
 base_module = _load_base_module()
 builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
+Qwen35TextModel = importlib.import_module("models.builders.qwen").Qwen35TextModel
 
 
 def _check_extra_options(extra_options, precision, execution_provider):
@@ -400,6 +401,37 @@ def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
     model.make_kv_cache_scale_initializers()
 
     assert set(captured) == {"model.layers.0.attn.k_scale", "model.layers.0.attn.v_scale"}
+    for arr in captured.values():
+        assert arr.shape == (2, 1, 16)
+
+
+def test_hybrid_qwen_paged_per_channel_scales_use_canonical_shape(tmp_path):
+    scale_size = 2 * 16
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [[0.1] * scale_size],
+                    "v_scales": [[0.2] * scale_size],
+                }
+            }
+        )
+    )
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.kv_quant_type = "PER_CHANNEL"
+    model.use_paged_attention = True
+    model.num_kv_heads = 2
+    model.head_size = 16
+    model.num_layers = 2
+    model.layer_types = ["linear_attention", "full_attention"]
+    model.extra_options = {"kv_cache_scale_file": str(scale_file)}
+    model._legacy_fp8_kv_cache = False
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    assert set(captured) == {"model.layers.1.attn.k_scale", "model.layers.1.attn.v_scale"}
     for arr in captured.values():
         assert arr.shape == (2, 1, 16)
 

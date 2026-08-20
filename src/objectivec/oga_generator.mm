@@ -5,6 +5,49 @@
 #import "oga_internal.h"
 #import "ort_genai_objc.h"
 
+#include <stdexcept>
+
+@interface OGASpeculativeStats ()
+
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSpeculativeStats>)ptr;
+
+@end
+
+@implementation OGASpeculativeStats {
+  std::unique_ptr<OgaSpeculativeStats> _stats;
+}
+
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSpeculativeStats>)ptr {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+  _stats = std::move(ptr);
+  return self;
+}
+
+- (uint64_t)getCount:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetCount([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH(error, uint64_t(-1))
+}
+
+- (double)getNumber:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetNumber([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_DOUBLE(error)
+}
+
+- (BOOL)getBool:(NSString*)name error:(NSError**)error {
+  try {
+    return _stats->GetBool([name UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+@end
+
 @implementation OGAGenerator {
   std::unique_ptr<OgaGenerator> _generator;
 }
@@ -118,6 +161,13 @@
     return _generator->GetSequenceCount(index);
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
+}
+
+- (nullable OGASpeculativeStats*)getSpeculativeStatsWithError:(NSError**)error {
+  try {
+    return [[OGASpeculativeStats alloc] initWithCXXPointer:_generator->GetSpeculativeStats()];
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 + (void)shutdown {

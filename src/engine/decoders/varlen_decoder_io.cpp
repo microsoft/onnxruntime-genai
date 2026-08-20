@@ -3,6 +3,9 @@
 
 #include "varlen_decoder_io.h"
 #include "../../models/decoder_only.h"
+#include "../sequence_positions.h"
+
+#include <string_view>
 
 namespace Generators {
 
@@ -42,8 +45,19 @@ int VarlenGraphBuffers::GraphId(size_t batch_size, size_t block_table_columns) {
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
+                                 const ExecutionContext* execution_context,
                                  VarlenGraphBuffers* graph_buffers)
-    : DecoderIO(model, scheduled_requests, cache_manager), graph_buffers_{graph_buffers} {
+    : DecoderIO(model, scheduled_requests, cache_manager),
+      graph_buffers_{graph_buffers},
+      execution_context_{execution_context} {
+  // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
+  // dimension is treated as one row per packed token.
+  const auto logits_symbolic_shape =
+      model->session_info_.GetOutputSymbolicShape(model->config_->model.decoder.outputs.logits);
+  logits_are_per_token_ = logits_symbolic_shape.empty() ||
+                          logits_symbolic_shape[0] == nullptr ||
+                          std::string_view(logits_symbolic_shape[0]) != "batch_size";
+
   PrepareInputIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
@@ -61,10 +75,16 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
 }
 
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), static_cast<size_t>(0),
-                                      [](size_t sum, const std::shared_ptr<Request>& request) -> size_t {
-                                        return sum + request->UnprocessedTokens().size();
-                                      });
+  const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+  if (plan && plan->requests.size() != scheduled_requests.size()) {
+    throw std::runtime_error("Step plan size does not match the scheduled batch.");
+  }
+  const size_t num_tokens =
+      plan ? plan->token_count
+           : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                             [](size_t sum, const std::shared_ptr<Request>& request) {
+                               return sum + request->ScheduledTokenCount();
+                             });
   // On a capturable step the tensors are views onto buffers that were allocated once, so their
   // device addresses match the ones recorded in the graph. Otherwise each step allocates its own.
   auto reshape = [&](std::unique_ptr<Tensor>& owned, Tensor* borrowed, ONNXTensorElementDataType type,
@@ -102,16 +122,27 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
     auto input_ids = request->UnprocessedTokensCpu();
+    const RequestStepPlan* entry = plan ? &plan->requests[i] : nullptr;
+    if (entry && (entry->request != request ||
+                  entry->unprocessed_token_count != input_ids.size() ||
+                  entry->packed_token_offset != running_length)) {
+      throw std::runtime_error("Step plan token layout does not match the scheduled request.");
+    }
     std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
 
-    if (request->IsPrefill()) {
-      // When a request is created, the current sequence length becomes the prompt length.
-      // But the kv cache is not updated until the first token is generated.
-      // So we set the past sequence length to current sequence length minus the unprocessed tokens length.
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength() - input_ids.size());
-    } else {
-      sequence_lengths_cpu_span[i] = static_cast<int32_t>(request->CurrentSequenceLength());
+    // The batch is represented as three coordinated arrays:
+    //   input_ids                  = all pending tokens concatenated
+    //   cumulative_sequence_lengths = boundaries of each request in that flat token array
+    //   past_sequence_lengths       = the absolute KV-cache write position for each request
+    // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
+    // number of tokens already in the cache and therefore the base position for this step.
+    const int64_t processed_sequence_length = request->ProcessedSequenceLength();
+    if (entry && (request->CurrentSequenceLength() != entry->sequence_length_before ||
+                  SlotsAfterStep(processed_sequence_length, entry->unprocessed_token_count) !=
+                      entry->target_cache_slots)) {
+      throw std::runtime_error("Step plan processed sequence length does not match the request.");
     }
+    sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);
 
     running_length += input_ids.size();
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
@@ -159,16 +190,18 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     // capturable step reports bounds that hold for the whole life of the graph instead: one token per
     // sequence, and the KV length the block table can address at its current column count.
     max_query_len = 1;
-    max_kv_len = static_cast<int32_t>(cache_manager_->BlockTableColumns() *
+    max_kv_len = static_cast<int32_t>(execution_context_->block_table_columns *
                                       model->config_->engine.dynamic_batching->block_size);
+  } else if (execution_context_ && execution_context_->plan) {
+    for (const auto& entry : execution_context_->plan->requests) {
+      max_query_len = std::max(max_query_len, static_cast<int32_t>(entry.unprocessed_token_count));
+      max_kv_len = std::max(max_kv_len, static_cast<int32_t>(entry.target_cache_slots));
+    }
   } else {
     for (auto& request : scheduled_requests) {
-      const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      // CurrentSequenceLength() already counts the unprocessed tokens for a prefill request, and
-      // excludes them for a generation request, mirroring how past_sequence_lengths is filled above.
-      const int32_t kv_len = request->IsPrefill()
-                                 ? static_cast<int32_t>(request->CurrentSequenceLength())
-                                 : static_cast<int32_t>(request->CurrentSequenceLength()) + query_len;
+      const int32_t query_len = static_cast<int32_t>(request->ScheduledTokenCount());
+      // KV length after the step is past length plus query length, which is the current length.
+      const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
       max_query_len = std::max(max_query_len, query_len);
       max_kv_len = std::max(max_kv_len, kv_len);
     }
@@ -186,16 +219,26 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
 }
 
 void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), static_cast<size_t>(0),
-                                      [](size_t sum, const std::shared_ptr<Request>& request) {
-                                        return sum + request->UnprocessedTokens().size();
-                                      });
-  const std::vector<int64_t> logits_shape = {static_cast<int64_t>(num_tokens), static_cast<int64_t>(model->config_->model.vocab_size)};
+  size_t logits_rows = scheduled_requests.size();
+  if (logits_are_per_token_) {
+    const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+    logits_rows =
+        plan ? plan->token_count
+             : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                               [](size_t sum, const std::shared_ptr<Request>& request) {
+                                 return sum + request->ScheduledTokenCount();
+                               });
+  }
+  const std::vector<int64_t> logits_shape = {
+      static_cast<int64_t>(logits_rows),
+      static_cast<int64_t>(model->config_->model.vocab_size)};
   if (graph_buffers_ != nullptr) {
     graph_buffers_->logits->CreateTensor(logits_shape, /*make_static=*/true);
     active_logits_ = graph_buffers_->logits.get();
   } else {
-    logits_ = std::make_unique<Tensor>(model->p_device_inputs_, model->session_info_.GetOutputDataType(model->config_->model.decoder.outputs.logits));
+    logits_ = std::make_unique<Tensor>(
+        model->p_device_inputs_,
+        model->session_info_.GetOutputDataType(model->config_->model.decoder.outputs.logits));
     logits_->CreateTensor(logits_shape);
     active_logits_ = logits_.get();
   }
@@ -206,14 +249,33 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   std::vector<size_t> valid_token_indices(scheduled_requests_.size());
-  for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
-    valid_token_indices[i] = running_length + scheduled_requests_[i]->UnprocessedTokens().size() - 1;
-    running_length += scheduled_requests_[i]->UnprocessedTokens().size();
+  if (logits_are_per_token_) {
+    if (execution_context_ && execution_context_->plan) {
+      const auto& plan = *execution_context_->plan;
+      if (plan.requests.size() != scheduled_requests_.size()) {
+        throw std::runtime_error("Step plan size does not match logits batch size.");
+      }
+      for (size_t i = 0; i < plan.requests.size(); ++i) {
+        if (plan.requests[i].request != scheduled_requests_[i]) {
+          throw std::runtime_error("Step plan order does not match logits batch order.");
+        }
+        valid_token_indices[i] = plan.requests[i].logits_row_index;
+      }
+    } else {
+      for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
+        valid_token_indices[i] = running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1;
+        running_length += scheduled_requests_[i]->ScheduledTokenCount();
+      }
+    }
+  } else {
+    for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
+      valid_token_indices[i] = i;
+    }
   }
 
-  // [num_tokens, vocab_size]
-  const auto all_tokens_logits_shape = active_logits_->GetShape();
-  const int64_t vocab_size = all_tokens_logits_shape[1];
+  // The output shape is either [batch_size, vocab_size] or [num_tokens, vocab_size].
+  const auto active_logits_shape = active_logits_->GetShape();
+  const int64_t vocab_size = active_logits_shape[1];
   const int64_t element_size = static_cast<int64_t>(Ort::SizeOf(active_logits_->GetType()));
 
   auto logits_bytes = active_logits_->GetByteSpan();
@@ -237,9 +299,8 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
     logits_fp32_span = logits_fp32_->GetDeviceSpan<float>();
   }
 
-  // On a pure decode step every request contributes exactly one token, so the rows the search needs
-  // are already the first `batch` rows of the output and the whole batch converts in one launch
-  // instead of one launch per request.
+  // Per-request logits occupy contiguous rows. Per-token logits do too on pure decode steps because
+  // every request contributes exactly one token. Convert the whole batch in one launch in either case.
   bool rows_are_contiguous = !valid_token_indices.empty();
   for (size_t i = 0; i < valid_token_indices.size() && rows_are_contiguous; ++i) {
     rows_are_contiguous = valid_token_indices[i] == i;
