@@ -18,6 +18,10 @@
 #include <thread>
 #include <unordered_map>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #include "../generators.h"
 #include "../search.h"
 #include "../tracing.h"

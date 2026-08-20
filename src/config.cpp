@@ -16,6 +16,8 @@
 
 namespace Generators {
 
+int64_t SafeDoubleToInt64(double x, std::string_view name);
+
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
@@ -443,7 +445,7 @@ struct Int64Array_Element : JSON::Element {
   explicit Int64Array_Element(std::vector<int64_t>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(static_cast<int64_t>(JSON::Get<double>(value)));
+    v_.push_back(SafeDoubleToInt64(JSON::Get<double>(value), name));
   }
 
  private:
@@ -1463,6 +1465,31 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+int64_t SafeDoubleToInt64(double x, std::string_view name) {
+  if (!std::isfinite(x)) {
+    throw std::runtime_error("Field '" + std::string(name) +
+                             "' cannot be converted to int64 (NaN or Inf)");
+  }
+
+  // int64_t::max() rounds up to 2^63 as a double, so use an exclusive upper bound.
+  constexpr double min_int64_val = -9223372036854775808.0;
+  constexpr double max_int64_exclusive = 9223372036854775808.0;
+  if (x < min_int64_val || x >= max_int64_exclusive) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is out of int64 range ["
+       << std::numeric_limits<int64_t>::min() << ", " << std::numeric_limits<int64_t>::max() << "]";
+    throw std::runtime_error(ss.str());
+  }
+
+  if (x != std::trunc(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is not an integer";
+    throw std::runtime_error(ss.str());
+  }
+
+  return static_cast<int64_t>(x);
 }
 
 struct Search_Element : JSON::Element {
