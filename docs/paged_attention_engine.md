@@ -8,7 +8,7 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
-The dynamic path manages paged KV decoder state together with per-request search and sampler state. When the decoder manifest also declares `fixed` state groups (recurrent or convolutional state), `PagedCacheManager` owns a `FixedStatePool` and reserves, stages, and commits its per-request slots inside the same transaction as the paged blocks. This integrates fixed-state ownership only: `VarlenDecoderIO` does not yet bind those tensors to model execution, so a hybrid graph still cannot run through the production dynamic decoder. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+The dynamic path manages paged KV decoder state together with per-request search and sampler state. When the decoder manifest also declares `fixed` state groups (recurrent or convolutional state), `PagedCacheManager` owns a `FixedStatePool` and reserves, stages, and commits its per-request slots inside the same transaction as the paged blocks. `HybridDecoderIO` binds those fixed tensors alongside the existing packed variable-length contract. Execution is selected from manifest capabilities rather than model names, and every Engine-owned mutable state participates in the same transaction boundary.
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
@@ -101,10 +101,10 @@ When an explicit manifest is present, model loading expands every binding and ve
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-The composite resource manager can reserve, stage, and commit `fixed` groups together with the
-required `paged_kv` group, but this branch intentionally keeps the dynamic compatibility gate in
-place because the production decoder does not bind fixed tensors yet. The packed hybrid decoder IO
-follow-up removes that gate at the same boundary where real model execution becomes available.
+`fixed` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one `fixed` group is present. The composite manager reserves, stages, and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds their gathered inputs and staged outputs alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
+
+Fixed state currently requires `engine.dynamic_batching`; static batching is rejected because
+`StaticBatchDecoderIO` does not own request-indexed fixed-state bindings.
 
 ## Request lifecycle
 
@@ -413,11 +413,12 @@ On the transactional dynamic path, `PagedCacheManager::PrepareStep()` updates th
 
 The physical key and value cache tensors are long-lived. What changes per step is the block table that maps each request's logical sequence blocks to physical cache blocks.
 
-`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. The production executor forwards this context to the decoder, but `VarlenDecoderIO` intentionally does not bind the fixed inputs or outputs yet.
+`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. `HybridDecoderIO` adopts the complete `VarlenDecoderIO` contract and appends these fixed bindings without changing packed token order or logits processing.
 
 ### 8. Pack variable-length model inputs
 
-`SimpleDecoder` chooses `VarlenDecoderIO` for the dynamic path.
+`SimpleDecoder` chooses `VarlenDecoderIO` for paged-only models and `HybridDecoderIO` (which
+composes `VarlenDecoderIO`) when fixed state groups are present.
 
 `VarlenDecoderIO` builds three coordinated inputs:
 
@@ -426,6 +427,13 @@ input_ids                    all requests' unprocessed tokens concatenated
 cumulative_sequence_lengths  boundaries of each request in the flat token array
 past_sequence_lengths        committed KV length and write position for each request
 ```
+
+When the graph declares `position_ids`, it also builds one absolute int64 position per packed
+token. Request row `i` starts at its committed `past_sequence_lengths[i]`, so a token at local
+offset `j` receives position `past_sequence_lengths[i] + j`. The StepPlan row, token count, and
+packed offset are validated before this optional tensor is copied to the model-input device.
+Packed models with this input execute eagerly because the current persistent CUDA graph buffers
+do not own stable position-ID storage.
 
 Using the previous example:
 
@@ -444,6 +452,13 @@ The decoder also prepares a CPU `int32[3]` attention metadata input:
 ```
 
 The first two values are upper bounds. The third is a lower bound on the longest per-request KV sequence and lets the paged attention operator decide whether split-KV decode is worthwhile. Supplying these values lets the operator choose its backend and size its work without reading sequence lengths back from the device. Models using this contract must expose the three-element input; the Engine no longer emits the legacy two-element form. This requires ONNX Runtime commit `0d291bc5d39d8e62150c2c30f174812834344b48` or a later package containing the three-element PagedAttention metadata contract.
+
+Pure-decode steps and mixed prefill/decode steps may select different numerically valid CUDA
+backends. Floating-point reassociation can therefore flip a near-tied greedy token when batch
+composition changes even though request state and continuation are correct. Qualification should
+use continuation/replay invariants, tolerant logits or top-k comparisons, and task-level quality;
+bitwise token equality across batch compositions is available only when every selected backend is
+batch-invariant.
 
 ### 9. Run the decoder once
 
@@ -711,12 +726,10 @@ decoder has `fixed` groups, and integrates it into the dynamic transaction:
 `PlanStepResources()` plans fixed rows atomically with paged blocks, `ReserveStep()`
 reserves both, `PrepareCommit()`/`Commit()` stage and publish both, and
 `Deallocate()` releases both. Removal and completion release a request's fixed slot
-together with its paged blocks. The pool is not yet bound to model execution:
-`VarlenDecoderIO` does not consume the fixed bindings and does not select the
-manifest's hybrid execution layouts, so a hybrid graph still cannot run through the
-production dynamic decoder path. Enabling hybrid execution is the remaining step;
-ownership, staging, rollback, publication, and invariant validation already commit
-paged KV, fixed state, request/search state, and ready events at one boundary.
+together with its paged blocks. `HybridDecoderIO` composes the packed
+`VarlenDecoderIO` inputs and logits handling with the reservation's fixed input and
+staged output bindings. Fixed-state models execute eagerly because these tensors
+have transaction-specific addresses that cannot be replayed safely by a CUDA graph.
 
 ## Prefill, decode, and mixed batches
 
