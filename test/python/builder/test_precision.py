@@ -37,7 +37,7 @@ def _load_base_module():
     return module
 
 
-def test_paged_attention_metadata_has_replay_safe_lower_bound(monkeypatch):
+def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
     monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
