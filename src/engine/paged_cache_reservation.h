@@ -83,6 +83,28 @@ class PagedCacheReservation {
   void FillWindowBlockTable(std::span<const void* const> request_ids,
                             size_t columns,
                             std::span<int32_t> output) const;
+  // Validates every precondition this reservation's own CommitValidated relies on, without
+  // mutating any state. For a reservation that still satisfies the publish contract it is the only
+  // part of committing that can throw; CommitValidated additionally throws if the reservation is no
+  // longer Reserved (double publish), so an orchestrator must still guard CommitValidated too.
+  //
+  // Composite use: reservations produced by the same cache share one committed_tables_ vector
+  // (PagedKeyValueCache::Reserve hands the same vector to every reservation). ValidateCommit only
+  // checks this reservation's own share of that vector's headroom, so an orchestrator that validates
+  // several reservations up front and then publishes them all must additionally guarantee, before
+  // the publish phase, that (a) the reservations cover disjoint request ids and (b) committed_tables_
+  // has capacity for the sum of their newly-admitted tables. Otherwise a later CommitValidated could
+  // reallocate committed_tables_ and throw mid-publish.
+  void ValidateCommit() const;
+  // Publishes a reservation that ValidateCommit has already accepted. For a single reservation it
+  // moves preallocated blocks and tables into the committed cache and performs no fallible allocation
+  // or device work; its only guard is a state-only, allocation-free check that the reservation is
+  // still Reserved (it throws rather than publish twice, which would be undefined behavior). Across a
+  // composite publish it stays allocation-free only while the orchestrator honors the ValidateCommit
+  // preconditions above. See the implementation for why it is intentionally not marked noexcept.
+  void CommitValidated();
+  // Convenience wrapper preserving the original single-call contract: ValidateCommit then
+  // CommitValidated.
   void Commit();
   void Release();
 
