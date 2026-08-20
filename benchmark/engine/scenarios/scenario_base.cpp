@@ -76,7 +76,7 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
     }
     result["core_metrics"] = {
         {"summary",
-         {{"ttft_ms", {{"p25", output.ttft_p25_ms}, {"p50", output.ttft_p50_ms}, {"p95", output.ttft_p95_ms}}},
+         {{"ttft_ms", {{"p5", output.ttft_p5_ms}, {"p50", output.ttft_p50_ms}, {"p95", output.ttft_p95_ms}}},
           {"inter_token_latency_ms", {{"p50", output.inter_token_latency_p50_ms}, {"p95", output.inter_token_latency_p95_ms}}},
           {"peak_device_memory_mb", output.peak_device_memory_mb},
           {"steady_state_device_memory_mb", output.steady_state_device_memory_mb}}},

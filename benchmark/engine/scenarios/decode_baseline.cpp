@@ -188,7 +188,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
-  output.ttft_p25_ms = Percentile(ttft_values, 25.0);
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
 
