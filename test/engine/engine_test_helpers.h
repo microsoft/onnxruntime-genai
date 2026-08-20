@@ -29,6 +29,15 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
 
+// Loads the tiny checked-in hybrid decoder used by the fixed-state-pool tests. Its config declares
+// two fixed decoder state groups (convolution layers [0, 3] and recurrent layers [2, 5]) whose
+// bindings resolve to real session inputs/outputs, so FixedStatePool can validate the manifest and
+// derive per-request geometry. Like the other engine test models, the graph never executes: the
+// pool allocates and stages its own tensors.
+inline std::shared_ptr<Model> LoadSyntheticHybridModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+}
+
 // Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request
 // advances deterministically (SelectTop) when fed scripted logits.
 inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
