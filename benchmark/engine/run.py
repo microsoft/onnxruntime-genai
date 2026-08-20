@@ -21,6 +21,9 @@ def main() -> int:
         "--cuda_visible_devices",
         help="Comma-separated GPU IDs; scenarios are assigned round-robin and each sees one GPU.",
     )
+    parser.add_argument(
+        "--verbose", "--versbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
+    )
     args = parser.parse_args()
 
     scenarios = json.loads(args.config.read_text())
@@ -45,16 +48,24 @@ def main() -> int:
             temp_config.write_text(json.dumps([scenario], indent=2) + "\n")
 
             environment = os.environ.copy()
+            gpu_id = None
             if gpu_ids is not None:
-                environment["CUDA_VISIBLE_DEVICES"] = gpu_ids[(index - 1) % len(gpu_ids)]
+                gpu_id = gpu_ids[(index - 1) % len(gpu_ids)]
+                environment["CUDA_VISIBLE_DEVICES"] = gpu_id
+            label = f"{index}/{len(scenarios)} {scenario['scenario']}"
+            print(f"Starting {label}" + (f" on GPU {gpu_id}" if gpu_id is not None else ""), flush=True)
             completed = subprocess.run(
                 [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
                 env=environment,
+                capture_output=not args.verbose,
+                text=True,
             )
 
             result_path = scenario_out / f"{scenario['scenario']}_results_001.json"
             if result_path.exists():
                 shutil.move(result_path, args.out / f"{scenario['scenario']}_results_{index:03d}.json")
+            state = "completed" if completed.returncode == 0 else f"failed ({completed.returncode})"
+            print(f"{state.capitalize()} {label}", flush=True)
             return completed.returncode != 0
 
     work = list(enumerate(scenarios, 1))
