@@ -497,10 +497,16 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // a multiple of the block size. Only meaningful with a shared past/present
   // buffer, where the sequence dimension is fixed at allocation time.
   // Local (sliding-window) attention layers are left untouched: their cache is
-  // capped to the window size and does not grow, so block-alignment does not apply.
+  // capped to the window and does not grow, so block-alignment does not apply.
   // No-op for fixed-KV-shape models: their sequence dim is dictated by the model
   // graph, so rounding it would desync the cache from the graph's fixed shape.
-  if (past_present_share_buffer_ && fixed_kv_seq_len <= 0 &&
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  // We took the windowed path above iff a windowed cache was computed and there is
+  // no beam search. When it is uniform (empty layers list) *every* layer is a
+  // sliding-window layer, so the whole cache is local and must not be rounded.
+  const bool windowed_cache = windowed_cache_size > 0 && state_.params_->search.num_beams == 1;
+  const bool uniform_local_cache = windowed_cache && sliding_window->layers.empty();
+  if (past_present_share_buffer_ && fixed_kv_seq_len <= 0 && !uniform_local_cache &&
       state_.params_->search.kv_cache_block_size.has_value()) {
     const int64_t block_size = static_cast<int64_t>(state_.params_->search.kv_cache_block_size.value());
     if (block_size > 0) {
@@ -510,9 +516,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
       // Mark which cache slots correspond to local (sliding-window) attention
       // layers so they can be skipped (0 = global/full attention, 1 = local).
+      // Only the alternating windowed path gives some layers a smaller cache;
+      // otherwise no layer is local and the whole cache is rounded.
       std::vector<std::uint8_t> is_local_attention(layer_shapes_.size(), 0);
-      const auto& sliding_window = model_.config_->model.decoder.sliding_window;
-      if (!layer_shapes_.empty() && sliding_window.has_value() && !sliding_window->layers.empty()) {
+      if (windowed_cache && !layer_shapes_.empty() && !sliding_window->layers.empty()) {
         std::unordered_map<int, int> model_layer_to_cache_slot;
         for (int slot = 0; slot < layer_count_; ++slot) {
           int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
