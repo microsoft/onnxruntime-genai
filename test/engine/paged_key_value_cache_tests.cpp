@@ -503,6 +503,24 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
       std::runtime_error);
 }
 
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateWithStaticBatching) {
+  auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching.reset();
+  EXPECT_THROW(
+      {
+        try {
+          auto manager = CacheManager::Create(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find("require engine.dynamic_batching"),
+              std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
   auto model = LoadSyntheticPagedModel();
   model->config_->model.decoder.state_groups->front().key.reset();
