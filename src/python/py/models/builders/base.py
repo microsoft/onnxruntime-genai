@@ -498,6 +498,16 @@ class Model:
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
+    def paged_attention_uses_packed_layout(self):
+        """Whether the complete graph consumes packed token rows.
+
+        PagedAttention itself always consumes packed Q/K/V rows, so every paged builder including
+        hybrid ones with fixed convolution or recurrent state keeps this equal to
+        `use_paged_attention`. A builder overrides this only if some other part of its graph
+        still needs a dense reference shape while paged attention itself stays packed.
+        """
+        return self.use_paged_attention
+
     def get_rope_parameters(self, config):
         """Return the RoPE parameters mapping from the model config.
 
@@ -1042,6 +1052,14 @@ class Model:
                 "cache_slack": self.window_kv_cache_slack,
             }
 
+        state_groups = self.make_decoder_state_groups(inputs, outputs)
+        has_fixed_state_groups = any(group["kind"] != "paged_kv" for group in state_groups)
+        if self.use_paged_attention and has_fixed_state_groups:
+            # Fixed convolution/recurrent state is staged per step and does not yet have
+            # rollback-safe stable addresses. Keep the provider eager even if graph capture was
+            # requested globally.
+            self.ep_attrs.get(self.ep, {}).update({"enable_cuda_graph": "0"})
+
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
@@ -1056,7 +1074,6 @@ class Model:
                 },
             }
 
-        state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
 
@@ -3339,6 +3356,35 @@ class Model:
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
 
+    def make_varlen_causal_conv_with_state(self, name, **kwargs):
+        """Packed-layout counterpart of `make_causal_conv_with_state`.
+
+        `root_input` is token-major `[num_tokens, channels]` instead of channel-first
+        `[batch_size, channels, sequence_length]`; activation-typed state is keyed per scheduled
+        request as `[batch_size, channels, kernel_size - 1]`.
+        """
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["cumulative_sequence_length"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        output = f"{name}/output_0"
+        present_conv = kwargs["present_conv_state"]
+        outputs = [output, present_conv]
+        self.make_node(
+            "VarlenCausalConvWithState",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            activation=kwargs.get("activation", "silu"),
+            max_checkpoints=0,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
+
     def make_linear_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
@@ -3373,6 +3419,40 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
+
+    def make_varlen_linear_attention(self, name, **kwargs):
+        """Packed-layout counterpart of `make_linear_attention`.
+
+        Query, key, and value use THD `[num_tokens, heads, dim]` layouts. State is required FP32
+        V-major `[batch_size, value_heads, value_dim, key_dim]`.
+        """
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["cumulative_sequence_length"],
+            kwargs["past_recurrent_state"],
+            kwargs["decay"],
+            kwargs["beta"],
+        ]
+        output = f"{name}/output_0"
+        present_recurrent = kwargs["present_recurrent_state"]
+        outputs = [output, present_recurrent]
+        self.make_node(
+            "VarlenLinearAttention",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+            decay_activation=kwargs.get("decay_activation", "none"),
+            beta_activation=kwargs.get("beta_activation", "none"),
+            max_checkpoints=0,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
+
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
