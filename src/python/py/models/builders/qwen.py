@@ -1112,12 +1112,9 @@ class Qwen35TextModel(Model):
         self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
         if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
-        if self.linear_attn_op == "gated_delta_net" and self._recurrent_state_window:
-            # The windowed carry is a LinearAttention concept; GatedDeltaNet expresses the same
-            # rollback through its `checkpoints` output, which the runtime does not consume yet.
-            raise NotImplementedError(
-                "linear_attn_op=gated_delta_net does not support recurrent_state_window yet"
-            )
+        if self.linear_attn_op == "gated_delta_net" and self._recurrent_state_window > 8:
+            # The window becomes the operator's checkpoint output, which it caps at 8 slots.
+            raise ValueError("linear_attn_op=gated_delta_net supports recurrent_state_window up to 8")
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1170,8 +1167,10 @@ class Qwen35TextModel(Model):
                 if self.linear_attn_op == "gated_delta_net":
                     # V-major and always float32: the recurrence boundary is where reduced
                     # precision hurts most. The trailing extents swap, which is a no-op whenever
-                    # the key and value head dims match.
+                    # the key and value head dims match. With state_window=W this is the
+                    # operator's checkpoint window, whose last slot is the committed state.
                     recurrent_state_shape = [
+                        *self._state_window_dims,
                         "batch_size",
                         self.linear_num_value_heads,
                         self.linear_value_head_dim,
@@ -1970,6 +1969,9 @@ class Qwen35TextModel(Model):
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
         op_name = f"{basename}/GatedDeltaNet"
+        window = self._recurrent_state_window
+        present = f"present.{layer_id}.recurrent_state"
+        state_shape = [*self._state_window_dims, "batch_size", n_kv, hv, hk]
         self.make_gated_delta_net(
             op_name,
             q_path=q_4d,
@@ -1978,7 +1980,13 @@ class Qwen35TextModel(Model):
             decay=f"{a_cast_name}/output_0",
             beta=f"{b_cast_name}/output_0",
             initial_state=f"past_key_values.{layer_id}.recurrent_state",
-            final_state=f"present.{layer_id}.recurrent_state",
+            # Windowed: past and present are one buffer whose last slot is the committed state,
+            # so the op writes the whole window through `checkpoints` and no separate final
+            # state exists. MtpGenerator promotes an accepted slot to the last one on a partial
+            # accept, which is exactly the rollback the window is for.
+            final_state="" if window else present,
+            checkpoints=present if window else "",
+            state_checkpoints=window,
             a_log=a_log_init,
             dt_bias=dt_bias_init,
             update_rule="gated_delta",
@@ -1987,7 +1995,8 @@ class Qwen35TextModel(Model):
             qk_l2_norm=1,
             scale=0.0,  # 0 means the op's default 1/sqrt(head_size_qk)
             output_shape=["batch_size", "sequence_length", n_kv, hv],
-            state_shape=["batch_size", n_kv, hv, hk],
+            state_shape=state_shape,
+            checkpoints_shape=state_shape,
         )
 
         flat_name = f"{basename}/gdn_out/Reshape"

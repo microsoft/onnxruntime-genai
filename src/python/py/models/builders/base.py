@@ -3352,9 +3352,10 @@ class Model:
     def make_gated_delta_net(self, name, **kwargs):
         """com.microsoft::GatedDeltaNet -- token-major inputs, V-major float32 state.
 
-        Unlike LinearAttention this takes a committed single state and returns a separate
-        final state, so the caller passes distinct input/output state names. `checkpoints`,
-        when requested, carries the per-token state series a speculative decoder rolls back to.
+        The state may be a plain committed state (`final_state`) or a checkpoint window
+        (`checkpoints`) whose last slot is the committed state and whose earlier slots are the
+        per-token series a speculative decoder rolls back to. In the windowed form one buffer
+        serves as both the past and the present state, so `final_state` is left unbound.
         """
         inputs = [
             kwargs["q_path"],
@@ -3369,9 +3370,9 @@ class Model:
         if kwargs.get("a_log"):
             inputs += [kwargs["a_log"], kwargs["dt_bias"]]
         output = f"{name}/output_0"
-        final_state = kwargs["final_state"]
+        final_state = kwargs.get("final_state", "")
+        checkpoints = kwargs.get("checkpoints", "")
         outputs = [output, final_state]
-        checkpoints = kwargs.get("checkpoints")
         if checkpoints:
             outputs.append(checkpoints)
 
@@ -3395,7 +3396,8 @@ class Model:
             **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+        if final_state:
+            self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
         if checkpoints:
             self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
 
