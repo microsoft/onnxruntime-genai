@@ -12,6 +12,7 @@
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
 
+#include <array>
 #include <string_view>
 
 namespace Generators {
@@ -158,6 +159,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                           std::string_view(logits_symbolic_shape[0]) != "batch_size";
 
   PrepareInputIds(model, scheduled_requests);
+  PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
 
@@ -263,6 +265,66 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   if (owned_input_ids) owned_inputs_.push_back(std::move(owned_input_ids));
   if (owned_cumulative) owned_inputs_.push_back(std::move(owned_cumulative));
   if (owned_sequence_lengths) owned_inputs_.push_back(std::move(owned_sequence_lengths));
+}
+
+void VarlenDecoderIO::PreparePositionIds(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  const std::string& position_ids_name =
+      model->config_->model.decoder.inputs.position_ids;
+  if (!model->session_info_.HasInput(position_ids_name)) {
+    return;
+  }
+  if (graph_buffers_ != nullptr) {
+    throw std::logic_error(
+        "Packed position_ids are not supported by CUDA graph capture.");
+  }
+
+  const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+  if (plan && plan->requests.size() != scheduled_requests.size()) {
+    throw std::logic_error(
+        "Step plan size does not match packed position_ids batch.");
+  }
+  const size_t num_tokens =
+      plan ? plan->token_count
+           : std::accumulate(
+                 scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                 [](size_t sum, const std::shared_ptr<Request>& request) {
+                   return sum + request->ScheduledTokenCount();
+                 });
+  auto position_ids = std::make_unique<Tensor>(
+      model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  const std::array<int64_t, 1> position_shape{
+      static_cast<int64_t>(num_tokens)};
+  position_ids->CreateTensor(position_shape);
+  auto position_span = position_ids->GetDeviceSpan<int64_t>();
+  auto position_cpu = position_span.CpuSpan();
+
+  size_t packed_offset = 0;
+  for (size_t row = 0; row < scheduled_requests.size(); ++row) {
+    const auto& request = scheduled_requests[row];
+    const size_t token_count = request->ScheduledTokenCount();
+    if (plan) {
+      const auto& entry = plan->requests[row];
+      if (entry.request != request ||
+          entry.packed_token_offset != packed_offset ||
+          entry.unprocessed_token_count != token_count) {
+        throw std::logic_error(
+            "Step plan token layout does not match packed position_ids.");
+      }
+    }
+    const int64_t first_position = request->ProcessedSequenceLength();
+    for (size_t token = 0; token < token_count; ++token) {
+      position_cpu[packed_offset + token] =
+          first_position + static_cast<int64_t>(token);
+    }
+    packed_offset += token_count;
+  }
+  position_span.CopyCpuToDevice();
+
+  input_names_.push_back(position_ids_name.c_str());
+  inputs_.push_back(position_ids->GetOrtTensor());
+  owned_inputs_.push_back(std::move(position_ids));
 }
 
 // PagedAttention accepts an optional `attention_metadata` CPU input holding
