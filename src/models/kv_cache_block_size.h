@@ -18,7 +18,9 @@
 namespace Generators {
 
 // Round seq_len up to the nearest multiple of block_size. block_size <= 0 means
-// "not configured" and leaves seq_len unchanged.
+// "not configured" and leaves seq_len unchanged. block_size is bounded to int32 at
+// the config boundary (SafeDoubleToInt) and seq_len is an int-sized cache dimension,
+// so the int64 arithmetic cannot overflow.
 inline int64_t RoundUpToKvCacheBlock(int64_t seq_len, int64_t block_size) {
   if (block_size <= 0)
     return seq_len;
