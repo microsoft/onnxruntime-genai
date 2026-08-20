@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -12,6 +13,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <nlohmann/json.hpp>
 
@@ -150,17 +154,40 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& cfg = configs[i];
 
-    const auto scenario = ScenarioBase::Create(cfg.scenario);
-    if (!scenario) {
-      throw std::runtime_error("Unknown scenario: " + cfg.scenario);
-    }
-
-    const nlohmann::json result = scenario->Run(cfg, context);
-    any_scenario_failed |= result.value("status", "failed") != "success";
-
     std::ostringstream results_file_name;
     results_file_name << cfg.scenario << "_results_" << std::setw(3) << std::setfill('0') << i + 1 << ".json";
-    WriteJsonFile(out_dir / results_file_name.str(), result);
+    const fs::path results_path = out_dir / results_file_name.str();
+
+    // Run each scenario in its own process. CUDA's caching allocator (and the paged cache's
+    // GetAvailableMemory() capacity check) can hold device memory even after a prior scenario's
+    // model/engine are destructed, so reusing one process across scenarios can make a config fail
+    // here that would succeed on its own. A fresh process guarantees a fresh device memory view.
+    const pid_t pid = fork();
+    if (pid < 0) {
+      throw std::runtime_error("fork() failed while dispatching scenario: " + cfg.scenario);
+    }
+
+    if (pid == 0) {
+      int exit_code = 1;
+      try {
+        const auto scenario = ScenarioBase::Create(cfg.scenario);
+        if (!scenario) {
+          throw std::runtime_error("Unknown scenario: " + cfg.scenario);
+        }
+        const nlohmann::json result = scenario->Run(cfg, context);
+        WriteJsonFile(results_path, result);
+        exit_code = result.value("status", "failed") == "success" ? 0 : 1;
+      } catch (const std::exception& ex) {
+        std::cerr << "[dispatcher] Scenario '" << cfg.scenario << "' crashed: " << ex.what() << std::endl;
+      }
+      std::_Exit(exit_code);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+      throw std::runtime_error("waitpid() failed while dispatching scenario: " + cfg.scenario);
+    }
+    any_scenario_failed |= !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   }
 
   return any_scenario_failed ? 1 : 0;
