@@ -224,6 +224,14 @@ Its optional live path performs real model generation for selected tools or all 
 - Run the coding sample manually against a tool-trained model.
 - Use the long-context harness to distinguish schema/template admission from model tool-selection quality.
 
+### Guidance profiling
+
+`examples/python/engine/guidance-profiling.py` runs paired unguided and guided requests with the same prompt and JSON schema. It reports request setup latency, time to first token, total generation latency, inter-token latency, decode throughput, token counts, and guided-versus-unguided p50 deltas. Warmup requests are excluded, and measured modes alternate on one Engine.
+
+For CUDA, the grammar cursor and mask construction run on the CPU. The compact bitmask is copied to the GPU and applied there with `LaunchAddLogitsMask`; logits are not copied back to the CPU. The benchmark therefore measures the combined cost of CPU grammar advancement, mask construction, transaction cloning, host-to-device mask transfer, and the GPU mask kernel. A profiler such as Nsight Systems is still needed to attribute that end-to-end delta to individual CPU and CUDA operations.
+
+Constrained and unconstrained runs can produce different token counts. TTFT and inter-token latency are directly comparable; total generation latency must be interpreted with the reported output length.
+
 ## Known Limitations
 
 - Tool parsing, argument validation, authorization, and execution remain host responsibilities.
