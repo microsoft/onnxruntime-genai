@@ -476,7 +476,10 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMultiplePagedGroups) {
       std::runtime_error);
 }
 
-TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
+  // Fixed decoder state groups are now supported (the composite manager owns a FixedStatePool), but
+  // their bindings still have to resolve to real session inputs and outputs. The synthetic-paged
+  // session has no such tensors, so pool construction rejects the group at session validation.
   auto model = LoadSyntheticPagedModel();
   Config::Model::Decoder::StateGroup fixed_group;
   fixed_group.kind = Config::Model::Decoder::StateGroupKind::Fixed;
@@ -488,12 +491,12 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
   EXPECT_THROW(
       {
         try {
-          auto manager = CacheManager::Create(model);
+          PagedCacheManager manager{model};
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find(
-                  "does not yet support fixed decoder state groups"),
-              std::string::npos);
+              std::string{error.what()}.find("was not found"),
+              std::string::npos)
+              << error.what();
           throw;
         }
       },
