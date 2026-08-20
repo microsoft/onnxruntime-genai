@@ -227,10 +227,26 @@ std::shared_ptr<Request> Engine::StepStatic() {
 std::shared_ptr<Request> Engine::StepDynamic() {
   while (scheduler_->HasPendingRequests()) {
     // A dynamic step is a transaction with six phases:
-    // plan -> reserve cache -> checkpoint request state -> execute -> stage sampled tokens -> commit.
+    // plan -> reserve state -> checkpoint request state -> execute -> stage sampled tokens -> commit.
     // Nothing becomes externally visible until the final commit succeeds.
     step_plan_.transaction_id = next_transaction_id_++;
-    auto planning_result = scheduler_->PlanStep(step_plan_);
+    StepPlanningResult planning_result;
+    try {
+      // PlanStep is expected to report non-executable outcomes through its result, not by throwing.
+      // A throw here means a planning-time consistency check failed -- for a composite model,
+      // PagedCacheManager::PlanStepResources proves paged and fixed committed ownership agree and
+      // throws std::logic_error on any divergence. That is proven state corruption, so route it
+      // through the same fatal, structured path as every other execution-contract violation instead
+      // of letting a raw std::logic_error escape Step() with the Engine still marked healthy.
+      planning_result = scheduler_->PlanStep(step_plan_);
+    } catch (...) {
+      MarkUnhealthyAndThrow(
+          StepOutcomeKind::ExecutionContractFailure,
+          step_plan_.transaction_id,
+          nullptr,
+          "Dynamic step planning failed a cache/state consistency check.",
+          std::current_exception());
+    }
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -263,16 +279,40 @@ std::shared_ptr<Request> Engine::StepDynamic() {
 
     std::unique_ptr<CacheStepReservation> reservation;
     try {
-      // Reserve every block needed by the complete plan up front. The reservation can be used to
-      // build model inputs, but it does not alter committed block tables until Commit().
+      // Reserve every paged block, fixed slot, and fixed staging tensor the complete plan needs up
+      // front. The reservation can build model inputs, but it does not alter committed ownership or
+      // token boundaries until Commit(). Prove the reservation matches the plan exactly -- required
+      // flag, row count, staging bytes, and per-row request identity -- so a plan/reservation
+      // divergence fails here (fatal) rather than silently committing mismatched state.
       reservation = cache_manager_->ReserveStep(step_plan_);
+      const auto fixed_slots = reservation->FixedStateSlots();
+      const bool has_fixed_state = !fixed_slots.empty();
+      if (step_plan_.fixed_state.required != has_fixed_state ||
+          (has_fixed_state &&
+           step_plan_.fixed_state.row_count != step_plan_.requests.size()) ||
+          fixed_slots.size() != step_plan_.fixed_state.row_count ||
+          reservation->FixedStateStagingBytes() !=
+              step_plan_.fixed_state.staging_bytes) {
+        throw std::logic_error(
+            "State reservation does not match the planned fixed-state resources.");
+      }
+      // For a fixed-state plan, every prior condition passing proves
+      // fixed_slots.size() == row_count == requests.size(), so indexing requests by a fixed-slot row
+      // below is in bounds even when a buggy cache manager over-reports row_count.
+      for (size_t row = 0; row < fixed_slots.size(); ++row) {
+        if (fixed_slots[row].request_id !=
+            step_plan_.requests[row].request_id) {
+          throw std::logic_error(
+              "Fixed state slots do not match scheduled request row order.");
+        }
+      }
     } catch (...) {
       ++transaction_metrics_.reservation_failures;
       MarkUnhealthyAndThrow(
           StepOutcomeKind::ExecutionContractFailure,
           step_plan_.transaction_id,
           nullptr,
-          "Failed to reserve the planned paged cache transaction.",
+          "Failed to reserve the planned cache transaction.",
           std::current_exception());
     }
 
@@ -303,11 +343,16 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }();
     ExecutionContext context{&step_plan_};
     context.cache_reservation = reservation->PagedReservation();
+    context.fixed_state_slots = reservation->FixedStateSlots();
+    context.fixed_state_bindings = reservation->FixedStateBindings();
+    context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
 
     bool request_transaction_active = false;
     const auto rollback_transaction = [&]() {
-      // Request/search state and paged-cache state are checkpointed separately. Both must be
-      // restored so a retry observes exactly the state that existed before this Step() call.
+      // Request/search state and composite cache state are checkpointed separately. Both must be
+      // restored so a retry observes exactly the state that existed before this Step() call. The
+      // reservation's Release() discards fixed provisional slots and staged banks as well as the
+      // reserved paged blocks.
       std::exception_ptr rollback_error;
       if (request_transaction_active) {
         try {
@@ -420,8 +465,15 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
-      // Commit order is deliberate: make staged search state durable, publish cache growth, then
-      // advance the lightweight Request bookkeeping that readers observe.
+      // Commit order is deliberate. First validate every ownership and capacity precondition of the
+      // whole reservation and perform all fallible fixed device work into inactive banks, without
+      // publishing anything. A failure here is fatal even though committed state is intact: the
+      // fixed inactive banks may be partly written and cannot be proven consistent for a retry.
+      reservation->PrepareCommit();
+      // Everything below crosses the commit boundary and is never retried. Make staged search state
+      // durable, publish paged occupancy and the fixed bank flip, then advance the lightweight
+      // Request bookkeeping that readers observe. Any failure after this point is fatal because a
+      // cooperating component may already have crossed the shared token boundary.
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
