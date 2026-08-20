@@ -223,6 +223,112 @@ void PagedCacheReservation::FillWindowBlockTable(
 }
 
 void PagedCacheReservation::Commit() {
+  ValidateCommit();
+  CommitValidated();
+}
+
+void PagedCacheReservation::ValidateCommit() const {
+  if (state_ != PagedCacheReservationState::Reserved) {
+    throw std::logic_error("Paged cache reservation can only be committed once.");
+  }
+  if (!block_pool_ || !committed_tables_) {
+    throw std::logic_error("Paged cache reservation has no owning cache.");
+  }
+  if ((window_block_pool_ == nullptr) != (window_ring_blocks_ == 0)) {
+    throw std::logic_error("Paged cache window reservation configuration is inconsistent.");
+  }
+
+  // Re-derive everything CommitValidated depends on straight from the committed cache so that a
+  // change to ownership, token boundaries, delta layout, or preallocated capacity between reserve
+  // and commit is rejected here rather than during publication.
+  size_t new_table_count = 0;
+  size_t assigned_reserved_blocks = 0;
+  size_t assigned_reserved_window_blocks = 0;
+  std::vector<const void*> request_ids;
+  request_ids.reserve(deltas_.size());
+  for (const auto& delta : deltas_) {
+    if (!delta.request_id ||
+        std::find(request_ids.begin(), request_ids.end(), delta.request_id) !=
+            request_ids.end()) {
+      throw std::logic_error(
+          "Paged cache reservation contains an invalid request delta.");
+    }
+    request_ids.push_back(delta.request_id);
+
+    const auto* table = FindCommittedTable(delta.request_id);
+    if (delta.newly_admitted == (table != nullptr)) {
+      throw std::logic_error("Paged cache ownership changed after reservation.");
+    }
+    if (table && table->committed_slots != delta.committed_slots) {
+      throw std::logic_error(
+          "Paged cache token boundary changed after reservation.");
+    }
+
+    // The delta must consume exactly its own contiguous slice of the reserved block and window
+    // block pools, in order, and never grow below the already-committed boundary.
+    if (delta.target_slots < delta.committed_slots ||
+        delta.reserved_block_offset != assigned_reserved_blocks ||
+        delta.reserved_block_count >
+            reserved_blocks_.size() - assigned_reserved_blocks ||
+        delta.reserved_window_block_offset != assigned_reserved_window_blocks ||
+        delta.reserved_window_block_count >
+            reserved_window_blocks_.size() - assigned_reserved_window_blocks) {
+      throw std::logic_error("Paged cache reservation delta is inconsistent.");
+    }
+
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t total_blocks = committed_blocks + delta.reserved_block_count;
+    if (delta.target_slots > total_blocks * block_pool_->BlockSize()) {
+      throw std::logic_error(
+          "Paged cache reservation cannot reach its target token boundary.");
+    }
+    // Existing tables must already have room for the appended blocks so CommitValidated's insert
+    // cannot reallocate. New tables preallocated their capacity at reservation time.
+    if (table && table->blocks.capacity() < total_blocks) {
+      throw std::logic_error(
+          "Paged cache reservation did not preallocate commit capacity.");
+    }
+
+    assigned_reserved_blocks += delta.reserved_block_count;
+    assigned_reserved_window_blocks += delta.reserved_window_block_count;
+    new_table_count += delta.newly_admitted ? 1 : 0;
+  }
+
+  // The committed_tables_ headroom checked here is this reservation's own share only. A composite
+  // orchestrator that publishes sibling reservations against the same vector must ensure aggregate
+  // headroom itself (see the ValidateCommit contract in the header).
+  if (assigned_reserved_blocks != reserved_blocks_.size() ||
+      assigned_reserved_window_blocks != reserved_window_blocks_.size() ||
+      new_table_count != new_tables_.size() ||
+      committed_tables_->capacity() <
+          committed_tables_->size() + new_table_count) {
+    throw std::logic_error(
+        "Paged cache reservation commit resources are inconsistent.");
+  }
+}
+
+// Publication path for a reservation that ValidateCommit has already accepted. It only moves
+// shared_ptr block handles and preallocated tables into the committed cache; ValidateCommit
+// guarantees the reserved-block/table spans indexed below and both insert capacities, so none of
+// the block/table moves reallocate or touch the device. (The AdvanceCommittedSlots slot walk relies
+// on the same UsedSlots == committed_slots invariant the whole reservation model maintains, which
+// ValidateCommit re-derives via the token-boundary and target-reachability checks.) The one caveat
+// is committed_tables_->push_back: it cannot reallocate for a
+// single validated reservation (the constructor reserved this reservation's headroom), but when an
+// orchestrator publishes several reservations that share one committed_tables_ vector it stays
+// allocation-free only if that orchestrator guaranteed the aggregate headroom documented on
+// ValidateCommit. It is deliberately not marked noexcept: the std::vector insert/push_back and .at()
+// calls it relies on are not themselves noexcept-declared, so marking it noexcept would turn any
+// unexpected precondition violation into std::terminate instead of a catchable failure the Engine
+// can surface as unhealthy. Keeping it potentially-throwing is the safest honest signature while
+// still contributing no new fallible work of its own on the single-reservation path.
+void PagedCacheReservation::CommitValidated() {
+  // The one precondition re-checked here: publishing twice would walk cleared reserved-block spans
+  // with stale delta offsets, which is undefined behavior rather than a catchable error. This is a
+  // state-only comparison performed before any mutation, so it introduces no allocation or
+  // device work and never leaves a half-published reservation. It intentionally does NOT re-run the
+  // ownership, boundary, or capacity checks -- those belong to ValidateCommit and a composite
+  // transaction runs them for every reservation up front.
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache reservation can only be committed once.");
   }
