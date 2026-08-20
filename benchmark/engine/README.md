@@ -55,12 +55,29 @@ ONNX Runtime rather than the one baked into their build-time RPATH.
 ```bash
 export LD_LIBRARY_PATH=<cuda_home>/lib64:$PWD/build/Linux/RelWithDebInfo/benchmark/engine
 
-./build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+python benchmark/engine/run.py \
+  --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --config benchmark/engine/config.json \
   --out benchmark/engine/out
 ```
 
 `--config` defaults to `config.json` and `--out` to `out`, both relative to the working directory.
+
+Use `run.py` for configs containing multiple scenarios. It runs each entry in a separate
+`engine_benchmark` process, so CUDA, ONNX Runtime allocators, and the paged-cache capacity check
+start cleanly for every scenario. The wrapper preserves numbered result files such as
+`decode_baseline_results_001.json` and `long_prefill_results_002.json`.
+
+For a single scenario, the executable can still be run directly:
+
+```bash
+build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+  --config benchmark/engine/config.json \
+  --out benchmark/engine/out
+```
+
+A multi-scenario config should be run through `run.py` to avoid carrying CUDA allocator state
+from one scenario into the next.
 
 Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 
