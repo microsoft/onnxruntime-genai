@@ -15,7 +15,7 @@ class GemmaModel(MistralModel):
         self.layernorm_attrs["add_offset"] = 1
 
 
-# TODO: fix after base class changes
+# TODO: integrate extra LayerNorms into make_layer in base class
 class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
