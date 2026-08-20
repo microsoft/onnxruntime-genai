@@ -256,5 +256,164 @@ TEST(PagedCacheReservationTest, WindowTableUsesReservedRingBeforeCommit) {
   EXPECT_EQ(tables[0].window_blocks[1]->Id(), 1u);
 }
 
+// ValidateCommit must be a pure precondition check: it may not touch the committed cache, the
+// block pool, the reserved blocks, or the reservation's own state, so a composite transaction can
+// validate every reservation up front before any of them publish.
+TEST(PagedCacheReservationTest, ValidateCommitDoesNotMutateAndIsRepeatable) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 5, true},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+  const size_t available_before = pool.AvailableBlocks();
+
+  reservation.ValidateCommit();
+  reservation.ValidateCommit();
+
+  // Nothing was published or consumed and the reservation is still committable.
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), available_before);
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
+  EXPECT_EQ(reservation.ReservedBlockCount(), 2u);
+
+  // The still-Reserved reservation commits normally afterwards.
+  reservation.CommitValidated();
+  ASSERT_EQ(tables.size(), 1u);
+  EXPECT_EQ(tables[0].committed_slots, 5u);
+  EXPECT_EQ(tables[0].blocks.size(), 2u);
+}
+
+// CommitValidated publishes a reservation that ValidateCommit already accepted, producing exactly
+// the same committed state as the single-call Commit wrapper.
+TEST(PagedCacheReservationTest, CommitValidatedPublishesPreviouslyValidatedReservation) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 5, false},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  reservation.ValidateCommit();
+  reservation.CommitValidated();
+
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Committed);
+  ASSERT_EQ(tables.size(), 1u);
+  EXPECT_EQ(tables[0].committed_slots, 5u);
+  ASSERT_EQ(tables[0].blocks.size(), 2u);
+  // Committing again is rejected exactly as the legacy single-call path is.
+  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
+  EXPECT_THROW(reservation.CommitValidated(), std::logic_error);
+  EXPECT_THROW(reservation.Commit(), std::logic_error);
+}
+
+// If ownership changes between reserve and commit -- here a committed table for the request
+// appears after a newly-admitted reservation was taken -- ValidateCommit rejects it before any
+// block is published.
+TEST(PagedCacheReservationTest, ValidateCommitRejectsOwnershipChangeBeforePublication) {
+  BlockPool pool{kBlockSize, 3};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  // Simulate another transaction admitting the same request id first.
+  tables.push_back(PagedCacheBlockTable{kRequestA, 1, pool.AllocateBlocks(1)});
+  const size_t blocks_before = tables[0].blocks.size();
+
+  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
+  EXPECT_THROW(reservation.Commit(), std::logic_error);
+
+  // The pre-existing table was not extended and the reservation never published.
+  EXPECT_EQ(tables[0].blocks.size(), blocks_before);
+  EXPECT_EQ(tables[0].committed_slots, 1u);
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
+}
+
+// If the committed token boundary changes under an existing-request reservation,
+// ValidateCommit rejects it before publication rather than publishing against stale state.
+TEST(PagedCacheReservationTest, ValidateCommitRejectsTokenBoundaryChangeBeforePublication) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 4, false},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  // Another transaction moved this request's committed boundary backward after the reservation
+  // planned against committed_slots == 3.
+  tables[0].committed_slots = 2;
+  const size_t blocks_before = tables[0].blocks.size();
+
+  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
+
+  // Validation did not further change the boundary or append the reserved block.
+  EXPECT_EQ(tables[0].committed_slots, 2u);
+  EXPECT_EQ(tables[0].blocks.size(), blocks_before);
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
+}
+
+// If the committed blocks backing an existing request shrink so the reservation can no longer
+// reach its target token boundary, ValidateCommit rejects it before publication.
+TEST(PagedCacheReservationTest, ValidateCommitRejectsUnreachableTargetBeforePublication) {
+  BlockPool pool{kBlockSize, 3};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 5, false},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  // Simulate the committed capacity vanishing between reserve and commit.
+  tables[0].blocks.clear();
+
+  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
+  EXPECT_EQ(tables[0].committed_slots, 4u);
+  EXPECT_TRUE(tables[0].blocks.empty());
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
+}
+
+// The blocks.capacity() guard is the sole guarantee that CommitValidated's insert into an existing
+// table cannot reallocate. If the committed table grows into its preallocated headroom between
+// reserve and commit -- the target stays reachable, but there is no longer spare capacity for the
+// appended reserved block -- ValidateCommit must reject it before any block is published.
+TEST(PagedCacheReservationTest, ValidateCommitRejectsExhaustedPreallocatedCapacityBeforePublication) {
+  BlockPool pool{kBlockSize, 64};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 5, false},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+  ASSERT_EQ(reservation.ReservedBlockCount(), 1u);
+
+  // reserve() guarantees at least the required headroom, but vector implementations may allocate
+  // more than requested. Consume the actual headroom so publishing one reserved block would force
+  // reallocation regardless of the standard library's growth policy.
+  const size_t preallocated_capacity = tables[0].blocks.capacity();
+  ASSERT_GE(preallocated_capacity, tables[0].blocks.size() + reservation.ReservedBlockCount());
+  while (tables[0].blocks.size() < preallocated_capacity) {
+    auto blocks = pool.AllocateBlocks(kBlockSize);
+    ASSERT_EQ(blocks.size(), 1u);
+    tables[0].blocks.push_back(std::move(blocks.front()));
+  }
+  ASSERT_EQ(tables[0].blocks.size(), tables[0].blocks.capacity());
+
+  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
+  EXPECT_THROW(reservation.Commit(), std::logic_error);
+
+  // Nothing was published: the reserved block was not appended and no slots advanced.
+  EXPECT_EQ(tables[0].blocks.size(), preallocated_capacity);
+  EXPECT_EQ(tables[0].committed_slots, 4u);
+  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
+}
+
 }  // namespace
 }  // namespace Generators
