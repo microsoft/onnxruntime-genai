@@ -171,8 +171,13 @@ def _recording_model():
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.nodes = []
     model.values = []
+    model.casts = []
     model.make_node = lambda op_type, **kwargs: model.nodes.append((op_type, kwargs))
     model.make_value = lambda name, dtype, shape: model.values.append((name, dtype, shape))
+    model.make_cast = lambda name, input_name, dtype, shape: (
+        model.casts.append((name, input_name, dtype, shape)),
+        model.values.append((f"{name}/output_0", dtype, shape)),
+    )
     return model
 
 
@@ -213,6 +218,7 @@ def test_varlen_linear_attention_emits_reviewed_fp32_state_contract():
         present_recurrent_state="present",
         decay="decay",
         beta="beta",
+        gate_shape=["num_tokens", 16],
         output_shape=["num_tokens", 16, 128],
         present_recurrent_shape=state_shape,
         update_rule="gated_delta",
@@ -232,6 +238,84 @@ def test_varlen_linear_attention_emits_reviewed_fp32_state_contract():
     assert "kv_num_heads" not in node
     assert "state_window" not in node
     assert model.values[-1] == ("present", base_module.ir.DataType.FLOAT, state_shape)
+
+
+def test_gated_delta_net_evaluation_preserves_precomputed_gate_contract():
+    model = _recording_model()
+    state_shape = ["batch_size", 16, 128, 128]
+    model.make_gated_delta_net(
+        "/gdn",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        decay="decay",
+        beta="beta",
+        gate_shape=["num_tokens", 16],
+        output_shape=["num_tokens", 16, 128],
+        present_recurrent_shape=state_shape,
+        scale=1.0,
+    )
+
+    op_type, node = model.nodes[0]
+    assert model.casts == [
+        (
+            "/gdn/decay_fp32/Cast",
+            "decay",
+            base_module.ir.DataType.FLOAT,
+            ["num_tokens", 16],
+        ),
+        (
+            "/gdn/beta_fp32/Cast",
+            "beta",
+            base_module.ir.DataType.FLOAT,
+            ["num_tokens", 16],
+        ),
+    ]
+    assert op_type == "GatedDeltaNet"
+    assert node["inputs"] == [
+        "q",
+        "k",
+        "v",
+        "cu",
+        "/gdn/decay_fp32/Cast/output_0",
+        "/gdn/beta_fp32/Cast/output_0",
+        "past",
+    ]
+    assert node["outputs"] == ["/gdn/output_0", "present"]
+    assert node["update_rule"] == "gated_delta"
+    assert node["scale"] == 1.0
+    assert node["gate_activation"] == "none"
+    assert node["beta_activation"] == "none"
+    assert node["qk_l2_norm"] == 0
+    assert node["chunk_size"] == 64
+    assert node["state_checkpoints"] == 0
+    assert model.values[-1] == ("present", base_module.ir.DataType.FLOAT, state_shape)
+
+
+def test_gated_delta_net_evaluation_rejects_bf16_but_accepts_fp32():
+    model = _recording_model()
+    model.io_dtype = base_module.ir.DataType.BFLOAT16
+    with pytest.raises(ValueError, match="does not support bfloat16"):
+        model.make_gated_delta_net("/gdn")
+
+    model.io_dtype = base_module.ir.DataType.FLOAT
+    model.make_gated_delta_net(
+        "/gdn_fp32",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        decay="decay",
+        beta="beta",
+        gate_shape=["num_tokens", 16],
+        output_shape=["num_tokens", 16, 128],
+        present_recurrent_shape=["batch_size", 16, 128, 128],
+    )
 
 
 def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
@@ -257,7 +341,7 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     reshapes = []
     model.make_reshape = lambda name, inputs, dtype, shape: reshapes.append((name, inputs, dtype, shape))
     linear_calls = []
-    model.make_varlen_linear_attention = lambda name, **kwargs: linear_calls.append((name, kwargs))
+    model.make_gated_delta_net = lambda name, **kwargs: linear_calls.append((name, kwargs))
     outputs = []
     model._make_linear_attention_output = lambda *args: outputs.append(args)
 
@@ -270,11 +354,13 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
         ["num_tokens", 3, 8],
     ]
     linear = linear_calls[0][1]
+    assert linear_calls[0][0].endswith("/GatedDeltaNet")
     assert linear["q_path"].endswith("/q_thd/Reshape/output_0")
     assert linear["k_path"].endswith("/k_thd/Reshape/output_0")
     assert linear["v_path"].endswith("/v_thd/Reshape/output_0")
     assert linear["output_shape"] == ["num_tokens", 3, 8]
     assert linear["present_recurrent_shape"] == ["batch_size", 3, 8, 4]
+    assert linear["gate_shape"] == ["num_tokens", 3]
     assert reshapes[-1][3] == ["num_tokens", 24]
     assert outputs[0][2].endswith("/linear_attention_output/Reshape/output_0")
 

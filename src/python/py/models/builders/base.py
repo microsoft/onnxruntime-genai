@@ -3453,6 +3453,53 @@ class Model:
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
 
+    def make_gated_delta_net(self, name, **kwargs):
+        """Emit the GatedDeltaNet evaluation path with precomputed normalization and gates.
+
+        This intentionally keeps the same upstream graph as `make_varlen_linear_attention` so
+        model-level comparisons isolate the recurrent operator rather than its optional fusions.
+        """
+        if self.io_dtype == ir.DataType.BFLOAT16:
+            raise ValueError(
+                "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
+                "the current ORT kernel registers float and float16 only"
+            )
+        # The source gates intentionally remain identical to the varlen evaluation graph. Casting
+        # them here satisfies GDN's FP32 ABI but cannot recover precision already rounded by the
+        # shared FP16 gate path; a production GDN exporter should instead use its qwen/sigmoid
+        # fusion inputs directly.
+        decay_cast = f"{name}/decay_fp32/Cast"
+        beta_cast = f"{name}/beta_fp32/Cast"
+        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["cumulative_sequence_length"],
+            f"{decay_cast}/output_0",
+            f"{beta_cast}/output_0",
+            kwargs["past_recurrent_state"],
+        ]
+        output = f"{name}/output_0"
+        present_recurrent = kwargs["present_recurrent_state"]
+        self.make_node(
+            "GatedDeltaNet",
+            inputs=inputs,
+            outputs=[output, present_recurrent],
+            name=name,
+            domain="com.microsoft",
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+            gate_activation="none",
+            beta_activation="none",
+            qk_l2_norm=0,
+            chunk_size=kwargs.get("chunk_size", 64),
+            state_checkpoints=0,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
+
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
