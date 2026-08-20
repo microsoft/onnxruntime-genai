@@ -340,10 +340,20 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct SharedInitializer {
+      std::string name;
+      std::string data_file;
+      std::string offset;
+      std::string length;
+      int data_type{};
+      std::vector<int64_t> shape;
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -464,6 +474,7 @@ struct Config {
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};

@@ -501,9 +501,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
         (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(
-    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
-):
+def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.prune_lm_head = prune_lm_head
@@ -526,9 +524,7 @@ def test_paged_attention_lm_head_pruning(
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(
-        model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"])
-    )
+    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
