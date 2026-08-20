@@ -3451,6 +3451,56 @@ class Model:
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
 
+    def make_gated_delta_net(self, name, **kwargs):
+        """com.microsoft::GatedDeltaNet -- token-major inputs, V-major float32 state.
+
+        Unlike LinearAttention this takes a committed single state and returns a separate
+        final state, so the caller passes distinct input/output state names. `checkpoints`,
+        when requested, carries the per-token state series a speculative decoder rolls back to.
+        """
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs.get("cu_seqlens", ""),
+            kwargs["decay"],
+            kwargs["beta"],
+            kwargs["initial_state"],
+        ]
+        # a_log/dt_bias are the fused `gate_activation=qwen` coefficients; both or neither.
+        if kwargs.get("a_log"):
+            inputs += [kwargs["a_log"], kwargs["dt_bias"]]
+        output = f"{name}/output_0"
+        final_state = kwargs["final_state"]
+        outputs = [output, final_state]
+        checkpoints = kwargs.get("checkpoints")
+        if checkpoints:
+            outputs.append(checkpoints)
+
+        attributes = {
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        for opt in ("gate_activation", "beta_activation"):
+            if kwargs.get(opt):
+                attributes[opt] = kwargs[opt]
+        for opt in ("qk_l2_norm", "chunk_size", "state_checkpoints"):
+            if kwargs.get(opt):
+                attributes[opt] = kwargs[opt]
+
+        self.make_node(
+            "GatedDeltaNet",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+        if checkpoints:
+            self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
+
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
