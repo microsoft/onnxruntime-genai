@@ -35,6 +35,8 @@ from transformers import (
 from .cuda_quantizer import CudaQuantizer
 from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
+PAGED_ATTENTION_METADATA_SHAPE = [3]
+
 
 class Model:
     def _get_model_type(self, config):
@@ -180,7 +182,7 @@ class Model:
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
-            "attention_metadata": [2],                                                                           # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "attention_metadata": PAGED_ATTENTION_METADATA_SHAPE.copy(),                                         # For paged attention models. Static upper query/KV bounds plus a replay-safe lower KV bound.
         }
         self.make_inputs_init()
 
@@ -3375,9 +3377,10 @@ class Model:
         #   16: attention_metadata
         # The scheduler-provided slot_mapping is not used here; slots are derived from
         # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
-        # can select a backend and size its launch without a device-to-host readback of the sequence
-        # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
+        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
+        # in CPU memory so the op can select a backend and size its launch without a device-to-host
+        # readback of the sequence lengths. Feeding it is what removes the per-node stream
+        # synchronization on the decode path.
         self.extend_with_optional_inputs(
             inputs,
             [

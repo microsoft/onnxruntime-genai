@@ -3,10 +3,28 @@
 
 #pragma once
 
+#include <array>
+
 #include "decoder.h"
+#include "../step_plan.h"
 #include "../../models/decoder_only.h"
 
 namespace Generators {
+
+struct AttentionMetadataValues {
+  int32_t max_query_len_bound{};
+  int32_t max_kv_len_bound{};
+  int32_t max_kv_len_lower_bound{};
+};
+
+inline constexpr size_t kAttentionMetadataElementCount = 3;
+
+AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
+AttentionMetadataValues GetAttentionMetadataForGraph(size_t block_table_columns, size_t block_size);
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size);
+std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
+    const AttentionMetadataValues& metadata);
 
 /**
  * @struct VarlenGraphBuffers
@@ -47,7 +65,7 @@ struct VarlenGraphBuffers {
  * - Input IDs - int64[total_num_tokens]
  * - Cumulative Sequence Lengths - int32[batch_size + 1]
  * - Past Sequence Lengths - int32[batch_size]
- * - Attention Metadata - int32[2] (CPU), optional
+ * - Attention Metadata - int32[3] (CPU), optional
  * Outputs:
  * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
  *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.

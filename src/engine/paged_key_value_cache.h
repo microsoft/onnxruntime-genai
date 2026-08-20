@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <algorithm>
 #include <stdint.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <list>
 
@@ -14,6 +16,23 @@
 #include "step_plan.h"
 
 namespace Generators {
+
+inline constexpr size_t kMinGraphBlockTableColumns = 8;
+
+inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
+  if (max_columns == 0) {
+    throw std::runtime_error("Graph block-table capacity must be non-zero.");
+  }
+
+  size_t columns = std::min(kMinGraphBlockTableColumns, max_columns);
+  while (columns < max_blocks) {
+    if (columns > max_columns / 2) {
+      return max_columns;
+    }
+    columns *= 2;
+  }
+  return columns;
+}
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.

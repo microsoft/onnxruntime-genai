@@ -37,6 +37,30 @@ def _load_base_module():
     return module
 
 
+def test_paged_attention_metadata_has_replay_safe_lower_bound(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["TestModel"],
+        hidden_act="silu",
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=1024,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert model.input_types["attention_metadata"] == ir.DataType.INT32
+    assert model.input_shapes["attention_metadata"] == [3]
+    assert model.input_shapes["attention_metadata"] is not base.PAGED_ATTENTION_METADATA_SHAPE
+
+
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
