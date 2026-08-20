@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 #include "window_ring.h"
@@ -19,6 +20,72 @@ PagedCacheBlockTable* FindTable(std::vector<PagedCacheBlockTable>& tables, const
                                  return table.request_id == request_id;
                                });
   return it == tables.end() ? nullptr : &*it;
+}
+
+std::vector<std::weak_ptr<Block>> CaptureBlockHandles(
+    const std::vector<std::shared_ptr<Block>>& blocks,
+    const BlockPool& pool,
+    std::string_view description) {
+  std::vector<std::weak_ptr<Block>> handles;
+  handles.reserve(blocks.size());
+  for (const auto& block : blocks) {
+    if (!pool.Owns(block) || block->Capacity() != pool.BlockSize()) {
+      throw std::logic_error(
+          "Paged cache " + std::string{description} + " block mapping is invalid.");
+    }
+    handles.push_back(block);
+  }
+  return handles;
+}
+
+void ValidateBlockHandles(
+    const std::vector<std::shared_ptr<Block>>& blocks,
+    std::span<const std::weak_ptr<Block>> expected_handles,
+    const BlockPool& pool,
+    std::string_view description) {
+  if (blocks.size() != expected_handles.size()) {
+    throw std::logic_error(
+        "Paged cache " + std::string{description} + " block mapping changed after reservation.");
+  }
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    if (!pool.Owns(blocks[index]) ||
+        blocks[index]->Capacity() != pool.BlockSize() ||
+        expected_handles[index].lock() != blocks[index]) {
+      throw std::logic_error(
+          "Paged cache " + std::string{description} + " block mapping changed after reservation.");
+    }
+  }
+}
+
+void ValidateCommittedBlockLayout(const PagedCacheBlockTable& table, size_t block_size) {
+  size_t remaining = table.committed_slots;
+  for (const auto& block : table.blocks) {
+    if (!block || block->Capacity() != block_size) {
+      throw std::logic_error("Paged cache committed block layout is invalid.");
+    }
+    const size_t expected_size = std::min(remaining, block_size);
+    if (block->Size() != expected_size) {
+      throw std::logic_error(
+          "Paged cache block occupancy does not match the committed token boundary.");
+    }
+    remaining -= expected_size;
+  }
+  if (remaining != 0) {
+    throw std::logic_error(
+        "Paged cache committed blocks cannot represent the committed token boundary.");
+  }
+}
+
+void ValidateEmptyReservedBlocks(
+    std::span<const std::shared_ptr<Block>> blocks,
+    size_t block_size,
+    std::string_view description) {
+  for (const auto& block : blocks) {
+    if (!block || block->Capacity() != block_size || block->Size() != 0) {
+      throw std::logic_error(
+          "Paged cache " + std::string{description} + " blocks are invalid.");
+    }
+  }
 }
 
 }  // namespace
@@ -80,6 +147,25 @@ PagedCacheReservation::PagedCacheReservation(
 
     const size_t committed_slots = committed_table ? committed_table->committed_slots : 0;
     const size_t committed_blocks = committed_table ? committed_table->blocks.size() : 0;
+    std::vector<std::weak_ptr<Block>> committed_blocks_snapshot;
+    std::vector<std::weak_ptr<Block>> committed_window_blocks_snapshot;
+    if (committed_table) {
+      ValidateCommittedBlockLayout(*committed_table, block_pool.BlockSize());
+      committed_blocks_snapshot = CaptureBlockHandles(
+          committed_table->blocks, block_pool, "committed");
+      if (window_block_pool_) {
+        if (committed_table->window_blocks.size() != window_ring_blocks_) {
+          throw std::logic_error(
+              "Paged cache committed window ring has an invalid size.");
+        }
+        committed_window_blocks_snapshot = CaptureBlockHandles(
+            committed_table->window_blocks, *window_block_pool_,
+            "committed window");
+      } else if (!committed_table->window_blocks.empty()) {
+        throw std::logic_error(
+            "Paged cache committed table has unexpected window blocks.");
+      }
+    }
     if (request.target_slots < committed_slots) {
       throw std::runtime_error("Paged cache reservation cannot reduce committed slots.");
     }
@@ -97,6 +183,8 @@ PagedCacheReservation::PagedCacheReservation(
     deltas_.push_back(PagedCacheReservationDelta{
         request.request_id,
         committed_slots,
+        std::move(committed_blocks_snapshot),
+        std::move(committed_window_blocks_snapshot),
         request.target_slots,
         std::min(growth, tail_capacity),
         reserved_block_count,
@@ -223,6 +311,159 @@ void PagedCacheReservation::FillWindowBlockTable(
 }
 
 void PagedCacheReservation::Commit() {
+  ValidateCommit();
+  CommitValidated();
+}
+
+void PagedCacheReservation::ValidateCommit() const {
+  if (state_ != PagedCacheReservationState::Reserved) {
+    throw std::logic_error("Paged cache reservation can only be committed once.");
+  }
+  if (!block_pool_ || !committed_tables_) {
+    throw std::logic_error("Paged cache reservation has no owning cache.");
+  }
+  if ((window_block_pool_ == nullptr) != (window_ring_blocks_ == 0)) {
+    throw std::logic_error("Paged cache window reservation configuration is inconsistent.");
+  }
+
+  // Re-derive everything CommitValidated depends on straight from the committed cache so that a
+  // change to ownership, token boundaries, delta layout, or preallocated capacity between reserve
+  // and commit is rejected here rather than during publication.
+  size_t new_table_count = 0;
+  size_t assigned_reserved_blocks = 0;
+  size_t assigned_reserved_window_blocks = 0;
+  std::unordered_set<const void*> committed_request_ids;
+  committed_request_ids.reserve(committed_tables_->size());
+  for (const auto& table : *committed_tables_) {
+    if (!table.request_id ||
+        !committed_request_ids.insert(table.request_id).second) {
+      throw std::logic_error(
+          "Paged cache committed tables contain an invalid or duplicate request.");
+    }
+  }
+  std::vector<const void*> request_ids;
+  request_ids.reserve(deltas_.size());
+  for (const auto& delta : deltas_) {
+    if (!delta.request_id ||
+        std::find(request_ids.begin(), request_ids.end(), delta.request_id) !=
+            request_ids.end()) {
+      throw std::logic_error(
+          "Paged cache reservation contains an invalid request delta.");
+    }
+    request_ids.push_back(delta.request_id);
+
+    const auto* table = FindCommittedTable(delta.request_id);
+    if (delta.newly_admitted == (table != nullptr)) {
+      throw std::logic_error("Paged cache ownership changed after reservation.");
+    }
+    if (table && table->committed_slots != delta.committed_slots) {
+      throw std::logic_error(
+          "Paged cache token boundary changed after reservation.");
+    }
+    if (table) {
+      ValidateCommittedBlockLayout(*table, block_pool_->BlockSize());
+      ValidateBlockHandles(
+          table->blocks, delta.committed_blocks, *block_pool_,
+          "committed");
+      if (window_block_pool_) {
+        ValidateBlockHandles(
+            table->window_blocks, delta.committed_window_blocks,
+            *window_block_pool_, "committed window");
+      } else if (!table->window_blocks.empty() ||
+                 !delta.committed_window_blocks.empty()) {
+        throw std::logic_error(
+            "Paged cache committed table has unexpected window blocks.");
+      }
+    }
+
+    // The delta must consume exactly its own contiguous slice of the reserved block and window
+    // block pools, in order, and never grow below the already-committed boundary.
+    if (delta.target_slots < delta.committed_slots ||
+        delta.reserved_block_offset != assigned_reserved_blocks ||
+        assigned_reserved_blocks > reserved_blocks_.size() ||
+        delta.reserved_block_count >
+            reserved_blocks_.size() - assigned_reserved_blocks ||
+        delta.reserved_window_block_offset != assigned_reserved_window_blocks ||
+        assigned_reserved_window_blocks > reserved_window_blocks_.size() ||
+        delta.reserved_window_block_count >
+            reserved_window_blocks_.size() - assigned_reserved_window_blocks) {
+      throw std::logic_error("Paged cache reservation delta is inconsistent.");
+    }
+
+    ValidateEmptyReservedBlocks(
+        std::span<const std::shared_ptr<Block>>{reserved_blocks_}.subspan(
+            assigned_reserved_blocks, delta.reserved_block_count),
+        block_pool_->BlockSize(), "reserved");
+    for (const auto& block :
+         std::span<const std::shared_ptr<Block>>{reserved_blocks_}.subspan(
+             assigned_reserved_blocks, delta.reserved_block_count)) {
+      if (!block_pool_->Owns(block)) {
+        throw std::logic_error(
+            "Paged cache reserved blocks are not owned by the block pool.");
+      }
+    }
+    if (window_block_pool_) {
+      const auto reserved_window_blocks =
+          std::span<const std::shared_ptr<Block>>{reserved_window_blocks_}.subspan(
+              assigned_reserved_window_blocks, delta.reserved_window_block_count);
+      ValidateEmptyReservedBlocks(
+          reserved_window_blocks,
+          window_block_pool_->BlockSize(), "reserved window");
+      for (const auto& block : reserved_window_blocks) {
+        if (!window_block_pool_->Owns(block)) {
+          throw std::logic_error(
+              "Paged cache reserved window blocks are not owned by the window block pool.");
+        }
+      }
+    }
+
+    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t total_blocks = committed_blocks + delta.reserved_block_count;
+    if (delta.target_slots > total_blocks * block_pool_->BlockSize()) {
+      throw std::logic_error(
+          "Paged cache reservation cannot reach its target token boundary.");
+    }
+    // Existing tables must already have room for the appended blocks so CommitValidated's insert
+    // cannot reallocate. New tables preallocated their capacity at reservation time.
+    if (table && table->blocks.capacity() < total_blocks) {
+      throw std::logic_error(
+          "Paged cache reservation did not preallocate commit capacity.");
+    }
+
+    assigned_reserved_blocks += delta.reserved_block_count;
+    assigned_reserved_window_blocks += delta.reserved_window_block_count;
+    new_table_count += delta.newly_admitted ? 1 : 0;
+  }
+
+  if (assigned_reserved_blocks != reserved_blocks_.size() ||
+      assigned_reserved_window_blocks != reserved_window_blocks_.size() ||
+      new_table_count != new_tables_.size() ||
+      committed_tables_->capacity() <
+          committed_tables_->size() + new_table_count) {
+    throw std::logic_error(
+        "Paged cache reservation commit resources are inconsistent.");
+  }
+}
+
+// Publication path for a reservation that ValidateCommit has already accepted. It only moves
+// shared_ptr block handles and preallocated tables into the committed cache; ValidateCommit
+// guarantees the reserved-block/table spans indexed below and both insert capacities, so none of
+// the block/table moves reallocate or touch the device. (The AdvanceCommittedSlots slot walk relies
+// on the same UsedSlots == committed_slots invariant the whole reservation model maintains, which
+// ValidateCommit re-derives via the token-boundary and target-reachability checks.) The one caveat
+// is committed_tables_->push_back, whose headroom was reserved by the constructor and rechecked by
+// ValidateCommit. It is deliberately not marked noexcept: the std::vector insert/push_back and .at()
+// calls it relies on are not themselves noexcept-declared, so marking it noexcept would turn any
+// unexpected precondition violation into std::terminate instead of a catchable failure the Engine
+// can surface as unhealthy. Keeping it potentially-throwing is the safest honest signature while
+// still contributing no new fallible work of its own.
+void PagedCacheReservation::CommitValidated() {
+  // The one precondition re-checked here: publishing twice would walk cleared reserved-block spans
+  // with stale delta offsets, which is undefined behavior rather than a catchable error. This is a
+  // state-only comparison performed before any mutation, so it introduces no allocation or
+  // device work and never leaves a half-published reservation. It intentionally does NOT re-run the
+  // ownership, boundary, or capacity checks -- those belong to ValidateCommit and a composite
+  // transaction runs them for every reservation up front.
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache reservation can only be committed once.");
   }
@@ -230,8 +471,15 @@ void PagedCacheReservation::Commit() {
   size_t new_table_index = 0;
   for (const auto& delta : deltas_) {
     PagedCacheBlockTable* table = FindTable(*committed_tables_, delta.request_id);
-    if (!table) {
+    if (delta.newly_admitted) {
+      if (table) {
+        throw std::logic_error(
+            "Paged cache ownership changed after validation.");
+      }
       table = &new_tables_.at(new_table_index++);
+    } else if (!table) {
+      throw std::logic_error(
+          "Paged cache ownership changed after validation.");
     }
 
     const auto first = reserved_blocks_.begin() + static_cast<ptrdiff_t>(delta.reserved_block_offset);

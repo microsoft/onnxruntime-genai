@@ -586,6 +586,22 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 
 Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
 
+Paged-cache publication exposes a validate/publish split for the composite transaction introduced
+by the next Engine integration step. The current Engine continues to use the `Commit()` convenience
+wrapper.
+`ValidateCommit()` is repeatable and mutates nothing; it verifies request ownership, token
+boundaries, exact ordered full-cache and resident window-ring block mappings, block occupancy,
+block-pool identity ownership, unique committed request tables, empty reserved blocks,
+reserved-span accounting, and preallocated vector capacity.
+`CommitValidated()` then publishes the already-validated block handles and advances committed
+slots without allocating or touching the device. `Commit()` remains the single-reservation
+convenience wrapper that calls both phases.
+
+A future composite transaction must validate every participating state reservation before
+publishing any of them. Changing cache ownership, slot occupancy, block identity, or vector
+headroom after validation invalidates the publish preconditions and is a fatal
+transaction-contract error.
+
 ## Sliding-window paged layers
 
 The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV

@@ -54,6 +54,8 @@ struct BlockPool {
 
   size_t BlockSize() const;
 
+  bool Owns(const std::shared_ptr<Block>& block) const;
+
   // Allocates enough blocks to hold `num_slots` and marks those slots used.
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots);
 

@@ -143,6 +143,10 @@ size_t BlockPool::BlockSize() const {
   return block_size_;
 }
 
+bool BlockPool::Owns(const std::shared_ptr<Block>& block) const {
+  return block && block->Id() < Capacity() && blocks_[block->Id()] == block;
+}
+
 size_t BlockPool::BlocksNeeded(size_t num_slots) {
   return (num_slots + block_size_ - 1) / block_size_;
 }

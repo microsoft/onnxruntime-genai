@@ -32,6 +32,8 @@ struct PagedCacheReservationRequest {
 struct PagedCacheReservationDelta {
   const void* request_id{};
   size_t committed_slots{};
+  std::vector<std::weak_ptr<Block>> committed_blocks;
+  std::vector<std::weak_ptr<Block>> committed_window_blocks;
   size_t target_slots{};
   size_t tail_slots_to_consume{};
   size_t reserved_block_offset{};
@@ -83,6 +85,19 @@ class PagedCacheReservation {
   void FillWindowBlockTable(std::span<const void* const> request_ids,
                             size_t columns,
                             std::span<int32_t> output) const;
+  // Validates every precondition this reservation's own CommitValidated relies on, without
+  // mutating any state. For a reservation that still satisfies the publish contract it is the only
+  // part of committing that can throw; CommitValidated additionally throws if the reservation is no
+  // longer Reserved (double publish), so an orchestrator must still guard CommitValidated too.
+  void ValidateCommit() const;
+  // Publishes a reservation that ValidateCommit has already accepted. For a single reservation it
+  // moves preallocated blocks and tables into the committed cache and performs no fallible allocation
+  // or device work; its only guard is a state-only, allocation-free check that the reservation is
+  // still Reserved (it throws rather than publish twice, which would be undefined behavior). See the
+  // implementation for why it is intentionally not marked noexcept.
+  void CommitValidated();
+  // Convenience wrapper preserving the original single-call contract: ValidateCommit then
+  // CommitValidated.
   void Commit();
   void Release();
 
