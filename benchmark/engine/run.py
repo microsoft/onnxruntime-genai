@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -25,6 +26,7 @@ def main() -> int:
         "--verbose", "--versbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
     )
     args = parser.parse_args()
+    benchmark_start = time.perf_counter()
 
     scenarios = json.loads(args.config.read_text())
     if not isinstance(scenarios, list) or not scenarios:
@@ -73,6 +75,12 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         failed = any(executor.map(run_scenario, work))
 
+    elapsed_seconds = time.perf_counter() - benchmark_start
+    elapsed_minutes, elapsed_remainder = divmod(elapsed_seconds, 60)
+    print(
+        f"Benchmark {'failed' if failed else 'completed'} in {int(elapsed_minutes)}m {elapsed_remainder:.2f}s",
+        flush=True,
+    )
     return 1 if failed else 0
 
 
