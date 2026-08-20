@@ -147,6 +147,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.scheduled_request_limit = 0;
   plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
+  plan.fixed_state = {};
   plan.graph_capture_eligible = false;
 
   struct Candidate {
