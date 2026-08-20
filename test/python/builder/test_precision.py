@@ -216,19 +216,6 @@ def _run_check_extra_options(
     )
 
 
-def test_fuse_shared_expert_gate_is_normalized_on_cuda(monkeypatch):
-    options = {"fuse_shared_expert_gate": "true"}
-
-    _run_check_extra_options(monkeypatch, options, execution_provider="cuda")
-
-    assert options["fuse_shared_expert_gate"] is True
-
-
-def test_fuse_shared_expert_gate_rejects_non_cuda_ep(monkeypatch):
-    with pytest.raises(ValueError, match="fuse_shared_expert_gate is only supported on the CUDA EP"):
-        _run_check_extra_options(monkeypatch, {"fuse_shared_expert_gate": "true"})
-
-
 # ---------------------------------------------------------------------------
 # MTP options are normalized and enforce the main-model output contract.
 # ---------------------------------------------------------------------------

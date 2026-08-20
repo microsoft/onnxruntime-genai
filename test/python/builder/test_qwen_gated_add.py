@@ -4,13 +4,14 @@
 from types import MethodType
 
 import onnx_ir as ir
+import pytest
 
 from models.builders.qwen import Qwen35MoeTextModel
 
 
-def _make_model(fuse_shared_expert_gate):
+def _make_model(ep):
     model = object.__new__(Qwen35MoeTextModel)
-    model.fuse_shared_expert_gate = fuse_shared_expert_gate
+    model.ep = ep
     model.hidden_size = 2048
     model.io_dtype = ir.DataType.FLOAT16
     model.calls = []
@@ -28,8 +29,9 @@ def _make_model(fuse_shared_expert_gate):
     return model
 
 
-def test_cuda_fusion_emits_one_gated_add():
-    model = _make_model(True)
+@pytest.mark.parametrize("ep", ["cpu", "cuda", "webgpu"])
+def test_supported_ep_fusion_emits_one_gated_add(ep):
+    model = _make_model(ep)
 
     output = model._combine_routed_and_shared_experts(3, "routed", "shared", "gate")
 
@@ -42,8 +44,8 @@ def test_cuda_fusion_emits_one_gated_add():
     assert kwargs["domain"] == "com.microsoft"
 
 
-def test_fusion_opt_out_preserves_mul_add_graph():
-    model = _make_model(False)
+def test_unsupported_ep_preserves_mul_add_graph():
+    model = _make_model("dml")
 
     output = model._combine_routed_and_shared_experts(3, "routed", "shared", "gate")
 

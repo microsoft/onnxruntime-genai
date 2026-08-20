@@ -2333,9 +2333,6 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.shared_expert_intermediate_size = getattr(
             config, "shared_expert_intermediate_size", self.moe_intermediate_size
         )
-        self.fuse_shared_expert_gate = str(
-            extra_options.get("fuse_shared_expert_gate", "true" if self.ep == "cuda" else "false")
-        ).lower() in ("1", "true", "yes")
 
         # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
         # so remove any /mlp/ MatMul overrides that don't apply.
@@ -2754,7 +2751,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
     def _combine_routed_and_shared_experts(self, layer_id, routed_output, shared_output, shared_gate):
         output_shape = ["batch_size", "sequence_length", self.hidden_size]
-        if self.fuse_shared_expert_gate:
+        if self.ep in {"cpu", "cuda", "webgpu"}:
             combine_name = f"/model/layers.{layer_id}/moe/GatedAdd"
             combine_output = f"{combine_name}/output_0"
             self.make_node(
