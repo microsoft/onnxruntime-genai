@@ -17,8 +17,9 @@ env:
   ORT_BUILD_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
   ORT_RUNTIME_PACKAGE_NAME: microsoft.ml.onnxruntime
   ORT_EP_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64
-  ORT_EP_PACKAGE_VERSION: "0.1.0"
-  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
+  ORT_EP_NUGET_VERSION: "0.2.0-dev.20260819+f1d07f0d"
+  ORT_EP_PYPI_VERSION: "0.2.0.dev20260819"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -84,7 +85,7 @@ jobs:
             "https://api.nuget.org/v3-flatcontainer/${{ env.ORT_RUNTIME_PACKAGE_NAME }}/${{ env.ORT_RUNTIME_VERSION }}/${{ env.ORT_RUNTIME_PACKAGE_NAME }}.${{ env.ORT_RUNTIME_VERSION }}.nupkg" \
             -o ort-runtime.zip
           curl -fsSL \
-            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/onnxruntime-cuda-12/nuget/packages/${{ env.ORT_EP_PACKAGE_NAME }}/versions/${{ env.ORT_EP_PACKAGE_VERSION }}/content?api-version=6.0-preview.1" \
+            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/ORT-Nightly/nuget/packages/${{ env.ORT_EP_PACKAGE_NAME }}/versions/${{ env.ORT_EP_NUGET_VERSION }}/content?api-version=6.0-preview.1" \
             -o ort-ep.zip
           unzip -q ort-build.zip -d ort-build-package
           unzip -q ort-runtime.zip -d ort-runtime-package
@@ -203,7 +204,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip uninstall -y onnxruntime-gpu && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PACKAGE_VERSION }} --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PYPI_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"

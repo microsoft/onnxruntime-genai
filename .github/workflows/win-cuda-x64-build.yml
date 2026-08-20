@@ -20,12 +20,13 @@ env:
   buildRoot: 'build/cuda/win-x64'
   binaryDir: 'build/cuda/win-x64/Release'
   ORT_NUGET_SOURCE: "https://api.nuget.org/v3/index.json"
-  ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/onnxruntime-cuda-12/nuget/v3/index.json"
-  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
+  ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_PACKAGE_VERSION: "1.28.0"
   ORT_EP_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.EP.Cuda12.win-x64"
-  ORT_EP_PACKAGE_VERSION: "0.1.0"
+  ORT_EP_NUGET_VERSION: "0.2.0-dev.20260819+f1d07f0d"
+  ORT_EP_PYPI_VERSION: "0.2.0.dev20260819"
 
 jobs:
   windows-cuda-x64-build:
@@ -63,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           nuget install $env:ORT_PACKAGE_NAME -Version $env:ORT_PACKAGE_VERSION -Source $env:ORT_NUGET_SOURCE -ExcludeVersion -NonInteractive
-          nuget install $env:ORT_EP_PACKAGE_NAME -Version $env:ORT_EP_PACKAGE_VERSION -Source $env:ORT_EP_NUGET_SOURCE -ExcludeVersion -NonInteractive -DependencyVersion Ignore
+          nuget install $env:ORT_EP_PACKAGE_NAME -Version $env:ORT_EP_NUGET_VERSION -Source $env:ORT_EP_NUGET_SOURCE -ExcludeVersion -NonInteractive -DependencyVersion Ignore
 
       - run: |
           Get-ChildItem $env:ORT_PACKAGE_NAME -Recurse
@@ -185,7 +186,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\cuda\torch\requirements.txt
           python -m pip install -r test\python\cuda\ort\requirements.txt
-          python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PACKAGE_VERSION
+          python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the synthetic Engine Python tests
