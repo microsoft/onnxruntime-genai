@@ -111,7 +111,7 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
 
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
-  output.ttft_p25_ms = Percentile(ttft_values, 25.0);
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   memory.Stop();
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
