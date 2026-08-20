@@ -5,6 +5,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "kv_cache.h"
+#include "kv_cache_block_size.h"
 #include "windowed_kv_cache.h"
 #include "../config_utils.h"
 #include "../openvino/interface.h"
@@ -493,52 +494,22 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
-  // kv_cache_block_size: round the pre-allocated KV cache sequence length up to
-  // a multiple of the block size. Only meaningful with a shared past/present
-  // buffer, where the sequence dimension is fixed at allocation time.
-  // Local (sliding-window) attention layers are left untouched: their cache is
-  // capped to the window and does not grow, so block-alignment does not apply.
-  // No-op for fixed-KV-shape models: their sequence dim is dictated by the model
-  // graph, so rounding it would desync the cache from the graph's fixed shape.
+  // kv_cache_block_size: round the pre-allocated KV cache sequence length up to a
+  // multiple of the block size (see kv_cache_block_size.h). Skipped for
+  // fixed-KV-shape models and for uniform sliding-window caches (every layer is
+  // local); on the alternating windowed path only the local layers are spared.
   const auto& sliding_window = model_.config_->model.decoder.sliding_window;
-  // We took the windowed path above iff a windowed cache was computed and there is
-  // no beam search. When it is uniform (empty layers list) *every* layer is a
-  // sliding-window layer, so the whole cache is local and must not be rounded.
   const bool windowed_cache = windowed_cache_size > 0 && state_.params_->search.num_beams == 1;
-  const bool uniform_local_cache = windowed_cache && sliding_window->layers.empty();
-  if (past_present_share_buffer_ && fixed_kv_seq_len <= 0 && !uniform_local_cache &&
-      state_.params_->search.kv_cache_block_size.has_value()) {
+  const bool sliding_window_layers_empty = !sliding_window.has_value() || sliding_window->layers.empty();
+  if (ShouldRoundKvCacheToBlock(past_present_share_buffer_, fixed_kv_seq_len, windowed_cache,
+                                sliding_window_layers_empty, state_.params_->search.kv_cache_block_size)) {
     const int64_t block_size = static_cast<int64_t>(state_.params_->search.kv_cache_block_size.value());
-    if (block_size > 0) {
-      const auto round_up_to_block = [block_size](int64_t seq_len) {
-        return ((seq_len + block_size - 1) / block_size) * block_size;
-      };
-
-      // Mark which cache slots correspond to local (sliding-window) attention
-      // layers so they can be skipped (0 = global/full attention, 1 = local).
-      // Only the alternating windowed path gives some layers a smaller cache;
-      // otherwise no layer is local and the whole cache is rounded.
-      std::vector<std::uint8_t> is_local_attention(layer_shapes_.size(), 0);
-      if (windowed_cache && !layer_shapes_.empty() && !sliding_window->layers.empty()) {
-        std::unordered_map<int, int> model_layer_to_cache_slot;
-        for (int slot = 0; slot < layer_count_; ++slot) {
-          int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
-          model_layer_to_cache_slot[model_idx] = slot;
-        }
-        for (int model_layer_idx : sliding_window->layers) {
-          auto it = model_layer_to_cache_slot.find(model_layer_idx);
-          if (it != model_layer_to_cache_slot.end())
-            is_local_attention[it->second] = 1;
-        }
-      }
-
-      shape_[2] = round_up_to_block(shape_[2]);
-      for (size_t layer_idx = 0; layer_idx < layer_shapes_.size(); ++layer_idx) {
-        if (is_local_attention[layer_idx])
-          continue;
-        layer_shapes_[layer_idx][2] = round_up_to_block(layer_shapes_[layer_idx][2]);
-      }
-    }
+    // Only the alternating windowed path gives some layers a smaller (local) cache.
+    const std::vector<int> local_layers =
+        (windowed_cache && !sliding_window_layers_empty) ? sliding_window->layers : std::vector<int>{};
+    const std::vector<std::uint8_t> is_local_attention =
+        ComputeLocalAttentionSlots(layer_count_, kv_layer_indices_, local_layers);
+    ApplyKvCacheBlockSize(block_size, is_local_attention, shape_, layer_shapes_);
   }
 
   try {
