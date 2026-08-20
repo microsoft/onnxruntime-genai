@@ -3,7 +3,9 @@
 """Run each benchmark scenario in a separate process."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -15,24 +17,50 @@ def main() -> int:
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=Path("config.json"))
     parser.add_argument("--out", type=Path, default=Path("out"))
+    parser.add_argument(
+        "--cuda_visible_devices",
+        help="Comma-separated GPU IDs; scenarios are assigned round-robin and each sees one GPU.",
+    )
     args = parser.parse_args()
 
     scenarios = json.loads(args.config.read_text())
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("config must contain a non-empty JSON array of scenarios")
 
+    gpu_ids = None
+    if args.cuda_visible_devices is not None:
+        gpu_ids = [gpu.strip() for gpu in args.cuda_visible_devices.split(",") if gpu.strip()]
+        if not gpu_ids:
+            raise ValueError("--cuda_visible_devices must contain at least one GPU ID")
+
     args.out.mkdir(parents=True, exist_ok=True)
-    failed = False
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_config = Path(temp_dir) / "scenario.json"
-        for index, scenario in enumerate(scenarios, 1):
+
+    def run_scenario(item):
+        index, scenario = item
+        with tempfile.TemporaryDirectory() as scenario_dir:
+            scenario_dir = Path(scenario_dir)
+            temp_config = scenario_dir / "scenario.json"
+            scenario_out = scenario_dir / "out"
+            scenario_out.mkdir()
             temp_config.write_text(json.dumps([scenario], indent=2) + "\n")
-            completed = subprocess.run([str(args.executable), "--config", str(temp_config), "--out", str(args.out)])
-            result_name = f"{scenario['scenario']}_results_001.json"
-            result_path = args.out / result_name
+
+            environment = os.environ.copy()
+            if gpu_ids is not None:
+                environment["CUDA_VISIBLE_DEVICES"] = gpu_ids[(index - 1) % len(gpu_ids)]
+            completed = subprocess.run(
+                [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
+                env=environment,
+            )
+
+            result_path = scenario_out / f"{scenario['scenario']}_results_001.json"
             if result_path.exists():
                 shutil.move(result_path, args.out / f"{scenario['scenario']}_results_{index:03d}.json")
-            failed |= completed.returncode != 0
+            return completed.returncode != 0
+
+    work = list(enumerate(scenarios, 1))
+    max_workers = len(gpu_ids) if gpu_ids is not None else 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        failed = any(executor.map(run_scenario, work))
 
     return 1 if failed else 0
 

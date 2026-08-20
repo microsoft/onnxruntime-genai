@@ -79,6 +79,21 @@ build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
 A multi-scenario config should be run through `run.py` to avoid carrying CUDA allocator state
 from one scenario into the next.
 
+To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario is
+assigned one GPU in round-robin order, and `CUDA_VISIBLE_DEVICES` is set separately for each
+process, so no scenario uses more than one GPU:
+
+```bash
+python benchmark/engine/run.py \
+  --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+  --config benchmark/engine/config.json \
+  --out benchmark/engine/out \
+  --cuda_visible_devices 0,1,2,3
+```
+
+Without `--cuda_visible_devices`, scenarios remain sequential and inherit the caller's
+`CUDA_VISIBLE_DEVICES` setting.
+
 Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 
 ## Configuration
