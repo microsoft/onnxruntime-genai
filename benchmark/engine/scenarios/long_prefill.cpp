@@ -40,6 +40,15 @@ void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
 
 ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+
+  std::cout << tag << "Execute start: model_path='" << config.model_path
+            << "', provider='" << config.execution_provider
+            << "', concurrency=" << config.concurrency
+            << ", measured_runs=" << config.measured_runs
+            << ", prompt_length_k=" << config.prompt_length_k
+            << ", generation_tokens=" << config.generation_tokens
+            << std::endl;
+
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
 
   MemorySampler memory;
