@@ -51,6 +51,7 @@ struct RequestMetrics {
 
 struct ScenarioExecutionOutput {
   std::vector<RequestMetrics> requests;
+  double ttft_p5_ms{0.0};
   double ttft_p50_ms{0.0};
   double ttft_p95_ms{0.0};
   double inter_token_latency_p50_ms{0.0};
