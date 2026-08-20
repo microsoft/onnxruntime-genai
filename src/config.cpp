@@ -1436,6 +1436,13 @@ struct Search_Element : JSON::Element {
       } else {
         v_.chunk_size = std::nullopt;
       }
+    } else if (name == "kv_cache_block_size") {
+      double block_value = JSON::Get<double>(value);
+      if (block_value > 0) {
+        v_.kv_cache_block_size = static_cast<size_t>(block_value);
+      } else {
+        v_.kv_cache_block_size = std::nullopt;
+      }
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {

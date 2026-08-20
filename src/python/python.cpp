@@ -224,6 +224,7 @@ struct PyGeneratorParams {
     pybind11::dict d;
     d["batch_size"] = params_->GetSearchNumber("batch_size");
     d["chunk_size"] = params_->GetSearchNumber("chunk_size");
+    d["kv_cache_block_size"] = params_->GetSearchNumber("kv_cache_block_size");
     d["diversity_penalty"] = params_->GetSearchNumber("diversity_penalty");
     d["do_sample"] = params_->GetSearchBool("do_sample");
     d["early_stopping"] = params_->GetSearchBool("early_stopping");
