@@ -296,7 +296,7 @@ absorbed every token of the forward. `RecurrentState`
 - **Snapshot / restore** — `Snapshot(position)` copies the live conv + recurrent buffers before a
   speculative forward; `RewindTo` restores them in place (in place, so buffer addresses stay stable
   for CUDA-graph replay). Always available, but costs `2 * num_layers` device copies per step.
-- **Windowed state** — when the model is exported with `recurrent_state_window = W`, the state
+- **Windowed state** — when the model is exported with `state_window = W`, the state
   tensors carry a window axis of `W` per-token states, right-aligned: slot `j` holds the state after
   token `seq_len - W + j`, and slot `W-1` is the one the ops read. `CropToPosition(position)` then
   commits a partial accept by promoting the slot for `position` into slot `W-1` — one batched kernel
@@ -324,7 +324,7 @@ shape, so `GeneratorParams::max_graph_capture_length` is set to `num_speculative
   `(length, recurrent variant)` pair, so ORT captures and replays an independent graph per shape.
 
 `HiddenStatesInputs` / `HiddenStatesOutputs`
-([src/models/hidden_states_inputs.h](../src/models/hidden_states_inputs.h)) keep one dedicated
+([src/models/hidden_states.h](../src/models/hidden_states.h)) keep one dedicated
 static buffer per captured length and a single shared dynamic buffer for everything else (prompt
 prefill), so the prompt does not leave a per-length buffer behind. `HiddenStatesInputs::Update`
 validates the source element type and byte count, then prefers a stream-ordered device-to-device
@@ -432,10 +432,10 @@ draft-model speculative path uses.
 
 | Parameter | Set with | Default | Effect |
 |---|---|---|---|
-| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. For `N > 1`, `model.mtp.outputs.hidden_states` must name the feedback output exported with `mtp_emit_hidden=true`. `N` is capped at `recurrent_state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide. |
+| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. For `N > 1`, `model.mtp.outputs.hidden_states` must name the feedback output exported with `mtp_emit_hidden=true`. `N` is capped at `state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide. |
 | `search.chunk_size` | `SetSearchNumber("chunk_size", n)` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
 
-On a windowed-state model (`recurrent_state_window > 1`) with at least one accepted draft, the
+On a windowed-state model (`state_window > 1`) with at least one accepted draft, the
 greedy path crops to the last accepted state and replays only that token with an `M=1` forward.
 When no draft is accepted, it restores the snapshot and replays the committed token.
 

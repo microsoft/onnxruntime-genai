@@ -10,6 +10,7 @@ import subprocess
 from os import PathLike, listdir
 from os.path import isfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import requests
 

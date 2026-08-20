@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
+#include <utility>
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
@@ -258,14 +259,32 @@ struct DeviceInterface {
 // ExternalAddRef must be called when returning an object through the C API
 // ExternalRelease must be called on the C API destroy method
 template <typename T>
+struct ExternalRefCountedTraits {
+  static constexpr bool notify_external_reference_changes = false;
+};
+
+template <typename T>
 struct ExternalRefCounted {
   void ExternalAddRef() {
-    if (++ref_count_ == 1)  // First reference?
+    if (++ref_count_ == 1) {  // First reference?
       external_owner_ = static_cast<T*>(this)->shared_from_this();
+      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+        static_assert(noexcept(std::declval<T&>().OnFirstExternalReference()));
+        static_cast<T*>(this)->OnFirstExternalReference();
+      }
+    }
   }
-  void ExternalRelease() {
-    if (--ref_count_ == 0)
+
+  void ExternalRelease() noexcept {
+    if (--ref_count_ == 0) {
+      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+        static_assert(noexcept(std::declval<T&>().OnLastExternalReference()));
+        // Notify before releasing the self-owner so a type-specific last-release hook can only mark
+        // deferred work while the object is guaranteed to still be alive.
+        static_cast<T*>(this)->OnLastExternalReference();
+      }
       external_owner_ = nullptr;
+    }
   }
 
  private:

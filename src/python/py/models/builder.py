@@ -53,7 +53,7 @@ from builders import (
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.quant_config import KV_CACHE_QUANT_TYPES
+from builders.quant_config import KV_CACHE_QUANT_TYPES, QuantConfig
 from transformers import AutoConfig
 
 
@@ -168,6 +168,7 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "enable_mtp",
     ]
 
     for key in bools:
@@ -179,10 +180,34 @@ def check_extra_options(
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
 
+    if "state_window" in extra_options:
+        try:
+            state_window = int(extra_options["state_window"])
+        except (TypeError, ValueError) as e:
+            raise ValueError("state_window must be a non-negative integer.") from e
+        if state_window < 0:
+            raise ValueError("state_window must be a non-negative integer.")
+        extra_options["state_window"] = state_window
+
+    if extra_options.get("enable_mtp", False):
+        if not extra_options.get("include_hidden_states", False):
+            raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
+        incompatible_options = [
+            key for key in ("exclude_lm_head", "prune_lm_head") if extra_options.get(key, False)
+        ]
+        if incompatible_options:
+            raise ValueError("enable_mtp cannot be combined with " + ", ".join(incompatible_options) + ".")
+
+    if "mtp_quant_config" in extra_options:
+        mtp_quant_config = extra_options["mtp_quant_config"]
+        if not isinstance(mtp_quant_config, QuantConfig):
+            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+        extra_options["mtp_quant_config"] = mtp_quant_config
+
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head", "prune_lm_head")
+            for key in ("exclude_embeds", "exclude_lm_head")
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -256,16 +281,14 @@ def check_extra_options(
                 f"moe_quant_type must be one of {sorted(supported_moe_quant_types)}, got '{moe_quant_type}'."
             )
         if moe_quant_type in ("mxfp4", "nvfp4"):
-            # MXFP4 and NVFP4 share the CUDA QMoE FP4 op path and both require the int4 build
-            # precision (that is what exports the quantized QMoE op); the FP4 scheme only sets the
-            # MoE expert weights to the FP4 encoding.
             if execution_provider != "cuda":
                 raise ValueError(
                     f"moe_quant_type={moe_quant_type} is only supported on the CUDA EP, got ep='{execution_provider}'."
                 )
+        if moe_quant_type == "mxfp4":
             if not (precision == "int4" and extra_options.get("is_symmetric", True)):
                 raise ValueError(
-                    f"moe_quant_type={moe_quant_type} requires building with precision=int4 (symmetric int4): the "
+                    "moe_quant_type=mxfp4 requires building with precision=int4 (symmetric int4): the "
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
@@ -302,6 +325,16 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    quantization_config = getattr(config, "quantization_config", {})
+    if quantization_config.get("quant_method") == "modelopt":
+        if execution_provider != "cuda":
+            raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
+        if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
+            raise ValueError("ModelOpt checkpoints require moe_quant_type=nvfp4 to preserve the original experts.")
+        extra_options["moe_quant_type"] = "nvfp4"
+        if str(quantization_config.get("kv_cache_quant_algo", "")).upper() == "FP8":
+            extra_options.setdefault("kv_cache_quant_type", "fp8_per_tensor")
 
     # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
     # embedding and the LM head. This is only valid when the model actually ties them.
@@ -351,8 +384,10 @@ def parse_extra_options(
 
     if extra_options:
         for kv_str in extra_options:
-            kv = kv_str.split("=")
-            kv_pairs[kv[0].strip()] = kv[1].strip()
+            if "=" not in kv_str:
+                raise ValueError(f"extra option must be KEY=VALUE, got '{kv_str}'")
+            key, value = kv_str.split("=", 1)
+            kv_pairs[key.strip()] = value.strip()
 
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
@@ -710,19 +745,30 @@ def get_args():
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
-                    Inserts Gather+Unsqueeze before the LM head so the MatMul input is [B,1,H] instead of [B,S,H],
-                    eliminating ~(S-1)/S of the compute. Cannot be combined with exclude_lm_head.
+                    When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
+                    of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
+                    the MatMul input is [B,H] instead of [num_tokens,H].
+                    Ignored when exclude_lm_head is true.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
+                    Requires include_hidden_states=true, exclude_lm_head=false, prune_lm_head=false,
+                    and source safetensors containing mtp.* weights.
+                mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
+                    structured QuantConfig schema independently from the main model.
+                state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
+                    Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
+                    Requires ONNX Runtime kernels that implement this attribute.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
                     [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
                     `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
-                    `past_sequence_lengths` metadata inputs. An `engine` section (block_size, gpu_utilization_factor,
-                    max_batch_size) is added to genai_config.json. Currently only supported for the CUDA execution
-                    provider with fp16 or bf16 precision. Cannot be combined with exclude_embeds, exclude_lm_head, or prune_lm_head.
+                    `past_sequence_lengths` metadata inputs. With prune_lm_head=true, selects the final packed hidden
+                    state for each sequence so the model outputs [batch_size, vocab_size] logits. By default, the model
+                    outputs [num_tokens, vocab_size] logits. Currently only supported for the CUDA execution provider
+                    with fp16 or bf16 precision. Cannot be combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
@@ -755,7 +801,8 @@ def get_args():
                         INT4 quantization, and is only supported on the CUDA EP.
                     nvfp4 = NVFP4 QMoE weights on the CUDA EP (quant_type="nvfp4", expert_weight_bits=4, block_size=16):
                         4-bit e2m1 weights with FP8-E4M3 block scales and a per-expert float32 global scale.
-                        Same build/precision/EP requirements as mxfp4.
+                        Requires an ONNX Runtime build with NVFP4 QMoE support. The graph precision controls
+                        unquantized tensors and model I/O; the expert weights remain NVFP4.
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.

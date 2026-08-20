@@ -26,7 +26,7 @@ bool IsPureDecodeStep(ScheduledRequests& scheduled_requests) {
     return false;
   }
   for (auto& request : scheduled_requests) {
-    if (request->IsPrefill() || request->UnprocessedTokens().size() != 1) {
+    if (request->IsPrefill() || request->ScheduledTokenCount() != 1) {
       return false;
     }
   }

@@ -56,6 +56,9 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
             request_ids.end()) {
       throw std::runtime_error("The dynamic step plan contains an invalid request.");
     }
+    if (!IsExecutable(entry.request->status_)) {
+      throw std::runtime_error("The dynamic step plan contains a request that is not executable.");
+    }
     const int64_t remaining =
         entry.request->CurrentSequenceLength() -
         entry.request->ProcessedSequenceLength();
@@ -65,6 +68,17 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
           "The dynamic step token count must be positive and no greater than the remaining tokens.");
     }
     request_ids.push_back(entry.request_id);
+  }
+  // Complete every potentially allocating output-bookkeeping operation before binding the plan or
+  // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
+  // request can append at most one generated index.
+  for (const auto& entry : plan.requests) {
+    const auto remaining =
+        static_cast<size_t>(entry.request->CurrentSequenceLength() -
+                            entry.request->ProcessedSequenceLength());
+    if (entry.unprocessed_token_count == remaining) {
+      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
+    }
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(
@@ -105,21 +119,22 @@ void ScheduledRequests::GenerateNextTokens() {
     // serialize the whole batch; launching all of them first means only the first completion below
     // actually waits for the device.
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+      if (IsExecuting(requests_[request_idx]->status_) &&
           requests_[request_idx]->IsChunkComplete()) {
         requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
       }
     }
 
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-      if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+      if (IsExecuting(requests_[request_idx]->status_) &&
           requests_[request_idx]->IsChunkComplete()) {
         requests_[request_idx]->CompleteGeneration();
       }
     }
 
     for (const auto& request : requests_) {
-      if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+      if (IsExecuting(request->status_) &&
+          !request->IsChunkComplete())
         request->AdvanceChunk();
     }
   } catch (...) {
@@ -152,7 +167,7 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
     return false;
 
   for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
-    if (requests_[request_idx]->status_ != RequestStatus::Completed &&
+    if (IsExecuting(requests_[request_idx]->status_) &&
         requests_[request_idx]->IsChunkComplete())
       sampling_plan_->logits.push_back(logits[request_idx]);
   }
@@ -180,7 +195,8 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
     request->CompleteGeneration();
   }
   for (const auto& request : requests_) {
-    if (request->status_ != RequestStatus::Completed && !request->IsChunkComplete())
+    if (IsExecuting(request->status_) &&
+        !request->IsChunkComplete())
       request->AdvanceChunk();
   }
 
@@ -196,7 +212,13 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
 
   sampling_plan_->Clear();
   for (const auto& request : requests_) {
-    if (request->status_ == RequestStatus::Completed || !request->IsChunkComplete())
+    // Dynamic transactions keep newly admitted and continued requests Queued until commit, while
+    // the static scheduler moves every executable row to Active before constructing the batch.
+    const bool status_is_executable =
+        require_transaction_support ? IsExecutable(request->status_)
+                                    : IsExecuting(request->status_);
+    if (!status_is_executable ||
+        !request->IsChunkComplete())
       continue;
 
     const auto args = ResolveSampleArgs(request->SearchOptions());

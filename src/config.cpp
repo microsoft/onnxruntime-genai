@@ -353,6 +353,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table_windowed") {
+      v_.block_table_windowed = JSON::Get<std::string_view>(value);
     } else if (name == "attention_metadata") {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
@@ -1466,6 +1468,25 @@ struct Speculative_Element : JSON::Element {
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
             std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
+    } else if (name == "ngram_size") {
+      const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+        throw std::runtime_error(
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            ". Got: " + std::to_string(ngram_size) + ".");
+      v_.ngram_size = ngram_size;
+    } else if (name == "ngram_chained_lookup") {
+      v_.ngram_chained_lookup = JSON::Get<bool>(value);
+    } else if (name == "min_adaptive_k") {
+      const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
+        throw std::runtime_error(
+            "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
+            " and " + std::to_string(kMaxK) + ". Got: " +
+            std::to_string(min_adaptive_k) + ".");
+      v_.min_adaptive_k = min_adaptive_k;
+    } else if (name == "cooldown") {
+      v_.cooldown = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1570,6 +1591,14 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value) {
   try {
     Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {

@@ -33,6 +33,7 @@ struct Config {
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -385,6 +386,10 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
@@ -504,9 +509,15 @@ struct Config {
   } search;
 
   struct Speculative {
-    // Four is a conservative default that amortizes target verification without excessive draft
-    // work; the best value depends on the model pair and execution provider.
+    // Fixed proposal width when min_adaptive_k is 0. Four conservatively amortizes target
+    // verification without excessive draft work; the best value depends on acceptance and EP cost.
     int max_draft_tokens{4};
+    int ngram_size{};             // 0 disables n-gram decoding; 2-16 matches the last N-1 tokens.
+    bool ngram_chained_lookup{};  // Refill the proposal by repeatedly looking up synthetic context.
+    // 0 disables adaptation. Values 1-16 enable it and set the starting width and floor;
+    // adjacent-width probes may grow the effective width up to the hard limit of 16.
+    int min_adaptive_k{};
+    bool cooldown{};  // Skip one speculative attempt after three zero-accept rounds.
   } speculative;
 
   struct Engine {
@@ -537,6 +548,7 @@ struct Config {
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

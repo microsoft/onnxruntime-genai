@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime_genai as og
 import pytest
 
@@ -76,7 +77,7 @@ def _drain(ready):
     sink = ready.get_opaque_data()
     while ready.has_unseen_tokens():
         sink.tokens.append(ready.get_unseen_token())
-    return ready.is_done()
+    return ready.is_turn_complete()
 
 
 def _step_once(engine):
@@ -99,8 +100,9 @@ def _run(engine, *, max_steps=_MAX_STEPS):
 def _generate_isolated(model, prompt, max_new_tokens):
     sink = _Sink()
     engine = og.Engine(model)
-    _add_request(engine, model, prompt, max_new_tokens, sink)
+    request = _add_request(engine, model, prompt, max_new_tokens, sink)
     _run(engine)
+    assert not request.is_turn_complete()
     del engine
     gc.collect()
     return sink.tokens
@@ -114,6 +116,17 @@ def test_model_declares_paged_config():
     assert config["model"]["vocab_size"] == _VOCAB_SIZE
     assert config["model"]["eos_token_id"] == _EOS_TOKEN_ID
     assert config["search"]["do_sample"] is False
+
+
+def test_model_declares_per_request_fp16_logits():
+    graph = onnx.load(_MODEL_DIR / "decoder.onnx", load_external_data=False).graph
+    logits = next(output for output in graph.output if output.name == "logits")
+    tensor_type = logits.type.tensor_type
+
+    assert tensor_type.elem_type == onnx.TensorProto.FLOAT16
+    assert len(tensor_type.shape.dim) == 2
+    assert tensor_type.shape.dim[0].dim_param == "batch_size"
+    assert tensor_type.shape.dim[1].dim_value == _VOCAB_SIZE
 
 
 def test_deterministic_tokens(model):
@@ -138,13 +151,16 @@ def test_isolated_matches_simultaneous(model):
 
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
-    _add_request(engine, model, _PROMPT_A, max_new, sink_a)
-    _add_request(engine, model, _PROMPT_B, max_new, sink_b)
+    requests = [
+        _add_request(engine, model, _PROMPT_A, max_new, sink_a),
+        _add_request(engine, model, _PROMPT_B, max_new, sink_b),
+    ]
     assert engine.has_pending_requests()
     _run(engine)
 
     assert sink_a.tokens == isolated_a, "request A diverged when batched with B"
     assert sink_b.tokens == isolated_b, "request B diverged when batched with A"
+    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_staggered_admission(model):
@@ -154,7 +170,7 @@ def test_staggered_admission(model):
 
     engine = og.Engine(model)
     sink_a = _Sink()
-    _add_request(engine, model, _PROMPT_A, max_new, sink_a)
+    request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
 
     for _ in range(3):
         if not engine.has_pending_requests():
@@ -163,11 +179,13 @@ def test_staggered_admission(model):
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    _add_request(engine, model, _PROMPT_B, max_new, sink_b)
+    request_b = _add_request(engine, model, _PROMPT_B, max_new, sink_b)
     _run(engine)
 
     assert sink_a.tokens == expected_a
     assert sink_b.tokens == expected_b
+    assert not request_a.is_turn_complete()
+    assert not request_b.is_turn_complete()
 
 
 def test_max_length_stops(model):
@@ -200,12 +218,144 @@ def test_completion_isolation(model):
 
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
-    _add_request(engine, model, _PROMPT_A, short_new, short_sink)
-    _add_request(engine, model, _PROMPT_LONG, long_new, long_sink)
+    short_request = _add_request(engine, model, _PROMPT_A, short_new, short_sink)
+    long_request = _add_request(engine, model, _PROMPT_LONG, long_new, long_sink)
     _run(engine)
 
     assert short_sink.tokens == predicted_tokens(_PROMPT_A, short_new)
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
+    assert not short_request.is_turn_complete()
+    assert not long_request.is_turn_complete()
+
+
+def test_continuation_while_peer_remains_active(model):
+    short_max_new, long_max_new = 60, 80
+    # EOS is valid input context here; Continue must reset the prior turn's done state rather than
+    # treating an EOS token in the new prompt fragment as a newly generated stop.
+    follow_up = [_EOS_TOKEN_ID, 12]
+
+    reference_engine = og.Engine(model)
+    reference_sink = _Sink()
+    reference = _add_request(
+        reference_engine, model, _PROMPT_A, short_max_new, reference_sink
+    )
+    while not reference.is_turn_complete():
+        ready = reference_engine.step()
+        assert ready is not None
+        _drain(ready)
+    reference.continue_with(np.asarray(follow_up, dtype=np.int32))
+    _run(reference_engine)
+
+    engine = og.Engine(model)
+    short_sink, long_sink = _Sink(), _Sink()
+    short = _add_request(engine, model, _PROMPT_A, short_max_new, short_sink)
+    long = _add_request(engine, model, _PROMPT_LONG, long_max_new, long_sink)
+
+    while not short.is_turn_complete():
+        ready = engine.step()
+        assert ready is not None
+        if _drain(ready) and ready is not short:
+            engine.remove_request(ready)
+
+    assert not long.is_turn_complete(), "peer must remain active when continuation is appended"
+    for _ in range(3):
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+    assert not long.is_turn_complete(), "peer must remain active during the continuation delay"
+
+    short.continue_with(np.asarray(follow_up, dtype=np.int32))
+    _run(engine)
+
+    assert short_sink.tokens == reference_sink.tokens
+
+
+def test_request_rejects_tokens_while_awaiting_admission(model):
+    engine = og.Engine(model)
+    sink = _Sink()
+    request = _add_request(engine, model, _PROMPT_A, 8, sink)
+
+    with pytest.raises(RuntimeError, match="initial input before submission"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+
+    engine.remove_request(request)
+
+
+def test_request_cannot_be_removed_from_another_engine(model):
+    owner = og.Engine(model)
+    other = og.Engine(model)
+    sink = _Sink()
+    request = _add_request(owner, model, _PROMPT_A, 8, sink)
+
+    with pytest.raises(RuntimeError, match="does not belong"):
+        other.remove_request(request)
+
+    owner.remove_request(request)
+    other.remove_request(request)
+    assert not request.is_turn_complete()
+
+
+def test_request_lifecycle_operations(model):
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=64)
+    request = og.Request(params)
+
+    request.add_tokens(np.asarray(_PROMPT_A, dtype=np.int32))
+    sink = _Sink()
+    request.set_opaque_data(sink)
+    engine = og.Engine(model)
+    engine.add_request(request)
+
+    ready = engine.step()
+    assert ready is not None
+    _drain(ready)
+    assert not request.is_turn_complete()
+
+    while not request.is_turn_complete():
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+    assert request.is_turn_complete()
+
+    with pytest.raises(RuntimeError, match="use the continuation API"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+    request.continue_with(np.asarray([12], dtype=np.int32))
+    assert not request.is_turn_complete()
+
+    engine.remove_request(request)
+    assert not request.is_turn_complete()
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.add_tokens(np.asarray([12], dtype=np.int32))
+    with pytest.raises(RuntimeError, match="closed request"):
+        request.continue_with(np.asarray([12], dtype=np.int32))
+    engine.remove_request(request)
+
+
+def test_last_handle_release_reclaims_retained_capacity(model):
+    engine = og.Engine(model)
+    sinks = [_Sink() for _ in range(8)]
+    requests = [
+        _add_request(engine, model, [5 + index, 9, 13], 1, sinks[index])
+        for index in range(8)
+    ]
+
+    while not all(request.is_turn_complete() for request in requests):
+        ready = engine.step()
+        assert ready is not None
+        _drain(ready)
+
+    # Every TurnComplete request still owns one of the eight resident slots. Dropping all public
+    # handles must mark them abandoned so the next admission can reclaim that capacity.
+    requests.clear()
+    del ready
+    gc.collect()
+
+    replacement_sink = _Sink()
+    replacement = _add_request(engine, model, _PROMPT_A, 4, replacement_sink)
+    _run(engine)
+
+    assert replacement_sink.tokens == predicted_tokens(_PROMPT_A, 4)
+    assert not replacement.is_turn_complete()
 
 
 def test_remove_request_freezes_output(model):
@@ -216,7 +366,7 @@ def test_remove_request_freezes_output(model):
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
     request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
-    _add_request(engine, model, _PROMPT_B, sibling_new, sink_b)
+    request_b = _add_request(engine, model, _PROMPT_B, sibling_new, sink_b)
 
     for _ in range(4):
         if not engine.has_pending_requests():
@@ -231,6 +381,7 @@ def test_remove_request_freezes_output(model):
 
     assert sink_a.tokens == frozen_a, "removed request kept producing tokens"
     assert sink_b.tokens == sibling_expected, "sibling did not complete after removal"
+    assert not request_b.is_turn_complete()
 
 
 def test_engine_teardown_and_recreation(model):
@@ -239,15 +390,17 @@ def test_engine_teardown_and_recreation(model):
 
     first = og.Engine(model)
     sink1 = _Sink()
-    _add_request(first, model, _PROMPT_A, max_new, sink1)
+    first_request = _add_request(first, model, _PROMPT_A, max_new, sink1)
     _run(first)
     assert sink1.tokens == expected
+    assert not first_request.is_turn_complete()
     del first
     gc.collect()
 
     second = og.Engine(model)
     assert not second.has_pending_requests()
     sink2 = _Sink()
-    _add_request(second, model, _PROMPT_A, max_new, sink2)
+    second_request = _add_request(second, model, _PROMPT_A, max_new, sink2)
     _run(second)
     assert sink2.tokens == expected
+    assert not second_request.is_turn_complete()

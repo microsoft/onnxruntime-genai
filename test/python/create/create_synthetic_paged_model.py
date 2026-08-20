@@ -5,8 +5,8 @@
 # --------------------------------------------------------------------------
 """Create the deterministic paged model used by the Engine tests.
 
-The graph writes packed tokens through the supplied block table and emits
-one-hot logits for:
+The graph writes packed tokens through the supplied block table and emits one
+FP16 logits row per request for:
 
     (first_prompt_token + current_token + current_length) % vocab_size
 """
@@ -113,8 +113,14 @@ def _decoder_graph():
     node("Sub", ["score", "score_floor"], ["next_token"])
 
     node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
-    node("Equal", ["next_token_col", "vocab_range"], ["is_next"])
-    node("Cast", ["is_next"], ["logits"], to=TensorProto.FLOAT)
+    node("Equal", ["next_token_col", "vocab_range"], ["is_next_per_token"])
+
+    # Select each request's final packed token so the Engine exercises its
+    # [batch_size, vocab_size] output allocation and row mapping. Each boundary
+    # is an exclusive end offset, so subtracting one gives the final token index.
+    node("Sub", ["boundaries", "c1"], ["last_token_index"])
+    node("Gather", ["is_next_per_token", "last_token_index"], ["is_next_per_request"], axis=0)
+    node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
 
     cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
     inputs = [
@@ -126,7 +132,7 @@ def _decoder_graph():
         helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, cache_shape),
     ]
     outputs = [
-        helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["num_tokens", VOCAB_SIZE]),
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT16, ["batch_size", VOCAB_SIZE]),
         helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, cache_shape),
         helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, cache_shape),
     ]
