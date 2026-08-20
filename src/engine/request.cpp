@@ -546,8 +546,9 @@ void Request::CompleteGeneration() {
   }
 
   if (sequence_length > sequence_length_before) {
+    const size_t generated_token_count = sequence_length - sequence_length_before;
     auto next_tokens = search_->GetNextTokens().CpuSpan();
-    auto new_tokens = next_tokens.subspan(next_tokens.size() - (sequence_length - sequence_length_before));
+    auto new_tokens = next_tokens.last(generated_token_count);
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }
