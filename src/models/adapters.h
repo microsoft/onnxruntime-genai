@@ -47,8 +47,8 @@ struct Adapters : std::enable_shared_from_this<Adapters>, ExternalRefCounted<Ada
 
   void ReleaseAdapter(const std::string& adapter_name);
 
-  private:
-   // Serializes all access to adapters_ and to per-Adapter ref counts so that
+ private:
+  // Serializes all access to adapters_ and to per-Adapter ref counts so that
   // load/unload/acquire/release cannot race. Without this, the check-then-erase
   // pattern in UnloadAdapter (and concurrent std::unordered_map mutation) is a
   // use-after-free hazard.
