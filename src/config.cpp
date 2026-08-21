@@ -841,6 +841,9 @@ struct Mtp_Element : JSON::Element {
     if (name == "shared_kv_layers") {
       return shared_kv_layers_;
     }
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -860,13 +863,6 @@ struct Mtp_Element : JSON::Element {
     }
     if (name == "outputs") {
       return outputs_;
-    }
-    throw JSON::unknown_value_error{};
-  }
-
-  Element& OnArray(std::string_view name) override {
-    if (name == "shared_initializers") {
-      return shared_initializers_;
     }
     throw JSON::unknown_value_error{};
   }
