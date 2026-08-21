@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 
@@ -48,6 +49,31 @@ TEST(SamplerStateIndexPoolTest, ReusedIndexPreparationFailureKeepsItFree) {
 
   const int retried = pool.Acquire([](int, int) {});
   EXPECT_EQ(retried, original);
+  EXPECT_EQ(pool.ActiveCount(), 1u);
+}
+
+TEST(SamplerStateIndexPoolTest, OwnedStateConstructionFailureReleasesAcquiredIndex) {
+  SamplerStateIndexPool pool;
+
+  EXPECT_THROW(
+      pool.AcquireOwned(
+          [](int, int) {},
+          [](int) -> std::unique_ptr<int> {
+            throw std::bad_alloc{};
+          }),
+      std::bad_alloc);
+
+  EXPECT_EQ(pool.Size(), 1);
+  EXPECT_EQ(pool.FreeCount(), 1u);
+  EXPECT_EQ(pool.ActiveCount(), 0u);
+
+  auto state = pool.AcquireOwned(
+      [](int, int) {},
+      [](int index) {
+        return std::make_unique<int>(index);
+      });
+  ASSERT_NE(state, nullptr);
+  EXPECT_EQ(*state, 0);
   EXPECT_EQ(pool.ActiveCount(), 1u);
 }
 
