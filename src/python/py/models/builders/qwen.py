@@ -2759,15 +2759,43 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         )
 
         # --- Shared expert ---
-        shared_output = self.make_shared_expert(layer_id, mlp.shared_expert, mlp.shared_expert_gate, root_input)
-        combine_name = f"{basename}/Add"
+        shared_output, shared_gate = self.make_shared_expert(
+            layer_id, mlp.shared_expert, mlp.shared_expert_gate, root_input
+        )
+        self.layernorm_attrs["skip_input"] = self._combine_routed_and_shared_experts(
+            layer_id, f"{moe_name}/output_0", shared_output, shared_gate
+        )
+
+    def _combine_routed_and_shared_experts(self, layer_id, routed_output, shared_output, shared_gate):
+        output_shape = ["batch_size", "sequence_length", self.hidden_size]
+        if self.ep in {"cpu", "cuda", "webgpu"}:
+            combine_name = f"/model/layers.{layer_id}/moe/GatedAdd"
+            combine_output = f"{combine_name}/output_0"
+            self.make_node(
+                "GatedAdd",
+                inputs=[routed_output, shared_output, shared_gate],
+                outputs=[combine_output],
+                name=combine_name,
+                domain="com.microsoft",
+            )
+            self.make_value(combine_output, self.io_dtype, output_shape)
+            return combine_output
+
+        gated_mul_name = f"/model/layers.{layer_id}/shared_expert/gate/Mul"
+        self.make_mul(
+            gated_mul_name,
+            [shared_output, shared_gate],
+            dtype=self.io_dtype,
+            shape=output_shape,
+        )
+        combine_name = f"/model/layers.{layer_id}/moe/Add"
         self.make_add(
             combine_name,
-            [f"{moe_name}/output_0", shared_output],
+            [routed_output, f"{gated_mul_name}/output_0"],
             dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=output_shape,
         )
-        self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
+        return f"{combine_name}/output_0"
 
     def make_nvfp4_moe_initializers(
         self,
@@ -2878,12 +2906,4 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self.make_sigmoid(
             gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
         )
-
-        gated_mul_name = f"{basename}/gate/Mul"
-        self.make_mul(
-            gated_mul_name,
-            [f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"],
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
-        )
-        return f"{gated_mul_name}/output_0"
+        return f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"
