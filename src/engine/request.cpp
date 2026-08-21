@@ -54,7 +54,12 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
   }
 
-  const bool guidance_requested = !params->guidance_type.empty() || !params->guidance_data.empty();
+  const bool has_guidance_type = !params->guidance_type.empty();
+  const bool has_guidance_data = !params->guidance_data.empty();
+  if (has_guidance_type != has_guidance_data) {
+    throw std::runtime_error("Guidance type and data must be provided together.");
+  }
+  const bool guidance_requested = has_guidance_type && has_guidance_data;
   if (guidance_requested && !params->model_) {
     throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
   }
@@ -62,7 +67,7 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
     guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
   }
   if (guidance_requested && !guidance_logits_processor_) {
-    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true and provide both guidance type and data.");
+    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true.");
   }
 
   // The engine drives one independent search per request, so completion is batched: see

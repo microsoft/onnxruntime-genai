@@ -571,15 +571,18 @@ TEST_F(RequestLifecycleTest, RequestRejectsGuidanceFastForwardTokens) {
 }
 
 TEST_F(RequestLifecycleTest, RequestRejectsIncompleteGuidanceConfiguration) {
-  auto params = MakeGreedyParams(*model_);
-  params->guidance_type = "regex";
+  for (bool omit_type : {false, true}) {
+    auto params = MakeGreedyParams(*model_);
+    params->guidance_type = omit_type ? "" : "regex";
+    params->guidance_data = omit_type ? "[0-9]+" : "";
 
-  EXPECT_THROW(
-      {
-        auto request = std::make_shared<Request>(params);
-        static_cast<void>(request);
-      },
-      std::runtime_error);
+    try {
+      auto request = std::make_shared<Request>(params);
+      FAIL() << "Expected incomplete guidance configuration to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "Guidance type and data must be provided together.");
+    }
+  }
 }
 
 TEST_F(RequestLifecycleTest, EngineRejectsRequestCreatedForDifferentModel) {

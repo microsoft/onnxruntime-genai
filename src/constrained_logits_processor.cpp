@@ -203,12 +203,12 @@ void GuidanceLogitsProcessor::CommitTokens(std::span<int32_t> tokens) {
   ComputeMask();
 }
 
-std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::GetMask() {
+const std::vector<std::vector<uint32_t>>& GuidanceLogitsProcessor::GetMask() const {
   return masks_;
 }
 
 void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
-  auto masks = GetMask();
+  const auto& masks = GetMask();
 
   if (params_->p_device->GetType() == DeviceType::CUDA || params_->p_device->GetType() == DeviceType::NvTensorRtRtx) {
     const size_t words_per_row = (params_->config.model.vocab_size + 31) / 32;

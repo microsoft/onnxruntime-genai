@@ -232,6 +232,17 @@ For CUDA, the grammar cursor and mask construction run on the CPU. The compact b
 
 Constrained and unconstrained runs can produce different token counts. TTFT and inter-token latency are directly comparable; total generation latency must be interpreted with the reported output length.
 
+On an H100 80 GB with the CUDA INT4 Qwen 2.5 0.5B model, 30 measured runs per mode produced the following p50 results:
+
+| Metric | Unguided | Guided | Change |
+| --- | ---: | ---: | ---: |
+| Request setup | 0.632 ms | 990.247 ms | +989.615 ms |
+| End-to-end TTFT | 34.392 ms | 993.552 ms | +959.160 ms |
+| Inter-token latency | 1.732 ms | 1.840 ms | +6.22% |
+| Decode throughput | 577.242 tokens/s | 543.448 tokens/s | -5.85% |
+
+All 30 guided outputs were parseable and schema-compliant; none of the 30 unguided outputs matched the strict schema. The guided and unguided responses contained 23 and 39 tokens respectively, so their total generation latencies are not directly comparable. Nsight measured `LaunchAddLogitsMask` at 1.516 microseconds on average and 0.255 ms in total, approximately 0.05% of GPU kernel time. The dominant short-request cost is therefore CPU-side per-request tokenizer and grammar construction, not the CUDA mask kernel.
+
 ## Known Limitations
 
 - Tool parsing, argument validation, authorization, and execution remain host responsibilities.
@@ -245,11 +256,12 @@ Constrained and unconstrained runs can produce different token counts. TTFT and 
 ## Follow-Up Work
 
 1. Add guidance-enabled Engine CI coverage.
-2. Benchmark guidance mask and grammar-clone overhead at Engine concurrency.
-3. Measure tool-call accuracy and latency with routed subsets of 5, 10, and 20 tools versus the full 94-tool payload.
-4. Add host examples for parallel tool calls and bounded result aggregation.
-5. Define public capacity/headroom signals suitable for proactive request rollover.
-6. Evaluate cross-request prefix caching separately from same-request continuation.
+2. Investigate reusing immutable llguidance tokenizer and compiled grammar setup while preserving an independent mutable cursor per request.
+3. Reuse host and device mask buffers across decode steps, then benchmark mask transfer and grammar-clone overhead at Engine concurrency.
+4. Measure tool-call accuracy and latency with routed subsets of 5, 10, and 20 tools versus the full 94-tool payload.
+5. Add host examples for parallel tool calls and bounded result aggregation.
+6. Define public capacity/headroom signals suitable for proactive request rollover.
+7. Evaluate cross-request prefix caching separately from same-request continuation.
 
 ## Review Checklist
 

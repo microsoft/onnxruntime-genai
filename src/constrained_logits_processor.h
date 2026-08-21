@@ -56,7 +56,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
 
   // GetMask is used to get the logits mask
-  std::vector<std::vector<uint32_t>> GetMask();
+  const std::vector<std::vector<uint32_t>>& GetMask() const;
 
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
   // token ids.
