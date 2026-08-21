@@ -14,8 +14,9 @@ from types import SimpleNamespace
 import onnx_ir as ir
 import torch
 
-from .quant_config import resolve_dtype
-from .qwen import Qwen35MoeTextModel
+from quantization import resolve_dtype
+
+from .qwen import Qwen35MoETextModel
 
 
 def mtp_dtypes_from_quant_config(quant_config):
@@ -61,7 +62,7 @@ class _RMSNormWeight:
         self.weight = weight
 
 
-class Qwen35MtpHead(Qwen35MoeTextModel):
+class Qwen35MtpHead(Qwen35MoETextModel):
     """Qwen3.6 multi-token-prediction (MTP) self-speculative head builder.
 
     Emits a separate ``mtp.onnx`` graph that predicts token ``t_{i+2}`` from the

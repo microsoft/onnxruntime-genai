@@ -685,6 +685,31 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
     ]
 
 
+def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
+    model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.hidden_size = 16
+    model.moe_attrs = {
+        "op_type": "QMoE",
+        "quant_type": "nvfp4",
+    }
+    model.layernorm_attrs = {"skip_input": ""}
+    projection = types.SimpleNamespace(weight_scale_2=torch.tensor(1.0))
+    moe = types.SimpleNamespace(
+        experts=[types.SimpleNamespace(gate_proj=projection)],
+        shared_expert=object(),
+        shared_expert_gate=object(),
+    )
+    calls = []
+    monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: calls.append((name, kwargs)))
+    monkeypatch.setattr(model, "make_shared_expert", lambda *_args: ("shared_output", "shared_gate"))
+    monkeypatch.setattr(model, "make_gated_add", lambda *_args, **_kwargs: None)
+
+    model.make_moe_subgraph(1, moe, "hidden_states")
+
+    assert calls[0][1]["global_scales1"] == "model.layers.1.moe.experts.gate_up_proj.global_scales"
+    assert calls[0][1]["global_scales2"] == "model.layers.1.moe.experts.down_proj.global_scales"
+
+
 def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.io_dtype = ir.DataType.FLOAT16

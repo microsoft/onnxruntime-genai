@@ -120,7 +120,7 @@ def test_base_moe_orchestrates_model_hooks(monkeypatch):
     calls = []
     moe = object()
 
-    monkeypatch.setattr(model, "make_moe_preprocessed", lambda *args: calls.append(("preprocess", args)), raising=False)
+    monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append(("preprocess", args)))
     monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append(("router", args)), raising=False)
     monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append(("subgraph", args)), raising=False)
 
@@ -158,7 +158,7 @@ def test_gptoss_moe_dispatches_fused_and_decomposed_paths(monkeypatch):
     calls = []
     moe = object()
 
-    monkeypatch.setattr(model, "make_moe_preprocessed", lambda *args: calls.append("preprocess"))
+    monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append("preprocess"))
     monkeypatch.setattr(model, "make_moe_router", lambda *args: calls.append("router"))
     monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append("subgraph"))
     monkeypatch.setattr(model, "make_moe_decomposed", lambda *args: calls.append("decomposed"))
@@ -311,7 +311,7 @@ def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
     mlp = types.SimpleNamespace(experts=types.SimpleNamespace(fc1_weights=torch.empty(0), fc2_weights=torch.empty(0)))
 
     with pytest.raises(ValueError, match="pre-quantized Quark GPT-OSS experts"):
-        GPTOSSModel.make_moe_preprocessed(model, 0, mlp, "root")
+        GPTOSSModel.make_moe_preprocessing(model, 0, mlp, "root")
 
 
 def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():

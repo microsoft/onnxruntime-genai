@@ -16,7 +16,7 @@ import torch
 from transformers import Qwen2ForCausalLM
 
 from .base import Model
-from .quant_config import QuantConfig
+from quantization import QuantConfig
 
 
 class QwenModel(Model):
@@ -490,28 +490,6 @@ class Qwen35TextModel(Model):
         neg_exp_a = (-attention.A_log.data.exp()).detach()
         self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
 
-        gate_shape = ["batch_size", "sequence_length", n_kv]
-
-        if self.fuse_linear_attn_gates:
-            # One kernel for both gates; the float32 intermediates stay in registers.
-            gate_name = f"{basename}/gate/LinearAttentionGate"
-            g_output = f"{gate_name}/output_0"
-            beta_output = f"{gate_name}/output_1"
-            self.make_node(
-                "LinearAttentionGate",
-                [f"{a_name}/output_0", dt_bias_init, neg_exp_a_name, f"{b_name}/output_0"],
-                [g_output, beta_output],
-                name=gate_name,
-                domain="com.microsoft",
-            )
-            self.make_value(g_output, self.io_dtype, gate_shape)
-            self.make_value(beta_output, self.io_dtype, gate_shape)
-            return q_scaled_output, k_norm_out, v_out, g_output, beta_output
-
-        beta_name = f"{basename}/beta/Sigmoid"
-        self.make_sigmoid(beta_name, f"{b_name}/output_0", self.io_dtype, gate_shape)
-        beta_output = f"{beta_name}/output_0"
-
         gate_name = f"{basename}/LinearAttentionGate"
         gate_shape = ["batch_size", "sequence_length", self.linear_num_value_heads]
         self.make_linear_attention_gate(
@@ -984,6 +962,12 @@ class Qwen35MoETextModel(Qwen35TextModel):
     def get_moe_module(self, layer_id, layer):
         return layer.mlp
 
+    def is_native_nvfp4_moe(self, moe):
+        if self.moe_attrs.get("quant_type") != "nvfp4":
+            return False
+        first_expert = next(iter(moe.experts), None)
+        return first_expert is not None and getattr(first_expert.gate_proj, "weight_scale_2", None) is not None
+
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         op_type = self.moe_attrs["op_type"]
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
@@ -999,12 +983,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         # A ModelOpt checkpoint can contain native NVFP4 expert tensors. Preserve
         # those when their scale metadata is present; otherwise quantize the
         # checkpoint's dense expert tensors through the regular QMoE path.
-        first_expert = next(iter(mlp.experts), None)
-        is_nvfp4 = (
-            self.moe_attrs.get("quant_type") == "nvfp4"
-            and first_expert is not None
-            and getattr(first_expert.gate_proj, "weight_scale_2", None) is not None
-        )
+        is_nvfp4 = self.is_native_nvfp4_moe(moe)
         gate_up_proj_global_scales = ""
         down_proj_global_scales = ""
 
@@ -1015,7 +994,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
             gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
             down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
             self.make_nvfp4_moe_initializers(
-                mlp.experts,
+                moe.experts,
                 gate_up_proj_weight,
                 gate_up_proj_scales,
                 gate_up_proj_global_scales,
@@ -1024,15 +1003,15 @@ class Qwen35MoETextModel(Qwen35TextModel):
                 down_proj_global_scales,
             )
         elif op_type == "MoE":
-            raw_gate_up = mlp.experts.gate_up_proj
+            raw_gate_up = moe.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
             interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
                 raw_gate_up
             )
             self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj, down_proj_weight, to=self.io_dtype)
+            self.make_initializer(moe.experts.down_proj, down_proj_weight, to=self.io_dtype)
         else:
-            raw_gate_up = mlp.experts.gate_up_proj
+            raw_gate_up = moe.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
             interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
                 raw_gate_up
@@ -1043,7 +1022,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
                 qw1, sc1 = self.make_qmoe_weights(interleaved[i])
                 gate_up_qw_list.append(qw1)
                 gate_up_sc_list.append(sc1)
-                qw2, sc2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
+                qw2, sc2 = self.make_qmoe_weights(moe.experts.down_proj[i])
                 down_qw_list.append(qw2)
                 down_sc_list.append(sc2)
             self.make_initializer(torch.stack(gate_up_qw_list, dim=0).to(torch.uint8), gate_up_proj_weight)
@@ -1080,6 +1059,13 @@ class Qwen35MoETextModel(Qwen35TextModel):
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+        is_nvfp4 = self.is_native_nvfp4_moe(moe)
+        gate_up_proj_global_scales = (
+            f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales" if is_nvfp4 else ""
+        )
+        down_proj_global_scales = (
+            f"model.layers.{layer_id}.moe.experts.down_proj.global_scales" if is_nvfp4 else ""
+        )
 
         moe_name = f"{basename}/{op_type}"
         self.make_moe_op(
@@ -1092,6 +1078,8 @@ class Qwen35MoETextModel(Qwen35TextModel):
             weight2=down_proj_weight,
             scales2=down_proj_scales if op_type == "QMoE" else "",
             bias2=down_proj_bias,
+            global_scales1=gate_up_proj_global_scales,
+            global_scales2=down_proj_global_scales,
         )
 
         shared_output, shared_gate = self.make_shared_expert(

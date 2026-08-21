@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 
 from models.builders.base import Model
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35MoETextModel
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def test_native_nvfp4_rejects_non_nvfp4_weight():
 
 
 def test_nvfp4_qmoe_rejects_mismatched_gate_up_global_scales():
-    model = object.__new__(Qwen35MoeTextModel)
+    model = object.__new__(Qwen35MoETextModel)
 
     def projection(scale):
         return SimpleNamespace(

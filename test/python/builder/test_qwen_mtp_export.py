@@ -6,7 +6,7 @@ import os
 import onnx
 from onnx import external_data_helper, helper
 
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35MoETextModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -63,7 +63,7 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
         ],
     )
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    shared_initializers = Qwen35MoETextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == b"keep"
     model = onnx.load(tmp_path / "mtp.onnx", load_external_data=False)
@@ -124,7 +124,7 @@ def test_share_mtp_weights_leaves_originals_on_truncated_data(tmp_path):
     )
     original_model = (tmp_path / "mtp.onnx").read_bytes()
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    shared_initializers = Qwen35MoETextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == b"samexx"
     assert (tmp_path / "mtp.onnx").read_bytes() == original_model
@@ -157,7 +157,7 @@ def test_share_mtp_weights_restores_originals_when_metadata_replace_fails(tmp_pa
 
     monkeypatch.setattr(os, "replace", fail_metadata_replace)
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    shared_initializers = Qwen35MoETextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == original_data
     assert (tmp_path / "mtp.onnx").read_bytes() == original_model
