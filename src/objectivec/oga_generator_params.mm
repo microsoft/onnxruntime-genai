@@ -66,6 +66,21 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_DOUBLE(error)
 }
 
+- (BOOL)setSpeculativeBool:(NSString*)key boolValue:(BOOL)value error:(NSError**)error {
+  try {
+    _generatorParams->SetSpeculativeBool([key UTF8String], value);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)getSpeculativeBool:(NSString*)key error:(NSError**)error {
+  try {
+    return _generatorParams->GetSpeculativeBool([key UTF8String]);
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
 - (OgaGeneratorParams&)CXXAPIOgaGeneratorParams {
   return *(_generatorParams.get());
 }

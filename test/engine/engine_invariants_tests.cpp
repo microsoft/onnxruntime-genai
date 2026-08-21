@@ -295,30 +295,30 @@ TEST(InvariantValidatorTest, ZeroBlockTableColumnsIsAllowed) {
 
 TEST(InvariantValidatorTest, ValidRequestHasNoViolations) {
   EXPECT_TRUE(ValidateRequestInvariants(
-                  MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 4, 6))
+                  MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 6))
                   .empty());
 }
 
 TEST(InvariantValidatorTest, ProcessedBeyondCurrentReported) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 12, 6);
+  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 12, 6);
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, SeenBeyondCurrentReported) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::InProgress, 10, 4, 11);
+  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 11);
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, CompletedRequestWithFinalUnprocessedTokenIsValid) {
+TEST(InvariantValidatorTest, TurnCompleteRequestWithFinalUnprocessedTokenIsValid) {
   // At completion the just-generated final token is appended but never fed back to the model, so a
-  // Completed Request legitimately reports one (or more) unprocessed token(s). This must not fire.
-  auto request = MakeValidRequest(kRequestA, RequestStatus::Completed, 10, 9, 10);
+  // TurnComplete Request may legitimately report unprocessed tokens. This must not fire.
+  auto request = MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 9, 10);
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, CompletedRequestFullyProcessedIsValid) {
+TEST(InvariantValidatorTest, TurnCompleteRequestFullyProcessedIsValid) {
   EXPECT_TRUE(ValidateRequestInvariants(
-                  MakeValidRequest(kRequestA, RequestStatus::Completed, 10, 10, 10))
+                  MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10))
                   .empty());
 }
 
@@ -329,8 +329,8 @@ TEST(InvariantValidatorTest, CompletedRequestFullyProcessedIsValid) {
 TEST(InvariantValidatorTest, ConsistentSnapshotsValidateClean) {
   const auto cache = MakeValidCache();
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::InProgress, 9, 9, 9),
-      MakeValidRequest(kRequestB, RequestStatus::InProgress, 4, 4, 4),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
   };
   EXPECT_TRUE(ValidateInvariants(cache, requests).empty());
   EXPECT_NO_THROW(ThrowIfInvariantsViolated(cache, requests));
@@ -339,7 +339,7 @@ TEST(InvariantValidatorTest, ConsistentSnapshotsValidateClean) {
 TEST(InvariantValidatorTest, BlockTableForUnknownRequestReported) {
   const auto cache = MakeValidCache();  // owns tables for A and B
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::InProgress, 9, 9, 9),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
       // B is missing from the request set, yet the cache holds a block table for it.
   };
   EXPECT_FALSE(ValidateInvariants(cache, requests).empty());
@@ -349,8 +349,8 @@ TEST(InvariantValidatorTest, ThrowWrapperListsViolations) {
   auto cache = MakeValidCache();
   cache.free_blocks = 0;  // break block accounting
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::InProgress, 9, 9, 9),
-      MakeValidRequest(kRequestB, RequestStatus::InProgress, 4, 4, 4),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
   };
   EXPECT_THROW(ThrowIfInvariantsViolated(cache, requests), std::runtime_error);
 }

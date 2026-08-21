@@ -19,16 +19,6 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     : Search_Cpu(params) {
-  if (params_->search.random_seed != -1)
-    gen_.seed(params_->search.random_seed);
-  else {
-    std::random_device rd;
-    std::array<uint32_t, decltype(gen_)::state_size> data;
-    std::generate(data.begin(), data.end(), std::ref(rd));
-    std::seed_seq seq(data.begin(), data.end());
-    gen_.seed(seq);
-  }
-
   next_tokens_ptr_ = cpu_device_.Allocate<int32_t>(params.search.batch_size);
   next_tokens_ptr_.Zero();
   next_tokens_ = cpu_span<int32_t>(next_tokens_ptr_.Span());
@@ -87,7 +77,6 @@ void GreedySearch_Cpu::SaveStateForTransactionImpl(bool checkpoint_local_state) 
     transaction_eos_seen_ = std::make_unique<bool[]>(eos_seen_.size());
   copy(std::span<const bool>{eos_seen_}, std::span<bool>{transaction_eos_seen_.get(), eos_seen_.size()});
   transaction_not_done_count_ = not_done_count_;
-  transaction_gen_ = gen_;
 }
 
 void GreedySearch_Cpu::RestoreStateForTransactionImpl() {
@@ -95,7 +84,6 @@ void GreedySearch_Cpu::RestoreStateForTransactionImpl() {
   copy(std::span<const int32_t>{transaction_next_tokens_}, next_tokens_);
   copy(std::span<const bool>{transaction_eos_seen_.get(), eos_seen_.size()}, eos_seen_);
   not_done_count_ = transaction_not_done_count_;
-  gen_ = transaction_gen_;
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
@@ -212,7 +200,7 @@ void GreedySearch_Cpu::CommitToken(int32_t token) {
     AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
+void GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng) {
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
 
@@ -222,15 +210,14 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
 }
 
 // Top-P (nucleus) sampling; nucleus selection shared with speculative decoding via ComputeSampledCategorical.
-void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
+void GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rng) {
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
 
@@ -242,14 +229,13 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     // top_k=0 -> pure nucleus path.
     ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
+void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
   assert(temperature > 0.0f);
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
@@ -261,8 +247,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
 
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
-    std::discrete_distribution<> dis(dist.probs.begin(), dist.probs.end());
-    SetNextToken(batch_id, dist.indices[dis(gen_)]);
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
