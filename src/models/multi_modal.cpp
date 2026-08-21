@@ -688,6 +688,12 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 
   position_inputs_->Add();
   logits_.Add();
+  // Same as DecoderOnly_State: a decoder exported with include_hidden_states registers that output
+  // as a managed one so it survives CUDA-graph capture.
+  if (!model_.config_->model.decoder.outputs.hidden_states.empty()) {
+    hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
+    hidden_states_output_->Add();
+  }
   kv_cache_.Add();
   if (recurrent_state_)
     recurrent_state_->Add();
@@ -712,6 +718,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
@@ -723,6 +731,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }

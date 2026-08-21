@@ -93,6 +93,11 @@ HiddenStatesOutputs::HiddenStatesOutputs(State& state)
   const std::string& name = model_.config_->model.decoder.outputs.hidden_states;
   type_ = model_.session_info_.GetOutputDataType(name);
   shape_ = {state_.params_->BatchBeamSize(), 0, model_.config_->model.decoder.hidden_size};
+  // A graph that declares a static sequence dimension (e.g. a head that only ever emits the last
+  // position) must be bound a buffer of exactly that length, whatever the input length is.
+  const auto output_shape = model_.session_info_.GetOutputShape(name);
+  if (output_shape.size() == 3 && output_shape[1] > 0)
+    fixed_sequence_length_ = static_cast<int>(output_shape[1]);
 }
 
 void HiddenStatesOutputs::Add() {
@@ -103,6 +108,7 @@ void HiddenStatesOutputs::Add() {
 }
 
 Tensor* HiddenStatesOutputs::GetOrCreateBuffer(int sequence_length) {
+  if (fixed_sequence_length_ > 0) sequence_length = fixed_sequence_length_;
   const bool capture_length = state_.params_->use_graph_capture &&
                               sequence_length <= state_.params_->max_graph_capture_length;
   if (capture_length) {

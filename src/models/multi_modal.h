@@ -19,6 +19,7 @@
 #include "position_inputs.h"
 #include "model_type.h"
 #include "recurrent_state.h"
+#include "hidden_states.h"
 
 namespace Generators {
 
@@ -193,6 +194,7 @@ struct DecoderState : State {
   DefaultKeyValueCache kv_cache_{*this};                // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
+  std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;
 };
 
 struct MultiModalPipelineState : State {
@@ -209,6 +211,8 @@ struct MultiModalPipelineState : State {
   OrtValue* GetInput(const char* name) override;
 
   OrtValue* GetOutput(const char* name) override;
+
+  DeviceSpan<float> GetAllLogits() { return decoder_state_->logits_.GetAll(); }
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,

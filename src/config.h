@@ -346,6 +346,12 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
+      // Positions the logits output covers. 0 (the default) means one row per input token. A
+      // positive value marks a graph whose logits sequence dimension is bounded: it emits one row
+      // per input token while the input is at most this long, and last-token logits only for longer
+      // (prefill) forwards. Set by MTP verify graphs exported with a fixed verify width.
+      int max_logits_sequence_length{};
+
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
@@ -466,6 +472,13 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // Assistant-style heads (Gemma4) additionally consume the main decoder's token embeddings
+      // and read its present KV directly instead of owning a cache. Empty for Qwen-style heads.
+      std::string main_inputs_embeds;
+      // Main-decoder layer indices whose present KV the head shares, paired positionally with
+      // inputs.shared_key_names and inputs.shared_value_names.
+      std::vector<int> shared_kv_layers;
+
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
@@ -473,6 +486,9 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        // Head inputs bound to the main decoder's present KV, one per shared_kv_layers entry.
+        std::vector<std::string> shared_key_names;
+        std::vector<std::string> shared_value_names;
       } inputs;
 
       struct Outputs {

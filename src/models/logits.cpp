@@ -15,6 +15,8 @@ Logits::Logits(State& state)
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_logits_, type_);
 
+  max_output_sequence_length_ = static_cast<size_t>(std::max(0, model_.config_->model.decoder.max_logits_sequence_length));
+
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
   if (IsOpenVINOStatefulModel(state.model_) || state.model_.IsPruned()) {
@@ -28,6 +30,18 @@ Logits::Logits(State& state)
 
     trimmed_prefill_logits_ = true;
   }
+}
+
+DeviceSpan<float> Logits::GetAll() {
+  OrtValue* logits = output_raw_->GetOrtTensor();
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> ||
+      type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    Cast(*logits, all_logits_fp32_, *model_.p_device_logits_, Ort::TypeToTensorType<float>);
+    logits = all_logits_fp32_.get();
+  }
+  if (all_logits_.empty() || logits->GetTensorMutableRawData() != all_logits_.Span().data())
+    all_logits_ = WrapTensor<float>(*model_.p_device_logits_, *logits);
+  return all_logits_;
 }
 
 DeviceSpan<float> Logits::Get() {
@@ -86,6 +100,12 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
     new_kv_length = 1;
   }
 
+  // A bounded logits output only covers every input position while the input fits within it;
+  // longer (prefill) forwards emit last-token logits only.
+  const size_t input_kv_length = new_kv_length;
+  if (max_output_sequence_length_ > 0 && new_kv_length > max_output_sequence_length_)
+    new_kv_length = 1;
+
   if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
     return;
   }
@@ -93,13 +113,17 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   // Store length of input sequence for each batch for the get step
   for (int b = 0; b < state_.params_->search.batch_size; b++) {
     // Find the first non pad token from the end
-    size_t token_index = new_kv_length;
+    size_t token_index = input_kv_length;
     while (token_index-- > 0) {
-      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
+      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * input_kv_length + token_index];
       if (next_token != model_.config_->model.pad_token_id)
         break;
     }
-    input_sequence_lengths[b] = static_cast<int>(token_index + 1);
+    size_t length = token_index + 1;
+    // Non-zero only for a bounded output that dropped rows: rebase onto the rows actually emitted.
+    if (const size_t dropped_rows = input_kv_length - new_kv_length; dropped_rows > 0)
+      length = length > dropped_rows ? length - dropped_rows : 1;
+    input_sequence_lengths[b] = static_cast<int>(length);
   }
 
   if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length) {

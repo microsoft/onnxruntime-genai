@@ -7,8 +7,10 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "gemma4_assistant_generator.h"
 #include "generators.h"
 #include "models/model.h"
+#include "models/model_type.h"
 #include "models/utils.h"
 #include "mtp_generator.h"
 
@@ -16,6 +18,8 @@ namespace Generators {
 
 std::unique_ptr<MtpGeneratorInterface> CreateMtpGenerator(
     const Model& target_model, const Model& draft_model, const GeneratorParams& params) {
+  if (ModelType::IsGemma4Assistant(draft_model.config_->model.type))
+    return std::make_unique<Gemma4AssistantGenerator>(target_model, draft_model, params);
   return std::make_unique<MtpGenerator>(target_model, draft_model, params);
 }
 
