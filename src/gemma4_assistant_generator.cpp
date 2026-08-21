@@ -47,6 +47,18 @@ const T& RequireModel(const Model& model, const char* role) {
 
 }  // namespace
 
+void ValidateGemma4AssistantOptions(const Config::Search& search, const Config::Speculative& speculative,
+                                    int max_logits_sequence_length) {
+  if (search.do_sample && search.temperature > 0.0f)
+    throw std::runtime_error("Gemma4AssistantGenerator currently supports greedy generation only");
+  if (search.min_length > 0 || search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0)
+    throw std::runtime_error(
+        "Gemma4AssistantGenerator does not support min_length, repetition_penalty, or no_repeat_ngram_size");
+  if (max_logits_sequence_length > 0 && speculative.max_draft_tokens > max_logits_sequence_length)
+    throw std::runtime_error(
+        "Gemma4AssistantGenerator requires max_draft_tokens <= model.decoder.max_logits_sequence_length");
+}
+
 Gemma4AssistantGenerator::Gemma4AssistantGenerator(
     const Model& target_model, const Model& assistant_model, const GeneratorParams& params)
     : target_model_{RequireModel<MultiModalLanguageModel>(target_model, "target")},
@@ -54,11 +66,10 @@ Gemma4AssistantGenerator::Gemma4AssistantGenerator(
       assistant_run_options_{OrtRunOptions::Create()},
       embedding_run_options_{OrtRunOptions::Create()} {
   ValidateMtpPair(target_model_, assistant_model_, params);
-  if (params.search.do_sample && params.search.temperature > 0.0f)
-    throw std::runtime_error("Gemma4AssistantGenerator currently supports greedy generation only");
 
   const auto& mtp = target_model_.config_->model.mtp;
   const auto& target_decoder = target_model_.config_->model.decoder;
+  ValidateGemma4AssistantOptions(params.search, params.speculative, target_decoder.max_logits_sequence_length);
   hidden_size_ = target_decoder.hidden_size;
   if (hidden_size_ <= 0)
     throw std::runtime_error("Gemma4AssistantGenerator requires model.decoder.hidden_size in the target config");
@@ -68,6 +79,10 @@ Gemma4AssistantGenerator::Gemma4AssistantGenerator(
       mtp.inputs.shared_value_names.size() != mtp.shared_kv_layers.size())
     throw std::runtime_error(
         "Gemma4AssistantGenerator requires model.mtp.shared_kv_layers, shared_key_names and shared_value_names to be the same length");
+  if (target_model_.config_->model.embedding.run_options)
+    SetRunOptions(*embedding_run_options_, *target_model_.config_->model.embedding.run_options);
+  if (assistant_model_.config_->model.decoder.run_options)
+    SetRunOptions(*assistant_run_options_, *assistant_model_.config_->model.decoder.run_options);
 
   target_embeddings_name_ = mtp.main_inputs_embeds;
   target_hidden_states_name_ = mtp.main_hidden_states;
@@ -180,12 +195,15 @@ void Gemma4AssistantGenerator::EmbedToken(int32_t token) {
   else
     throw std::runtime_error("Gemma4AssistantGenerator: embedding token input must be int32 or int64");
 
-  const std::array<const char*, 3> names{
-      target_model_.config_->model.embedding.inputs.input_ids.c_str(),
-      target_model_.config_->model.embedding.inputs.image_features.c_str(),
-      target_model_.config_->model.embedding.inputs.audio_features.c_str()};
-  const std::array<const OrtValue*, 3> inputs{
-      embedding_token_.get(), target_->state_->GetInput(names[1]), target_->state_->GetInput(names[2])};
+  std::vector<const char*> names{target_model_.config_->model.embedding.inputs.input_ids.c_str()};
+  std::vector<const OrtValue*> inputs{embedding_token_.get()};
+  for (const std::string* optional_name : {&target_model_.config_->model.embedding.inputs.image_features,
+                                           &target_model_.config_->model.embedding.inputs.audio_features}) {
+    if (OrtValue* input = target_->state_->GetInput(optional_name->c_str())) {
+      names.push_back(optional_name->c_str());
+      inputs.push_back(input);
+    }
+  }
   const char* output_name = target_model_.config_->model.embedding.outputs.embeddings.c_str();
   OrtValue* output = current_embedding_->GetOrtTensor();
   target_model_.embedding_session_->Run(embedding_run_options_.get(), names.data(), inputs.data(),
@@ -224,6 +242,20 @@ int32_t Gemma4AssistantGenerator::Draft() {
 }
 
 void Gemma4AssistantGenerator::ArgmaxTargetRows(int first_row, int count, int32_t* output) {
+  OrtValue* raw = ResolveTargetOutput(target_model_.config_->model.decoder.outputs.logits);
+  const auto type = raw->GetTensorTypeAndShapeInfo()->GetElementType();
+  const auto* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
+  const size_t row_bytes = static_cast<size_t>(vocab_size_) * Ort::SizeOf(type);
+  bool all_device = true;
+  for (int row = 0; row < count; ++row) {
+    const void* values = base + static_cast<size_t>(first_row + row) * row_bytes;
+    if (!target_model_.p_device_->ArgMax(values, type, 1, vocab_size_, output + row)) {
+      all_device = false;
+      break;
+    }
+  }
+  if (all_device) return;
+
   auto& pipeline = dynamic_cast<MultiModalPipelineState&>(*target_->state_);
   auto cpu = pipeline.GetAllLogits().CopyDeviceToCpu();
   for (int row = 0; row < count; ++row)

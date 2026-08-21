@@ -709,6 +709,18 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
+void DecoderState::RewindTo(size_t index) {
+  position_inputs_->RewindTo(index);
+  kv_cache_.RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
+void DecoderState::SnapshotState(size_t position) {
+  if (recurrent_state_)
+    recurrent_state_->Snapshot(position);
+}
+
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
@@ -851,6 +863,14 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  decoder_state_->RewindTo(index);
+}
+
+void MultiModalPipelineState::SnapshotState(size_t position) {
+  decoder_state_->SnapshotState(position);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

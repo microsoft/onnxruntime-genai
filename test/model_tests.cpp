@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cstring>  // for memcmp
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <filesystem>
@@ -54,6 +55,42 @@ TEST(ModelTests, DMLAdapterSelection) {
 
 // DML doesn't support GPT attention
 #if !USE_DML
+TEST(ModelTests, MultiModalRewindRegeneratesSameOutput) {
+  const std::filesystem::path source{MODEL_PATH "multimodal-decoder-with-input-ids"};
+  const auto model_path = std::filesystem::temp_directory_path() / "ortgenai_multimodal_rewind";
+  std::filesystem::remove_all(model_path);
+  std::filesystem::copy(source, model_path, std::filesystem::copy_options::recursive);
+
+  const auto config_path = model_path / "genai_config.json";
+  std::ifstream config_input{config_path};
+  std::string config{std::istreambuf_iterator<char>{config_input}, std::istreambuf_iterator<char>{}};
+  config.replace(config.find("\"phi3v\""), sizeof("\"phi3v\"") - 1, "\"gemma4\"");
+  config.replace(config.find("\"vision\": {"), sizeof("\"vision\": {") - 1,
+                 "\"speech\": {\"config_filename\": \"\"}, \"vision\": {");
+  std::ofstream{config_path} << config;
+
+  auto model = OgaModel::Create(model_path.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+  params->SetSearchOptionBool("past_present_share_buffer", false);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  constexpr std::array<int32_t, 1> prompt{2};
+  generator->AppendTokens(prompt);
+  while (!generator->IsDone())
+    generator->GenerateNextToken();
+  const auto first = generator->GetSequence(0);
+  const std::vector<int32_t> expected{first.begin(), first.end()};
+
+  generator->RewindTo(prompt.size());
+  while (!generator->IsDone())
+    generator->GenerateNextToken();
+
+  const auto actual = generator->GetSequence(0);
+  ASSERT_EQ(actual.size(), expected.size());
+  EXPECT_EQ(std::memcmp(actual.data(), expected.data(), expected.size() * sizeof(int32_t)), 0);
+}
+
 TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};

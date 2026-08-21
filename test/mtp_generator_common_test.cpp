@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "gemma4_assistant_generator.h"
 #include "mtp_generator_common.h"
 
 namespace Generators::test {
@@ -83,6 +84,34 @@ TEST(CountAcceptedDraftsTest, AcceptsEveryDraft) {
 
 TEST(CountAcceptedDraftsTest, HandlesEmptyRound) {
   EXPECT_EQ(CountAcceptedDrafts(nullptr, nullptr, 0, 5), 0);
+}
+
+TEST(Gemma4AssistantOptionsTest, RejectsDraftWidthBeyondLogitsWindow) {
+  Config::Search search;
+  Config::Speculative speculative;
+  speculative.max_draft_tokens = 7;
+  EXPECT_THROW(ValidateGemma4AssistantOptions(search, speculative, 6), std::runtime_error);
+}
+
+TEST(Gemma4AssistantOptionsTest, AcceptsUnboundedLogitsWindow) {
+  Config::Search search;
+  Config::Speculative speculative;
+  speculative.max_draft_tokens = 7;
+  EXPECT_NO_THROW(ValidateGemma4AssistantOptions(search, speculative, 0));
+}
+
+TEST(Gemma4AssistantOptionsTest, RejectsUnsupportedSearchConstraints) {
+  Config::Search search;
+  Config::Speculative speculative;
+
+  search.min_length = 2;
+  EXPECT_THROW(ValidateGemma4AssistantOptions(search, speculative, 6), std::runtime_error);
+  search.min_length = 0;
+  search.repetition_penalty = 1.1f;
+  EXPECT_THROW(ValidateGemma4AssistantOptions(search, speculative, 6), std::runtime_error);
+  search.repetition_penalty = 1.0f;
+  search.no_repeat_ngram_size = 2;
+  EXPECT_THROW(ValidateGemma4AssistantOptions(search, speculative, 6), std::runtime_error);
 }
 
 TEST(MtpGeneratorBaseTest, RequiresAppendTokensFirst) {

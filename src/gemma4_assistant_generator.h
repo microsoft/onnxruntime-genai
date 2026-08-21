@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "config.h"
 #include "models/onnxruntime_api.h"
 #include "mtp_generator_common.h"
 #include "smartptrs.h"
@@ -19,6 +20,9 @@ struct GeneratorParams;
 struct Model;
 struct MultiModalLanguageModel;
 struct Tensor;
+
+void ValidateGemma4AssistantOptions(const Config::Search& search, const Config::Speculative& speculative,
+                                    int max_logits_sequence_length);
 
 struct Gemma4AssistantGenerator : MtpGeneratorBase {
   Gemma4AssistantGenerator(const Model& target_model, const Model& assistant_model,

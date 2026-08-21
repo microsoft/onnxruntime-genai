@@ -393,7 +393,8 @@ def write_assistant_config(package: Path, assistant_config: dict[str, Any], targ
 
 def validate(target_package: Path, assistant_package: Path | None) -> None:
     """Check every name in the target's mtp block against the graph that must provide it."""
-    mtp = json.loads((target_package / GENAI_CONFIG).read_text(encoding="utf-8"))["model"]["mtp"]
+    model_config = json.loads((target_package / GENAI_CONFIG).read_text(encoding="utf-8"))["model"]
+    mtp = model_config["mtp"]
     decoder = onnx.load(target_package / TARGET_MODEL_RELPATH, load_external_data=False)
     decoder_outputs = {output.name for output in decoder.graph.output}
     required = [mtp["main_hidden_states"]]
@@ -401,6 +402,12 @@ def validate(target_package: Path, assistant_package: Path | None) -> None:
     missing = [name for name in required if name not in decoder_outputs]
     if missing:
         raise ValueError(f"target is missing outputs: {', '.join(missing)}")
+
+    embedding_config = model_config["embedding"]
+    embedding = onnx.load(target_package / embedding_config["filename"], load_external_data=False)
+    embedding_outputs = {output.name for output in embedding.graph.output}
+    if mtp["main_inputs_embeds"] not in embedding_outputs:
+        raise ValueError(f"target embedding is missing output: {mtp['main_inputs_embeds']}")
 
     if assistant_package is None:
         return
