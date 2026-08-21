@@ -23,6 +23,7 @@ namespace {
 
 constexpr int kRandomSeed = 42;
 constexpr int kPrefillPromptLengthK = 128;
+constexpr int kPrefillGenerationTokens = 1;
 
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 4 || concurrency == 8;
@@ -47,6 +48,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
             << "', concurrency=" << config.concurrency
             << ", prompt_length_k=" << config.prompt_length_k
             << ", prefill_prompt_length_k=" << kPrefillPromptLengthK
+            << ", prefill_generation_tokens=" << kPrefillGenerationTokens
             << ", generation_tokens=" << config.generation_tokens << std::endl;
 
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
@@ -84,6 +86,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::vector<size_t> prompt_counts(static_cast<size_t>(config.concurrency), decode_prompt_count);
+    std::vector<int> target_generation_tokens(static_cast<size_t>(config.concurrency), config.generation_tokens);
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
     std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
@@ -95,9 +98,13 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     for (int i = 0; i < config.concurrency; ++i) {
       const auto& prompt = i == 0 ? prefill_prompt : decode_prompt;
       const size_t prompt_count = i == 0 ? prefill_prompt_count : decode_prompt_count;
+      // Keep the long-prefill request bounded to one generated token so mixed runs do not
+      // exceed model context/KV limits and intermittently fault CUDA under high pressure.
+      const int generation_tokens = i == 0 ? kPrefillGenerationTokens : config.generation_tokens;
       prompt_counts[static_cast<size_t>(i)] = prompt_count;
+      target_generation_tokens[static_cast<size_t>(i)] = generation_tokens;
       params.emplace_back(OgaGeneratorParams::Create(*model));
-      params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + config.generation_tokens));
+      params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + generation_tokens));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
       request_tokens[static_cast<size_t>(i)].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
       requests.emplace_back(OgaRequest::Create(*params.back()));
@@ -153,7 +160,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       ttft_values.push_back(ttft_ms);
       auto& samples = request_itl_ms[request_index];
       const bool completed = request_tokens[request_index].size() - prompt_counts[request_index] ==
-                             static_cast<size_t>(config.generation_tokens);
+                             static_cast<size_t>(target_generation_tokens[request_index]);
       output.requests.push_back({measured_run_index * config.concurrency + i, ttft_ms, Percentile(samples, 50.0), completed});
       inter_token_latency_values.insert(inter_token_latency_values.end(), samples.begin(), samples.end());
     }
@@ -173,6 +180,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       {"tokens_per_s", std::move(tokens_per_s_values)},
       {"decode_prompt_tokens", decode_prompt_count},
       {"prefill_prompt_tokens", prefill_prompt_count},
+      {"prefill_generation_tokens", kPrefillGenerationTokens},
       {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
   };
   return output;

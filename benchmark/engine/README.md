@@ -124,7 +124,10 @@ Each config is a list of scenario entries:
 
 `mixed_workload` runs one long-prefill request alongside active decode requests. The full and
 focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
-smallest 0.5B, concurrency-4 entry.
+smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
+capped to one generated token while decode requests keep `generation_tokens`; this keeps the
+prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
+while still measuring prefill-vs-decode interference.
 
 ## Adding a scenario
 
