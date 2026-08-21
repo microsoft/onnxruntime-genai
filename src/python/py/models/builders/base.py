@@ -1793,7 +1793,7 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if getattr(self, "quant_type", None) == "modelopt":
+        if getattr(self, "quant_type", None) in {"modelopt", "compressed-tensors"}:
             weight_scale = getattr(matmul, "weight_scale", None)
             weight_scale_2 = getattr(matmul, "weight_scale_2", None)
             if weight_scale_2 is not None:
