@@ -47,7 +47,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
-  GuidanceLogitsProcessor(const Model& model, std::shared_ptr<const GeneratorParams> params);
+  GuidanceLogitsProcessor(const Model& model, const GeneratorParams& params);
 
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;

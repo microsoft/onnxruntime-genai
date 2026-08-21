@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -57,6 +58,39 @@ TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   EXPECT_EQ(tokens[0], 1);
   EXPECT_EQ(tokens[1], 2);
   EXPECT_EQ(tokens[2], 3);
+}
+
+TEST(LogitsMaskTests, UsesPaddedRowStrideForNonAlignedVocabularyCuda) {
+  constexpr int batch_size = 2;
+  constexpr int vocab_size = 33;
+  constexpr size_t words_per_row = 2;
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+
+  auto logits = device->Allocate<float>(batch_size * vocab_size);
+  std::fill(logits.CpuSpan().begin(), logits.CpuSpan().end(), 1.0f);
+  logits.CopyCpuToDevice();
+
+  const std::array<uint32_t, batch_size * words_per_row> host_mask{{
+      uint32_t{1} << 0, uint32_t{1} << 0,
+      uint32_t{1} << 1, uint32_t{1} << 0,
+  }};
+  auto mask = device->Allocate<uint32_t>(host_mask.size());
+  std::copy(host_mask.begin(), host_mask.end(), mask.CpuSpan().begin());
+  mask.CopyCpuToDevice();
+
+  device->LaunchAddLogitsMask(
+      logits.Span().data(), batch_size, vocab_size, mask.Span().data());
+  const auto result = logits.CopyDeviceToCpu();
+
+  for (int row = 0; row < batch_size; ++row) {
+    for (int token = 0; token < vocab_size; ++token) {
+      const bool allowed = token == 32 || token == row;
+      EXPECT_EQ(result[row * vocab_size + token],
+                allowed ? 1.0f : std::numeric_limits<float>::lowest())
+          << "row=" << row << " token=" << token;
+    }
+  }
 }
 
 TEST(SamplingTests, SchedulerOwnedSamplerPreservesRngAcrossBatchReorderCuda) {

@@ -19,12 +19,27 @@
 namespace Generators {
 
 #if USE_GUIDANCE
+namespace {
+
+std::shared_ptr<const GeneratorParams> SnapshotGuidanceParams(
+    const Model& model, const GeneratorParams& params) {
+  auto snapshot = std::make_shared<GeneratorParams>(model);
+  snapshot->search = params.search;
+  snapshot->p_device = params.p_device;
+  snapshot->guidance_type = params.guidance_type;
+  snapshot->guidance_data = params.guidance_data;
+  snapshot->guidance_ff_tokens_enabled = params.guidance_ff_tokens_enabled;
+  return snapshot;
+}
+
+}  // namespace
+
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
-    : GuidanceLogitsProcessor(state.model_, state.params_) {}
+    : GuidanceLogitsProcessor(state.model_, *state.params_) {}
 
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(
-    const Model& model, std::shared_ptr<const GeneratorParams> params)
-    : params_(std::move(params)),
+    const Model& model, const GeneratorParams& params)
+    : params_(SnapshotGuidanceParams(model, params)),
       eos_token_(params_->config.model.eos_token_id[0]) {
   if (params_->guidance_type.empty() || params_->guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
@@ -289,7 +304,7 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     const Model& model, std::shared_ptr<const GeneratorParams> params) {
   if (!params->guidance_type.empty() && !params->guidance_data.empty()) {
 #if USE_GUIDANCE
-    return std::make_unique<GuidanceLogitsProcessor>(model, std::move(params));
+    return std::make_unique<GuidanceLogitsProcessor>(model, *params);
 #else
     if (g_log.enabled)
       Log("warning", "No supported ConstrainedLogitsProcessor found. To use guidance, build with use_guidance=true");

@@ -63,7 +63,7 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   if (guidance_requested && !params->model_) {
     throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
   }
-  if (params->model_) {
+  if (guidance_requested) {
     guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
   }
   if (guidance_requested && !guidance_logits_processor_) {
@@ -533,7 +533,6 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
 }
 
 void Request::CompleteGeneration() {
-  const size_t sequence_length_before = static_cast<size_t>(CurrentSequenceLength());
   search_->CompleteGeneration();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
@@ -542,18 +541,13 @@ void Request::CompleteGeneration() {
     auto next_tokens = search_->GetNextTokens().CpuSpan();
     if (new_token_count > next_tokens.size())
       throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
+    auto new_tokens = next_tokens.last(new_token_count);
 
     const size_t first_new_token = tokens_host_.size();
-    tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
+    tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
     for (size_t token_index = first_new_token; token_index < tokens_host_.size(); ++token_index) {
       unseen_token_indices_.push_back(token_index);
     }
-  }
-
-  if (sequence_length > sequence_length_before) {
-    const size_t generated_token_count = sequence_length - sequence_length_before;
-    auto next_tokens = search_->GetNextTokens().CpuSpan();
-    auto new_tokens = next_tokens.last(generated_token_count);
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }

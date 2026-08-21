@@ -3,9 +3,14 @@
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common import get_lark_grammar, to_tool  # noqa: E402
 
 
 TOOL_CALL_START = "<tool_call>"
@@ -95,6 +100,15 @@ def run(args):
 
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=args.max_length)
+    if args.guidance:
+        grammar = get_lark_grammar(
+            tools=to_tool(tools),
+            text_output=False,
+            tool_output=True,
+            tool_call_start=TOOL_CALL_START,
+            tool_call_end=TOOL_CALL_END,
+        )
+        params.set_guidance("lark_grammar", grammar)
     prompt_tokens = list(tokenizer.encode(prompt))
     request = og.Request(params)
     request.add_tokens(np.asarray(prompt_tokens, dtype=np.int32))
@@ -130,4 +144,9 @@ if __name__ == "__main__":
     parser.add_argument("--tools_file", required=True)
     parser.add_argument("--user_prompt", default="What is the weather in Redmond, WA?")
     parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument(
+        "--guidance",
+        action="store_true",
+        help="Constrain the tool call with a Lark grammar; requires a guidance-enabled build",
+    )
     run(parser.parse_args())

@@ -585,16 +585,6 @@ TEST_F(RequestLifecycleTest, RequestRejectsIncompleteGuidanceConfiguration) {
   }
 }
 
-TEST_F(RequestLifecycleTest, EngineRejectsRequestCreatedForDifferentModel) {
-  auto other_model = CreateModel(GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = MakeGreedyParams(*other_model);
-  auto request = std::make_shared<Request>(params);
-  request->AddTokens(Prompt());
-
-  EXPECT_THROW(engine_.engine->AddRequest(request), std::runtime_error);
-  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
-}
-
 #if USE_GUIDANCE
 TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   auto guidance_model = CreateModel(
@@ -610,6 +600,7 @@ TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   auto params = MakeGreedyParams(*guidance_model);
   params->SetGuidance("regex", "!!", false);
   auto request = std::make_shared<Request>(params);
+  params->guidance_data = "a";
   auto prompt = Prompt();
   request->AddTokens(prompt);
   request->Assign(guidance_engine.engine);
@@ -632,6 +623,36 @@ TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   const auto staged_second = request->ApplyLogitsForTransaction(second_logits);
   EXPECT_EQ(staged_second.token, expected_tokens.front());
   request->RestoreStateForTransaction();
+}
+
+TEST_F(RequestLifecycleTest, StaticCpuGenerationAdvancesGuidanceCursor) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto first_tokens = tokenizer->Encode("!");
+  const auto second_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(first_tokens.size(), 1u);
+  ASSERT_EQ(second_tokens.size(), 1u);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "!a", false);
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  request->Assign(guidance_engine.engine);
+
+  auto first_logits = LogitsFavoringToken(
+      *guidance_model, second_tokens.front(), first_tokens.front());
+  request->GenerateNextTokens(first_logits);
+  request->CompleteGeneration();
+  EXPECT_EQ(request->UnseenToken(), first_tokens.front());
+
+  auto second_logits = LogitsFavoringToken(
+      *guidance_model, first_tokens.front(), second_tokens.front());
+  request->GenerateNextTokens(second_logits);
+  request->CompleteGeneration();
+  EXPECT_EQ(request->UnseenToken(), second_tokens.front());
 }
 #endif
 

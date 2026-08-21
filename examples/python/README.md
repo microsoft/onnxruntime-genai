@@ -108,13 +108,13 @@ python model-mm.py -m {path to model folder} -e {execution provider} --response_
 python model-chat.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 ```
 
-## Engine Guidance Profiling
+## Engine Tool Calling
 
-Build with guidance and run the paired Engine benchmark to compare request setup, time to first token, inter-token latency, and decode throughput with the same model and prompt:
+Run a complete Engine tool-calling round trip with host execution and incremental continuation. Add `--guidance` to constrain the tool call in a guidance-enabled build:
 
 ```bash
 python build.py --use_cuda --use_guidance --skip_tests --skip_examples
-python examples/python/engine/guidance-profiling.py -m {path to model folder} -e cuda --warmup 5 --iterations 30 --output guidance-profile.json
+python examples/python/engine/tool-calling.py -m {path to model folder} -e cuda --tools_file test/tool-definitions/weather.json --guidance
 ```
 
-`USE_GUIDANCE` is off by default. In a guidance-enabled build, guidance remains request-local and is activated only when `GeneratorParams.set_guidance()` is called. The profiler alternates unguided and guided requests on one Engine to reduce ordering and warmup bias. Compare token counts alongside total generation time because constrained and unconstrained output lengths may differ.
+`USE_GUIDANCE` is off by default. Guidance is request-local and optional; omit `--guidance` for models that natively produce tool-call output.

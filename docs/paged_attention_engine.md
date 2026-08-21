@@ -480,7 +480,9 @@ generated token stream but does not parse tool calls from the decoded output.
 
 Each guided request owns an independent constrained-logits processor. Its mask is applied before
 minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
-After sampling, the selected token advances that request's grammar cursor.
+The processor snapshots its guidance and search configuration when the request is created, so later
+mutation of the caller-owned `GeneratorParams` cannot change an active grammar. After sampling, the
+selected token advances that request's grammar cursor.
 
 The grammar cursor participates in the same transaction as search and paged-cache state. A step
 checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
