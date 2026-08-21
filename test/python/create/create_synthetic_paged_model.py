@@ -196,7 +196,6 @@ def create_config(output_dir):
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
                     "attention_metadata": "attention_metadata",
-                    "attention_metadata": "attention_metadata",
                     # Intentionally absent from the graph: the Engine must use the
                     # explicit state-group bindings instead of these legacy templates.
                     "past_key_names": "legacy_past.%d.key",

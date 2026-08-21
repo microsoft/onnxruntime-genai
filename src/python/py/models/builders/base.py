@@ -70,7 +70,6 @@ def resolve_windowed_paged_kv_cache(extra_options, window_size):
         and window_size > 0
     )
 
-
 class Model:
     def _get_model_type(self, config):
         return config.architectures[0]

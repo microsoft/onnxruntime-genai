@@ -452,7 +452,6 @@ The decoder also prepares a CPU `int32[3]` attention metadata input:
 ```
 
 The first two values are upper bounds. The third is a lower bound on the longest per-request KV sequence and lets the paged attention operator decide whether split-KV decode is worthwhile. Supplying these values lets the operator choose its backend and size its work without reading sequence lengths back from the device. Models using this contract must expose the three-element input; the Engine no longer emits the legacy two-element form. This requires ONNX Runtime commit `0d291bc5d39d8e62150c2c30f174812834344b48` or a later package containing the three-element PagedAttention metadata contract.
-
 Pure-decode steps and mixed prefill/decode steps may select different numerically valid CUDA
 backends. Floating-point reassociation can therefore flip a near-tied greedy token when batch
 composition changes even though request state and continuation are correct. Qualification should
