@@ -37,6 +37,30 @@ def _load_base_module():
     return module
 
 
+def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["TestModel"],
+        hidden_act="silu",
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=1024,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert model.input_types["attention_metadata"] == ir.DataType.INT32
+    assert model.input_shapes["attention_metadata"] == [3]
+    assert model.input_shapes["attention_metadata"] is not base.PAGED_ATTENTION_METADATA_SHAPE
+
+
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
@@ -501,9 +525,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
         (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(
-    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
-):
+def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.prune_lm_head = prune_lm_head
@@ -526,9 +548,7 @@ def test_paged_attention_lm_head_pruning(
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(
-        model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"])
-    )
+    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)

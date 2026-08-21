@@ -909,10 +909,17 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestAddTokens(this, &tokens));
   }
 
-  bool IsDone() const {
-    bool is_done{};
-    OgaCheckResult(OgaRequestIsDone(this, &is_done));
-    return is_done;
+  void Continue(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestContinue(this, &tokens));
+  }
+
+  /**
+   * \brief Returns whether the current generation turn is complete.
+   */
+  bool IsTurnComplete() const {
+    bool is_turn_complete{};
+    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
+    return is_turn_complete;
   }
 
   bool HasUnseenTokens() const {
@@ -953,10 +960,21 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
+  /**
+   * \brief Submits a request to the engine.
+   *
+   * Ownership continues after the current turn completes. Remove() releases resources immediately;
+   * releasing the final external handle instead defers reclamation until the next Add() or Step().
+   */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
   }
 
+  /**
+   * \brief Removes a request and releases engine ownership.
+   *
+   * Repeated calls after the request has already been removed are successful no-ops.
+   */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));
   }

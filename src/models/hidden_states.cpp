@@ -3,7 +3,7 @@
 
 #include "../generators.h"
 #include "model.h"
-#include "hidden_states_inputs.h"
+#include "hidden_states.h"
 
 namespace Generators {
 

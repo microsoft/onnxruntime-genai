@@ -77,7 +77,7 @@ This produces, in `<output-dir>`:
   RMSNorms, and a copy of the embedding + `lm_head`);
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
-`Qwen35MtpHead` (in `src/python/py/models/builders/qwen.py`) builds the head by reusing the
+`Qwen35MtpHead` (in `src/python/py/models/builders/qwen_mtp.py`) builds the head by reusing the
 parent `Qwen35MoeTextModel` machinery (`_make_full_attention`, `make_moe`, mRoPE, the residual
 chain) for the single layer, and loads the `mtp.*` + shared embedding/`lm_head` weights directly
 from the source safetensors — HF `transformers` discards the `mtp.*` weights on load, so they
@@ -226,7 +226,7 @@ output not otherwise managed by GenAI, so once the main model is exported with
 full per-position logits tensor, so the 2-token verify reads both `logits @ L` and `logits @ L+1`
 from one forward.
 
-`set_hidden_states` is backed by a `HiddenStatesInputs` feeder (`src/models/hidden_states_inputs.*`):
+`set_hidden_states` is backed by a `HiddenStatesInputs` feeder (`src/models/hidden_states.*`):
 a resizable `[batch, seq, hidden]` device tensor refreshed each step from the staged value. It is
 created by `DecoderOnly_State` only when `config.model.decoder.inputs.hidden_states` is set, so
 models without an MTP head are unaffected.
