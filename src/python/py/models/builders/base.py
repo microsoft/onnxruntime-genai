@@ -1056,6 +1056,10 @@ class Model:
         Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
         unify them with the full-attention layers, whose cache is allocated at max_length.
         """
+        # Paged layers share one [num_blocks, block_size, num_kv_heads, head_size] pool, so there
+        # is no per-layer sequence dim to rename and shape[2] is an int rather than a string.
+        if self.use_paged_attention:
+            return shape
         if (
             self.ep in self.eps_with_windowed_kv_cache
             and hasattr(self, "is_local")
