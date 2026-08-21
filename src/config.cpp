@@ -520,6 +520,8 @@ struct PipelineModel_Element : JSON::Element {
       v_.run_on_token_gen = JSON::Get<bool>(value);
     } else if (name == "is_lm_head") {
       v_.is_lm_head = JSON::Get<bool>(value);
+    } else if (name == "inherit_session_options") {
+      v_.inherit_session_options = JSON::Get<bool>(value);
     } else if (name == "reset_session_idx") {
       v_.reset_session_idx = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {

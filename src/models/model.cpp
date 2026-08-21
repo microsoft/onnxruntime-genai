@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <unordered_map>
 
 #ifndef _WIN32
@@ -557,6 +558,41 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
 }
 
+// Update provider options using values from a parent if they are not already specified in the child.
+// Used for pipeline models that opt in to inheritance to ensure that top-level provider options are
+// communicated into the options for those component models.
+static void InheritParentProviderOptions(const std::vector<Config::ProviderOptions>& parent_provider_options,
+                                         std::vector<Config::ProviderOptions>& child_provider_options) {
+  std::unordered_set<std::string> child_ep_option_keys;
+  for (const auto& parent_provider_option : parent_provider_options) {
+    auto child_provider_option_it = std::find_if(
+        child_provider_options.begin(),
+        child_provider_options.end(),
+        [&parent_provider_option](const Config::ProviderOptions& po) { return po.name == parent_provider_option.name; });
+    if (child_provider_option_it == child_provider_options.end()) {
+      // Child has no provider option for this provider, so just copy from parent.
+      child_provider_options.emplace_back(parent_provider_option);
+    } else {
+      // Use device filtering options from parent if not already set
+      if (!child_provider_option_it->device_filtering_options.has_value()) {
+        child_provider_option_it->device_filtering_options = parent_provider_option.device_filtering_options;
+      }
+
+      // Merge parent EP provider options
+      child_ep_option_keys.clear();
+      for (const auto& opt : child_provider_option_it->options) {
+        child_ep_option_keys.insert(opt.first);
+      }
+
+      for (const auto& parent_opt : parent_provider_option.options) {
+        if (child_ep_option_keys.find(parent_opt.first) == child_ep_option_keys.end()) {
+          child_provider_option_it->options.emplace_back(parent_opt);
+        }
+      }
+    }
+  }
+}
+
 void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
   for (size_t i = 0; i < input_names.size(); i++) {
@@ -742,15 +778,36 @@ Model::~Model() {
 #endif
 }
 
+static void AppendSessionProviders(Model& model,
+                                   const Config::SessionOptions& config_session_options,
+                                   OrtSessionOptions& session_options,
+                                   bool is_primary_session_options,
+                                   bool disable_graph_capture = false) {
+  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                                  config_session_options.provider_options, is_primary_session_options,
+                                                  *model.config_, disable_graph_capture);
+
+  if (!model.p_device_) {
+    model.p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != model.p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
+  }
+}
+
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           bool cloned_from_parent,
+                                           bool append_providers) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
-  session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  if (!cloned_from_parent) {
+    session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  }
 
   if (config_session_options.intra_op_num_threads.has_value()) {
     session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
@@ -914,29 +971,48 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
-                                                  config_session_options.provider_options, is_primary_session_options,
-                                                  *config_, disable_graph_capture);
-
-  if (!p_device_) {
-    p_device_ = session_device;
-  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
-    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
-                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
+  if (append_providers) {
+    AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options, disable_graph_capture);
   }
 }
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                 *session_options_,
+                                 true,    // is_primary_session_options
+                                 false,   // disable_graph_capture
+                                 false,   // cloned_from_parent
+                                 false);  // append_providers. Note: providers are only appended to the main options after
+                                          //                         (potentially) cloning it for the pipeline models.
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
-      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      Config::SessionOptions session_options = *pipeline_model.session_options;
+      if (pipeline_model.inherit_session_options) {
+        // Update config ProviderOptions for pipeline model with values from top-level options
+        InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
+                                     session_options.provider_options);
+      }
+
+      // When inheriting, clone the main OrtSessionOptions to use as the base, then overlay the options explicitly set
+      // for this pipeline model on top of it. Otherwise start from a fresh set of options.
+      auto emplaced = pipeline_model.inherit_session_options
+                          ? pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone())
+                          : pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(session_options,
+                                     *emplaced.first->second,
+                                     false,  // is_primary_session_options
+                                     false,  // disable_graph_capture
+                                     pipeline_model.inherit_session_options,
+                                     true);  // append_providers
     }
   }
+
+  // Append providers to the main session options only after cloning it for pipeline components, so that inheriting
+  // components do not get the top level providers appended twice.
+  AppendSessionProviders(*this, config_->model.decoder.session_options, *session_options_, true);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
@@ -945,7 +1021,7 @@ void Model::CreateSessionOptions() {
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   auto session_options = pipeline_session_options_.find(model_id);
-  // Use the pipeline model session options id config defined it.
+  // Use the pipeline model session options if config defined it.
   if (session_options != pipeline_session_options_.end())
     return session_options->second.get();
 
