@@ -15,6 +15,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/mtp_generator_common_test.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -96,6 +97,27 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
+
+# These tests exercise internal MTP helpers, which are not exported from the public shared library.
+add_executable(mtp_generator_common_tests "${CMAKE_CURRENT_SOURCE_DIR}/mtp_generator_common_test.cpp")
+target_include_directories(mtp_generator_common_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(mtp_generator_common_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest_main
+)
+add_dependencies(mtp_generator_common_tests onnxruntime-genai)
+set_target_properties(mtp_generator_common_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if(NOT MSVC)
+  target_compile_options(mtp_generator_common_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME MtpGeneratorCommonTests COMMAND mtp_generator_common_tests)
 
 # Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
 # OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,

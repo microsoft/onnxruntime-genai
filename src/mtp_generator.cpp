@@ -15,37 +15,9 @@
 
 namespace Generators {
 
-namespace {
-// Greedy argmax over a contiguous vocab row of fp32 logits on the CPU.
-int32_t ArgmaxRow(const float* row, int vocab_size) {
-  int32_t best = 0;
-  float best_val = row[0];
-  for (int i = 1; i < vocab_size; ++i) {
-    if (row[i] > best_val) {
-      best_val = row[i];
-      best = i;
-    }
-  }
-  return best;
-}
-
-}  // namespace
-
 MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, const GeneratorParams& params)
     : main_model_{main_model}, mtp_model_{mtp_model} {
-  if (params.search.batch_size != 1 || params.search.num_beams != 1 ||
-      params.search.num_return_sequences != 1) {
-    throw std::runtime_error("MtpGenerator supports only batch_size=1, num_beams=1, and num_return_sequences=1");
-  }
-  if (!params.guidance_type.empty()) {
-    throw std::runtime_error("MtpGenerator does not support guided generation");
-  }
-  if (main_model_.p_device_->GetType() != mtp_model_.p_device_->GetType()) {
-    throw std::runtime_error("MtpGenerator requires the main model and MTP head on the same device type");
-  }
-  if (main_model_.config_->model.vocab_size != mtp_model_.config_->model.vocab_size) {
-    throw std::runtime_error("MtpGenerator requires matching main-model and MTP-head vocabulary sizes");
-  }
+  ValidateMtpPair(main_model_, mtp_model_, params);
   if (main_model_.config_->model.decoder.hidden_size != mtp_model_.config_->model.decoder.hidden_size) {
     throw std::runtime_error("MtpGenerator requires matching main-model and MTP-head hidden sizes");
   }
@@ -128,6 +100,7 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   hidden_size_ = main_model_.config_->model.decoder.hidden_size;
   vocab_size_ = main_model_.config_->model.vocab_size;
   max_length_ = params.search.max_length;
+  eos_token_ids_ = main_model_.config_->model.eos_token_id;
 
   // Speculative sampling: when the caller requests randomized sampling (do_sample) with a positive
   // temperature, drafts are sampled from their truncated distribution and accepted via the
@@ -209,11 +182,7 @@ void MtpGenerator::ExtractHiddenPosition(OrtValue* hidden, int position) {
 }
 
 void MtpGenerator::CopyHiddenRow(OrtValue* hidden, int position, Tensor& dst) {
-  // hidden is [1, S, H] on the main model device; copy row `position` into dst ([1,1,H]).
-  auto src = ByteWrapTensor(*main_model_.p_device_, *hidden);
-  const size_t row_bytes = dst.GetByteSpan().size();
-  auto src_row = src.subspan(static_cast<size_t>(position) * row_bytes, row_bytes);
-  dst.GetByteSpan().CopyFrom(src_row);
+  CopyTensorRow(*hidden, position, dst, *main_model_.p_device_);
 }
 
 int32_t MtpGenerator::DraftHeadStep(int32_t token, bool need_draft) {
@@ -605,31 +574,13 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   primed_ = true;
 }
 
-void MtpGenerator::GenerateNextToken() {
-  if (!primed_) throw std::runtime_error("MtpGenerator: AppendTokens must be called before GenerateNextToken");
-  if (pending_tokens_.empty() && !done_) {
-    const size_t previous_size = sequence_.size();
-    RunRound();
-    pending_tokens_.insert(pending_tokens_.end(),
-                           sequence_.begin() + static_cast<ptrdiff_t>(previous_size),
-                           sequence_.end());
-    stats_.tokens_queued += sequence_.size() - previous_size;
-  }
-
-  if (!pending_tokens_.empty()) {
-    emitted_sequence_.push_back(pending_tokens_.front());
-    pending_tokens_.pop_front();
-    stats_.tokens_emitted++;
-  }
-}
-
 void MtpGenerator::RunRound() {
   if (done_) return;
 
   // Commit the token predicted for position length_.
   const int32_t t = next_token_;
   sequence_.push_back(t);
-  if (contains(main_model_.config_->model.eos_token_id, t) || sequence_.size() >= static_cast<size_t>(max_length_)) {
+  if (IsEos(t) || sequence_.size() >= static_cast<size_t>(max_length_)) {
     done_ = true;
     return;
   }
@@ -1043,27 +994,6 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
     CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the correction token
     length_ += static_cast<size_t>(a) + 1;
   }
-}
-
-bool MtpGenerator::IsDone() const {
-  return done_ && pending_tokens_.empty();
-}
-
-SpeculativeStats MtpGenerator::GetSpeculativeStats() const {
-  SpeculativeStats stats = stats_;
-  stats.tokens_buffered = pending_tokens_.size();
-  if (stats.draft_tokens_evaluated > 0) {
-    stats.acceptance_rate =
-        static_cast<float>(stats.draft_tokens_accepted) /
-        static_cast<float>(stats.draft_tokens_evaluated);
-  }
-  if (stats.rounds > 0) {
-    stats.avg_draft_tokens_per_round =
-        static_cast<float>(stats.draft_tokens_proposed) / static_cast<float>(stats.rounds);
-    stats.mean_emitted_tokens_per_round =
-        static_cast<float>(stats.tokens_emitted) / static_cast<float>(stats.rounds);
-  }
-  return stats;
 }
 
 }  // namespace Generators

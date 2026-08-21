@@ -9,11 +9,26 @@
 
 namespace Generators {
 
+namespace {
+
+// Tokens up to and including the last non-pad one; zero if the row is entirely padding.
+size_t NonPadLength(std::span<const int32_t> row, int32_t pad_token_id) {
+  for (size_t index = row.size(); index-- > 0;) {
+    if (row[index] != pad_token_id)
+      return index + 1;
+  }
+  return 0;
+}
+
+}  // namespace
+
 Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_logits_, type_);
+
+  max_output_sequence_length_ = static_cast<size_t>(std::max(0, model_.config_->model.decoder.max_logits_sequence_length));
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
@@ -28,6 +43,18 @@ Logits::Logits(State& state)
 
     trimmed_prefill_logits_ = true;
   }
+}
+
+DeviceSpan<float> Logits::GetAll() {
+  OrtValue* logits = output_raw_->GetOrtTensor();
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t> ||
+      type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    Cast(*logits, all_logits_fp32_, *model_.p_device_logits_, Ort::TypeToTensorType<float>);
+    logits = all_logits_fp32_.get();
+  }
+  if (all_logits_.empty() || logits->GetTensorMutableRawData() != all_logits_.Span().data())
+    all_logits_ = WrapTensor<float>(*model_.p_device_logits_, *logits);
+  return all_logits_;
 }
 
 DeviceSpan<float> Logits::Get() {
@@ -86,23 +113,20 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
     new_kv_length = 1;
   }
 
-  if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
+  // A bounded logits output only covers every input position while the input fits within it;
+  // longer (prefill) forwards emit last-token logits only.
+  const size_t input_kv_length = new_kv_length;
+  if (max_output_sequence_length_ > 0 && new_kv_length > max_output_sequence_length_)
+    new_kv_length = 1;
+
+  const bool shape_is_current = output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length;
+  if (shape_is_current && new_kv_length == 1) {
     return;
   }
 
-  // Store length of input sequence for each batch for the get step
-  for (int b = 0; b < state_.params_->search.batch_size; b++) {
-    // Find the first non pad token from the end
-    size_t token_index = new_kv_length;
-    while (token_index-- > 0) {
-      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
-      if (next_token != model_.config_->model.pad_token_id)
-        break;
-    }
-    input_sequence_lengths[b] = static_cast<int>(token_index + 1);
-  }
+  UpdateInputSequenceLengths(next_tokens, input_kv_length, input_kv_length - new_kv_length);
 
-  if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length) {
+  if (shape_is_current) {
     return;
   }
 
@@ -112,6 +136,19 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * shape_[2] * Ort::SizeOf(type_) : 0;
   output_raw_->CreateTensor(shape_, use_static, static_cap_bytes);
   state_.outputs_[output_index_] = output_raw_->GetOrtTensor();
+}
+
+// Store length of input sequence for each batch for the get step.
+void Logits::UpdateInputSequenceLengths(const DeviceSpan<int32_t>& next_tokens, size_t input_kv_length, size_t dropped_rows) {
+  const auto tokens = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan();
+  for (int b = 0; b < state_.params_->search.batch_size; b++) {
+    size_t length = NonPadLength(tokens.subspan(b * input_kv_length, input_kv_length),
+                                 model_.config_->model.pad_token_id);
+    // Rebase onto the rows actually emitted.
+    if (dropped_rows > 0)
+      length = length > dropped_rows ? length - dropped_rows : 1;
+    input_sequence_lengths[b] = static_cast<int>(length);
+  }
 }
 
 void Logits::Add() {

@@ -185,14 +185,12 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
   DumpOutputs();
 }
 
-void State::SetRunOption(const char* key, const char* value) {
+void SetRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
-      session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
-      session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -201,20 +199,35 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
+}
+
+void SetRunOptions(OrtRunOptions& run_options, const Config::RunOptions& config_run_options) {
+  for (const auto& [key, value] : config_run_options)
+    SetRunOption(run_options, key.c_str(), value.c_str());
+}
+
+void State::SetRunOption(const char* key, const char* value) {
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0)
+      session_terminated_ = false;
+    else if (strcmp(value, "1") == 0)
+      session_terminated_ = true;
+  }
+  Generators::SetRunOption(*run_options_, key, value);
 }
 
 /*
@@ -222,9 +235,8 @@ void State::SetRunOption(const char* key, const char* value) {
  * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
  */
 void State::SetRunOptions(const Config::RunOptions& config_run_options) {
-  for (auto& config_entry : config_run_options) {
-    SetRunOption(config_entry.first.c_str(), config_entry.second.c_str());
-  }
+  for (const auto& [key, value] : config_run_options)
+    SetRunOption(key.c_str(), value.c_str());
 }
 
 OrtValue* State::GetInput(const char* name) {

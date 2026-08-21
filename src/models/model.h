@@ -24,6 +24,8 @@ struct Tokenizer;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
+void SetRunOption(OrtRunOptions& run_options, const char* key, const char* value);
+void SetRunOptions(OrtRunOptions& run_options, const Config::RunOptions& config_run_options);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);
