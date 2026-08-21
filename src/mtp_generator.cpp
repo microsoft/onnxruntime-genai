@@ -67,7 +67,6 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // AutoRegressiveSpeculator does. Chaining needs the head to emit that hidden, so a head exported
   // without `mtp_emit_hidden=true` can only run N=1.
   num_speculative_tokens_ = std::max(1, params.speculative.max_draft_tokens);
-  GetEnv("ORTGENAI_MTP_FAST_COMMIT", fast_commit_);
 
   const std::string& head_hidden_states = main_model_.config_->model.mtp.outputs.hidden_states;
   if (num_speculative_tokens_ > 1 &&
@@ -782,11 +781,11 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     tradeoff the N=1 verify already makes; the reject path below re-runs decode-consistently to
   //     bound divergence from plain greedy. ---
   // Snapshot the recurrent state so a rejected wide verify can replay the committed prefix with
-  // decode-consistent numerics. The snapshot is also needed when no draft is accepted, where there
-  // is no committed recurrent-state window slot to crop to. The fast-commit path below needs
-  // neither, and the snapshot is 2*num_layers device copies on EVERY step, so skip it there.
-  const bool fast_commit = fast_commit_ && main_->CanCropRecurrentState();
-  if (!fast_commit) main_->SnapshotState();
+  // decode-consistent numerics. A model exported with a recurrent-state window commits directly out
+  // of the verify below and needs neither the replay nor the snapshot, which would otherwise cost
+  // 2*num_layers device copies on EVERY step.
+  const bool direct_commit = main_->CanCropRecurrentState();
+  if (!direct_commit) main_->SnapshotState();
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
@@ -843,36 +842,16 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     next_token_ = verify_argmax_[a];
     CopyHiddenRow(vhidden, a, *hidden_slice_);
     length_ += static_cast<size_t>(N) + 1;
-  } else if (fast_commit) {
+  } else if (direct_commit) {
     // Partial accept, DIRECT ARENA COMMIT: the batched verify already advanced the KV and the
     // per-token recurrent window through every verify token, so crop both to the accepted length
     // and take the bonus from verify row a -- no replay forward at all. Row a is an early row of a
-    // wide forward, so its argmax can differ from a sequential decode on near-ties; the crop path
-    // below is no more decode-consistent in practice (see the NOTE there), it just costs an extra
-    // forward. Opt in with ORTGENAI_MTP_FAST_COMMIT=1.
+    // wide forward, so its argmax can differ from a sequential decode on near-ties, but cropping to
+    // L+a and re-decoding instead is no more decode-consistent in practice (the cropped state is
+    // itself derived from the same wide verify); it just costs an extra forward per partial accept.
     main_->CropToAccepted(length_ + static_cast<size_t>(a) + 1, static_cast<size_t>(a));
     next_token_ = verify_argmax_[a];
     CopyHiddenRow(vhidden, a, *hidden_slice_);
-    length_ += static_cast<size_t>(a) + 1;
-  } else if (main_->CanCropRecurrentState() && a >= 1) {
-    // Partial accept (a>=1), LOSSLESS CROP fast-path (model exported with state_window).
-    // The batched verify's row a is an EARLY row of a wide (M=N+1) forward, whose argmax is NOT
-    // decode-consistent (only the LAST row of a forward matches a 1-token decode; §13.1). So we
-    // cannot take the bonus straight from the verify. Instead: crop the KV cache + recurrent state
-    // to L+a (state AFTER verify tokens 0..a-1 == window slot for position a-1) -- avoiding the wide
-    // (a+1)-token replay -- then M=1-decode the last committed token (d_{a-1}, at position L+a). Its
-    // row-0 logits ARE decode-consistent, giving a lossless bonus. This replaces the §13.5 wide
-    // replay (M=a+1) with a cheap M=1 forward.
-    // NOTE (§14.3): this is NOT actually lossless in practice -- the cropped state is itself derived
-    // from the wide batched verify and differs from sequential decode (~0.25 fp16), so greedy
-    // near-ties still flip. Kept for history/reference; the fallback replay below is the lossless path.
-    main_->CropToAccepted(length_ + static_cast<size_t>(a), static_cast<size_t>(a) - 1);
-    std::array<int32_t, 1> last{drafts_[a - 1]};  // committed token at position L+a
-    main_->AppendTokens(cpu_span<const int32_t>(last));
-    stats_.target_forward_passes++;
-    OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
-    ArgmaxMainRows(0, 1, &next_token_);         // decode-consistent bonus (M=1 last row)
-    CopyHiddenRow(rhidden, 0, *hidden_slice_);  // hidden paired with the bonus token
     length_ += static_cast<size_t>(a) + 1;
   } else {
     // Rejection at position a: the batched verify over-appended N-a wrong tokens and cannot be

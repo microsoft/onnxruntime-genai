@@ -161,8 +161,6 @@ struct MtpGenerator {
   // model and stays off otherwise.
   int prefill_chunk_{0};
   bool prefill_chunk_explicit_{false};
-  // Skip the greedy multi-token replay forward and commit straight from the wide verify.
-  bool fast_commit_{false};
   // Head KV length invariant (multi-token path): number of committed generated tokens currently
   // in the MTP head's KV cache (each fed once with its main hidden). The draft phase temporarily
   // extends this speculatively, then rolls it back to this value + accepted drafts.
