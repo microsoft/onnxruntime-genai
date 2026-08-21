@@ -205,9 +205,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)

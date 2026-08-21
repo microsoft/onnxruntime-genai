@@ -2273,6 +2273,10 @@ class Qwen35TextModel(Model):
             },
         }
 
+        if self.mtp_shared_initializers:
+            genai_config["model"]["decoder"]["shared_initializers"] = self.mtp_shared_initializers
+            genai_config["model"]["mtp"]["shared_initializers"] = self.mtp_shared_initializers
+
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)
         print("Added 'mtp' section to genai_config.json")
@@ -2374,6 +2378,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         # alongside the main model (see ``Qwen35MtpHead``). It is disabled for the
         # MTP head itself (``is_mtp_head``) to avoid infinite recursion.
         self.mtp_head = None
+        self.mtp_shared_initializers = []
         self.enable_mtp = str(extra_options.get("enable_mtp", "false")).lower() in ("1", "true", "yes")
         self.enable_mtp = self.enable_mtp and not getattr(self, "is_mtp_head", False)
         if self.enable_mtp:
@@ -2460,7 +2465,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             # bit-identically with the main model: redirect mtp.onnx's copies to the
             # main model's external data file and pack them out of mtp.onnx.data
             # (~2 GB on disk; the two sessions then mmap the same bytes on the host).
-            self._share_mtp_embedding_lm_head(out_dir, self.filename)
+            self.mtp_shared_initializers = self._share_mtp_embedding_lm_head(
+                out_dir, self.filename, self.mtp_head.filename
+            )
 
     @staticmethod
     def _share_mtp_embedding_lm_head(out_dir, main_file, mtp_file="mtp.onnx"):
@@ -2472,7 +2479,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         lm_head vs an fp16 MTP lm_head) is left untouched. Failures are non-fatal —
         the exported models remain valid (just larger) if sharing is skipped.
         """
-        import onnx
+        import onnx  # noqa: PLC0415
 
         main_onnx = os.path.join(out_dir, main_file)
         mtp_onnx = os.path.join(out_dir, mtp_file)
@@ -2486,7 +2493,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             and os.path.exists(main_data)
             and os.path.exists(mtp_data)
         ):
-            return
+            return []
 
         def ext_info(tensor):
             d = {e.key: e.value for e in tensor.external_data}
@@ -2529,12 +2536,11 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             mtp_inits = {t.name: t for t in mtp.graph.initializer}
 
             redirect, remove = {}, set()
-            for name in main_info:
-                if name not in mtp_inits or name not in main_info:
+            for name, (m_dt, m_dims, m_off, m_len) in main_info.items():
+                if name not in mtp_inits:
                     continue
                 t = mtp_inits[name]
                 loc, off, ln = ext_info(t)
-                m_dt, m_dims, m_off, m_len = main_info[name]
                 if loc != mtp_data_name or t.data_type != m_dt or tuple(t.dims) != m_dims or ln != m_len:
                     continue
                 if not external_data_equal(main_data, m_off, mtp_data, off, ln):
@@ -2543,7 +2549,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 remove.add((off, ln))
 
             if not redirect:
-                return
+                return []
 
             # Rebuild mtp.onnx.data with the redirected tensors packed out, in
             # ascending-offset order, assigning tight new offsets.
@@ -2583,7 +2589,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 f"Warning: could not share MTP embedding/lm_head weights ({exc}); "
                 f"the duplicated copies remain in {mtp_data_name}."
             )
-            return
+            return []
 
         # Keep the original pair recoverable until both staged files are installed.
         backup_data = mtp_data + ".bak"
@@ -2610,11 +2616,22 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                 f"Warning: could not commit shared MTP embedding/lm_head weights ({exc}); "
                 f"the duplicated copies remain in {mtp_data_name}."
             )
-            return
+            return []
         os.remove(backup_data)
         os.remove(backup_onnx)
         saved_mb = sum(ln for _, ln in redirect.values()) / 1e6
         print(f"Shared MTP embedding + lm_head with the main model (saved {saved_mb:.0f} MB from {mtp_data_name})")
+        return [
+            {
+                "name": name,
+                "data_file": main_data_name,
+                "offset": str(offset),
+                "length": str(length),
+                "data_type": main_info[name][0],
+                "shape": list(main_info[name][1]),
+            }
+            for name, (offset, length) in redirect.items()
+        ]
 
     def make_layer(self, layer_id, layer):
         """Override to use MoE instead of dense MLP."""
