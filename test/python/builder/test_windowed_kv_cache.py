@@ -59,7 +59,7 @@ def _make_gqa_model(ep, window_size):
     model = Model.__new__(Model)
     model.ep = ep
     model.extra_options = {}
-    model.kv_cache_quant_type = "none"
+    model.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16
@@ -191,8 +191,7 @@ class _NoGenerationConfig:
 
 
 def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4):
-    hf_config = SimpleNamespace(eos_token_id=[2])
-    monkeypatch.setattr(base_module, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: hf_config))
+    hf_config = SimpleNamespace(bos_token_id=None, eos_token_id=[2], pad_token_id=None)
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
 
     model = Model.__new__(Model)
@@ -220,7 +219,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4):
     model.input_names = {"input_ids": "input_ids", "past_key_values.key": [], "past_key_values.value": []}
     model.output_names = {"logits": "logits", "present.key": [], "present.value": []}
 
-    model.make_genai_config("model_name_or_path", {}, str(out_dir))
+    model.make_genai_config(hf_config, {}, str(out_dir))
     return json.loads((Path(out_dir) / "genai_config.json").read_text())
 
 

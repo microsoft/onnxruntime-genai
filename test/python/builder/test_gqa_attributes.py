@@ -41,7 +41,7 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
-        self.kv_cache_quant_type = "none"
+        self.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
@@ -112,9 +112,7 @@ def test_paged_attention_preserves_sliding_window_size():
 
 def test_quantized_gqa_emits_scale_inputs_and_attributes():
     model = _FakeGQAModel("cuda")
-    model.kv_cache_quant_type = "int4_per_channel"
-    model.kv_quant_type = "PER_CHANNEL"
-    model.kv_cache_bit_width = 4
+    model.kv_cache_attrs = {"quant_type": "int4_per_channel", "quant_mode": "PER_CHANNEL", "bit_width": 4}
 
     model.make_group_query_attention("/gqa", layer_id=3, q_path="q", k_path="k", v_path="v")
 
@@ -130,9 +128,7 @@ def test_quantized_gqa_emits_scale_inputs_and_attributes():
 
 def test_quantized_paged_attention_emits_scale_inputs_and_attributes():
     model = _FakeGQAModel("cuda")
-    model.kv_cache_quant_type = "int8_per_channel"
-    model.kv_quant_type = "PER_CHANNEL"
-    model.kv_cache_bit_width = 8
+    model.kv_cache_attrs = {"quant_type": "int8_per_channel", "quant_mode": "PER_CHANNEL", "bit_width": 8}
 
     model.make_paged_attention(
         "/paged",
@@ -158,8 +154,7 @@ def test_quantized_paged_attention_emits_scale_inputs_and_attributes():
 
 def test_quantized_paged_attention_requires_layer_id():
     model = _FakeGQAModel("cuda")
-    model.kv_cache_quant_type = "int8_per_tensor"
-    model.kv_quant_type = "PER_TENSOR"
+    model.kv_cache_attrs = {"quant_type": "int8_per_tensor", "quant_mode": "PER_TENSOR", "bit_width": 8}
 
     with pytest.raises(ValueError, match="layer_id is required"):
         model.make_paged_attention(

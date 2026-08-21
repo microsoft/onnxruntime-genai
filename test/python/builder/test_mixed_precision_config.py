@@ -22,6 +22,8 @@ import pytest
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
+from quantization import desugar_algo_config
+
 
 def _load_builder_module(module_name):
     spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
@@ -40,14 +42,13 @@ Model = base_module.Model
 
 
 # ---------------------------------------------------------------------------
-# matmul_mixed_precision parsing (via resolve_quant_config -> quant_config)
+# matmul_mixed_precision parsing
 # ---------------------------------------------------------------------------
 
 
 def _resolve_mixed_precision(value):
-    model = Model.__new__(Model)
-    model.resolve_quant_config({"algo_config": "default", "matmul_mixed_precision": value})
-    return model.matmul_mixed_precision
+    _, placement = desugar_algo_config({"algo_config": "default", "matmul_mixed_precision": value})
+    return placement
 
 
 def test_normalize_parses_selector_quant_type_string():
@@ -85,39 +86,37 @@ def test_normalize_rejects_unknown_quant_type():
 
 
 # ---------------------------------------------------------------------------
-# resolve_quant_config
+# Legacy option desugaring
 # ---------------------------------------------------------------------------
 
 
 def test_resolve_base_method_only_has_no_mixed_precision():
-    model = Model.__new__(Model)
-    model.resolve_quant_config({"algo_config": "k_quant"})
-    assert model.quantization_algo == "k_quant"
-    assert model.matmul_mixed_precision == {}
+    method, placement = desugar_algo_config({"algo_config": "k_quant"})
+    assert method == "k_quant"
+    assert placement == {}
 
 
 def test_resolve_reads_matmul_mixed_precision_string():
-    model = Model.__new__(Model)
-    model.resolve_quant_config(
+    method, placement = desugar_algo_config(
         {"algo_config": "default", "matmul_mixed_precision": "last_matmul:int8,linear_attn:int4"}
     )
-    assert model.quantization_algo == "default"
-    assert model.matmul_mixed_precision == {"last_matmul": "int8", "linear_attn": "int4"}
+    assert method == "default"
+    assert placement == {"last_matmul": "int8", "linear_attn": "int4"}
 
 
 def test_resolve_expands_legacy_compound_alias():
-    model = Model.__new__(Model)
-    model.resolve_quant_config({"algo_config": "k_quant_mixed"})
-    assert model.quantization_algo == "k_quant"
-    assert model.matmul_mixed_precision == {"last_matmul": "int8", "mixed_layers": "int8"}
+    method, placement = desugar_algo_config({"algo_config": "k_quant_mixed"})
+    assert method == "k_quant"
+    assert placement == {"last_matmul": "int8", "mixed_layers": "int8"}
 
 
 def test_resolve_explicit_config_overrides_legacy_alias_defaults():
-    model = Model.__new__(Model)
-    model.resolve_quant_config({"algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"})
-    assert model.quantization_algo == "k_quant"
+    method, placement = desugar_algo_config(
+        {"algo_config": "k_quant_last", "matmul_mixed_precision": "last_matmul:int4"}
+    )
+    assert method == "k_quant"
     # Explicit last_matmul:int4 overrides the alias-implied last_matmul:int8.
-    assert model.matmul_mixed_precision == {"last_matmul": "int4"}
+    assert placement == {"last_matmul": "int4"}
 
 
 # ---------------------------------------------------------------------------

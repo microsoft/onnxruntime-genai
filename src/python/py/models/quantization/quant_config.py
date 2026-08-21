@@ -23,6 +23,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import onnx_ir as ir
+
 # ---------------------------------------------------------------------------
 # 1. Unified quant-dtype vocabulary
 # ---------------------------------------------------------------------------
@@ -364,7 +366,7 @@ class QuantConfig:
     def from_extra_options(
         cls,
         extra_options: dict[str, Any],
-        precision: str = "int4",
+        precision: ir.DataType | str = ir.DataType.INT4,
         execution_provider: str = "cuda",
     ) -> "QuantConfig":
         """Desugar today's flat ``extra_options`` (+ ``precision``) into a ``QuantConfig``.
@@ -374,6 +376,7 @@ class QuantConfig:
         ``Model`` (``resolve_quant_config`` / ``moe_quant_type`` handling) so the
         two surfaces stay in lock-step.
         """
+        precision = onnx_dtype_to_precision(precision)
         extra_options = dict(extra_options or {})
 
         weights_type = _PRECISION_TO_WEIGHTS_TYPE.get(precision, "none")
@@ -463,9 +466,26 @@ def _normalize_mixed_precision(value: Any) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for selector, quant_type in items:
         if selector not in MATCH_PRESETS:
-            raise ValueError(
-                f"matmul_mixed_precision selector must be one of {list(MATCH_PRESETS)}, got '{selector}'."
-            )
+            raise ValueError(f"matmul_mixed_precision selector must be one of {list(MATCH_PRESETS)}, got '{selector}'.")
         resolve_dtype(quant_type)  # validate the quant type name
         normalized[selector] = quant_type
     return normalized
+
+
+def onnx_dtype_to_precision(onnx_dtype: ir.DataType | str) -> str:
+    """Map the resolved ONNX weight dtype to a `QuantConfig` precision string.
+
+    Only used to seed the QuantConfig's `weights.type` / `io_dtype`; the builder's numeric
+    quantization knobs are read from the resolved config, not from this precision.
+    """
+    if isinstance(onnx_dtype, str):
+        return onnx_dtype.lower()
+    return {
+        ir.DataType.INT4: "int4",
+        ir.DataType.UINT4: "int4",
+        ir.DataType.INT8: "int8",
+        ir.DataType.UINT8: "int8",
+        ir.DataType.BFLOAT16: "bf16",
+        ir.DataType.FLOAT16: "fp16",
+        ir.DataType.FLOAT: "fp32",
+    }.get(onnx_dtype, "fp16")

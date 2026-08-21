@@ -189,11 +189,11 @@ class Qwen35TextModel(Model):
             return
 
         kv_layers = [i for i, lt in enumerate(self.layer_types) if lt == "full_attention"]
-        per_channel = self.kv_quant_type == "PER_CHANNEL"
+        per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
 
-        scale_file = self.extra_options.get("kv_cache_scale_file", None)
-        if scale_file is None:
+        scale_file = self.kv_cache_attrs["scales_path"]
+        if not scale_file:
             raise ValueError(
                 "Quantized KV cache requires calibrated scales; provide them via extra_options['kv_cache_scale_file']."
             )

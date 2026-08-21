@@ -121,9 +121,6 @@ class Qwen35MtpHead(Qwen35MoETextModel):
         # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
         self.make_inputs_and_outputs()
 
-        if self.kv_cache_quant_type != "none":
-            self.make_kv_cache_scale_initializers()
-
         # Load MTP-specific weights (discarded by HF ``from_pretrained``).
         self._load_mtp_weights(input_path)
 

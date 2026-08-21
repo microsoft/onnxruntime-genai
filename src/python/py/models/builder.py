@@ -57,37 +57,6 @@ from quantization import KV_CACHE_QUANT_TYPES, QuantConfig
 from transformers import AutoConfig
 
 
-def apply_deprecated_extra_option_aliases(kv_pairs):
-    """
-    Rename any deprecated extra_options keys to their new names in-place.
-
-    The weight-only quantization options were generalized from int4-specific names to
-    precision-agnostic names (they apply to int4/int8/... MatMulNBits quantization), so the
-    `int4_` prefix was dropped. The old names are kept as deprecated aliases so existing
-    consumers (e.g. Olive recipes) that still pass the old `int4_`-prefixed names keep working.
-    If both the old and new names are provided, the new name wins. Emits a deprecation warning
-    for each old name encountered. Remove this method (and its call sites) once consumers migrate.
-    """
-    # Maps deprecated old name -> new name.
-    deprecated_aliases = {
-        "int4_accuracy_level": "accuracy_level",
-        "int4_block_size": "block_size",
-        "int4_is_symmetric": "is_symmetric",
-        "int4_op_types_to_quantize": "op_types_to_quantize",
-        "int4_nodes_to_exclude": "nodes_to_exclude",
-        "int4_algo_config": "algo_config",
-    }
-    for old_name, new_name in deprecated_aliases.items():
-        if old_name not in kv_pairs:
-            continue
-        print(
-            f"WARNING: extra_option '{old_name}' is deprecated and will be removed in a future release. "
-            f"Please use '{new_name}' instead."
-        )
-        kv_pairs.setdefault(new_name, kv_pairs[old_name])
-        del kv_pairs[old_name]
-
-
 def parse_hf_token(hf_token):
     """
     Returns the authentication token needed for Hugging Face.
@@ -148,8 +117,6 @@ def check_extra_options(
     """
     Check key-value pairs and set values correctly
     """
-    apply_deprecated_extra_option_aliases(extra_options)
-
     bools = [
         "is_symmetric",
         "exclude_embeds",

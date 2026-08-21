@@ -37,13 +37,10 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from quantization import CudaQuantizer, QuantConfig, desugar_algo_config, resolve_dtype
+from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
-    def _get_model_type(self, config):
-        return config.architectures[0]
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.make_config_init(config)
 
@@ -56,9 +53,9 @@ class Model:
         )
         self.window_size = getattr(config, "sliding_window", -1)  # default is -1 in GroupQueryAttention kernel
 
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
-        # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
-        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: TRT-RTX
+        # evicts inside the EP, CPU and CUDA evict inside GroupQueryAttention (sliding_window_cache=1).
+        self.eps_with_windowed_kv_cache = {"cpu", "cuda", "trt-rtx"}
 
         # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
         # 0 means "use the EP default at runtime"; set explicitly to override.
@@ -113,7 +110,7 @@ class Model:
 
         # Global variables for model builder
         self.model_name_or_path = config._name_or_path
-        self.model_type = self._get_model_type(config)
+        self.model_type = config.architectures[0]
         self.io_dtype = ir.DataType(io_dtype)
         self.onnx_dtype = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
@@ -238,44 +235,47 @@ class Model:
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
-            "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
-            "seqlens_k": "",            # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
-            "total_seq_len": "",        # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
-            "block_row_indices": "",    # Row indices of CSR format of block mask (used as input to SparseAttention)
-            "block_col_indices": "",    # Col indices of CSR format of block mask (used as input to SparseAttention)
-            "key_total_seq_lens": "",   # Sum of each row in attention mask (used as input to SparseAttention)
+            "mask_name": "",             # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
+            "seqlens_k": "",             # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
+            "total_seq_len": "",         # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
+            "block_row_indices": "",     # Row indices of CSR format of block mask (used as input to SparseAttention)
+            "block_col_indices": "",     # Col indices of CSR format of block mask (used as input to SparseAttention)
+            "key_total_seq_lens": "",    # Sum of each row in attention mask (used as input to SparseAttention)
         }
 
         # Embedding-specific variables
         self.embed_attrs = {
-            "scale": 1,                 # Scale value to multiply output of Embedding layer by
+            "scale": 1,                  # Scale value to multiply output of Embedding layer by
         }
 
         # LayerNorm-specific variables
         epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 1e-06
         self.layernorm_attrs = {
-            "simple": True,             # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
-            "first_layernorm": True,    # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
-            "last_layernorm": False,    # Last LayerNorm = SkipLayerNorm with only output 0 (no output 3)
-            "root_input": "",           # Root input from parent node for LayerNorm and SkipLayerNorm
-            "skip_input": "",           # Skip input from parent node for SkipLayerNorm
-            "output_0": "",             # Output 0 for LayerNorm and SkipLayerNorm
-            "output_3": "",             # Output 3 for SkipLayerNorm
-            "add_offset": 0,            # Offset value for LayerNorm weight
-            "epsilon": epsilon,         # Epsilon value to avoid `sqrt(0)` in LayerNorm
-            "cast": {                   # Casting LayerNorm-specific variables
-                "use_fp32": False,      # Use float32 precision to compute LayerNorm
-                "root_input": False,    # Cast root_input
-                "skip_input": False,    # Cast skip_input
-                "output_0": False,      # Cast output_0
-                "output_3": False,      # Cast output_3
+            "simple": True,              # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
+            "first_layernorm": True,     # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
+            "last_layernorm": False,     # Last LayerNorm = SkipLayerNorm with only output 0 (no output 3)
+            "root_input": "",            # Root input from parent node for LayerNorm and SkipLayerNorm
+            "skip_input": "",            # Skip input from parent node for SkipLayerNorm
+            "output_0": "",              # Output 0 for LayerNorm and SkipLayerNorm
+            "output_3": "",              # Output 3 for SkipLayerNorm
+            "add_offset": 0,             # Offset value for LayerNorm weight
+            "epsilon": epsilon,          # Epsilon value to avoid `sqrt(0)` in LayerNorm
+            "cast": {                    # Casting LayerNorm-specific variables
+                "use_fp32": False,       # Use float32 precision to compute LayerNorm
+                "root_input": False,     # Cast root_input
+                "skip_input": False,     # Cast skip_input
+                "output_0": False,       # Cast output_0
+                "output_3": False,       # Cast output_3
             },
         }
 
         # MatMul-specific variables
         is_lora = hasattr(config, "peft_type") and config.peft_type == "LORA"
         self.matmul_attrs = {
-            "use_lora": is_lora,  # Use LoRA/QLoRA format
+            "use_lora": is_lora,         # Use LoRA/QLoRA format
+            "weights_prepacked": False,  # It offline prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
+                                         # CUDA MatMulNBits layout: 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout,
+                                         # 2 = SM90/Hopper fpA_intB layout. Only meaningful on the CUDA EP; other EPs keep the raw blockwise layout.
         }
 
         # RoPE-specific variables
@@ -343,11 +343,27 @@ class Model:
         }
         self.make_attention_init(config)
 
-        # `kv_cache_quant_type` is validated and normalized in builder.py (`check_extra_options`),
-        # which always runs before the model is constructed, so read the value directly here.
-        self.kv_cache_quant_type = extra_options.get("kv_cache_quant_type", "none")
-        if self.kv_cache_quant_type != "none":
-            self.make_quantized_kv_cache_init()
+        # KV-cache specific variables
+        quant_type = extra_options.get("kv_cache_quant_type", "none") or "none"
+        quant_dtype = (
+            ir.DataType.INT8
+            if quant_type.startswith("int8")
+            else ir.DataType.INT4
+            if quant_type.startswith("int4")
+            else ir.DataType.FLOAT8E4M3FN
+            if quant_type.startswith("fp8")
+            else None
+        )
+        bit_width = 4 if quant_dtype == ir.DataType.INT4 else 8 if quant_dtype is not None else 0
+        quant_mode = "PER_CHANNEL" if quant_type.endswith("per_channel") else "PER_TENSOR"
+        self.kv_cache_attrs = {
+            "quant_type": quant_type,                                     # Quantization scheme for key-value caches
+            "quant_dtype": quant_dtype,                                   # Quantization type for key-value caches
+            "bit_width": bit_width,                                       # Bit width for key-value caches
+            "quant_mode": quant_mode,                                     # Quantization mode for key-value caches
+            "scales_path": extra_options.get("kv_cache_scale_file", ""),  # Filepath to where the calibrated scales are stored on disk
+        }
+        self.make_kv_cache_init()
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -356,26 +372,10 @@ class Model:
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
-        # Structured quantization config: parse the flat extra_options into a single QuantConfig
-        # (weights / moe / runtime), then source every quantization knob below from it so there is a
-        # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
-        # exported models remain byte-identical to the flat-option path.
-        self.quant_config = extra_options.get("_quant_config")
-        if self.quant_config is None:
-            self.quant_config = QuantConfig.from_extra_options(
-                extra_options,
-                precision=self.onnx_dtype_to_precision(self.onnx_dtype),
-                execution_provider=self.ep,
-            )
-        elif not isinstance(self.quant_config, QuantConfig):
-            raise TypeError("_quant_config must be a QuantConfig instance")
-
-        # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes the dense weights
-        # to 8-bit MatMulNBits at save time, mirroring the int4 path (onnx_dtype INT4/UINT4).
-        quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
+        # Make quantization config for multiple `attrs` dictionaries to reference
+        self.make_quant_config_init()
 
         # MoE-specific variables
-        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = (
             config.num_local_experts
             if hasattr(config, "num_local_experts")
@@ -384,44 +384,23 @@ class Model:
             else 0
         )
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-
-        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
-        # (expert_weight_bits, QMoE quant_type):
-        #   "int4"  -> (4, "int")    INT4 QMoE (default)
-        #   "int8"  -> (8, "int")    INT8 QMoE
-        #   "mxfp4" -> (4, "fp4")    MXFP4 QMoE (CUDA-only)
-        #   "nvfp4" -> (4, "nvfp4")  NVFP4 QMoE (CUDA-only)
-        moe_descriptor = resolve_dtype(self.quant_config.moe.type)
-        expert_weight_bits = moe_descriptor.bits
-        # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
-        # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        moe_op_type = "QMoE" if moe_descriptor.is_quantized else "MoE"
-        if moe_descriptor.kind == "mx":
-            qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
-        else:
-            qmoe_quant_type = "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
-
-        # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
-        # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
-        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
-        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
-        weights_prepacked = self.quant_config.moe.weights_prepacked
         self.moe_attrs = {
-            "op_type": moe_op_type,                          # MoE op to use
+            "op_type": "MoE",                                # MoE op to use
             "num_experts": num_experts,                      # Number of experts in MoE layer
             "top_k": top_k_experts,                          # Number of experts to select in MoE layer
             "activation_alpha": 1.0,                         # Alpha parameter used in activation function
             "activation_beta": 0.0,                          # Beta parameter used in activation function
             "activation_type": self.activation,              # Activation function for MoE layer
-            "expert_weight_bits": expert_weight_bits,        # Number of bits used in quantized MoE weights (only INT4 or INT8 are supported).
+            "expert_weight_bits": -1,                        # Number of bits used in quantized MoE weights (only INT4 or INT8 are supported).
             "normalize_routing_weights": False,              # Normalize routing weights in MoE layer
             "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
-            "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
+            "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
+            "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
         }
+        self.make_moe_init()
 
         # LM head-specific variables
         lm_head_softcap = config.final_logit_softcapping if getattr(config, "final_logit_softcapping", None) is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
@@ -432,28 +411,25 @@ class Model:
         }
         self.make_lm_head_init(config)
 
-        # Quantization-specific variables (INT4, INT8, etc.) — all sourced from `self.quant_config`.
-        weights_cfg = self.quant_config.weights
-        self.matmul_block_size = weights_cfg.block_size
+        # Global quantization-specific variables (INT4, INT8, etc.)
+        nodes_to_exclude = [override.match["name"] for override in self.quant_config.weights.overrides if override.exclude]
 
         # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
         # 0 = off (raw blockwise layout), 1 = SM80/Ampere fpA_intB layout (weight_prepacked=1),
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
-        self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
+        self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
-        # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig).
-        self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
-            "accuracy_level": weights_cfg.accuracy_level,
-            "qmoe_block_size": self.qmoe_block_size,
-            "qdq_block_size": int(self.matmul_block_size),
-            "bits": 8 if quantize_to_8bits else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision).
-            "is_symmetric": weights_cfg.symmetric,
-            "op_types_to_quantize": weights_cfg.op_types,
-            "nodes_to_exclude": [override.match["name"] for override in weights_cfg.overrides if override.exclude],
-            "algo_config": None,  # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
+            "accuracy_level": self.quant_config.weights.accuracy_level,
+            "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
+            "matmul_block_size": int(self.quant_config.weights.block_size),
+            "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
+            "is_symmetric": self.quant_config.weights.symmetric,
+            "op_types_to_quantize": self.quant_config.weights.op_types,
+            "nodes_to_exclude": nodes_to_exclude,
+            "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": self.quant_config.runtime.use_qdq,
         }
         self.make_quant_init(config)
@@ -585,14 +561,6 @@ class Model:
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
-
-    def hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
-        """Return a standard 3D shape or a 2D paged-attention shape."""
-        last_dim = self.hidden_size if last_dim is None else last_dim
-        if self.use_paged_attention:
-            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
-            return [first_dim, last_dim]
-        return ["batch_size", seq_dim, last_dim]
 
     def make_rope_init(self, config):
         if not hasattr(config, "rope_parameters") or not isinstance(config.rope_parameters, dict):
@@ -741,51 +709,59 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
-    def make_quantized_kv_cache_init(self):
+    def make_kv_cache_init(self):
+        if self.kv_cache_attrs["quant_type"] == "none":
+            # Return early if quantized KV caches aren't used
+            return
+
         if self.attention_attrs["op_type"] not in {"GroupQueryAttention", "PagedAttention"}:
+            # Return early if invalid op is used
             raise ValueError("Quantized KV cache requires GroupQueryAttention or PagedAttention.")
 
         if self.ep not in {"cpu", "cuda"}:
+            # Return early if selected EP is not supported with quantized KV caches
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
                 f"Got execution_provider='{self.ep}'."
             )
 
-        is_int4 = self.kv_cache_quant_type.startswith("int4")
-        is_fp8 = self.kv_cache_quant_type.startswith("fp8")
-        self.kv_cache_bit_width = 4 if is_int4 else 8
-        self.kv_quant_type = "PER_CHANNEL" if self.kv_cache_quant_type.endswith("per_channel") else "PER_TENSOR"
-
-        if self.use_paged_attention and is_int4:
+        if self.use_paged_attention and self.kv_cache_attrs["bit_width"] == 4:
             # PagedAttention's T_CACHE type constraint is {float16, bfloat16, int8, float8e4m3fn};
             # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
             raise ValueError(
                 "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_type='{self.kv_cache_quant_type}'."
+                f"got kv_cache_quant_type='{self.kv_cache_attrs['quant_type']}'."
             )
 
-        if is_fp8:
+        cache_dtype = (
             # FP8 E4M3: stored one byte per element (no bit-packing), kernel selects the fp8
             # path from the cache element type; kv_cache_bit_width stays 8.
-            cache_dtype = ir.DataType.FLOAT8E4M3FN
-        elif is_int4:
-            cache_dtype = ir.DataType.UINT8
-        else:
-            cache_dtype = ir.DataType.INT8
+            ir.DataType.FLOAT8E4M3FN
+            if self.kv_cache_attrs["quant_type"].startswith("fp8")
+            else ir.DataType.UINT8
+            if self.kv_cache_attrs["bit_width"] == 4
+            else ir.DataType.INT8
+        )
 
+        # Update input and output KV cache dtypes
         self.input_types["past_key_values.key"] = cache_dtype
         self.input_types["past_key_values.value"] = cache_dtype
         self.output_types["present.key"] = cache_dtype
         self.output_types["present.value"] = cache_dtype
 
-        if is_int4:
+        # Update input and output KV cache shapes based on bit width
+        if self.kv_cache_attrs["bit_width"] == 4:
             packed_head_size = (self.head_size + 1) // 2
             self.input_shapes["past_key_values.key"][-1] = packed_head_size
             self.input_shapes["past_key_values.value"][-1] = packed_head_size
             self.output_shapes["present.key"][-1] = packed_head_size
             self.output_shapes["present.value"][-1] = packed_head_size
 
+        # Restrict buffer sharing with quantized KV caches to specific EPs
         self.past_present_share_buffer = self.ep == "cuda"
+
+        # Save calibrated scales for quantized KV caches
+        self.make_kv_cache_scale_initializers()
 
     def get_kv_cache_scale_names(self, layer_id):
         # Convention-based initializer names for the per-layer KV cache quantization scales,
@@ -797,31 +773,30 @@ class Model:
         )
 
     def make_kv_cache_scale_initializers(self):
-        per_channel = self.kv_quant_type == "PER_CHANNEL"
+        per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
 
         # Calibrated per-layer scales are required and supplied via a JSON file:
         #   {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}
         # where each per-layer entry is a scalar (PER_TENSOR) or a length-scale_size
         # vector (PER_CHANNEL).
-        scale_file = self.extra_options.get("kv_cache_scale_file", None)
-        if scale_file is None:
+        if self.kv_cache_attrs["scales_path"] == "":
             raise ValueError(
                 "Quantized KV cache requires calibrated scales; provide them via "
                 "extra_options['kv_cache_scale_file']."
             )
-        with open(scale_file, encoding="utf-8") as file:
+
+        with open(self.kv_cache_attrs["scales_path"], encoding="utf-8") as file:
             scale_data = json.load(file)
         try:
             k_scales_per_layer = scale_data["scales"]["k_scales"]
             v_scales_per_layer = scale_data["scales"]["v_scales"]
         except (KeyError, TypeError) as error:
-            raise ValueError(
-                "kv_cache_scale_file must contain scales.k_scales and scales.v_scales."
-            ) from error
+            raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
+
         if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
             raise ValueError(
-                f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
+                f"Scales file must provide {self.num_layers} per-layer scales, "
                 f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
             )
 
@@ -830,7 +805,8 @@ class Model:
         # count. Emit the canonical shape on the paged path and keep the flat vector elsewhere.
         scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
 
-        def make_scale(per_layer, layer_id):
+        # Create a helper function for reformatting a scale tensor to the right output format
+        def make_kv_cache_scale(per_layer, layer_id):
             scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
             if scale.size != scale_size:
                 raise ValueError(
@@ -840,41 +816,73 @@ class Model:
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
             return scale.reshape(scale_shape)
 
+        # Make initializers for each scale tensor
         for layer_id in range(self.num_layers):
             k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            self.make_initializer(make_scale(k_scales_per_layer, layer_id), k_scale_name)
-            self.make_initializer(make_scale(v_scales_per_layer, layer_id), v_scale_name)
+            self.make_initializer(make_kv_cache_scale(k_scales_per_layer, layer_id), k_scale_name)
+            self.make_initializer(make_kv_cache_scale(v_scales_per_layer, layer_id), v_scale_name)
+
+    def make_quant_config_init(self):
+        self.quant_config = self.extra_options.get("_quant_config")
+        if self.quant_config is None:
+            self.quant_config = QuantConfig.from_extra_options(
+                extra_options=self.extra_options,
+                precision=self.onnx_dtype,
+                execution_provider=self.ep,
+            )
+        elif not isinstance(self.quant_config, QuantConfig):
+            raise TypeError("_quant_config must be a QuantConfig instance")
+
+    def make_moe_init(self):
+        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
+        # (expert_weight_bits, QMoE quant_type):
+        #   "int4"  -> (4, "int")    INT4 QMoE (default)
+        #   "int8"  -> (8, "int")    INT8 QMoE
+        #   "mxfp4" -> (4, "fp4")    MXFP4 QMoE (CUDA-only)
+        #   "nvfp4" -> (4, "nvfp4")  NVFP4 QMoE (CUDA-only)
+        # Structured quantization config: parse the flat extra_options into a single QuantConfig
+        # (weights / moe / runtime), then source every quantization knob below from it so there is a
+        # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
+        # exported models remain byte-identical to the flat-option path.
+        moe_descriptor = resolve_dtype(self.quant_config.moe.type)
+        self.moe_attrs["expert_weight_bits"] = moe_descriptor.bits
+
+        # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
+        # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        self.moe_attrs["moe_op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        if moe_descriptor.kind == "mx":
+            self.moe_attrs["qmoe_quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+        else:
+            self.moe_attrs["qmoe_quant_type"] = "int"
+
+        # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
+        # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
+        # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
+        # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
+        self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
 
     def make_lm_head_init(self, config):
         pass
 
-    def onnx_dtype_to_precision(self, onnx_dtype):
-        """Map the resolved ONNX weight dtype to a `QuantConfig` precision string.
-
-        Only used to seed the QuantConfig's `weights.type` / `io_dtype`; the builder's numeric
-        quantization knobs are read from the resolved config, not from this precision.
-        """
-        return {
-            ir.DataType.INT4: "int4",
-            ir.DataType.UINT4: "int4",
-            ir.DataType.INT8: "int8",
-            ir.DataType.UINT8: "int8",
-            ir.DataType.BFLOAT16: "bf16",
-            ir.DataType.FLOAT16: "fp16",
-            ir.DataType.FLOAT: "fp32",
-        }.get(onnx_dtype, "fp16")
-
+    # TODO: check this method
     def make_quant_init(self, config):
         # Decouple the int4 quantization *method* (how weights are rounded) from the
         # *mixed-precision placement* (which MatMuls use a different quant type than the
-        # int4 body). The base method is one of {"default", "rtn", "k_quant"}; placement is
-        # resolved from `matmul_mixed_precision` in `resolve_quant_config`. Legacy
+        # int4 body). The base method is one of {"default", "rtn", "k_quant"}. Legacy
         # compound names (e.g. "rtn_last", "k_quant_mixed") are still accepted as aliases.
         #
         # `matmul_mixed_precision` maps a node-group selector to a quant-type name (int4/int8,
         # extensible to fp8/fp4); the bit width is resolved on demand via `resolve_dtype`, so a
         # new scheme needs no new option and no stored bit table.
-        self.resolve_quant_config()
+
+        # Resolve quant config
+        self.quantization_algo = self.quant_config.weights.method
+        self.matmul_mixed_precision = {
+            override.match["preset"]: override.type
+            for override in self.quant_config.weights.overrides
+            if "preset" in override.match and override.type is not None
+        }
+
         self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
@@ -887,9 +895,9 @@ class Model:
                 config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
             )
 
-        # Positive FP4 e2m1 representable magnitudes (codes 0-7); negatives use codes 8-15.
-        self._FP4_E2M1_POS_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-        self._FP4_E2M1_MAX = 6.0
+        # Positive FP4_E2M1 representable magnitudes (codes 0-7); negatives use codes 8-15.
+        self.FP4_E2M1_POS_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+        self.FP4_E2M1_MAX = 6.0
 
     def make_tied_embeddings_init(self, config):
         # Determine if tied embeddings is even possible on the graph
@@ -939,11 +947,6 @@ class Model:
         # where rtn* = rtn, rtn_last
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
-        if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
-            if hasattr(self, "quant_config"):
-                self.resolve_quant_config()
-            else:
-                self.resolve_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -954,7 +957,7 @@ class Model:
         if base_method == "rtn" or (base_method == "default" and bits != 4):
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
+                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs["matmul_block_size"]}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
@@ -962,7 +965,7 @@ class Model:
         if base_method == "k_quant":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.matmul_block_size}",
+                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs["matmul_block_size"]}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp",
             )
@@ -1128,6 +1131,14 @@ class Model:
         """
         pass
 
+    def make_hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
+        """Return a standard 3D shape or a 2D paged-attention shape."""
+        last_dim = self.hidden_size if last_dim is None else last_dim
+        if self.use_paged_attention:
+            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
+            return [first_dim, last_dim]
+        return ["batch_size", seq_dim, last_dim]
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
@@ -1161,25 +1172,6 @@ class Model:
         tokenizer.model_max_length = self.context_length
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
-
-    def resolve_quant_config(self, extra_options=None):
-        """Resolve the dense quantization method and mixed-precision map.
-
-        Both values come from ``self.quant_config`` regardless of whether it was constructed from
-        flat extra options or structured JSON. ``self.matmul_mixed_precision`` maps node-group
-        selectors to a quant type, for example ``{"last_matmul": "int8"}``. The optional flat
-        options argument is retained for direct adapter callers that do not construct a ``Model``.
-        """
-        if extra_options is not None:
-            self.quantization_algo, self.matmul_mixed_precision = desugar_algo_config(extra_options)
-            return
-
-        self.quantization_algo = self.quant_config.weights.method
-        self.matmul_mixed_precision = {
-            override.match["preset"]: override.type
-            for override in self.quant_config.weights.overrides
-            if "preset" in override.match and override.type is not None
-        }
 
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
@@ -1280,7 +1272,7 @@ class Model:
             quant_int4 = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
-                block_size=self.quant_attrs["qdq_block_size"],
+                block_size=self.quant_attrs["matmul_block_size"],
                 is_symmetric=self.quant_attrs["is_symmetric"],
                 accuracy_level=self.quant_attrs["accuracy_level"],
                 nodes_to_exclude=nodes_to_exclude + upgraded_nodes,
@@ -1295,7 +1287,7 @@ class Model:
                 quant_upgraded = MatMulNBitsQuantizer(
                     model=model_proto,
                     bits=bits,
-                    block_size=self.quant_attrs["qdq_block_size"],
+                    block_size=self.quant_attrs["matmul_block_size"],
                     is_symmetric=self.quant_attrs["is_symmetric"],
                     accuracy_level=self.quant_attrs["accuracy_level"],
                     nodes_to_exclude=nodes_to_exclude,
@@ -1310,7 +1302,7 @@ class Model:
             quant = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
-                block_size=self.quant_attrs["qdq_block_size"],
+                block_size=self.quant_attrs["matmul_block_size"],
                 is_symmetric=self.quant_attrs["is_symmetric"],
                 accuracy_level=self.quant_attrs["accuracy_level"],
                 nodes_to_exclude=nodes_to_exclude,
@@ -1344,7 +1336,7 @@ class Model:
         An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant
         nbits (use ORT_FPA_INTB_GEMM=1 for int4 and int8).
         """
-        prepack_mode = self.matmulnbits_weights_prepacked
+        prepack_mode = self.matmul_attrs["weights_prepacked"]
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
             return
 
@@ -1482,9 +1474,7 @@ class Model:
         self.model.graph.append(node)
         self.node_names.add(name)
 
-    def make_value(
-        self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None
-    ) -> ir.Value:
+    def make_value(self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
         """Obtain or create an IR value by value name.
 
         If the value does not exist a new one is created.
@@ -1809,35 +1799,47 @@ class Model:
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
+        elif getattr(matmul, "weight_scale_2", None) is not None or matmul.weight.dtype == torch.float8_e4m3fn:
+            # For ModelOpt `MatMul`
+            return self.make_matmul_modelopt(matmul, basename, root_input, **kwargs)
         else:
             # For regular `MatMul`
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
-    def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if getattr(self, "quant_type", None) == "modelopt":
-            weight_scale = getattr(matmul, "weight_scale", None)
-            weight_scale_2 = getattr(matmul, "weight_scale_2", None)
-            if weight_scale_2 is not None:
-                out_features = int(matmul.weight.shape[0])
-                scale_shape = (out_features, int(matmul.weight.shape[1]) // 8)
-                scale_bytes = self.modelopt_e4m3_bytes(weight_scale, f"{basename}.weight_scale", scale_shape)
-                global_scale = self.modelopt_positive_scalar(weight_scale_2, f"{basename}.weight_scale_2")
-                return self.make_matmul_block_quantized_nvfp4_weight(
-                    basename, root_input, matmul.weight, scale_bytes, global_scale, **kwargs
-                )
-            if matmul.weight.dtype == torch.float8_e4m3fn:
-                if weight_scale is None:
-                    raise ValueError(f"ModelOpt FP8 weight '{basename}' is missing its weight_scale tensor.")
-                input_scale_tensor = getattr(matmul, "input_scale", None)
-                input_scale = (
-                    self.modelopt_positive_scalar(input_scale_tensor, f"{basename}.input_scale")
-                    if input_scale_tensor is not None
-                    else None
-                )
-                return self.make_matmul_block_quantized_fp8_weight(
-                    basename, root_input, matmul.weight, weight_scale, input_scale, **kwargs
-                )
+    def make_matmul_modelopt(self, matmul, basename, root_input, **kwargs):
+        if getattr(matmul, "weight_scale_2", None) is not None:
+            return self.make_matmul_modelopt_nvfp4(matmul, basename, root_input, **kwargs)
+        elif matmul.weight.dtype == torch.float8_e4m3fn:
+            return self.make_matmul_modelopt_fp8(matmul, basename, root_input, **kwargs)
+        else:
+            raise NotImplementedError(f"The {matmul.weight.dtype} precision within ModelOpt is not currently supported.")
 
+    def make_matmul_modelopt_nvfp4(self, matmul, basename, root_input, **kwargs):
+        out_features = int(matmul.weight.shape[0])
+        scale_shape = (out_features, int(matmul.weight.shape[1]) // 8)
+        scale_bytes = self.modelopt_e4m3_bytes(
+            getattr(matmul, "weight_scale", None), f"{basename}.weight_scale", scale_shape
+        )
+        global_scale = self.modelopt_positive_scalar(matmul.weight_scale_2, f"{basename}.weight_scale_2")
+        return self.make_matmul_block_quantized_nvfp4_weight(
+            basename, root_input, matmul.weight, scale_bytes, global_scale, **kwargs
+        )
+
+    def make_matmul_modelopt_fp8(self, matmul, basename, root_input, **kwargs):
+        weight_scale = getattr(matmul, "weight_scale", None)
+        if weight_scale is None:
+            raise ValueError(f"ModelOpt FP8 weight '{basename}' is missing its weight_scale tensor.")
+        input_scale_tensor = getattr(matmul, "input_scale", None)
+        input_scale = (
+            self.modelopt_positive_scalar(input_scale_tensor, f"{basename}.input_scale")
+            if input_scale_tensor is not None
+            else None
+        )
+        return self.make_matmul_block_quantized_fp8_weight(
+            basename, root_input, matmul.weight, weight_scale, input_scale, **kwargs
+        )
+
+    def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
@@ -1977,7 +1979,7 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
 
         return name
 
@@ -2038,7 +2040,7 @@ class Model:
             K=in_features,
             N=out_features,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
 
         return name
 
@@ -2093,9 +2095,6 @@ class Model:
 
     def make_matmul_nbits_qdq(self, matmul, matmul_name, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
-            # TODO: quantize weights, then save new MatMul weights for onnx model
-            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
-            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_float(matmul, matmul_name, root_input, **kwargs)
 
         if matmul.bits != 4:
@@ -2121,7 +2120,7 @@ class Model:
         self.make_value(
             matmul_output,
             self.io_dtype,
-            shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=matmul.out_features),
+            shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=matmul.out_features),
         )
 
         return matmul_name
@@ -2162,7 +2161,7 @@ class Model:
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
         add_inputs = [f"{matmul_name}/output_0", lora_B]
-        add_shape = self.hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim)
+        add_shape = self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim)
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
 
         return add_name
@@ -2233,9 +2232,6 @@ class Model:
 
     def make_packed_matmul_int4(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if not hasattr(q_matmul, "qweight"):
-            # TODO: quantize weights, then save new MatMul weights for onnx model
-            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
-            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
 
         matmul = self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
@@ -2248,7 +2244,7 @@ class Model:
 
         add_bias_inputs = [root_input, bias]
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        shape = self.hidden_state_shape(seq_dim=seq_dim, last_dim=add.shape[0])
+        shape = self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=add.shape[0])
 
         if kwargs.get("logits", False):
             output = "logits"
@@ -2300,7 +2296,7 @@ class Model:
                 name=gather_name,
                 domain="com.microsoft",
                 bits=bits,
-                block_size=int(self.matmul_block_size),
+                block_size=int(self.quant_attrs["matmul_block_size"]),
                 gather_axis=0,
                 quantize_axis=1,
             )
@@ -2329,7 +2325,7 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
-        self.make_value(gather_output, self.io_dtype, shape=self.hidden_state_shape())
+        self.make_value(gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
@@ -2340,7 +2336,7 @@ class Model:
             ]
             mul_output = f"{mul_name}/output_0"
             self.make_node("Mul", inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=self.hidden_state_shape())
+            self.make_value(mul_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
             layernorm_attrs_value = mul_output
         else:
@@ -2353,7 +2349,7 @@ class Model:
                 cast_name,
                 layernorm_attrs_value,
                 ir.DataType.FLOAT,
-                shape=self.hidden_state_shape(),
+                shape=self.make_hidden_state_shape(),
             )
             layernorm_attrs_value = f"{cast_name}/output_0"
 
@@ -2411,9 +2407,9 @@ class Model:
         )
         if not use_hidden_states_as_output:
             # Add shape only if not graph output
-            self.make_value(outputs[0], new_io_dtype, shape=self.hidden_state_shape())
+            self.make_value(outputs[0], new_io_dtype, shape=self.make_hidden_state_shape())
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=self.hidden_state_shape())
+            self.make_value(outputs[3], new_io_dtype, shape=self.make_hidden_state_shape())
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -3412,7 +3408,7 @@ class Model:
     def get_kv_cache_scale_inputs(self, **kwargs):
         # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
         # initializer names, or empty placeholders when the KV cache is not quantized.
-        if self.kv_cache_quant_type == "none":
+        if self.kv_cache_attrs["quant_type"] == "none":
             return "", ""
         layer_id = kwargs.get("layer_id")
         if layer_id is None:
@@ -3434,9 +3430,9 @@ class Model:
         if kwargs.get("q_norm_weight", ""):
             attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
 
-        if self.kv_cache_quant_type != "none":
-            attributes["k_quant_type"] = self.kv_quant_type
-            attributes["v_quant_type"] = self.kv_quant_type
+        if self.kv_cache_attrs["quant_type"] != "none":
+            attributes["k_quant_type"] = self.kv_cache_attrs["quant_mode"]
+            attributes["v_quant_type"] = self.kv_cache_attrs["quant_mode"]
 
         if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
@@ -3478,8 +3474,8 @@ class Model:
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         attributes = self.get_attention_op_attributes(**kwargs)
-        if self.kv_cache_quant_type != "none":
-            attributes["kv_cache_bit_width"] = self.kv_cache_bit_width
+        if self.kv_cache_attrs["quant_type"] != "none":
+            attributes["kv_cache_bit_width"] = self.kv_cache_attrs["bit_width"]
         self.make_node(
             "GroupQueryAttention",
             inputs=inputs,
@@ -4203,7 +4199,7 @@ class Model:
             mul_name,
             mul_inputs,
             dtype=self.io_dtype,
-            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         # Make output MatMul node
@@ -4314,7 +4310,7 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape())
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
 
     def make_fp8e8m0_initializer(self, scales_uint8, name):
         """Register a FLOAT8E8M0 initializer from raw ue8m0 code bytes (uint8).
@@ -4393,7 +4389,7 @@ class Model:
 
         # Per-block ue8m0 (power-of-two) scale. code 127 => scale 1.0 (used when amax==0).
         block_amax = blocks.abs().amax(dim=-1)  # [N, num_blocks]
-        ideal = block_amax / self._FP4_E2M1_MAX
+        ideal = block_amax / self.FP4_E2M1_MAX
         codes = torch.full((n, num_blocks), 127, dtype=torch.int64)
         pos = ideal > 0
         exps = torch.round(torch.log2(ideal[pos])).to(torch.int64) + 127
@@ -4402,7 +4398,7 @@ class Model:
 
         # Quantize each scaled value to the nearest FP4 e2m1 code.
         scaled = blocks / scales_float.unsqueeze(-1)
-        fp4_codes = self._fp4_e2m1_codes(scaled).reshape(n, k)  # [N, K] uint8 codes 0-15
+        fp4_codes = self.fp4_e2m1_codes(scaled).reshape(n, k)  # [N, K] uint8 codes 0-15
 
         # Column-major pack: transpose to [K, N], pack pairs along N (even=low, odd=high).
         codes_kn = fp4_codes.T.contiguous()  # [K, N]
@@ -4412,12 +4408,12 @@ class Model:
 
         return packed, codes.to(torch.uint8), 1.0
 
-    def _fp4_e2m1_codes(self, values):
+    def fp4_e2m1_codes(self, values):
         """Map float values to nearest FP4 e2m1 4-bit codes (0-15). Sign bit is bit 3."""
-        pos_vals = torch.tensor(self._FP4_E2M1_POS_VALUES, dtype=torch.float32)
+        pos_vals = torch.tensor(self.FP4_E2M1_POS_VALUES, dtype=torch.float32)
         flat = values.float().reshape(-1)
         sign = flat.sign()
-        absv = flat.abs().clamp(max=self._FP4_E2M1_MAX)
+        absv = flat.abs().clamp(max=self.FP4_E2M1_MAX)
         nearest_idx = (absv.unsqueeze(-1) - pos_vals.unsqueeze(0)).abs().argmin(dim=-1)  # 0-7
         codes = nearest_idx.to(torch.uint8)
         codes[sign < 0] += 8
@@ -4505,12 +4501,12 @@ class Model:
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
             **extra_kwargs,
         )
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape())
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
 
     def make_qmoe_weights(self, weights):
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
 
-        if self.qmoe_block_size <= 0:
+        if self.quant_attrs["qmoe_block_size"] <= 0:
             try:
                 if self.ep == "cuda":
                     qweight, scales = self._cuda_per_channel_quantize(
@@ -4524,7 +4520,7 @@ class Model:
             except Exception as e:
                 raise RuntimeError(f"Per-channel QMoE quantization failed: {e}") from e
 
-        if self.ep == "cuda" and self.qmoe_block_size > 0:
+        if self.ep == "cuda" and self.quant_attrs["qmoe_block_size"] > 0:
             # CUDA QMoE consumes CUTLASS-prepacked expert weights (the kernel's fpA_intB mixed GEMM
             # layout). For weights_prepacked=-1 (auto) or 1, produce them offline so the QMoE op reads
             # them directly: quantize with ONNX Runtime's blockwise quantizer, keep the signed scales,
@@ -4535,7 +4531,7 @@ class Model:
             # weights_prepacked=0 ships raw [N, K/pack] weights with ONNX Runtime's MatMulNBits-compatible
             # blockwise quantizer. This is the exact encoding the CUDA QMoE PrePack hook expects: raw
             # bytes + blockwise scales, which it lays out into the CUTLASS fpA_intB format at load time.
-            block_size = self.qmoe_block_size
+            block_size = self.quant_attrs["qmoe_block_size"]
             quantize_method = (
                 self._matmulnbits_blockwise_quantize
                 if weights_prepacked == 0
@@ -4554,10 +4550,10 @@ class Model:
 
         # Use block-wise quantization for supported EPs when qmoe_block_size > 0.
         supported_blockwise_eps = ["cpu", "cuda", "webgpu", "trt-rtx"]
-        use_blockwise_quant = self.ep in supported_blockwise_eps and self.qmoe_block_size > 0
+        use_blockwise_quant = self.ep in supported_blockwise_eps and self.quant_attrs["qmoe_block_size"] > 0
 
         if use_blockwise_quant:
-            block_size = self.qmoe_block_size
+            block_size = self.quant_attrs["qmoe_block_size"]
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
@@ -4567,7 +4563,7 @@ class Model:
 
         raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)}) "
                            "for QMoE expert weights quantization. "
-                           f"Got qmoe_block_size={self.qmoe_block_size} and ep={self.ep}.")
+                           f"Got qmoe_block_size={self.quant_attrs["qmoe_block_size"]} and ep={self.ep}.")
 
     def _symmetric_per_channel_quantize(self, weights):
         """Quantize a single expert's weights with one scale per output channel.
@@ -4617,7 +4613,7 @@ class Model:
         ``weights_prepacked`` is left at its prepacked default.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        block_size = self.qmoe_block_size
+        block_size = self.quant_attrs["qmoe_block_size"]
         return CudaQuantizer.qmoe_prepacked_blockwise_quantize(
             weights,
             bits,
@@ -4638,7 +4634,7 @@ class Model:
         convention). Layout matches ``quantize_matmul_{4,8}bits``.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
-        block_size = self.qmoe_block_size
+        block_size = self.quant_attrs["qmoe_block_size"]
         return CudaQuantizer.matmulnbits_blockwise_quantize(
             weights,
             bits,
@@ -4671,7 +4667,7 @@ class Model:
         self.make_value(
             act_output,
             dtype=self.io_dtype,
-            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         mul_act_name = f"{basename}/Mul"
@@ -4680,7 +4676,7 @@ class Model:
             mul_act_name,
             mul_act_inputs,
             dtype=self.io_dtype,
-            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
         )
 
         return mul_act_name
@@ -4701,7 +4697,7 @@ class Model:
         else:
             self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(last_dim=self.intermediate_size))
 
         return gelu_name
 
@@ -4709,7 +4705,7 @@ class Model:
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
-        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(last_dim=self.intermediate_size))
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(last_dim=self.intermediate_size))
         return relu_name
 
     def make_relu_squared(self, layer_id, root_input, activation):
@@ -4721,7 +4717,7 @@ class Model:
         self.make_value(
             f"{pow_name}/output_0",
             self.io_dtype,
-            shape=self.hidden_state_shape(last_dim=self.intermediate_size),
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
         )
         return pow_name
 
@@ -4831,7 +4827,7 @@ class Model:
             self.make_value(
                 mul_output,
                 self.io_dtype,
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
             lm_name = mul_name
 
@@ -4847,7 +4843,7 @@ class Model:
             self.make_value(
                 where_output,
                 self.io_dtype,
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
             lm_name = where_name
 
@@ -4859,7 +4855,7 @@ class Model:
                 div_name,
                 div_inputs,
                 dtype=self.io_dtype,
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
 
             tanh_name = f"{basename}/softcap/Tanh"
@@ -4867,7 +4863,7 @@ class Model:
                 tanh_name,
                 f"{div_name}/output_0",
                 dtype=self.io_dtype,
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
 
             mul_name = f"{basename}/softcap/Mul"
@@ -4877,7 +4873,7 @@ class Model:
             self.make_value(
                 mul_output,
                 self.io_dtype,
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
             lm_name = mul_name
 
@@ -4889,7 +4885,7 @@ class Model:
             self.make_value(
                 cast_output,
                 self.output_types["logits"],
-                shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
+                shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=self.vocab_size),
             )
 
     def make_layer(self, layer_id, layer):
@@ -5003,9 +4999,6 @@ class Model:
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
-
-        if self.kv_cache_quant_type != "none":
-            self.make_kv_cache_scale_initializers()
 
         # Load weights of original model
         self.weights = self.load_weights(input_path)

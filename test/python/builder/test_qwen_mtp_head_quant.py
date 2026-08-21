@@ -10,7 +10,6 @@ import onnx_ir as ir
 import pytest
 import torch
 
-from models.builders.base import Model
 from models.builders.qwen import Qwen35MoETextModel, Qwen35TextModel
 from models.builders.qwen_mtp import Qwen35MtpHead
 from quantization import QuantConfig
@@ -25,12 +24,6 @@ def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
     model._mtp_ep = "cuda"
     model._resolve_mtp_model_config(extra_options)
     return model
-
-
-def test_base_model_type_resolution_uses_config_architecture():
-    config = SimpleNamespace(architectures=["ExampleForCausalLM"])
-
-    assert Model._get_model_type(None, config) == "ExampleForCausalLM"
 
 
 def test_no_mtp_config_inherits_main_model_settings():
