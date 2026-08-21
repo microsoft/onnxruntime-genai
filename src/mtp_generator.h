@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include <deque>
 #include <memory>
 #include <random>
 #include <vector>
 
 #include "sampling_distribution.h"
+#include "mtp_generator_common.h"
 #include "speculative_stats.h"
 
 namespace Generators {
@@ -28,29 +28,14 @@ struct DeviceInterface;
 // round-trip), and the draft is verified against the main model in a single 2-token forward.
 // Greedy, batch size 1. The output is identical to plain greedy decoding (lossless), modulo
 // floating-point near-ties in the batched verify forward.
-struct MtpGenerator {
+struct MtpGenerator : MtpGeneratorBase {
   MtpGenerator(const Model& main_model, const Model& mtp_model, const GeneratorParams& params);
 
   // Seed the prompt (runs the main model's prefill).
-  void AppendTokens(cpu_span<const int32_t> input_ids);
-
-  // Produce exactly one user-visible token. A speculative round may commit several tokens
-  // internally; later calls drain those buffered tokens before another round runs.
-  void GenerateNextToken();
-
-  bool IsDone() const;
-
-  // The full committed token sequence (batch index 0).
-  const std::vector<int32_t>& GetSequence() const { return emitted_sequence_; }
-
-  // Speculative-decoding statistics.
-  SpeculativeStats GetSpeculativeStats() const;
-  size_t Forwards() const { return stats_.target_forward_passes; }
-  size_t Accepts() const { return stats_.draft_tokens_accepted; }
-  size_t Trials() const { return stats_.draft_tokens_evaluated; }
+  void AppendTokens(cpu_span<const int32_t> input_ids) override;
 
  private:
-  void RunRound();
+  void RunRound() override;
 
   // Run the MTP head on a single (hidden_state, token) pair. When `need_draft` is true, returns the
   // head's greedy drafted next token; when false, only advances the head's KV cache (skipping the
@@ -142,12 +127,8 @@ struct MtpGenerator {
   std::vector<std::shared_ptr<Tensor>> refeed_multi_;
   std::unique_ptr<OrtValue> logits_fp32_;  // reusable fp32 cast of the main model's raw logits
 
-  std::vector<int32_t> sequence_;          // internally committed tokens (may include lookahead)
-  std::vector<int32_t> emitted_sequence_;  // prompt + tokens exposed through GenerateNextToken
-  std::deque<int32_t> pending_tokens_;     // internally committed tokens waiting to be exposed
   int hidden_size_{};
   int vocab_size_{};
-  int max_length_{};
 
   // Number of speculative draft tokens per step (N). 1 = the original single-token fast path;
   // >1 chains the single MTP module N times (Qwen3.6 / vLLM-style). Taken from
@@ -192,8 +173,6 @@ struct MtpGenerator {
   // Loop carry state (see the design doc draft/verify invariant):
   int32_t next_token_{};  // token predicted for the current cache length L (not yet committed)
   size_t length_{};       // committed cache length L
-  bool primed_{false};    // whether AppendTokens has run the prompt
-  bool done_{false};
   // Pipelined draft: on an accepted step the next step's draft is computed ahead (fused into the
   // post-accept KV-advance as one 2-token MTP forward), so the next GenerateNextToken reuses it
   // instead of issuing a separate draft forward.

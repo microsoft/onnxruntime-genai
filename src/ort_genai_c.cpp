@@ -14,7 +14,7 @@
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
-#include "mtp_generator.h"
+#include "mtp_generator_common.h"
 #include "engine/engine.h"
 #include "models/streaming_processor.h"
 #include "models/nemotron_speech.h"
@@ -67,7 +67,17 @@ struct OgaAudios : Generators::Audios, OgaAbstract {};
 struct OgaConfig : Generators::Config, OgaAbstract {};
 struct OgaGenerator : Generators::Generator, OgaAbstract {};
 struct OgaGeneratorParams : Generators::GeneratorParams, OgaAbstract {};
-struct OgaMtpGenerator : Generators::MtpGenerator, OgaAbstract {};
+// Unlike the handles above, this one owns the implementation rather than deriving from it (the
+// concrete generator is chosen at runtime), so `OgaDestroyMtpGenerator` deletes it as itself.
+struct OgaMtpGenerator {
+  explicit OgaMtpGenerator(std::unique_ptr<Generators::MtpGeneratorInterface> implementation)
+      : implementation_{std::move(implementation)} {}
+
+  Generators::MtpGeneratorInterface& Impl() { return *implementation_; }
+  const Generators::MtpGeneratorInterface& Impl() const { return *implementation_; }
+
+  std::unique_ptr<Generators::MtpGeneratorInterface> implementation_;
+};
 struct OgaImages : Generators::Images, OgaAbstract {};
 struct OgaModel : Generators::Model, OgaAbstract {};
 struct OgaMultiModalProcessor : Generators::MultiModalProcessor, OgaAbstract {};
@@ -500,47 +510,47 @@ OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* p
 
 OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_model, const OgaModel* mtp_model, const OgaGeneratorParams* params, OgaMtpGenerator** out) {
   OGA_TRY
-  *out = ReturnUnique<OgaMtpGenerator>(std::make_unique<Generators::MtpGenerator>(*main_model, *mtp_model, *params));
+  *out = std::make_unique<OgaMtpGenerator>(Generators::CreateMtpGenerator(*main_model, *mtp_model, *params)).release();
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
-  generator->AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
+  generator->Impl().AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator) {
   OGA_TRY
-  generator->GenerateNextToken();
+  generator->Impl().GenerateNextToken();
   return nullptr;
   OGA_CATCH
 }
 
 bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator) {
-  return generator->IsDone();
+  return generator->Impl().IsDone();
 }
 
 size_t OGA_API_CALL OgaMtpGenerator_GetSequenceCount(const OgaMtpGenerator* generator) {
-  return generator->GetSequence().size();
+  return generator->Impl().GetSequence().size();
 }
 
 const int32_t* OGA_API_CALL OgaMtpGenerator_GetSequenceData(const OgaMtpGenerator* generator) {
-  return generator->GetSequence().data();
+  return generator->Impl().GetSequence().data();
 }
 
 size_t OGA_API_CALL OgaMtpGenerator_GetForwardCount(const OgaMtpGenerator* generator) {
-  return generator->Forwards();
+  return generator->Impl().Forwards();
 }
 
 size_t OGA_API_CALL OgaMtpGenerator_GetAcceptCount(const OgaMtpGenerator* generator) {
-  return generator->Accepts();
+  return generator->Impl().Accepts();
 }
 
 size_t OGA_API_CALL OgaMtpGenerator_GetTrialCount(const OgaMtpGenerator* generator) {
-  return generator->Trials();
+  return generator->Impl().Trials();
 }
 
 OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(
@@ -549,12 +559,12 @@ OgaResult* OGA_API_CALL OgaMtpGenerator_GetSpeculativeStats(
   if (!out)
     throw std::invalid_argument("out must not be null.");
   *out = ReturnUnique<OgaSpeculativeStats>(
-      std::make_unique<Generators::SpeculativeStats>(generator->GetSpeculativeStats()));
+      std::make_unique<Generators::SpeculativeStats>(generator->Impl().GetSpeculativeStats()));
   return nullptr;
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete static_cast<Generators::MtpGenerator*>(p); }
+void OGA_API_CALL OgaDestroyMtpGenerator(OgaMtpGenerator* p) { delete p; }
 
 bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();
