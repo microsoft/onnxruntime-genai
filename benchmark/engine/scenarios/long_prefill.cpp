@@ -33,6 +33,9 @@ void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
   if (config.concurrency != 1) {
     throw std::invalid_argument("long_prefill requires concurrency=1");
   }
+  if (config.generation_tokens != 1) {
+    throw std::invalid_argument("long_prefill requires generation_tokens=1");
+  }
   if (!IsLongPrefillLength(config.prompt_length_k)) {
     throw std::invalid_argument("long_prefill requires prompt_length_k in [32,64,128]");
   }

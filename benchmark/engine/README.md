@@ -58,10 +58,9 @@ export LD_LIBRARY_PATH=<cuda_home>/lib64:$PWD/build/Linux/RelWithDebInfo/benchma
 python benchmark/engine/run.py \
   --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --config benchmark/engine/config.json \
-  --out benchmark/engine/out
+  --out benchmark/engine/out \
+  --cuda_visible_devices 0,1,2,3
 ```
-
-`--config` defaults to `config.json` and `--out` to `out`, both relative to the working directory.
 
 Use `run.py` for configs containing multiple scenarios. It runs each entry in a separate
 `engine_benchmark` process, so CUDA, ONNX Runtime allocators, and the paged-cache capacity check
@@ -76,9 +75,6 @@ build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --out benchmark/engine/out
 ```
 
-A multi-scenario config should be run through `run.py` to avoid carrying CUDA allocator state
-from one scenario into the next.
-
 To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario is
 assigned one GPU in round-robin order, and `CUDA_VISIBLE_DEVICES` is set separately for each
 process, so no scenario uses more than one GPU:
@@ -91,10 +87,8 @@ python benchmark/engine/run.py \
   --cuda_visible_devices 0,1,2,3
 ```
 
-Without `--cuda_visible_devices`, scenarios remain sequential and inherit the caller's
-`CUDA_VISIBLE_DEVICES` setting.
-
-Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
+The runner requires `--executable`, `--config`, `--out`, and `--cuda_visible_devices`. Verbose
+child benchmark output is opt-in with `--verbose`.
 
 ## Configuration
 

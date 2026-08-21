@@ -6,7 +6,6 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -26,25 +25,12 @@ namespace fs = std::filesystem;
 namespace engine_benchmark {
 namespace {
 
-// versions.json is written next to the executable when the build stages the benchmark dependencies.
-nlohmann::json ReadStagedVersions() {
-  // Match versions.json staged under any build config: build/Linux/<config>/benchmark/engine.
-  const std::regex versions_pattern(R"(build/Linux/[^/]+/benchmark/engine/versions\.json$)");
-  fs::path versions_path;
-  for (const auto& entry : fs::recursive_directory_iterator("build/Linux")) {
-    if (!entry.is_regular_file() || !std::regex_search(entry.path().generic_string(), versions_pattern)) {
-      continue;
-    }
-    if (!versions_path.empty()) {
-      throw std::runtime_error("Multiple versions.json found under build/Linux; expected exactly one build config.");
-    }
-    versions_path = entry.path();
-  }
-
+// versions.json is staged beside the running executable.
+nlohmann::json ReadStagedVersions(const fs::path& executable) {
+  const fs::path versions_path = executable.parent_path() / "versions.json";
   std::ifstream file(versions_path, std::ios::binary);
-  if (versions_path.empty() || !file) {
-    throw std::runtime_error(
-        "versions.json not found; expected the build to stage it under build/Linux/<config>/benchmark/engine.");
+  if (!file) {
+    throw std::runtime_error("versions.json not found beside executable: " + executable.string());
   }
 
   nlohmann::json versions;
@@ -118,7 +104,7 @@ void WriteJsonFile(const fs::path& path, const nlohmann::json& json) {
 
 }  // namespace
 
-int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
+int DispatchScenarios(const fs::path& executable, const fs::path& config_path, const fs::path& out_dir) {
   OgaHandle handle;
 
   std::ifstream config_file(config_path, std::ios::binary);
@@ -138,7 +124,7 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
 
   RegisterExecutionProviderLibraries(configs);
 
-  const nlohmann::json staged_versions = ReadStagedVersions();
+  const nlohmann::json staged_versions = ReadStagedVersions(executable);
 
   BenchmarkContext context;
   context.ort_version = staged_versions.value("ort_version", std::string{"unknown"});
@@ -184,7 +170,8 @@ int main(int argc, char** argv) {
       }
     }
 
-    return engine_benchmark::DispatchScenarios(config_path, out_dir);
+    // /proc/self/exe is a Linux virtual path that points to the currently running executable
+    return engine_benchmark::DispatchScenarios(fs::canonical("/proc/self/exe"), config_path, out_dir);
   } catch (const std::exception& ex) {
     std::cerr << "engine_benchmark failed: " << ex.what() << std::endl;
     return 1;
