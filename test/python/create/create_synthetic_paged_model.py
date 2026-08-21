@@ -128,6 +128,7 @@ def _decoder_graph():
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
         helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
+        helper.make_tensor_value_info("attention_metadata", TensorProto.INT32, [3]),
         helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, cache_shape),
         helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, cache_shape),
     ]
@@ -177,6 +178,7 @@ def create_config(output_dir):
                     "block_table": "block_table",
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
+                    "attention_metadata": "attention_metadata",
                     "past_key_names": "past_key_values.%d.key",
                     "past_value_names": "past_key_values.%d.value",
                 },
