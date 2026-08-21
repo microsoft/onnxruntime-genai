@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -29,6 +30,87 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   auto cpu_logits = logits.CpuSpan();
   std::fill(cpu_logits.begin(), cpu_logits.end(), 0.0f);
   cpu_logits[token] = 100.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
+struct FailingContinuationControl {
+  bool fail_append{};
+  bool fail_restore{};
+};
+
+class FailingContinuationSearch final : public GreedySearch_Cpu {
+ public:
+  FailingContinuationSearch(
+      const GeneratorParams& params,
+      std::shared_ptr<FailingContinuationControl> control)
+      : GreedySearch_Cpu(params), control_{std::move(control)} {}
+
+  void AppendTokens(DeviceSpan<int32_t>& tokens) override {
+    if (control_->fail_append) {
+      throw std::runtime_error("Injected continuation append failure.");
+    }
+    GreedySearch_Cpu::AppendTokens(tokens);
+  }
+
+ protected:
+  void RestoreStateForTransactionImpl() override {
+    if (control_->fail_restore) {
+      throw std::runtime_error("Injected continuation restore failure.");
+    }
+    GreedySearch_Cpu::RestoreStateForTransactionImpl();
+  }
+
+ private:
+  std::shared_ptr<FailingContinuationControl> control_;
+};
+
+class FailingContinuationDevice final : public DeviceInterface {
+ public:
+  FailingContinuationDevice(
+      DeviceInterface& inner,
+      std::shared_ptr<FailingContinuationControl> control)
+      : inner_{inner}, control_{std::move(control)} {}
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<FailingContinuationSearch>(params, control_);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+  std::shared_ptr<FailingContinuationControl> control_;
+};
+
+static_assert(noexcept(std::declval<Request&>().CommitStep(
+    std::declval<const RequestStepPlan&>(),
+    std::declval<const RequestStepResult&>())));
+
+DeviceSpan<float> SamplingLogits(Model& model) {
+  auto logits = model.p_device_inputs_->Allocate<float>(
+      static_cast<size_t>(model.config_->model.vocab_size));
+  auto cpu_logits = logits.CpuSpan();
+  std::fill(cpu_logits.begin(), cpu_logits.end(), -100.0f);
+  cpu_logits[2] = 1.0f;
+  cpu_logits[3] = 1.0f;
+  cpu_logits[4] = 1.0f;
   logits.CopyCpuToDevice();
   return logits;
 }
@@ -269,7 +351,6 @@ TEST_F(RequestLifecycleTest, ContinueAfterTurnCompleteQueuesNextTurn) {
   EXPECT_EQ(engine_.engine->Step(), request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_TRUE(request->IsTurnComplete());
-  EXPECT_TRUE(request->IsDone());  // Compatibility alias.
 }
 
 TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {
@@ -292,6 +373,33 @@ TEST_F(RequestLifecycleTest, ContinueBeyondContextIsRejectedBeforeMutation) {
   EXPECT_EQ(after.processed_sequence_length, before.processed_sequence_length);
 }
 
+TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEngine) {
+  auto params = MakeGreedyParams(*model_);
+  auto control = std::make_shared<FailingContinuationControl>();
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  engine_.engine->AddRequest(request);
+  ASSERT_EQ(engine_.engine->Step(), request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
+
+  control->fail_append = true;
+  control->fail_restore = true;
+  try {
+    request->Continue(std::vector<int32_t>{5});
+    FAIL() << "Expected continuation restore failure.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind, StepOutcomeKind::FatalExecutionFailure);
+  }
+
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_THROW(request->Continue(std::vector<int32_t>{6}), std::runtime_error);
+  EXPECT_THROW(static_cast<void>(engine_.engine->Step()), EngineStepError);
+}
+
 TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
@@ -306,6 +414,7 @@ TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
       static_cast<size_t>(first_plan.sequence_length_before);
   constexpr int32_t generated_token = 5;
   auto first_logits = LogitsForToken(*model_, generated_token);
+  PrepareRequestStep(model_, first_plan);
   request->SaveStateForTransaction();
   const auto first_result = request->ApplyLogitsForTransaction(first_logits);
   request->CommitStateForTransaction();
@@ -319,6 +428,7 @@ TEST_F(RequestLifecycleTest, ContinuePreservesUnreadOutputAndHidesInputTokens) {
   completion_plan.target_cache_slots =
       static_cast<size_t>(completion_plan.sequence_length_before);
   auto eos_logits = LogitsForToken(*model_, EosToken(*model_));
+  PrepareRequestStep(model_, completion_plan);
   request->SaveStateForTransaction();
   const auto completion_result =
       request->ApplyLogitsForTransaction(eos_logits);
@@ -424,6 +534,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   const int32_t next_token = 5;
   auto logits = LogitsForToken(*model_, next_token);
 
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   const auto result = request->ApplyLogitsForTransaction(logits);
 
@@ -464,6 +575,36 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 
+TEST_F(RequestLifecycleTest, TransactionalRollbackRestoresSamplingState) {
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 3;
+  params->search.top_p = 1.0f;
+  params->search.temperature = 1.0f;
+  params->search.random_seed = 1234;
+
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  request->Assign(engine_.engine);
+  const auto before = request->Snapshot();
+  auto logits = SamplingLogits(*model_);
+
+  request->SaveStateForTransaction();
+  const auto first = request->ApplyLogitsForTransaction(logits);
+  request->RestoreStateForTransaction();
+
+  EXPECT_EQ(request->Snapshot().current_sequence_length,
+            before.current_sequence_length);
+
+  request->SaveStateForTransaction();
+  const auto retried = request->ApplyLogitsForTransaction(logits);
+  request->RestoreStateForTransaction();
+
+  EXPECT_TRUE(first.token_appended);
+  EXPECT_TRUE(retried.token_appended);
+  EXPECT_EQ(retried.token, first.token);
+}
+
 TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   auto prompt = Prompt();
   auto request = MintAssignedRequest(engine_.engine, *model_, prompt);
@@ -475,6 +616,7 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   plan.unprocessed_token_count = 2;
   plan.target_cache_slots = 2;
 
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   request->CommitStateForTransaction();
   request->CommitStep(plan, RequestStepResult{});
@@ -499,6 +641,7 @@ TEST_F(RequestLifecycleTest, FirstTransactionalStepCanCommitDirectlyToTurnComple
   plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
   auto logits = LogitsForToken(*model_, EosToken(*model_));
 
+  PrepareRequestStep(model_, plan);
   request->SaveStateForTransaction();
   const auto result = request->ApplyLogitsForTransaction(logits);
   request->CommitStateForTransaction();

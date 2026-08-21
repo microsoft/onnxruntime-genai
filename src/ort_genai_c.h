@@ -59,14 +59,6 @@ typedef enum OgaElementType {
   OgaElementType_bfloat16,    // Non-IEEE floating-point format based on IEEE754 single-precision
 } OgaElementType;
 
-typedef enum OgaRequestStatus {
-  OgaRequestStatus_created,
-  OgaRequestStatus_queued,
-  OgaRequestStatus_active,
-  OgaRequestStatus_turn_complete,
-  OgaRequestStatus_closed,
-} OgaRequestStatus;
-
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
@@ -523,7 +515,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSearchBool(const OgaGene
 /**
  * \brief Set a numerical value for a speculative decoding option.
  * \param[in] params The generator params to set.
- * \param[in] name The name of the speculative option (e.g. "max_draft_tokens").
+ * \param[in] name The name of the speculative option (e.g. "max_draft_tokens" or "ngram_size").
  * \param[in] value The value to set.
  * \return OgaResult containing the error message if setting the option failed.
  */
@@ -537,6 +529,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeNumber(OgaGen
  * \return OgaResult containing the error message if getting the option failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGeneratorParams* params, const char* name, double* value);
+
+/**
+ * \brief Set a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to set.
+ * \param[in] name The name of the speculative option.
+ * \param[in] value The value to set.
+ * \return OgaResult containing the error message if setting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeBool(OgaGeneratorParams* params, const char* name, bool value);
+
+/**
+ * \brief Get a boolean value for a speculative decoding option.
+ * \param[in] params The generator params to query.
+ * \param[in] name The name of the speculative option.
+ * \param[out] value The current value.
+ * \return OgaResult containing the error message if getting the option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeBool(const OgaGeneratorParams* params, const char* name, bool* value);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -1194,8 +1204,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest**
  * \brief Checks if the engine has any pending requests to process.
  *
  * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
- * A false result does not mean the engine owns no requests: requests at OgaRequestStatus_turn_complete remain owned
- * until explicitly removed with OgaEngineRemoveRequest.
+ * A false result does not mean the engine owns no requests: turn-complete requests remain owned
+ * until removed or abandoned.
  *
  * \param[in] engine The engine instance to check for pending requests.
  * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
@@ -1208,8 +1218,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
  * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
- * On success, the engine retains ownership of the request at OgaRequestStatus_turn_complete, which completes only
- * the current generation turn. OgaEngineRemoveRequest releases that ownership immediately. If the caller instead
+ * On success, the engine retains ownership after the current generation turn completes. OgaEngineRemoveRequest
+ * releases that ownership immediately. If the caller instead
  * releases every external handle, the request is marked abandoned and reclaimed before the engine's next
  * OgaEngineAddRequest or OgaEngineStep boundary.
  *
@@ -1252,7 +1262,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, 
  * \brief Adds initial input sequences to a created request.
  *
  * This function is valid only before the request is submitted to an Engine. Use OgaRequestContinue to begin another
- * generation turn after OgaRequestStatus_turn_complete.
+ * generation turn after OgaRequestIsTurnComplete returns true.
  * Input must leave room for at least one generated token below max_length.
  *
  * \param[in] request The request to set the input sequences on.
@@ -1264,8 +1274,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, cons
 /**
  * \brief Queues another generation turn using the request's resident model state.
  *
- * This function is valid only from OgaRequestStatus_turn_complete. The request moves to
- * OgaRequestStatus_queued, and subsequent OgaEngineStep calls process the appended input.
+ * This function is valid only after OgaRequestIsTurnComplete returns true. Subsequent OgaEngineStep calls process
+ * the appended input.
  *
  * \param[in] request The request to continue.
  * \param[in] tokens The new input sequence for the next turn.
@@ -1340,36 +1350,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request,
 /**
  * \brief Checks if the current generation turn is complete.
  *
- * This function returns true at OgaRequestStatus_turn_complete. It does not mean that the request is permanently
- * closed; OgaRequestContinue may queue another turn while state remains resident.
+ * This function reports completion of the current turn. It does not mean that the request is permanently closed;
+ * OgaRequestContinue may queue another turn while state remains resident.
  *
  * \param[in] request The request whose current turn should be checked.
  * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
  * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsTurnComplete(const OgaRequest* request, bool* out);
-
-/**
- * \brief Deprecated compatibility alias for OgaRequestIsTurnComplete.
- *
- * This function reports completion of the current generation turn; it does not report permanent request closure.
- *
- * \deprecated Use OgaRequestIsTurnComplete instead.
- *
- * \param[in] request The request whose current turn should be checked.
- * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
- * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
-
-/**
- * \brief Gets the request lifecycle status.
- *
- * \param[in] request The request to inspect.
- * \param[out] out The current lifecycle status.
- * \return OgaResult containing the error message if the status could not be read, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetStatus(const OgaRequest* request, OgaRequestStatus* out);
 
 /**
  * \brief Registers an execution provider library with ONNXRuntime API.

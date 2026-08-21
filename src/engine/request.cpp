@@ -42,7 +42,9 @@ void ValidateAppendLength(const GeneratorParams& params,
 }  // namespace
 
 Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {
+    : params_{params},
+      rng_{CreateRandomGenerator(params->search.random_seed)},
+      search_{CreateSearch(*params)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -90,7 +92,6 @@ RequestAdmissionPreparation Request::PrepareAdmission() const {
   preparation.prompt_sequence_length = preparation.search->GetSequenceLength();
   preparation.seen_sequence_length = preparation.prompt_sequence_length;
   preparation.tokens_host.reserve(params_->search.max_length);
-  preparation.unseen_token_indices.reserve(params_->search.max_length);
   preparation.tokens_host.insert(
       preparation.tokens_host.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   return preparation;
@@ -101,13 +102,54 @@ void Request::CommitAdmission(std::shared_ptr<Engine> engine,
   search_ = std::move(preparation.search);
   batched_sampler_state_ = std::move(preparation.sampling_state);
   tokens_host_ = std::move(preparation.tokens_host);
-  unseen_token_indices_ = std::move(preparation.unseen_token_indices);
   prompt_sequence_length_ = preparation.prompt_sequence_length;
   seen_sequence_length_ = preparation.seen_sequence_length;
   processed_sequence_length_ = 0;
   prefill_input_ids_.clear();
   engine_ = std::move(engine);
   status_ = RequestStatus::Assigned;
+}
+
+void Request::PrepareForStep(size_t max_generated_token_indices) {
+  if (next_unseen_token_index_ > unseen_token_indices_.size()) {
+    throw std::logic_error("The unseen token cursor is outside the generated-token index queue.");
+  }
+
+  const size_t unread_token_count =
+      unseen_token_indices_.size() - next_unseen_token_index_;
+  const bool append_would_grow =
+      max_generated_token_indices >
+      unseen_token_indices_.capacity() - unseen_token_indices_.size();
+  if (next_unseen_token_index_ != 0 &&
+      (append_would_grow ||
+       next_unseen_token_index_ >= unread_token_count)) {
+    const auto unread_begin =
+        unseen_token_indices_.begin() +
+        static_cast<std::vector<size_t>::difference_type>(
+            next_unseen_token_index_);
+    unseen_token_indices_.erase(unseen_token_indices_.begin(), unread_begin);
+    next_unseen_token_index_ = 0;
+  }
+
+  if (max_generated_token_indices >
+      unseen_token_indices_.max_size() - unseen_token_indices_.size()) {
+    throw std::length_error(
+        "The generated-token index queue cannot represent this step.");
+  }
+  const size_t required_capacity =
+      unseen_token_indices_.size() + max_generated_token_indices;
+  if (required_capacity <= unseen_token_indices_.capacity()) {
+    return;
+  }
+
+  // Grow geometrically from the actual unread output needed by this step. Unlike reserving
+  // max_length, this keeps a streaming caller's index storage small while avoiding one allocation
+  // per token when output is allowed to accumulate.
+  const size_t target_capacity =
+      required_capacity > unseen_token_indices_.max_size() / 2
+          ? unseen_token_indices_.max_size()
+          : required_capacity * 2;
+  unseen_token_indices_.reserve(target_capacity);
 }
 
 void Request::Schedule() {
@@ -149,7 +191,8 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
 
   if (status_ != RequestStatus::Unassigned) {
     if (IsTurnComplete()) {
-      throw std::runtime_error("AddTokens only accepts initial input; use Continue for another turn.");
+      throw std::runtime_error(
+          "AddTokens only accepts initial input; use the continuation API for another turn.");
     }
     if (IsClosed(status_)) {
       throw std::runtime_error("Cannot add tokens to a closed request.");
@@ -197,8 +240,8 @@ void Request::Continue(std::span<const int32_t> tokens) {
     try {
       search_->RestoreStateForTransaction();
     } catch (...) {
-      throw std::runtime_error(
-          "Continue failed and the request search state could not be restored.");
+      engine->HandleContinuationRestoreFailure(
+          shared_from_this(), append_error, std::current_exception());
     }
     std::rethrow_exception(append_error);
   }
@@ -294,10 +337,6 @@ bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
 }
 
-bool Request::IsDone() const {
-  return IsTurnComplete();
-}
-
 bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
 }
@@ -320,12 +359,13 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       throw std::runtime_error("top_k must be 0 or greater");
 
     if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
-      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature);
+      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
+                              rng_);
     } else if (search_params.top_k > 1) {
-      search_->SampleTopK(search_params.top_k, search_params.temperature);
+      search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
     } else {
       assert(search_params.top_k == 0);
-      search_->SampleTopP(search_params.top_p, search_params.temperature);
+      search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
     }
   }
 }
@@ -345,10 +385,12 @@ void Request::ValidateEngineCompatibility() const {
 
 void Request::SaveStateForTransaction() {
   search_->SaveStateForTransaction();
+  transaction_rng_ = rng_;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
   search_->SaveStateForExternalSamplingTransaction();
+  transaction_rng_ = rng_;
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
@@ -369,10 +411,12 @@ RequestStepResult Request::StageGenerationForTransaction(
 
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
+  rng_ = transaction_rng_;
 }
 
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
+  rng_ = transaction_rng_;
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -386,6 +430,8 @@ void Request::CommitStateForTransaction() {
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
   if (result.token_appended) {
+    // ScheduledRequests reserved this append before model execution. tokens_host_ retains its
+    // existing max-length reservation, so neither push allocates at this commit boundary.
     const size_t token_index = tokens_host_.size();
     tokens_host_.push_back(result.token);
     unseen_token_indices_.push_back(token_index);
@@ -409,11 +455,11 @@ void Request::SelectNextToken() {
   } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
              search_params.top_k > 1) {
     search_->SampleTopKTopP(search_params.top_k, search_params.top_p,
-                            search_params.temperature);
+                            search_params.temperature, rng_);
   } else if (search_params.top_k > 1) {
-    search_->SampleTopK(search_params.top_k, search_params.temperature);
+    search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
   } else {
-    search_->SampleTopP(search_params.top_p, search_params.temperature);
+    search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
   }
 }
 

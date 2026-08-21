@@ -127,6 +127,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<Request> DrainReadyRequest();
   std::shared_ptr<Request> StepDynamic();
   std::shared_ptr<Request> StepStatic();
+  [[noreturn]] void HandleContinuationRestoreFailure(
+      const std::shared_ptr<Request>& request,
+      std::exception_ptr append_error,
+      std::exception_ptr restore_error);
   [[noreturn]] void MarkUnhealthyAndThrow(StepOutcomeKind outcome,
                                           StepTransactionId transaction_id,
                                           const void* request_id,

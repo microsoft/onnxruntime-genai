@@ -85,33 +85,45 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
       ready_requests_.begin(),
       ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
   ready_request_index_ = 0;
-  std::erase(ready_requests_, request);
-  std::erase(staged_ready_requests_, request);
+  ready_requests_.erase(
+      std::remove(ready_requests_.begin(), ready_requests_.end(), request),
+      ready_requests_.end());
+  staged_ready_requests_.erase(
+      std::remove(staged_ready_requests_.begin(), staged_ready_requests_.end(), request),
+      staged_ready_requests_.end());
   request->CompleteCloseFromEngine(*this);
-  std::erase_if(tracked_requests_, [&request](const std::weak_ptr<Request>& tracked) {
-    const auto owned = tracked.lock();
-    return !owned || owned == request;
-  });
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&request](const std::weak_ptr<Request>& tracked) {
+            const auto owned = tracked.lock();
+            return !owned || owned == request;
+          }),
+      tracked_requests_.end());
 }
 
 void Engine::ReclaimAbandonedRequests() {
-  // ExternalRelease only publishes an atomic abandonment marker. Engine entry points are externally
-  // serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
+  // ExternalRelease only publishes synchronized external-lifecycle state. Engine entry points are
+  // externally serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
   // release, ready-notification purge, and terminal close.
   std::vector<std::shared_ptr<Request>> abandoned_requests;
   abandoned_requests.reserve(tracked_requests_.size());
-  std::erase_if(tracked_requests_, [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
-    const auto request = tracked.lock();
-    if (!request) {
-      return true;
-    }
-    if (!IsClosed(request->status_) &&
-        request->BelongsTo(*this) &&
-        request->ExternalReferencesAbandoned()) {
-      abandoned_requests.push_back(request);
-    }
-    return false;
-  });
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
+            const auto request = tracked.lock();
+            if (!request) {
+              return true;
+            }
+            if (!IsClosed(request->status_) &&
+                request->BelongsTo(*this) &&
+                request->ExternalReferencesAbandoned()) {
+              abandoned_requests.push_back(request);
+            }
+            return false;
+          }),
+      tracked_requests_.end());
 
   for (const auto& request : abandoned_requests) {
     // Recheck defensively in case an external owner was reacquired before this serialized boundary.
@@ -145,6 +157,29 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
     throw std::runtime_error(
         "Continuous decoding is only supported when a static engine batch contains one request.");
   }
+}
+
+[[noreturn]] void Engine::HandleContinuationRestoreFailure(
+    const std::shared_ptr<Request>& request,
+    std::exception_ptr append_error,
+    std::exception_ptr restore_error) {
+  std::string message = AddExceptionCause(
+      "Continuation append failed and its Search state could not be restored.",
+      append_error);
+  try {
+    RemoveRequest(request);
+  } catch (...) {
+    message = AddExceptionCause(
+        std::move(message) + " Closing the poisoned request also failed.",
+        std::current_exception());
+    request->CompleteClose();
+  }
+  MarkUnhealthyAndThrow(
+      StepOutcomeKind::FatalExecutionFailure,
+      /*transaction_id=*/0,
+      request.get(),
+      std::move(message),
+      restore_error);
 }
 
 std::shared_ptr<Request> Engine::Step() {

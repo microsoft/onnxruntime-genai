@@ -16,6 +16,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "decoding_strategy.h"
+#include "n_gram_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
@@ -519,7 +520,23 @@ void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) 
 double GeneratorParams::GetSpeculativeNumber(std::string_view name) const {
   if (name == "max_draft_tokens")
     return static_cast<double>(speculative.max_draft_tokens);
+  if (name == "ngram_size")
+    return static_cast<double>(speculative.ngram_size);
+  if (name == "min_adaptive_k")
+    return static_cast<double>(speculative.min_adaptive_k);
   throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeNumber.");
+}
+
+void GeneratorParams::SetSpeculativeBool(std::string_view name, bool value) {
+  Generators::SetSpeculativeBool(speculative, name, value);
+}
+
+bool GeneratorParams::GetSpeculativeBool(std::string_view name) const {
+  if (name == "ngram_chained_lookup")
+    return speculative.ngram_chained_lookup;
+  if (name == "cooldown")
+    return speculative.cooldown;
+  throw std::runtime_error(std::string(name) + " is an invalid name for GetSpeculativeBool.");
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -532,9 +549,29 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return params.p_device->CreateGreedy(params);
 }
 
+std::mt19937 CreateRandomGenerator(int random_seed) {
+  if (random_seed >= 0)
+    return std::mt19937{static_cast<uint32_t>(random_seed)};
+
+  std::random_device random_device;
+  std::array<uint32_t, std::mt19937::state_size> seed_data;
+  for (uint32_t& value : seed_data)
+    value = random_device();
+  std::seed_seq seed_sequence(seed_data.begin(), seed_data.end());
+  return std::mt19937{seed_sequence};
+}
+
 Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
-      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)} {
+      generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)},
+      rng_{CreateRandomGenerator(params.search.random_seed)} {
+  if (params.speculative.ngram_chained_lookup && params.speculative.ngram_size == 0)
+    throw std::runtime_error(
+        "speculative.ngram_chained_lookup requires speculative.ngram_size to enable "
+        "n-gram decoding.");
+  if (params.speculative.ngram_size > 0)
+    ValidateNGramDecoding(model, params);
+
   // RNNT and TDT models don't use the traditional search/logits pipeline,
   // so skip the standard validations and just create the state.
   if (ModelType::IsTransducer(model.config_->model.type)) {

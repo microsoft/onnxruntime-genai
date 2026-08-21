@@ -396,11 +396,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
 
   size_t block_table_columns = max_blocks_per_request;
   if (graph_capture_) {
-    block_table_columns = 8;
-    while (block_table_columns < max_blocks_per_request) {
-      block_table_columns *= 2;
-    }
-    block_table_columns = std::min(block_table_columns, max_block_table_columns_);
+    block_table_columns =
+        GetGraphBlockTableColumns(max_blocks_per_request, max_block_table_columns_);
   }
 
   plan.proposed_block_table_columns = block_table_columns;
@@ -590,11 +587,8 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
     // Round the column count up to a power of two so that a run producing steadily longer sequences
     // settles on a handful of distinct shapes instead of a new one every time a block is appended.
     // Each distinct shape is captured under its own annotation id.
-    size_t columns = 8;
-    while (columns < max_blocks) {
-      columns *= 2;
-    }
-    block_table_columns_ = std::min(columns, max_block_table_columns_);
+    block_table_columns_ =
+        GetGraphBlockTableColumns(max_blocks, max_block_table_columns_);
     if (max_blocks > block_table_columns_ || requests.size() > max_block_table_rows_) {
       throw std::runtime_error("Block table exceeds the capacity reserved for graph capture.");
     }

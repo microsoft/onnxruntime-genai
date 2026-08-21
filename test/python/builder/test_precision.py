@@ -37,6 +37,30 @@ def _load_base_module():
     return module
 
 
+def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["TestModel"],
+        hidden_act="silu",
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=1024,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert model.input_types["attention_metadata"] == ir.DataType.INT32
+    assert model.input_shapes["attention_metadata"] == [3]
+    assert model.input_shapes["attention_metadata"] is not base.PAGED_ATTENTION_METADATA_SHAPE
+
+
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
@@ -214,6 +238,102 @@ def _run_check_extra_options(
         cache_dir="/tmp/fake-cache",
         extra_options=extra_options,
     )
+
+
+# ---------------------------------------------------------------------------
+# MTP options are normalized and enforce the main-model output contract.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_mtp_false_string_is_disabled(monkeypatch):
+    options = {"enable_mtp": "false"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is False
+
+
+def test_enable_mtp_requires_hidden_states(monkeypatch):
+    with pytest.raises(ValueError, match="requires include_hidden_states=true"):
+        _run_check_extra_options(monkeypatch, {"enable_mtp": "true"})
+
+
+@pytest.mark.parametrize("option", ["exclude_lm_head", "prune_lm_head"])
+def test_enable_mtp_rejects_incompatible_lm_head_options(monkeypatch, option):
+    with pytest.raises(ValueError, match=option):
+        _run_check_extra_options(
+            monkeypatch,
+            {"enable_mtp": "true", "include_hidden_states": "true", option: "true"},
+        )
+
+
+def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
+    options = {"enable_mtp": "true", "include_hidden_states": "true"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["enable_mtp"] is True
+    assert options["include_hidden_states"] is True
+
+
+def test_mtp_quant_config_json_is_parsed(monkeypatch):
+    options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].io_dtype == "bf16"
+    assert options["mtp_quant_config"].weights.type == "int4"
+
+
+def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
+    captured = {}
+
+    def fake_check_extra_options(*args):
+        captured.update(args[-1])
+
+    monkeypatch.setattr(builder_module, "check_extra_options", fake_check_extra_options)
+    builder_module.parse_extra_options(
+        "model",
+        "input",
+        "output",
+        "int4",
+        "cuda",
+        "cache",
+        ['mtp_quant_config={"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}'],
+    )
+
+    assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
+
+
+def test_resolved_quant_config_controls_method_and_overrides():
+    model = Model.__new__(Model)
+    model.quant_config = builder_module.QuantConfig.from_dict(
+        {
+            "weights": {
+                "type": "int4",
+                "method": "k_quant",
+                "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}],
+            }
+        }
+    )
+
+    model.resolve_quant_config()
+
+    assert model.quantization_algo == "k_quant"
+    assert model.matmul_mixed_precision == {"last_matmul": "int8"}
+
+
+def test_state_window_must_be_non_negative(monkeypatch):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _run_check_extra_options(monkeypatch, {"state_window": "-1"})
+
+
+def test_state_window_is_normalized(monkeypatch):
+    options = {"state_window": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_window"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -405,9 +525,7 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
         (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(
-    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows
-):
+def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.prune_lm_head = prune_lm_head
@@ -430,9 +548,7 @@ def test_paged_attention_lm_head_pruning(
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(
-        model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"])
-    )
+    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)

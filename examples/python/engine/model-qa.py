@@ -6,6 +6,8 @@ import json
 
 import onnxruntime_genai as og
 
+MAX_LENGTH = 1024
+
 
 def run(args: argparse.Namespace):
     config = og.Config(args.model_path)
@@ -20,25 +22,16 @@ def run(args: argparse.Namespace):
     params = og.GeneratorParams(model)
     params.set_search_options(
         do_sample=False,
-        max_length=1024,
+        max_length=MAX_LENGTH,
     )
 
     system_message = json.dumps([{"role": "system", "content": ""}])
     system_tokens = tokenizer.encode(
         tokenizer.apply_chat_template(messages=system_message, add_generation_prompt=False),
     )
-    # Temporary DML-only fallback while the low-level Engine continuation API is transitional:
-    # replay exact token IDs in a fresh request instead of reconstructing text. Replaying the full
-    # session also preserves max_length as a session-total limit. Other advertised providers keep
-    # one resident request and use continue_with().
-    use_dml_replay = args.execution_provider == "dml"
-    logical_token_history = [int(token) for token in system_tokens]
-    eos_token_ids = {int(token) for token in tokenizer.eos_token_ids}
-
-    request = None
-    if not use_dml_replay:
-        request = og.Request(params)
-        request.add_tokens(system_tokens)
+    session_token_count = len(system_tokens)
+    request = og.Request(params)
+    request.add_tokens(system_tokens)
 
     streaming_tokenizer = tokenizer.create_stream()
     request_added = False
@@ -53,13 +46,12 @@ def run(args: argparse.Namespace):
                 tokenizer.apply_chat_template(messages=user_message, add_generation_prompt=True),
             )
 
-            if use_dml_replay:
-                logical_token_history.extend(int(token) for token in turn_tokens)
-                request = og.Request(params)
-                request.add_tokens(logical_token_history)
-                engine.add_request(request)
-                request_added = True
-            elif request_added:
+            if session_token_count + len(turn_tokens) >= MAX_LENGTH:
+                print("Context exhausted; restart to begin a new conversation.")
+                break
+
+            session_token_count += len(turn_tokens)
+            if request_added:
                 request.continue_with(turn_tokens)
             else:
                 request.add_tokens(turn_tokens)
@@ -70,9 +62,8 @@ def run(args: argparse.Namespace):
 
             while ready_request := engine.step():
                 while ready_request.has_unseen_tokens():
-                    token = ready_request.get_unseen_token()
-                    if use_dml_replay and token not in eos_token_ids:
-                        logical_token_history.append(token)
+                    token = int(ready_request.get_unseen_token())
+                    session_token_count += 1
                     print(
                         streaming_tokenizer.decode(token),
                         end="",
@@ -80,12 +71,8 @@ def run(args: argparse.Namespace):
                     )
 
             print()
-            if use_dml_replay:
-                engine.remove_request(request)
-                request_added = False
-                request = None
     finally:
-        if request_added and request is not None:
+        if request_added:
             engine.remove_request(request)
 
 
@@ -105,7 +92,7 @@ if __name__ == "__main__":
         "--execution_provider",
         type=str,
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu"],
+        choices=["cpu", "cuda", "webgpu"],
         help="Execution provider to run ONNX model with",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")

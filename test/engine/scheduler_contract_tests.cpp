@@ -72,6 +72,7 @@ class SchedulerContractTest : public ::testing::Test {
     plan.sequence_length_before = before.current_sequence_length;
     plan.target_cache_slots =
         static_cast<size_t>(before.current_sequence_length);
+    PrepareRequestStep(model_, plan);
     request->SaveStateForTransaction();
     const auto result = request->ApplyLogitsForTransaction(logits);
     request->CommitStateForTransaction();

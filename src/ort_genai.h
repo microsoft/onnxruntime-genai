@@ -505,6 +505,16 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
+  void SetSpeculativeBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeBool(this, name, value));
+  }
+
+  bool GetSpeculativeBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeBool(this, name, &value));
+    return value;
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
@@ -912,22 +922,6 @@ struct OgaRequest : OgaAbstract {
     return is_turn_complete;
   }
 
-  /**
-   * \brief Deprecated compatibility alias for IsTurnComplete().
-   *
-   * \deprecated Use IsTurnComplete() instead.
-   */
-  [[deprecated("Use IsTurnComplete() instead.")]]
-  bool IsDone() const {
-    return IsTurnComplete();
-  }
-
-  OgaRequestStatus GetStatus() const {
-    OgaRequestStatus status;
-    OgaCheckResult(OgaRequestGetStatus(this, &status));
-    return status;
-  }
-
   bool HasUnseenTokens() const {
     bool has_unseen_tokens{};
     OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
@@ -967,9 +961,10 @@ struct OgaEngine : OgaAbstract {
   }
 
   /**
-   * \brief Submits a request and gives the engine ownership until Remove() is called.
+   * \brief Submits a request to the engine.
    *
-   * Ownership continues after the current turn completes. Remove the request before releasing its final handle.
+   * Ownership continues after the current turn completes. Remove() releases resources immediately;
+   * releasing the final external handle instead defers reclamation until the next Add() or Step().
    */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
@@ -978,7 +973,7 @@ struct OgaEngine : OgaAbstract {
   /**
    * \brief Removes a request and releases engine ownership.
    *
-   * Repeated calls after the request reaches OgaRequestStatus_closed are successful no-ops.
+   * Repeated calls after the request has already been removed are successful no-ops.
    */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));

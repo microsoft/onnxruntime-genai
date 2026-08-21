@@ -855,26 +855,6 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-TEST(CAPITests, RequestIsDoneCppCompatibilityAlias) {
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  auto request = OgaRequest::Create(*params);
-
-  const bool is_turn_complete = request->IsTurnComplete();
-  EXPECT_EQ(request->IsDone(), is_turn_complete);
-}
-
-TEST(CAPITests, RequestIsDoneCCompatibilityAlias) {
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto params = OgaGeneratorParams::Create(*model);
-  auto request = OgaRequest::Create(*params);
-
-  const bool is_turn_complete = request->IsTurnComplete();
-  bool c_is_done{};
-  OgaCheckResult(OgaRequestIsDone(request.get(), &c_is_done));
-  EXPECT_EQ(c_is_done, is_turn_complete);
-}
-
 // DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
@@ -951,10 +931,8 @@ struct Phi2Test {
     }
 
     for (size_t i = 0; i < batch_size_; i++) {
-      EXPECT_EQ(requests_[i]->GetStatus(), OgaRequestStatus_turn_complete);
       EXPECT_TRUE(requests_[i]->IsTurnComplete());
       EXPECT_NO_THROW(engine->Remove(*requests_[i]));
-      EXPECT_EQ(requests_[i]->GetStatus(), OgaRequestStatus_closed);
       EXPECT_FALSE(requests_[i]->IsTurnComplete());
       EXPECT_NO_THROW(engine->Remove(*requests_[i]));
 

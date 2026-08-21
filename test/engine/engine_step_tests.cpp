@@ -408,6 +408,39 @@ TEST_F(EngineStepTest, ContinueRejectsUndrainedReadyNotificationWithoutMutation)
             before.current_sequence_length + static_cast<int64_t>(continuation.size()));
 }
 
+TEST_F(EngineStepTest, ContinuedUnreadOutputPreservesOrder) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  engine.engine->AddRequest(request);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  engine.executor->SetForcedToken(6);
+  ASSERT_EQ(engine.engine->Step(), request);
+  engine.executor->SetForcedToken(7);
+  ASSERT_EQ(engine.engine->Step(), request);
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  EXPECT_EQ(request->UnseenToken(), 5);
+  EXPECT_EQ(request->UnseenToken(), 6);
+
+  const std::vector<int32_t> continuation{8, 9};
+  request->Continue(continuation);
+  engine.executor->SetForcedToken(10);
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  engine.executor->SetForcedToken(EosToken(*model_));
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  EXPECT_EQ(request->UnseenToken(), 7);
+  EXPECT_EQ(request->UnseenToken(), 10);
+  EXPECT_FALSE(request->HasUnseenTokens());
+}
+
 // Under capacity backpressure Step decodes only the requests that fit, then forms a fresh batch for
 // the deferred request on a later step -- one decode per internal cycle, never an over-capacity run.
 //

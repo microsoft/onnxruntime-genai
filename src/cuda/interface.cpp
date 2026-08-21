@@ -65,6 +65,11 @@ struct GpuMemory final : DeviceBuffer {
     CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
   }
 
+  void CopyFromCpu(const void* source, size_t size_in_bytes) override {
+    assert(size_in_bytes == size_in_bytes_);
+    CUDA_CHECK(::cudaMemcpy(p_device_, source, size_in_bytes, ::cudaMemcpyHostToDevice));
+  }
+
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
     if (source.GetType() == device_label)
       CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,

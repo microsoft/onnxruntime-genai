@@ -389,6 +389,11 @@ if(ENABLE_MODEL_BENCHMARK)
   add_subdirectory("${REPO_ROOT}/benchmark/c")
 endif()
 
+if(ENABLE_ENGINE_BENCHMARK)
+  message("------------------Enabling engine benchmark------------------")
+  add_subdirectory("${REPO_ROOT}/benchmark/engine")
+endif()
+
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 

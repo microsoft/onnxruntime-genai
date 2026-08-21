@@ -76,7 +76,12 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
 
   for (const auto& request : allocated_requests) {
     if (IsQueued(request->status_)) {
+      // Prepare before the queued-to-active transition so allocation failure leaves the request at
+      // its last externally visible boundary.
+      request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
       request->Schedule();
+    } else if (IsExecuting(request->status_)) {
+      request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
     }
   }
 
@@ -93,6 +98,12 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     std::vector<std::shared_ptr<Request>> batch_requests(requests_to_schedule.begin(),
                                                          requests_to_schedule.begin() + batch_size);
     if (cache_manager_->CanAllocate(batch_requests)) {
+      // Static cache allocation publishes the new batch immediately. Reserve output bookkeeping
+      // first so a bad_alloc cannot leave cache ownership committed without a runnable request.
+      for (auto& request : batch_requests) {
+        request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
+      }
+
       // Before allocating, we need to ensure that the existing requests in the cache manager
       // are terminal and no longer need to remain in the scheduler pool.
       for (auto& request : allocated_requests) {

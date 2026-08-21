@@ -52,24 +52,25 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
-  if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
+  if (first_run_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
     return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
-  } else {
-    UpdateInputsOutputs(next_tokens, next_indices, total_length);
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
-
-    // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
-    // MTP speculative decoding also captures the 2-token verify shape (max_graph_capture_length == 2),
-    // each captured length getting its own annotation id / static buffers.
-    int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
-    bool graph_capture_this_run = params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
-    const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
-    State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
-
-    return logits_.Get();
   }
+
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+
+  // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
+  // MTP speculative decoding also captures the 2-token verify shape (max_graph_capture_length == 2),
+  // each captured length getting its own annotation id / static buffers.
+  const int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
+  const bool graph_capture_this_run =
+      params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length;
+  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+  State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
+
+  return logits_.Get();
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,

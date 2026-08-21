@@ -197,16 +197,22 @@ struct PyGeneratorParams {
       auto name = entry.first.cast<std::string>();
       if (pybind11::isinstance<pybind11::float_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        params_->SetSpeculativeBool(name.c_str(), entry.second.cast<bool>());
       } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
         params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
       } else
-        throw std::runtime_error("Unknown speculative option type, must be int or float: " + name);
+        throw std::runtime_error("Unknown speculative option type, must be bool, int, or float: " + name);
     }
   }
 
   pybind11::dict GetSpeculativeOptions() {
     pybind11::dict d;
     d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
+    d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
+    d["ngram_chained_lookup"] = params_->GetSpeculativeBool("ngram_chained_lookup");
+    d["min_adaptive_k"] = params_->GetSpeculativeNumber("min_adaptive_k");
+    d["cooldown"] = params_->GetSpeculativeBool("cooldown");
     return d;
   }
 
@@ -245,14 +251,26 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
                           "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
                           "tokens_discarded", "tokens_buffered", "draft_forward_passes",
-                          "target_forward_passes"})
+                          "target_forward_passes", "effective_k", "adaptive_k_increases",
+                          "adaptive_k_decreases", "adaptive_k_observations",
+                          "adaptive_k_probes", "cooldown_entries", "cooldown_steps",
+                          "cooldown_remaining", "standard_fallback_steps",
+                          "full_accept_rounds", "partial_accept_rounds", "zero_accept_rounds",
+                          "target_verify_forward_passes", "target_reanchor_forward_passes",
+                          "target_reconciliation_forward_passes", "ngram_lookup_hits",
+                          "ngram_lookup_misses", "ngram_lookup_tokens_proposed",
+                          "ngram_chained_tokens_proposed", "ngram_grammar_candidate_rejections",
+                          "ngram_history_syncs", "ngram_history_tokens_synced"})
     d[key] = stats.GetCount(key);
   d["formula_supported"] = stats.GetBool("formula_supported");
   for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+                          "total_target_verify_ms", "total_target_reanchor_ms",
+                          "total_ngram_history_sync_ms", "total_ngram_lookup_ms",
                           "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
                           "mean_emitted_tokens_per_round", "expected_tokens_per_round",
                           "avg_target_ms_per_round", "target_baseline_ms_per_token",
-                          "target_overhead_ratio", "estimated_speedup", "observed_speedup"})
+                          "target_overhead_ratio", "estimated_speedup", "observed_speedup",
+                          "adaptive_k_throughput"})
     d[key] = stats.GetNumber(key);
   return d;
 }
@@ -401,15 +419,6 @@ void SetLogCallback(std::optional<const pybind11::function> callback) {
   } else {
     Oga::SetLogCallback(nullptr);
   }
-}
-
-bool IsRequestDoneDeprecated(const OgaRequest& request) {
-  if (PyErr_WarnEx(PyExc_DeprecationWarning,
-                   "Request.is_done() is deprecated; use Request.is_turn_complete() instead.",
-                   1) < 0) {
-    throw pybind11::error_already_set();
-  }
-  return request.IsTurnComplete();
 }
 
 PYBIND11_MODULE(onnxruntime_genai, m) {
@@ -719,13 +728,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
-  pybind11::enum_<OgaRequestStatus>(m, "RequestStatus")
-      .value("CREATED", OgaRequestStatus_created)
-      .value("QUEUED", OgaRequestStatus_queued)
-      .value("ACTIVE", OgaRequestStatus_active)
-      .value("TURN_COMPLETE", OgaRequestStatus_turn_complete)
-      .value("CLOSED", OgaRequestStatus_closed);
-
   pybind11::class_<OgaRequest>(m, "Request")
       .def(pybind11::init(
           [](PyGeneratorParams& params) {
@@ -745,8 +747,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
-      .def("is_done", &IsRequestDoneDeprecated, "Deprecated compatibility alias for is_turn_complete().")
-      .def_property_readonly("status", &OgaRequest::GetStatus)
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
       .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
         request.SetOpaqueData(opaque_data.ptr());

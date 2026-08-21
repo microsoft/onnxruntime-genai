@@ -51,24 +51,27 @@ TEST_F(CpuSearchCheckpointTest, SamplingRollbackRestoresRandomState) {
   search->AppendTokens(input);
   SetLogits({1.0f, 1.0f, 1.0f, -100.0f,
              1.0f, 1.0f, 1.0f, -100.0f});
+  auto rng = CreateRandomGenerator(config.search.random_seed);
 
   search->SaveStateForTransaction();
+  const auto transaction_rng = rng;
   std::vector<int32_t> first_tokens;
   for (int i = 0; i < 4; ++i) {
-    search->SampleTopK(3, 1.0f);
+    search->SampleTopK(3, 1.0f, rng);
     auto next_tokens = search->GetNextTokens().CpuSpan();
     first_tokens.insert(first_tokens.end(), next_tokens.begin(), next_tokens.end());
   }
   EXPECT_EQ(search->GetSequenceLength(), 5);
 
   search->RestoreStateForTransaction();
+  rng = transaction_rng;
   EXPECT_EQ(search->GetSequenceLength(), 1);
   EXPECT_EQ(search->GetNextTokens().CpuSpan()[0], 1);
   EXPECT_EQ(search->GetNextTokens().CpuSpan()[1], 2);
 
   std::vector<int32_t> retried_tokens;
   for (int i = 0; i < 4; ++i) {
-    search->SampleTopK(3, 1.0f);
+    search->SampleTopK(3, 1.0f, rng);
     auto next_tokens = search->GetNextTokens().CpuSpan();
     retried_tokens.insert(retried_tokens.end(), next_tokens.begin(), next_tokens.end());
   }
@@ -181,25 +184,28 @@ TEST_F(CudaSearchCheckpointTest, SamplingRollbackRestoresCurandStateAfterSelectT
   search->AppendTokens(input);
   SetLogits({1.0f, 1.0f, 1.0f, -100.0f,
              1.0f, 1.0f, 1.0f, -100.0f});
+  auto rng = CreateRandomGenerator(params->search.random_seed);
 
   search->SaveStateForTransaction();
+  const auto transaction_rng = rng;
   std::vector<int32_t> first_tokens;
   for (int i = 0; i < 3; ++i) {
     search->SelectTop();
-    search->SampleTopK(3, 1.0f);
+    search->SampleTopK(3, 1.0f, rng);
     const auto next_tokens = NextTokens();
     first_tokens.insert(first_tokens.end(), next_tokens.begin(), next_tokens.end());
   }
   EXPECT_EQ(search->GetSequenceLength(), 7);
 
   search->RestoreStateForTransaction();
+  rng = transaction_rng;
   EXPECT_EQ(search->GetSequenceLength(), 1);
   EXPECT_EQ(NextTokens(), std::vector<int32_t>({0, 0}));
 
   std::vector<int32_t> retried_tokens;
   for (int i = 0; i < 3; ++i) {
     search->SelectTop();
-    search->SampleTopK(3, 1.0f);
+    search->SampleTopK(3, 1.0f, rng);
     const auto next_tokens = NextTokens();
     retried_tokens.insert(retried_tokens.end(), next_tokens.begin(), next_tokens.end());
   }

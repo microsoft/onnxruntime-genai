@@ -90,7 +90,7 @@ RecurrentState::RecurrentState(State& state)
   validate_shape(conv_shape_, "conv_state");
   validate_shape(recurrent_shape_, "recurrent_state");
 
-  // A model built with `recurrent_state_window=W` carries a LEADING window axis (conv_state
+  // A model built with `state_window=W` carries a LEADING window axis (conv_state
   // becomes rank 4 and recurrent_state rank 5). Only the last W per-token states are kept, which
   // is what lets the MTP loop crop to an accepted prefix without a replay forward. The window axis
   // leads the batch axis so each slot is one contiguous block, which makes CropToPosition a single
@@ -175,7 +175,7 @@ void RecurrentState::SetForwardLength(int sequence_length) {
 void RecurrentState::CropToPosition(size_t position) {
   if (!IsWindowed())
     throw std::runtime_error(
-        "RecurrentState::CropToPosition requires the model exported with recurrent_state_window > 1");
+        "RecurrentState::CropToPosition requires the model exported with state_window > 1");
   // The live state is in presents_ (the buffers the last forward wrote; Update()/the swap has not
   // run yet at this point). Window slot j holds the state AFTER token (seq_len - W + j), so token
   // `position` lives in slot position + W - seq_len. Promote it to slot W-1, which is the slot the
@@ -185,7 +185,7 @@ void RecurrentState::CropToPosition(size_t position) {
     throw std::runtime_error(
         "RecurrentState::CropToPosition(" + std::to_string(position) + ") is outside the state window of " +
         std::to_string(state_window_) + " for a forward of length " + std::to_string(forward_length_) +
-        "; rebuild the model with a larger recurrent_state_window");
+        "; rebuild the model with a larger state_window");
   if (signed_slot >= state_window_)
     throw std::runtime_error(
         "RecurrentState::CropToPosition(" + std::to_string(position) + ") is past the last position of a forward of length " +

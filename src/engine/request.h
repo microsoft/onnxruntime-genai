@@ -22,6 +22,10 @@ struct RequestStepResult {
   bool done{};
 };
 
+// Every Engine Request has one sequence and one beam, so a chunk-complete step can append at most
+// one generated-output index.
+inline constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
+
 struct RequestAdmissionPreparation {
   RequestAdmissionPreparation();
   ~RequestAdmissionPreparation();
@@ -33,7 +37,6 @@ struct RequestAdmissionPreparation {
   std::unique_ptr<Search> search;
   std::unique_ptr<BatchedSamplerState> sampling_state;
   std::vector<int32_t> tokens_host;
-  std::vector<size_t> unseen_token_indices;
   int64_t prompt_sequence_length{};
   int64_t seen_sequence_length{};
 };
@@ -115,7 +118,8 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Returns the unprocessed tokens from the host-side mirror of the sequence.
    * @return Span of unprocessed token IDs, valid only until the next call that appends to the
-   *         sequence (CompleteGeneration, Continue or Assign). Copy it if it must outlive those.
+   *         sequence (CommitStep, CompleteGeneration, Continue, or Assign). Copy it if it must
+   *         outlive those.
    *
    * Same tokens as UnprocessedTokens(), but readable without copying them back from the device.
    * Building the next step's input ids is the hot path for this, and a device readback there costs
@@ -165,11 +169,6 @@ struct Request : std::enable_shared_from_this<Request>,
    * @return True in TurnComplete; the request may still be continued or closed.
    */
   bool IsTurnComplete() const;
-
-  /**
-   * @brief Compatibility alias for IsTurnComplete().
-   */
-  bool IsDone() const;
 
   RequestStatus Status() const noexcept { return status_; }
 
@@ -248,6 +247,10 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Moves the cursor past the tokens this step processed.
    */
   void AdvanceChunk();
+
+  // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
+  // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
+  void PrepareForStep(size_t max_generated_token_indices);
 
   RequestStatus status_{RequestStatus::Unassigned};
 
@@ -330,6 +333,8 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
   std::shared_ptr<GeneratorParams> params_;
+  std::mt19937 rng_;
+  std::mt19937 transaction_rng_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;

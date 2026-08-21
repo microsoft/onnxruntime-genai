@@ -69,6 +69,17 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
     }
     request_ids.push_back(entry.request_id);
   }
+  // Complete every potentially allocating output-bookkeeping operation before binding the plan or
+  // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
+  // request can append at most one generated index.
+  for (const auto& entry : plan.requests) {
+    const auto remaining =
+        static_cast<size_t>(entry.request->CurrentSequenceLength() -
+                            entry.request->ProcessedSequenceLength());
+    if (entry.unprocessed_token_count == remaining) {
+      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
+    }
+  }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(
         entry.unprocessed_token_count);

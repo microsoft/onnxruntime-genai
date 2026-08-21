@@ -12,7 +12,7 @@ The current dynamic path manages paged KV decoder state together with per-reques
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
-> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes status and unseen-output access as well as lifecycle mutation. Final handle release only publishes an abandonment marker; cleanup runs at the next serialized Engine boundary. External handle zero/one transitions serialize the self-owner and base-owned lifecycle state, so a concurrent handle returned by `Engine::Step()` cannot be erased by the previous handle's final release. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
+> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes completion and unseen-output access as well as lifecycle mutation. Final handle release only publishes an abandonment marker; cleanup runs at the next serialized Engine boundary. External handle zero/one transitions serialize the self-owner and base-owned lifecycle state, so a concurrent handle returned by `Engine::Step()` cannot be erased by the previous handle's final release. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
 
 The main implementation is under `src/engine/`:
 
@@ -45,6 +45,8 @@ return an already-ready request, if one exists
 plan a runnable batch
     |
 reserve all KV-cache growth needed by that plan
+    |
+preflight generated-output bookkeeping
     |
 checkpoint request and sampler state
     |
@@ -146,7 +148,7 @@ the beginning of a decode step: the token sampled by the previous step.
 ### `TurnComplete`
 
 The current generation turn reached an end condition, such as EOS or maximum length. Generated
-output remains available. `IsTurnComplete()` is the precise API for testing this state. `IsDone()` is a temporary compatibility alias for `IsTurnComplete()`; it remains turn-scoped and does not mean permanent request termination or removal.
+output remains available. `IsTurnComplete()` is the API for testing this state; it does not mean permanent request termination or removal.
 
 A generated EOS/stop token is not appended to the logical sequence or returned as unseen output.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by
@@ -201,6 +203,20 @@ logical sequence:
 | `next_unseen_token_index_` | Cursor into `unseen_token_indices_`; entries at and after this cursor have not been consumed |
 
 Unread generated output is one globally ordered stream for the request across all turns. The unseen-output API does not tag tokens with a turn, so callers that need per-turn attribution must track the boundaries themselves.
+
+The generated-token index queue is not reserved to `max_length`. Before a scheduled request can
+execute, it compacts a consumed prefix when that avoids growth or when the consumed prefix is at
+least as large as the unread suffix. It then reserves geometrically from the actual unread count
+plus the maximum indices the step can append. An Engine request has one sequence, so a
+chunk-complete step reserves one append and a partial-prefill step reserves none.
+
+This preparation runs in both static and dynamic `ScheduledRequests` construction. The static
+scheduler also prepares newly admitted rows before publishing its immediate cache allocation and
+prepares queued residents before moving them to `Active`; construction then finds the required
+capacity already available. Preparation therefore finishes before model execution or search-state
+advancement and before any request or cache state commits. `Request::CommitStep()` can consequently
+remain allocation-free and `noexcept`; static `CompleteGeneration()` uses the same prepared
+capacity while retaining its existing append behavior.
 
 The unprocessed tokens are:
 
@@ -370,6 +386,10 @@ While the reservation is active, decoder input preparation can view a combined b
 
 This allows the model to write into the future cache layout without publishing that layout as committed state.
 
+After reservation, `ScheduledRequests` validates the selected requests and preflights their
+generated-output index capacity. If that allocation fails, the reservation is released before
+request checkpointing, model execution, or cache commit.
+
 ### 6. Checkpoint request and sampler state
 
 Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected request's search state.
@@ -408,7 +428,13 @@ past_sequence_lengths = [A_past, B_past, C_past]
 
 This representation allows one model invocation to mix requests with different sequence lengths and different amounts of pending work. A step can contain a long prefill for one request and single-token decoding for other requests without padding every request to the same query length.
 
-The decoder also prepares attention metadata with bounds for the maximum query length and maximum KV length in the step. These bounds help the paged attention operator choose its backend and size its work without reading sequence lengths back from the device.
+The decoder also prepares a CPU `int32[3]` attention metadata input:
+
+```text
+[max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
+```
+
+The first two values are upper bounds. The third is a lower bound on the longest per-request KV sequence and lets the paged attention operator decide whether split-KV decode is worthwhile. Supplying these values lets the operator choose its backend and size its work without reading sequence lengths back from the device. Models using this contract must expose the three-element input; the Engine no longer emits the legacy two-element form. This requires ONNX Runtime commit `0d291bc5d39d8e62150c2c30f174812834344b48` or a later package containing the three-element PagedAttention metadata contract.
 
 ### 9. Run the decoder once
 
@@ -416,7 +442,7 @@ The decoder also prepares attention metadata with bounds for the maximum query l
 
 The outputs include one logits row for every flattened input token. The decoder state is attached to `ScheduledRequests` so post-processing can select the rows that belong to each request.
 
-For eligible pure decode shapes, the decoder may capture or replay a CUDA graph. Prefill and other variable shapes run eagerly.
+For eligible pure decode shapes, the decoder may capture or replay a CUDA graph. Prefill and other variable shapes run eagerly. Eager steps report exact bounds, so the KV upper and lower values are equal. A captured CPU input is read only while the graph is captured, so captured steps instead report bounds valid for every replay in the graph's block-table bucket. Capturable decode steps reserve exactly `ceil(current_kv_length / block_size)` blocks, allowing the Engine to report query upper bound `1`, KV upper bound `block_table_columns * block_size`, and KV lower bound `1` for the minimum or a capacity-clamped sub-minimum bucket, or `(preceding_power_of_two_columns * block_size) + 1` for larger and truncated final buckets. If a future reservation policy allocates ahead of the live KV length, the Engine conservatively reports a lower bound of `1`.
 
 ### 10. Select logits and stage next tokens
 
@@ -435,7 +461,7 @@ The result records:
 - Whether a token was appended.
 - Whether generation is complete.
 
-These results are staged. The request's host token mirror, processed-length counter, and public status are not updated yet.
+These results are staged. The request's host token mirror, processed-length counter, and internal lifecycle state are not updated yet.
 
 Requests that appended a token or became complete are placed in a staged ready list. The list is not exposed until the complete transaction commits.
 
@@ -512,6 +538,8 @@ The engine stores the fatal error and rethrows it on later `Step()` calls. Conti
 | `FatalExecutionFailure` | Execution or rollback failed in a way that makes continued use unsafe |
 
 When some requests fit and others are deferred, the step still executes the fitting subset. `capacity_deferred` is also recorded in transaction metrics for that successful planning pass.
+
+If `Continue()` fails while appending tokens and its Search checkpoint also cannot be restored, the request is closed and the Engine is marked fatally unhealthy. Reusing either would risk combining committed KV state with corrupted Search state.
 
 ## Paged KV-cache ownership
 
