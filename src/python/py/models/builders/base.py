@@ -1042,7 +1042,13 @@ class Model:
         Modifies KV cache shape dimension names for models with alternating attention patterns.
         Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
         unify them with the full-attention layers, whose cache is allocated at max_length.
+
+        Paged caches use the same physical block shape for every layer; local attention is expressed
+        by the PagedAttention operator instead of a different cache sequence dimension.
         """
+        if self.use_paged_attention:
+            return shape
+
         if (
             self.ep in self.eps_with_windowed_kv_cache
             and hasattr(self, "is_local")
@@ -3040,9 +3046,11 @@ class Model:
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
+        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"} and not self.use_paged_attention:
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
+            # PagedAttention has no such buffer: the engine owns block-managed cache, and the op
+            # does not accept this attribute.
             attributes["sliding_window_cache"] = 1
 
         return attributes
