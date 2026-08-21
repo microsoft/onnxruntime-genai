@@ -102,7 +102,14 @@ TEST(InvariantValidatorTest, WindowBlockPoolValidatesRingSizeAndOwnershipIndepen
 }
 
 TEST(InvariantValidatorTest, WindowBlockPoolIncludesTransactionReservationsInAccounting) {
-  auto cache = MakeValidCache();
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 1;
+  cache.transaction_reserved_block_ids = {0};
+  cache.reservations = {
+      RequestReservationSnapshot{
+          kRequestA, 0, 1, 0, {0}, {0, 1}, true},
+  };
   cache.window_blocks.total_blocks = 2;
   cache.window_blocks.free_blocks = 0;
   cache.window_blocks.blocks_per_request = 2;
@@ -148,7 +155,7 @@ TEST(InvariantValidatorTest, InitialAdmissionReservationValidatesWithoutCommitte
   cache.free_blocks = 0;
   cache.transaction_reserved_block_ids = {0};
   cache.reservations = {
-      RequestReservationSnapshot{kRequestA, 0, 1, 0, {0}},
+      RequestReservationSnapshot{kRequestA, 0, 1, 0, {0}, {}, true},
   };
 
   EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
@@ -176,7 +183,7 @@ TEST(InvariantValidatorTest, InitialAdmissionRejectsUnreservedDeltaBlock) {
   cache.free_blocks = 1;
   cache.transaction_reserved_block_ids = {0};
   cache.reservations = {
-      RequestReservationSnapshot{kRequestA, 0, 1, 0, {1}},
+      RequestReservationSnapshot{kRequestA, 0, 1, 0, {1}, {}, true},
   };
 
   const auto violations = ValidateCacheInvariants(cache);
@@ -329,7 +336,7 @@ TEST(InvariantValidatorTest, TurnCompleteRequestFullyProcessedIsValid) {
 TEST(InvariantValidatorTest, ConsistentSnapshotsValidateClean) {
   const auto cache = MakeValidCache();
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 5, 9),
       MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
   };
   EXPECT_TRUE(ValidateInvariants(cache, requests).empty());
@@ -343,6 +350,137 @@ TEST(InvariantValidatorTest, BlockTableForUnknownRequestReported) {
       // B is missing from the request set, yet the cache holds a block table for it.
   };
   EXPECT_FALSE(ValidateInvariants(cache, requests).empty());
+}
+
+TEST(InvariantValidatorTest, CommittedCacheUsageMustMatchProcessedLength) {
+  const auto cache = MakeValidCache();
+  const std::vector<RequestStateSnapshot> requests{
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 8, 8),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
+  };
+
+  const auto violations = ValidateInvariants(cache, requests);
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "differs from processed sequence length") !=
+                         std::string::npos;
+                }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, FullAndWindowOwnerSetsMustAgree) {
+  auto cache = MakeValidCache();
+  cache.window_blocks.total_blocks = 2;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.requests = {
+      RequestBlockSnapshot{kRequestA, {0, 1}},
+  };
+  const std::vector<RequestStateSnapshot> requests{
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
+  };
+
+  const auto violations = ValidateInvariants(cache, requests);
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "Full-cache and window-cache owner sets disagree") !=
+                         std::string::npos;
+                }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, WindowOwnerMustBeAKnownRequest) {
+  auto cache = MakeValidCache();
+  cache.window_blocks.total_blocks = 4;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.requests = {
+      RequestBlockSnapshot{kRequestA, {0, 1}},
+      RequestBlockSnapshot{kRequestB, {2, 3}},
+  };
+  const std::vector<RequestStateSnapshot> requests{
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+  };
+
+  const auto violations = ValidateInvariants(cache, requests);
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "Window cache holds a block table for unknown Request") !=
+                         std::string::npos;
+                }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, ReservationOwnerMustBeKnownAndMatchCommittedUsage) {
+  auto cache = MakeValidCache();
+  cache.free_blocks = 0;
+  cache.transaction_reserved_block_ids = {3};
+  cache.reservations = {
+      RequestReservationSnapshot{
+          kRequestB, /*committed_slots=*/3, /*target_slots=*/5,
+          /*tail_slots_to_consume=*/0, /*reserved_block_ids=*/{3}},
+  };
+  const std::vector<RequestStateSnapshot> requests{
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+  };
+
+  const auto violations = ValidateInvariants(cache, requests);
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "transaction committed slots disagree") !=
+                         std::string::npos;
+                }),
+            violations.end());
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "transaction reservation for unknown Request") !=
+                         std::string::npos;
+                }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, WindowReservationMustHaveConsistentOwnership) {
+  PagedCacheSnapshot cache;
+  cache.block_size = kBlockSize;
+  cache.total_blocks = 1;
+  cache.transaction_reserved_block_ids = {0};
+  cache.window_blocks.total_blocks = 2;
+  cache.window_blocks.blocks_per_request = 2;
+  cache.window_blocks.transaction_reserved_block_ids = {0, 1};
+  cache.reservations = {
+      RequestReservationSnapshot{
+          kRequestA, 0, 1, 0, {0}, {0}, true},
+  };
+  const std::vector<RequestStateSnapshot> requests{
+      MakeValidRequest(kRequestA, RequestStatus::Assigned, 3, 0, 3),
+  };
+
+  const auto violations = ValidateInvariants(cache, requests);
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "Not every transaction-reserved window block belongs") !=
+                         std::string::npos;
+                }),
+            violations.end());
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "transaction-reserved window blocks instead of 2") !=
+                         std::string::npos;
+                }),
+            violations.end());
 }
 
 TEST(InvariantValidatorTest, ThrowWrapperListsViolations) {

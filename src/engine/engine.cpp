@@ -172,7 +172,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
     message = AddExceptionCause(
         std::move(message) + " Closing the poisoned request also failed.",
         std::current_exception());
-    request->CompleteClose();
+    request->CompleteCloseFromEngine(*this);
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,
