@@ -1792,6 +1792,19 @@ class ModeloptModel(QuantizedModel):
         if not torch.isfinite(value).item() or value.item() <= 0:
             raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive, got {value.item()}.")
 
+    def _validate_positive_weight_scale(self, tensor, name, out_features):
+        # compressed-tensors FP8 uses per-channel weight scales; ModelOpt uses one per tensor.
+        if tensor is None:
+            raise ValueError(f"ModelOpt tensor '{name}' is missing.")
+        if tensor.numel() not in {1, out_features}:
+            raise ValueError(
+                f"ModelOpt tensor '{name}' must be a scalar or hold {out_features} per-channel values, "
+                f"got shape {tuple(tensor.shape)}."
+            )
+        value = tensor.float()
+        if not torch.isfinite(value).all().item() or (value <= 0).any().item():
+            raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive.")
+
     def _validate_linear(self, module, base):
         if module.weight_scale_2 is not None:
             if module.weight.dtype != torch.uint8 or module.weight.ndim != 2 or module.weight.shape[1] % 8 != 0:
@@ -1817,18 +1830,27 @@ class ModeloptModel(QuantizedModel):
                 )
             self._validate_positive_scalar(module.weight_scale_2, f"{base}.weight_scale_2")
         elif module.weight.dtype == torch.float8_e4m3fn:
-            self._validate_positive_scalar(module.weight_scale, f"{base}.weight_scale")
+            self._validate_positive_weight_scale(
+                module.weight_scale, f"{base}.weight_scale", int(module.weight.shape[0])
+            )
             if module.input_scale is not None:
                 self._validate_positive_scalar(module.input_scale, f"{base}.input_scale")
 
     def _linear_module(self, base, module=None):
         weight = self._get(f"{base}.weight")
         if weight is None:
+            weight = self._get(f"{base}.weight_packed")
+        if weight is None:
             return None
         module = module if module is not None else ModeloptLinearModule()
         module.weight = weight
         module.weight_scale = self._get(f"{base}.weight_scale")
         module.weight_scale_2 = self._get(f"{base}.weight_scale_2")
+        if module.weight_scale_2 is None:
+            # compressed-tensors stores the reciprocal of the ModelOpt NVFP4 global scale.
+            weight_global_scale = self._get(f"{base}.weight_global_scale")
+            if weight_global_scale is not None:
+                module.weight_scale_2 = torch.reciprocal(weight_global_scale)
         if ".self_attn." in base:
             module.input_scale = self._get(f"{base}.input_scale")
         self._validate_linear(module, base)
@@ -1878,21 +1900,26 @@ class ModeloptModel(QuantizedModel):
             )
 
         mlp = ns()
-        mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")
-        shared = ns()
-        shared.gate_proj = self._linear_module(f"{p}.mlp.shared_expert.gate_proj")
-        shared.up_proj = self._linear_module(f"{p}.mlp.shared_expert.up_proj")
-        shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
-        mlp.shared_expert = shared
-        mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
-        mlp.experts = []
-        for expert_id in range(self._num_experts):
-            expert_prefix = f"{p}.mlp.experts.{expert_id}"
-            expert = ns()
-            expert.gate_proj = self._linear_module(f"{expert_prefix}.gate_proj")
-            expert.up_proj = self._linear_module(f"{expert_prefix}.up_proj")
-            expert.down_proj = self._linear_module(f"{expert_prefix}.down_proj")
-            mlp.experts.append(expert)
+        if self._get(f"{p}.mlp.gate.weight") is not None:
+            mlp.gate = self._tensor_module(f"{p}.mlp.gate.weight")
+            shared = ns()
+            shared.gate_proj = self._linear_module(f"{p}.mlp.shared_expert.gate_proj")
+            shared.up_proj = self._linear_module(f"{p}.mlp.shared_expert.up_proj")
+            shared.down_proj = self._linear_module(f"{p}.mlp.shared_expert.down_proj")
+            mlp.shared_expert = shared
+            mlp.shared_expert_gate = self._tensor_module(f"{p}.mlp.shared_expert_gate.weight")
+            mlp.experts = []
+            for expert_id in range(self._num_experts):
+                expert_prefix = f"{p}.mlp.experts.{expert_id}"
+                expert = ns()
+                expert.gate_proj = self._linear_module(f"{expert_prefix}.gate_proj")
+                expert.up_proj = self._linear_module(f"{expert_prefix}.up_proj")
+                expert.down_proj = self._linear_module(f"{expert_prefix}.down_proj")
+                mlp.experts.append(expert)
+        else:
+            mlp.gate_proj = self._linear_module(f"{p}.mlp.gate_proj")
+            mlp.up_proj = self._linear_module(f"{p}.mlp.up_proj")
+            mlp.down_proj = self._linear_module(f"{p}.mlp.down_proj")
         layer.mlp = mlp
         return layer
 
@@ -1913,7 +1940,7 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
-        elif quant_type == "modelopt":
+        elif quant_type in {"modelopt", "compressed-tensors"}:
             model = ModeloptModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
