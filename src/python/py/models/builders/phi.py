@@ -583,7 +583,6 @@ class Phi3MoELongRoPEModel(MistralModel):
         self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=["num_rows", self.moe_attrs["num_experts"]])
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        moe_name = f"/model/layers.{layer_id}/moe"
         w1_list = []
         w2_list = []
         w3_list = []
