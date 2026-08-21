@@ -946,6 +946,11 @@ struct Phi2Test {
     }
 
     for (size_t i = 0; i < batch_size_; i++) {
+      EXPECT_TRUE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+      EXPECT_FALSE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+
       auto out_string = tokenizer_->Decode(generated_tokens[i].data(), generated_tokens[i].size());
       std::cout << "Decoded string:" << out_string << std::endl;
     }

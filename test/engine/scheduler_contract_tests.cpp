@@ -72,6 +72,7 @@ class SchedulerContractTest : public ::testing::Test {
     plan.sequence_length_before = before.current_sequence_length;
     plan.target_cache_slots =
         static_cast<size_t>(before.current_sequence_length);
+    PrepareRequestStep(model_, plan);
     request->SaveStateForTransaction();
     const auto result = request->ApplyLogitsForTransaction(logits);
     request->CommitStateForTransaction();
@@ -145,7 +146,7 @@ TEST_F(SchedulerContractTest, DynamicHonorsCapacityBackpressure) {
   EXPECT_EQ(third->status_, RequestStatus::Assigned);
 }
 
-TEST_F(SchedulerContractTest, DynamicDeallocatesCompletedRequests) {
+TEST_F(SchedulerContractTest, DynamicRetainsTurnCompleteRequestsUntilExplicitRemoval) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   DynamicBatchScheduler scheduler(model_, cache);
 
@@ -153,7 +154,7 @@ TEST_F(SchedulerContractTest, DynamicDeallocatesCompletedRequests) {
   MakePrefillResident(scheduler, *cache, request);
   ASSERT_EQ(cache->AllocatedCount(), 1u);
 
-  request->status_ = RequestStatus::Completed;
+  request->status_ = RequestStatus::TurnComplete;
   auto second = Assigned(20);
   scheduler.AddRequest(second);
   StepPlan plan;
@@ -161,10 +162,64 @@ TEST_F(SchedulerContractTest, DynamicDeallocatesCompletedRequests) {
   const auto result = scheduler.PlanStep(plan);
 
   ASSERT_TRUE(result.executable);
-  EXPECT_GE(cache->deallocate_calls, 1);
-  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_EQ(cache->deallocate_calls, 0);
+  EXPECT_EQ(cache->AllocatedCount(), 1u);
   ASSERT_EQ(plan.requests.size(), 1u);
   EXPECT_EQ(plan.requests[0].request, second);
+
+  scheduler.RemoveRequest(request);
+
+  EXPECT_EQ(cache->deallocate_calls, 1);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(cache->IsResident(request));
+}
+
+TEST_F(SchedulerContractTest, DynamicTurnCompleteResidencyAppliesCapacityBackpressure) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/1);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto completed = Assigned(10);
+  MakePrefillResident(scheduler, *cache, completed);
+  completed->status_ = RequestStatus::TurnComplete;
+
+  auto waiting = Assigned(20);
+  scheduler.AddRequest(waiting);
+  StepPlan plan;
+
+  const auto blocked = scheduler.PlanStep(plan);
+
+  EXPECT_FALSE(blocked.executable);
+  EXPECT_TRUE(blocked.capacity_deferred);
+  EXPECT_EQ(cache->deallocate_calls, 0);
+  EXPECT_EQ(cache->AllocatedCount(), 1u);
+  EXPECT_TRUE(plan.requests.empty());
+
+  scheduler.RemoveRequest(completed);
+  const auto admitted = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(admitted.executable);
+  EXPECT_EQ(cache->deallocate_calls, 1);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, waiting);
+}
+
+TEST_F(SchedulerContractTest, DynamicResidentQueuedRequestIsNotReadmitted) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto request = Assigned(10);
+  MakeDecodeResident(scheduler, *cache, request);
+  request->status_ = RequestStatus::Assigned;
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].request, request);
+  EXPECT_FALSE(plan.requests[0].newly_admitted);
+  EXPECT_EQ(cache->AllocatedCount(), 1u);
 }
 
 // Removing a request from the dynamic scheduler deallocates its cache resources immediately.
@@ -223,7 +278,7 @@ TEST_F(SchedulerContractTest, DynamicPlanningKeepsActiveWorkWhenNewAdmissionIsDe
   DynamicBatchScheduler scheduler(model_, cache);
   auto active = Assigned(10);
   MakePrefillResident(scheduler, *cache, active);
-  ASSERT_EQ(active->status_, RequestStatus::InProgress);
+  ASSERT_EQ(active->status_, RequestStatus::Active);
 
   auto deferred = Assigned(20);
   scheduler.AddRequest(deferred);
@@ -363,6 +418,40 @@ TEST_F(SchedulerContractTest, PrefillRespectsChunkAndGlobalCaps) {
   EXPECT_EQ(plan.requests[0].unprocessed_token_count, 1u);
   EXPECT_EQ(plan.token_count, 1u);
   EXPECT_FALSE(plan.graph_capture_eligible);
+}
+
+TEST_F(SchedulerContractTest, CacheQueryCapBoundsOversizedRequestChunk) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  cache->SetMaxQueryTokensPerRequest(2);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto request = Assigned(10);
+  request->Params()->search.chunk_size = 7;
+  scheduler.AddRequest(request);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.token_count, 2u);
+}
+
+TEST_F(SchedulerContractTest, CacheQueryCapBoundsUnchunkedRequest) {
+  auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  cache->SetMaxQueryTokensPerRequest(2);
+  DynamicBatchScheduler scheduler(model_, cache);
+  auto request = Assigned(10);
+  request->Params()->search.chunk_size = 0;
+  scheduler.AddRequest(request);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 1u);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.token_count, 2u);
 }
 
 TEST_F(SchedulerContractTest, GlobalCapChunksPromptWithoutSearchChunkSize) {

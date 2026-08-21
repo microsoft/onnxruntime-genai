@@ -42,7 +42,7 @@ struct State {
   virtual void SnapshotState(size_t position) { (void)position; }
 
   // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
-  // state (recurrent_state_window > 1), the accepted prefix can be committed WITHOUT a replay
+  // state (state_window > 1), the accepted prefix can be committed WITHOUT a replay
   // forward. HasCroppableRecurrentState() reports availability; CropToAccepted() rolls the
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).
@@ -222,6 +222,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
@@ -240,10 +241,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      bool cloned_from_parent = false,
+                                      bool append_providers = true);
 
  protected:
   void CreateSessionOptions();
+  void AddSharedInitializers();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

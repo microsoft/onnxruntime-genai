@@ -5,7 +5,7 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
-#include "hidden_states_inputs.h"
+#include "hidden_states.h"
 #include "recurrent_state.h"
 
 namespace Generators {

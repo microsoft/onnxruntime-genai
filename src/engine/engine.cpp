@@ -55,18 +55,137 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 }
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
+  ReclaimAbandonedRequests();
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
-  request->Assign(shared_from_this());
-  scheduler_->AddRequest(request);
+
+  // Track the request before assignment so every successfully submitted request can later be found
+  // even when the scheduler and cache hold it through implementation-specific containers. The
+  // registry allocation therefore happens before any request lifecycle mutation.
+  tracked_requests_.push_back(request);
+  try {
+    request->Assign(shared_from_this());
+    scheduler_->AddRequest(request);
+  } catch (...) {
+    tracked_requests_.pop_back();
+    throw;
+  }
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
+  if (request && IsClosed(request->status_)) {
+    return;
+  }
+  if (!request || request->engine_.lock().get() != this) {
+    throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
+  }
+
   scheduler_->RemoveRequest(request);
+
+  ready_requests_.erase(
+      ready_requests_.begin(),
+      ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
+  ready_request_index_ = 0;
+  ready_requests_.erase(
+      std::remove(ready_requests_.begin(), ready_requests_.end(), request),
+      ready_requests_.end());
+  staged_ready_requests_.erase(
+      std::remove(staged_ready_requests_.begin(), staged_ready_requests_.end(), request),
+      staged_ready_requests_.end());
+  request->CompleteClose();
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&request](const std::weak_ptr<Request>& tracked) {
+            const auto owned = tracked.lock();
+            return !owned || owned == request;
+          }),
+      tracked_requests_.end());
+}
+
+void Engine::ReclaimAbandonedRequests() {
+  // ExternalRelease only publishes an atomic abandonment marker. Engine entry points are externally
+  // serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
+  // release, ready-notification purge, and terminal close.
+  std::vector<std::shared_ptr<Request>> abandoned_requests;
+  abandoned_requests.reserve(tracked_requests_.size());
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&abandoned_requests, this](const std::weak_ptr<Request>& tracked) {
+            const auto request = tracked.lock();
+            if (!request) {
+              return true;
+            }
+            if (!IsClosed(request->status_) &&
+                request->engine_.lock().get() == this &&
+                request->IsExternallyAbandoned()) {
+              abandoned_requests.push_back(request);
+            }
+            return false;
+          }),
+      tracked_requests_.end());
+
+  for (const auto& request : abandoned_requests) {
+    // Recheck defensively in case an external owner was reacquired before this serialized boundary.
+    if (request->IsExternallyAbandoned()) {
+      RemoveRequest(request);
+    }
+  }
+}
+
+void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const {
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (request->engine_.lock().get() != this) {
+    throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
+  }
+
+  if (!cache_manager_->IsResident(request)) {
+    throw std::runtime_error("Cannot continue a request whose model state is no longer resident.");
+  }
+
+  if (std::find(ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_),
+                ready_requests_.end(), request) != ready_requests_.end()) {
+    throw std::runtime_error(
+        "Cannot continue a request while its ready notification is pending; "
+        "call Engine::Step() to drain the ready notification before continuing.");
+  }
+
+  if (!cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->ResidentRequestCount() > 1) {
+    throw std::runtime_error(
+        "Continuous decoding is only supported when a static engine batch contains one request.");
+  }
+}
+
+[[noreturn]] void Engine::HandleContinuationRestoreFailure(
+    const std::shared_ptr<Request>& request,
+    std::exception_ptr append_error,
+    std::exception_ptr restore_error) {
+  std::string message = AddExceptionCause(
+      "Continuation append failed and its Search state could not be restored.",
+      append_error);
+  try {
+    RemoveRequest(request);
+  } catch (...) {
+    message = AddExceptionCause(
+        std::move(message) + " Closing the poisoned request also failed.",
+        std::current_exception());
+    request->CompleteClose();
+  }
+  MarkUnhealthyAndThrow(
+      StepOutcomeKind::FatalExecutionFailure,
+      /*transaction_id=*/0,
+      request.get(),
+      std::move(message),
+      restore_error);
 }
 
 std::shared_ptr<Request> Engine::Step() {
+  ReclaimAbandonedRequests();
   if (auto request = DrainReadyRequest()) {
     return request;
   }
@@ -79,11 +198,22 @@ std::shared_ptr<Request> Engine::Step() {
 std::shared_ptr<Request> Engine::StepStatic() {
   while (scheduler_->HasPendingRequests()) {
     auto scheduled_requests = scheduler_->Schedule();
+    std::vector<RequestStatus> statuses_before_step;
+    statuses_before_step.reserve(scheduled_requests.size());
+    for (const auto& request : scheduled_requests) {
+      statuses_before_step.push_back(request->status_);
+    }
+
     model_executor_->Decode(scheduled_requests);
     scheduled_requests.GenerateNextTokens();
 
-    for (auto& request : scheduled_requests) {
-      if (request->HasUnseenTokens() || request->IsDone()) {
+    for (size_t i = 0; i < scheduled_requests.size(); ++i) {
+      auto request = scheduled_requests[i];
+      const bool turn_completed_this_step =
+          !IsTurnComplete(statuses_before_step[i]) &&
+          IsTurnComplete(request->status_);
+      if (!IsClosed(request->status_) &&
+          (request->HasUnseenTokens() || turn_completed_this_step)) {
         ready_requests_.push_back(request);
       }
     }
@@ -146,8 +276,31 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
-    auto scheduled_requests =
-        scheduler_->CreateScheduledRequests(step_plan_);
+    auto scheduled_requests = [&]() -> ScheduledRequests {
+      try {
+        return scheduler_->CreateScheduledRequests(step_plan_);
+      } catch (...) {
+        const auto construction_error = std::current_exception();
+        try {
+          reservation->Release();
+        } catch (...) {
+          ++transaction_metrics_.rollbacks;
+          MarkUnhealthyAndThrow(
+              StepOutcomeKind::FatalExecutionFailure,
+              step_plan_.transaction_id,
+              nullptr,
+              "Failed to release cache state after scheduled-request construction failed.",
+              std::current_exception());
+        }
+        ++transaction_metrics_.rollbacks;
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            step_plan_.transaction_id,
+            nullptr,
+            "Failed to construct the scheduled request transaction.",
+            construction_error);
+      }
+    }();
     ExecutionContext context{&step_plan_};
     context.cache_reservation = reservation->PagedReservation();
 

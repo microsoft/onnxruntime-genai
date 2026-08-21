@@ -33,6 +33,7 @@ struct Config {
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -334,10 +335,20 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct SharedInitializer {
+      std::string name;
+      std::string data_file;
+      std::string offset;
+      std::string length;
+      int data_type{};
+      std::vector<int64_t> shape;
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -385,6 +396,10 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
 
@@ -435,10 +450,13 @@ struct Config {
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
         bool is_lm_head{false};
-        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
-                                    // This is the index of the session that needs to be reset during the execution of the current session.
-                                    // This is a temporary solution until the QNN driver updates are available.
-                                    // Once the driver updates are available, this option will be deprecated.
+        bool inherit_session_options{false};  // If true, the top level (decoder) session options are used as the
+                                              // base for this component's session options, which are then overlaid
+                                              // on top of them.
+        int reset_session_idx{-1};            // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                              // This is the index of the session that needs to be reset during the execution of the current session.
+                                              // This is a temporary solution until the QNN driver updates are available.
+                                              // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
@@ -452,6 +470,7 @@ struct Config {
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};
@@ -504,9 +523,15 @@ struct Config {
   } search;
 
   struct Speculative {
-    // Four is a conservative default that amortizes target verification without excessive draft
-    // work; the best value depends on the model pair and execution provider.
+    // Fixed proposal width when min_adaptive_k is 0. Four conservatively amortizes target
+    // verification without excessive draft work; the best value depends on acceptance and EP cost.
     int max_draft_tokens{4};
+    int ngram_size{};             // 0 disables n-gram decoding; 2-16 matches the last N-1 tokens.
+    bool ngram_chained_lookup{};  // Refill the proposal by repeatedly looking up synthetic context.
+    // 0 disables adaptation. Values 1-16 enable it and set the starting width and floor;
+    // adjacent-width probes may grow the effective width up to the hard limit of 16.
+    int min_adaptive_k{};
+    bool cooldown{};  // Skip one speculative attempt after three zero-accept rounds.
   } speculative;
 
   struct Engine {
@@ -537,6 +562,7 @@ struct Config {
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

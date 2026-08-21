@@ -77,7 +77,15 @@ struct RecordingCacheManager : CacheManager {
 
   size_t MaxBatchSize() const override { return capacity_; }
 
+  size_t MaxQueryTokensPerRequest() const override { return max_query_tokens_per_request_; }
+
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
+
+  bool IsResident(const std::shared_ptr<Request>& request) const override {
+    return std::find(allocated_.begin(), allocated_.end(), request) != allocated_.end();
+  }
+
+  size_t ResidentRequestCount() const override { return allocated_.size(); }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
     const size_t request_limit =
@@ -194,6 +202,9 @@ struct RecordingCacheManager : CacheManager {
   void SetCapacityDeferredRequest(const std::shared_ptr<Request>& request) {
     capacity_deferred_request_id_ = request.get();
   }
+  void SetMaxQueryTokensPerRequest(size_t token_count) {
+    max_query_tokens_per_request_ = token_count;
+  }
   size_t AllocatedCount() const { return allocated_.size(); }
 
   // Recorded call counts.
@@ -204,6 +215,7 @@ struct RecordingCacheManager : CacheManager {
 
  private:
   size_t capacity_;
+  size_t max_query_tokens_per_request_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
@@ -313,6 +325,7 @@ struct RecordingModelExecutor : ModelExecutor {
   }
 
   void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
+  void SetForcedToken(int32_t token) { forced_token_ = token; }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
