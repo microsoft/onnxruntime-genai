@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from threading import Lock
+from queue import Queue
 from pathlib import Path
 
 
@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--cuda_visible_devices", required=True,
-                        help="Comma-separated GPU IDs; scenarios are assigned round-robin and each sees one GPU.")
+                        help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.")
     parser.add_argument(
         "--verbose", "--versbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
     )
@@ -34,7 +34,10 @@ def main() -> int:
     gpu_ids = [gpu.strip() for gpu in args.cuda_visible_devices.split(",") if gpu.strip()]
     if not gpu_ids:
         raise ValueError("--cuda_visible_devices must contain at least one GPU ID")
-    gpu_locks = {gpu_id: Lock() for gpu_id in gpu_ids}
+    # One queue token per GPU; taking a token reserves that GPU for one scenario.
+    available_gpus = Queue()
+    for gpu_id in gpu_ids:
+        available_gpus.put(gpu_id)
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -48,13 +51,12 @@ def main() -> int:
             temp_config.write_text(json.dumps([scenario], indent=2) + "\n")
 
             environment = os.environ.copy()
-            gpu_id = gpu_ids[(index - 1) % len(gpu_ids)]
+            # Block until a GPU is free, then return it after the subprocess exits.
+            gpu_id = available_gpus.get()
             environment["CUDA_VISIBLE_DEVICES"] = gpu_id
             label = f"{index}/{len(scenarios)} {scenario['scenario']}"
-            lock = gpu_locks[gpu_id]
-            lock.acquire()
             try:
-                print(f"Starting {label}" + (f" on GPU {gpu_id}" if gpu_id is not None else ""), flush=True)
+                print(f"Starting {label} on GPU {gpu_id}", flush=True)
                 completed = subprocess.run(
                     [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
                     env=environment,
@@ -62,7 +64,7 @@ def main() -> int:
                     text=True,
                 )
             finally:
-                lock.release()
+                available_gpus.put(gpu_id)
 
             result_path = scenario_out / f"{scenario['scenario']}_results_001.json"
             if result_path.exists():

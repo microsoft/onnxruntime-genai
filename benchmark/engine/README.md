@@ -75,9 +75,9 @@ build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --out benchmark/engine/out
 ```
 
-To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario is
-assigned one GPU in round-robin order, and `CUDA_VISIBLE_DEVICES` is set separately for each
-process, so no scenario uses more than one GPU:
+To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario
+waits for an available GPU, acquires its per-GPU slot, and receives that GPU through
+`CUDA_VISIBLE_DEVICES`, so no scenario uses more than one GPU:
 
 ```bash
 python benchmark/engine/run.py \
