@@ -128,7 +128,7 @@ jobs:
           python3 -m pip install -r test\python\requirements.txt --user
           python3 -m pip install -r test\python\cpu\torch\requirements.txt --user
           python3 -m pip install -r test\python\cpu\ort\requirements.txt --user
-          python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --force-reinstall --no-deps
+          python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --user --force-reinstall --no-deps
 
       - name: Run the Java tests
         run: |
