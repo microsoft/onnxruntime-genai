@@ -60,6 +60,7 @@ def _make_gqa_model(ep, window_size):
     model.ep = ep
     model.extra_options = {}
     model.kv_cache_quant_type = "none"
+    model.use_paged_attention = False
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16
@@ -139,6 +140,7 @@ _CACHE_SHAPE = ["batch_size", 2, "past_sequence_length", 16]
 def _make_shape_model(ep, local_layers=()):
     model = Model.__new__(Model)
     model.ep = ep
+    model.use_paged_attention = False
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
     if local_layers is not None:
         model.is_local = lambda layer_id: layer_id in local_layers
@@ -177,6 +179,14 @@ def test_model_without_alternating_attention_keeps_sequence_dim():
     model = _make_shape_model("cuda", local_layers=None)
 
     assert model.make_key_value_cache_shape(0, list(_CACHE_SHAPE)) == _CACHE_SHAPE
+
+
+def test_paged_attention_keeps_physical_block_shape_on_sliding_layers():
+    model = _make_shape_model("cuda", local_layers=(0,))
+    model.use_paged_attention = True
+    paged_shape = ["num_blocks", 256, 2, 16]
+
+    assert model.make_key_value_cache_shape(0, list(paged_shape)) == paged_shape
 
 
 # ===========================================================================

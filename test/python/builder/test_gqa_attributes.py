@@ -42,6 +42,7 @@ class _FakeGQAModel:
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
         self.kv_cache_quant_type = "none"
+        self.use_paged_attention = False
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
@@ -96,6 +97,7 @@ def test_fused_qk_norm_gqa_emits_qk_norm_epsilon_attribute():
 def test_paged_attention_preserves_sliding_window_size():
     model = _FakeGQAModel("cuda")
     model.window_size = 4096
+    model.use_paged_attention = True
 
     model.make_paged_attention(
         "/paged",
@@ -107,7 +109,10 @@ def test_paged_attention_preserves_sliding_window_size():
         block_table="block_table",
     )
 
-    assert model.nodes[-1]["attributes"]["local_window_size"] == 4096
+    attributes = model.nodes[-1]["attributes"]
+    assert attributes["local_window_size"] == 4096
+    # PagedAttention has no window-sized contiguous buffer and rejects this attribute.
+    assert "sliding_window_cache" not in attributes
 
 
 def test_quantized_gqa_emits_scale_inputs_and_attributes():
