@@ -108,8 +108,9 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     num_speculative_tokens_ = std::min(num_speculative_tokens_, static_cast<int>(window) - 1);
   }
   // Default the chunking on for windowed-state models only (they are the ones running long
-  // prompts through the MTP loop); 256 tokens/chunk costs a handful of extra forwards.
-  if (!prefill_chunk_explicit_ && main_->CanCropRecurrentState()) prefill_chunk_ = 256;
+  // prompts through the MTP loop). A 1024-token chunk keeps activation memory bounded without
+  // splitting common 1K prompts into several underfilled forwards.
+  if (!prefill_chunk_explicit_ && main_->CanCropRecurrentState()) prefill_chunk_ = 1024;
   mtp_params_ = std::make_shared<GeneratorParams>(mtp_model_);
   mtp_params_->search = params.search;
   // CUDA-graph capture on the MTP head: the head is a single standard-attention layer (KV

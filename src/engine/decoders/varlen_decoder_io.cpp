@@ -2,12 +2,111 @@
 // Licensed under the MIT License.
 
 #include "varlen_decoder_io.h"
+
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
 #include "../../models/decoder_only.h"
+#include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
 
 #include <string_view>
 
 namespace Generators {
+
+namespace {
+
+int32_t CheckedMetadataLength(size_t value, const char* name) {
+  if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::runtime_error(std::string{name} + " exceeds the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(value);
+}
+
+int32_t CheckedMetadataLength(int64_t value, const char* name) {
+  if (value < 0 || value > std::numeric_limits<int32_t>::max()) {
+    throw std::runtime_error(std::string{name} + " is outside the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(value);
+}
+
+int32_t CheckedMetadataLength(size_t count, size_t block_size, const char* name) {
+  const size_t int32_max = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+  if (count > int32_max / block_size) {
+    throw std::runtime_error(std::string{name} + " exceeds the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(count * block_size);
+}
+
+}  // namespace
+
+AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan) {
+  AttentionMetadataValues metadata;
+  for (const auto& entry : plan.requests) {
+    metadata.max_query_len_bound =
+        std::max(metadata.max_query_len_bound,
+                 CheckedMetadataLength(entry.unprocessed_token_count, "Query length"));
+    metadata.max_kv_len_bound =
+        std::max(metadata.max_kv_len_bound,
+                 CheckedMetadataLength(entry.target_cache_slots, "KV length"));
+  }
+  metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
+  return metadata;
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraph(size_t block_table_columns, size_t block_size) {
+  if (block_table_columns == 0 || block_size == 0) {
+    throw std::runtime_error("Captured attention metadata requires non-zero block-table columns and block size.");
+  }
+
+  size_t max_kv_len_lower_bound = 1;
+  if (block_table_columns > kMinGraphBlockTableColumns) {
+    // Graph shapes use 8, 16, 32, ... columns, with the configured maximum possibly truncating the
+    // final bucket. Reaching a bucket wider than eight proves that the longest live table exceeded
+    // the preceding power-of-two boundary because capturable decode steps reserve exactly the blocks
+    // needed by their current KV length. This remains true when the graph is reused for different
+    // requests, unlike the exact length observed during capture.
+    size_t preceding_bucket = 1;
+    while (preceding_bucket <= (block_table_columns - 1) / 2) {
+      preceding_bucket *= 2;
+    }
+    max_kv_len_lower_bound =
+        static_cast<size_t>(CheckedMetadataLength(preceding_bucket, block_size, "KV lower bound")) + 1;
+  }
+
+  return {
+      1,
+      CheckedMetadataLength(block_table_columns, block_size, "KV length"),
+      CheckedMetadataLength(max_kv_len_lower_bound, "KV lower bound"),
+  };
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
+  auto metadata = GetAttentionMetadataForGraph(block_table_columns, block_size);
+  const auto exact_metadata = GetAttentionMetadataForPlan(plan);
+  if (exact_metadata.max_query_len_bound > metadata.max_query_len_bound ||
+      exact_metadata.max_kv_len_bound > metadata.max_kv_len_bound) {
+    throw std::runtime_error("Captured attention metadata upper bounds do not cover the current step.");
+  }
+  if (exact_metadata.max_kv_len_lower_bound < metadata.max_kv_len_lower_bound) {
+    // The lower bound is only a backend-selection hint. If reservation policy ever gets ahead of
+    // the live KV length, keep the graph correct and conservatively disable lower-bound optimizations.
+    metadata.max_kv_len_lower_bound = 1;
+  }
+  return metadata;
+}
+
+std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
+    const AttentionMetadataValues& metadata) {
+  return {
+      metadata.max_query_len_bound,
+      metadata.max_kv_len_bound,
+      metadata.max_kv_len_lower_bound,
+  };
+}
 
 VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
   max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
@@ -167,14 +266,15 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 }
 
 // PagedAttention accepts an optional `attention_metadata` CPU input holding
-// [max_query_len_bound, max_kv_len_bound]. Both are upper bounds on the current step; the operator
+// [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]. The first two values are upper
+// bounds and the third value is a lower bound on the longest live KV sequence. The operator
 // uses them only to select a backend and to size its launch dimensions and workspaces, never as a
 // mask boundary. Supplying them lets the operator skip the device-to-host readback of the sequence
 // lengths, which otherwise forces a full stream synchronization inside every attention node.
 //
 // The engine already has both quantities on the host while it builds the sequence length inputs, so
-// this costs nothing. The bounds are exact rather than conservative, which is the tightest valid
-// choice: a larger bound is still correct but sizes the launch for more work than the step needs.
+// this costs nothing. Eager bounds are exact. Captured bounds describe the entire graph bucket so
+// they remain valid when the graph is replayed for different requests.
 void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
   const std::string& metadata_name = model->config_->model.decoder.inputs.attention_metadata;
   if (!model->session_info_.HasInput(metadata_name)) {
@@ -182,36 +282,34 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     return;
   }
 
-  int32_t max_query_len = 0;
-  int32_t max_kv_len = 0;
+  AttentionMetadataValues metadata;
   if (graph_buffers_ != nullptr) {
-    // A CPU input is read once, while the graph is being captured, and the recorded launch is reused
-    // for every later replay. Reporting the current step's exact lengths would freeze them, so a
-    // capturable step reports bounds that hold for the whole life of the graph instead: one token per
-    // sequence, and the KV length the block table can address at its current column count.
-    max_query_len = 1;
-    max_kv_len = static_cast<int32_t>(execution_context_->block_table_columns *
-                                      model->config_->engine.dynamic_batching->block_size);
-  } else if (execution_context_ && execution_context_->plan) {
-    for (const auto& entry : execution_context_->plan->requests) {
-      max_query_len = std::max(max_query_len, static_cast<int32_t>(entry.unprocessed_token_count));
-      max_kv_len = std::max(max_kv_len, static_cast<int32_t>(entry.target_cache_slots));
+    if (execution_context_ == nullptr || execution_context_->plan == nullptr) {
+      throw std::runtime_error("Captured attention metadata requires a step plan.");
     }
+    metadata = GetAttentionMetadataForGraphStep(
+        *execution_context_->plan,
+        execution_context_->block_table_columns,
+        model->config_->engine.dynamic_batching->block_size);
+  } else if (execution_context_ && execution_context_->plan) {
+    metadata = GetAttentionMetadataForPlan(*execution_context_->plan);
   } else {
     for (auto& request : scheduled_requests) {
-      const int32_t query_len = static_cast<int32_t>(request->ScheduledTokenCount());
-      // KV length after the step is past length plus query length, which is the current length.
-      const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
-      max_query_len = std::max(max_query_len, query_len);
-      max_kv_len = std::max(max_kv_len, kv_len);
+      const int32_t query_len =
+          CheckedMetadataLength(request->ScheduledTokenCount(), "Query length");
+      const int32_t kv_len =
+          CheckedMetadataLength(request->ProcessedSequenceLength() + query_len, "KV length");
+      metadata.max_query_len_bound = std::max(metadata.max_query_len_bound, query_len);
+      metadata.max_kv_len_bound = std::max(metadata.max_kv_len_bound, kv_len);
     }
+    metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
   }
 
+  const auto packed_metadata = PackAttentionMetadata(metadata);
   auto metadata_tensor = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int32_t>);
-  metadata_tensor->CreateTensor(std::vector<int64_t>{2});
+  metadata_tensor->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(packed_metadata.size())});
   auto metadata_span = metadata_tensor->GetDeviceSpan<int32_t>().CpuSpan();
-  metadata_span[0] = max_query_len;
-  metadata_span[1] = max_kv_len;
+  std::copy(packed_metadata.begin(), packed_metadata.end(), metadata_span.begin());
 
   input_names_.push_back(metadata_name.c_str());
   inputs_.push_back(metadata_tensor->GetOrtTensor());
