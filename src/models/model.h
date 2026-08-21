@@ -15,6 +15,7 @@
 #include "phi_multimodal_processor.h"
 #include "gemma_image_processor.h"
 #include "gemma4_multimodal_processor.h"
+#include "gemma3n_multimodal_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
