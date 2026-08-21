@@ -2373,6 +2373,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
                         if linear_node not in nodes_to_exclude:
                             nodes_to_exclude.append(linear_node)
 
+        self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def _init_mtp(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # MTP (multi-token prediction) self-speculative head.
         # When ``enable_mtp`` is set, an auxiliary ``mtp.onnx`` model is exported
         # alongside the main model (see ``Qwen35MtpHead``). It is disabled for the
@@ -2430,11 +2433,16 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
     def make_model(self, input_path):
         super().make_model(input_path)
+        self._make_mtp_head(input_path)
 
+    def _mtp_head_class(self):
+        from .qwen_mtp import Qwen35MtpHead  # noqa: PLC0415
+
+        return Qwen35MtpHead
+
+    def _make_mtp_head(self, input_path):
         # Then build the auxiliary MTP head (separate ONNX graph + file).
         if self.enable_mtp:
-            from .qwen_mtp import Qwen35MtpHead  # noqa: PLC0415
-
             print("Building MTP (multi-token prediction) head -> mtp.onnx")
             mtp_extra_options = self._mtp_extra_options
             mtp_extra_options.pop("enable_mtp", None)  # prevent recursion
@@ -2447,7 +2455,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             # lm_head, creating a graph cycle.
             mtp_extra_options.pop("include_hidden_states", None)
             mtp_extra_options.pop("exclude_lm_head", None)
-            self.mtp_head = Qwen35MtpHead(
+            self.mtp_head = self._mtp_head_class()(
                 self._mtp_config,
                 self._mtp_io_dtype,
                 self._mtp_onnx_dtype,
@@ -2459,6 +2467,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
     def save_model(self, out_dir):
         super().save_model(out_dir)
+        self._save_mtp_head(out_dir)
+
+    def _save_mtp_head(self, out_dir):
         if self.mtp_head is not None:
             self.mtp_head.save_model(out_dir)
             # Deduplicate the embedding + lm_head weights, which the MTP head shares
@@ -2907,3 +2918,26 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             gate_sigmoid_name, f"{gate_matmul_name}/output_0", self.io_dtype, shape=["batch_size", "sequence_length", 1]
         )
         return f"{down_matmul}/output_0", f"{gate_sigmoid_name}/output_0"
+
+
+class Qwen35DenseTextModel(Qwen35MoeTextModel):
+    """Dense Qwen3.5/Qwen3.8 text model.
+
+    Builds dense decoder layers like ``Qwen35TextModel`` while reusing
+    ``Qwen35MoeTextModel``'s MTP head wiring.
+    """
+
+    def _get_model_type(self, config):
+        return Qwen35TextModel._get_model_type(self, config)
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_layer(self, layer_id, layer):
+        return Qwen35TextModel.make_layer(self, layer_id, layer)
+
+    def _mtp_head_class(self):
+        from .qwen_mtp import Qwen35DenseMtpHead  # noqa: PLC0415
+
+        return Qwen35DenseMtpHead
