@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument("--cuda_visible_devices", required=True,
                         help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.")
     parser.add_argument(
-        "--verbose", "--versbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
+        "--verbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
     )
     args = parser.parse_args()
     benchmark_start = time.perf_counter()
