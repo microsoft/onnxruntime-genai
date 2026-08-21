@@ -1112,9 +1112,9 @@ class Qwen35TextModel(Model):
         self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
         if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
-        if self.linear_attn_op == "gated_delta_net" and self._recurrent_state_window > 8:
+        if self.linear_attn_op == "gated_delta_net" and self._state_window > 8:
             # The window becomes the operator's checkpoint output, which it caps at 8 slots.
-            raise ValueError("linear_attn_op=gated_delta_net supports recurrent_state_window up to 8")
+            raise ValueError("linear_attn_op=gated_delta_net supports state_window up to 8")
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
@@ -1969,7 +1969,7 @@ class Qwen35TextModel(Model):
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
         op_name = f"{basename}/GatedDeltaNet"
-        window = self._recurrent_state_window
+        window = self._state_window
         present = f"present.{layer_id}.recurrent_state"
         state_shape = [*self._state_window_dims, "batch_size", n_kv, hv, hk]
         self.make_gated_delta_net(
