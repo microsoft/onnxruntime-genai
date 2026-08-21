@@ -60,16 +60,13 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   search_->DeferCompletion(true);
 }
 
-void Request::OnFirstExternalReference() noexcept {
-  externally_abandoned_.store(false, std::memory_order_release);
+bool Request::BelongsTo(const Engine& engine) const noexcept {
+  return engine_.lock().get() == &engine;
 }
 
-void Request::OnLastExternalReference() noexcept {
-  externally_abandoned_.store(true, std::memory_order_release);
-}
-
-bool Request::IsExternallyAbandoned() const noexcept {
-  return externally_abandoned_.load(std::memory_order_acquire);
+void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  CompleteClose();
 }
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
@@ -141,7 +138,7 @@ void Request::Remove() {
   engine->RemoveRequest(shared_from_this());
 }
 
-void Request::CompleteClose() {
+void Request::CompleteClose() noexcept {
   engine_.reset();
   status_ = RequestStatus::Closed;
 }

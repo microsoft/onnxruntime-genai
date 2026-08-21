@@ -16,13 +16,6 @@
 
 namespace Generators {
 
-struct Request;
-
-template <>
-struct ExternalRefCountedTraits<Request> {
-  static constexpr bool notify_external_reference_changes = true;
-};
-
 struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
@@ -185,6 +178,11 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void Remove();
 
+  // Internal lifecycle capabilities used by Engine orchestration. These keep ownership and terminal
+  // mutation inside Request instead of exposing its weak owner or granting Engine private access.
+  bool BelongsTo(const Engine& engine) const noexcept;
+  void CompleteCloseFromEngine(const Engine& engine) noexcept;
+
   /**
    * @brief Checks if the request is in prefill mode.
    * @return True while the tokens the application supplied have not all been through the model.
@@ -324,13 +322,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<size_t> unseen_token_indices_;
   size_t next_unseen_token_index_{};
   int64_t seen_sequence_length_{};
-  friend struct Engine;
-  friend struct ExternalRefCounted<Request>;
-
-  void CompleteClose();
-  void OnFirstExternalReference() noexcept;
-  void OnLastExternalReference() noexcept;
-  bool IsExternallyAbandoned() const noexcept;
+  void CompleteClose() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -341,7 +333,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
-  std::atomic<bool> externally_abandoned_{false};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();

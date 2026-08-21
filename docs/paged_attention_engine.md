@@ -12,7 +12,7 @@ The current dynamic path manages paged KV decoder state together with per-reques
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
-> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes status and unseen-output access as well as lifecycle mutation. Final handle release only publishes an atomic abandonment marker; cleanup runs at the next serialized Engine boundary. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
+> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes status and unseen-output access as well as lifecycle mutation. Final handle release only publishes an abandonment marker; cleanup runs at the next serialized Engine boundary. External handle zero/one transitions serialize the self-owner and base-owned lifecycle state, so a concurrent handle returned by `Engine::Step()` cannot be erased by the previous handle's final release. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
 
 The main implementation is under `src/engine/`:
 
@@ -156,6 +156,10 @@ the model's chat template.
 `AddTokens()` remains an initial-input-only operation.
 
 A submitted request remains owned by its Engine and resident at `TurnComplete`. `Remove()` releases that ownership immediately. If every external handle is released instead, the request is marked abandoned and reclaimed before the Engine's next `AddRequest()` or `Step()` boundary.
+
+Automatic abandonment on final handle destruction is transitional behavior, not logical close. The
+external-reference machinery keeps that behavior race-free today, but the production ownership layer
+should keep handle destruction separate from explicit request close rather than reusing this policy.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Remove()` when they no

@@ -9,7 +9,11 @@
 // without redundant model runs, and forms a fresh batch across steps under capacity backpressure.
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,6 +23,41 @@
 #include "engine_test_doubles.h"
 
 namespace Generators {
+
+class TestBarrier {
+ public:
+  explicit TestBarrier(size_t participant_count)
+      : remaining_{participant_count} {}
+
+  void ArriveAndWait() {
+    std::unique_lock lock{mutex_};
+    if (--remaining_ == 0) {
+      condition_.notify_all();
+      return;
+    }
+    condition_.wait(lock, [this] { return remaining_ == 0; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  size_t remaining_;
+};
+
+struct ExternalRequestRaceProbe
+    : std::enable_shared_from_this<ExternalRequestRaceProbe>,
+      ExternalRefCounted<ExternalRequestRaceProbe> {
+  explicit ExternalRequestRaceProbe(
+      std::shared_ptr<std::atomic<bool>> destroyed)
+      : destroyed_{std::move(destroyed)} {}
+
+  ~ExternalRequestRaceProbe() {
+    destroyed_->store(true, std::memory_order_release);
+  }
+
+  std::shared_ptr<std::atomic<bool>> destroyed_;
+};
+
 namespace test {
 namespace {
 
@@ -58,6 +97,8 @@ class ExternalRequestReference {
 };
 
 static_assert(noexcept(std::declval<Request&>().ExternalRelease()));
+static_assert(
+    noexcept(std::declval<ExternalRequestRaceProbe&>().ExternalRelease()));
 
 class EngineStepTest : public ::testing::Test {
  protected:
@@ -69,6 +110,52 @@ class EngineStepTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST(ExternalRefCountedTest,
+     DistinguishesNeverHeldHeldAbandonedAndReacquiredStates) {
+  auto destroyed = std::make_shared<std::atomic<bool>>(false);
+  auto probe = std::make_shared<ExternalRequestRaceProbe>(destroyed);
+
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalAddRef();
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalRelease();
+  EXPECT_TRUE(probe->ExternalReferencesAbandoned());
+  probe->ExternalAddRef();
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalRelease();
+  EXPECT_TRUE(probe->ExternalReferencesAbandoned());
+}
+
+TEST(ExternalRefCountedTest,
+     ConcurrentFinalReleaseAndReacquirePreserveOwnerLifetime) {
+  auto destroyed = std::make_shared<std::atomic<bool>>(false);
+  auto engine_owner =
+      std::make_shared<ExternalRequestRaceProbe>(destroyed);
+  auto* raw = engine_owner.get();
+  raw->ExternalAddRef();
+
+  TestBarrier transition_start{3};
+  std::thread release_thread([raw, &transition_start] {
+    transition_start.ArriveAndWait();
+    raw->ExternalRelease();
+  });
+  std::thread reacquire_thread([engine_owner, &transition_start] {
+    transition_start.ArriveAndWait();
+    engine_owner->ExternalAddRef();
+  });
+  transition_start.ArriveAndWait();
+  release_thread.join();
+  reacquire_thread.join();
+
+  EXPECT_FALSE(raw->ExternalReferencesAbandoned());
+  EXPECT_FALSE(destroyed->load(std::memory_order_acquire));
+
+  engine_owner.reset();
+  EXPECT_FALSE(destroyed->load(std::memory_order_acquire));
+  raw->ExternalRelease();
+  EXPECT_TRUE(destroyed->load(std::memory_order_acquire));
+}
 
 // One request: Step decodes the proposed batch exactly once, commits its cache allocation, and
 // returns the request.
@@ -249,6 +336,38 @@ TEST_F(EngineStepTest, ReacquiringExternalReferenceCancelsDeferredAbandonment) {
 
   engine.engine->RemoveRequest(request);
   reacquired_external.Release();
+}
+
+TEST_F(EngineStepTest,
+       ConcurrentFinalReleaseAndReacquireCancelsRequestAbandonment) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto prompt = Prompt(10);
+  auto request = MintRequest(*model_, prompt);
+  request->ExternalAddRef();
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  TestBarrier transition_start{3};
+  std::thread release_thread([request, &transition_start] {
+    transition_start.ArriveAndWait();
+    request->ExternalRelease();
+  });
+  std::thread reacquire_thread([request, &transition_start] {
+    transition_start.ArriveAndWait();
+    request->ExternalAddRef();
+  });
+  transition_start.ArriveAndWait();
+  release_thread.join();
+  reacquire_thread.join();
+
+  EXPECT_EQ(engine.engine->Step(), nullptr);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 0);
+
+  engine.engine->RemoveRequest(request);
+  request->ExternalRelease();
 }
 
 TEST_F(EngineStepTest, ContinueRejectsUndrainedReadyNotificationWithoutMutation) {

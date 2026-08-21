@@ -75,7 +75,7 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   if (request && IsClosed(request->status_)) {
     return;
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
   }
 
@@ -87,7 +87,7 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   ready_request_index_ = 0;
   std::erase(ready_requests_, request);
   std::erase(staged_ready_requests_, request);
-  request->CompleteClose();
+  request->CompleteCloseFromEngine(*this);
   std::erase_if(tracked_requests_, [&request](const std::weak_ptr<Request>& tracked) {
     const auto owned = tracked.lock();
     return !owned || owned == request;
@@ -106,8 +106,8 @@ void Engine::ReclaimAbandonedRequests() {
       return true;
     }
     if (!IsClosed(request->status_) &&
-        request->engine_.lock().get() == this &&
-        request->IsExternallyAbandoned()) {
+        request->BelongsTo(*this) &&
+        request->ExternalReferencesAbandoned()) {
       abandoned_requests.push_back(request);
     }
     return false;
@@ -115,7 +115,7 @@ void Engine::ReclaimAbandonedRequests() {
 
   for (const auto& request : abandoned_requests) {
     // Recheck defensively in case an external owner was reacquired before this serialized boundary.
-    if (request->IsExternallyAbandoned()) {
+    if (request->ExternalReferencesAbandoned()) {
       RemoveRequest(request);
     }
   }
@@ -125,7 +125,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (request->engine_.lock().get() != this) {
+  if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
   }
 
