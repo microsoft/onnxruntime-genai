@@ -67,6 +67,8 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // AutoRegressiveSpeculator does. Chaining needs the head to emit that hidden, so a head exported
   // without `mtp_emit_hidden=true` can only run N=1.
   num_speculative_tokens_ = std::max(1, params.speculative.max_draft_tokens);
+  GetEnv("ORTGENAI_MTP_FAST_COMMIT", fast_commit_);
+
   const std::string& head_hidden_states = main_model_.config_->model.mtp.outputs.hidden_states;
   if (num_speculative_tokens_ > 1 &&
       (head_hidden_states.empty() || !mtp_model_.session_info_.HasOutput(head_hidden_states))) {
@@ -781,8 +783,10 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     bound divergence from plain greedy. ---
   // Snapshot the recurrent state so a rejected wide verify can replay the committed prefix with
   // decode-consistent numerics. The snapshot is also needed when no draft is accepted, where there
-  // is no committed recurrent-state window slot to crop to.
-  main_->SnapshotState();
+  // is no committed recurrent-state window slot to crop to. The fast-commit path below needs
+  // neither, and the snapshot is 2*num_layers device copies on EVERY step, so skip it there.
+  const bool fast_commit = fast_commit_ && main_->CanCropRecurrentState();
+  if (!fast_commit) main_->SnapshotState();
   verify_tokens_[0] = t;
   for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
   main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
@@ -839,6 +843,17 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     next_token_ = verify_argmax_[a];
     CopyHiddenRow(vhidden, a, *hidden_slice_);
     length_ += static_cast<size_t>(N) + 1;
+  } else if (fast_commit) {
+    // Partial accept, DIRECT ARENA COMMIT: the batched verify already advanced the KV and the
+    // per-token recurrent window through every verify token, so crop both to the accepted length
+    // and take the bonus from verify row a -- no replay forward at all. Row a is an early row of a
+    // wide forward, so its argmax can differ from a sequential decode on near-ties; the crop path
+    // below is no more decode-consistent in practice (see the NOTE there), it just costs an extra
+    // forward. Opt in with ORTGENAI_MTP_FAST_COMMIT=1.
+    main_->CropToAccepted(length_ + static_cast<size_t>(a) + 1, static_cast<size_t>(a));
+    next_token_ = verify_argmax_[a];
+    CopyHiddenRow(vhidden, a, *hidden_slice_);
+    length_ += static_cast<size_t>(a) + 1;
   } else if (main_->CanCropRecurrentState() && a >= 1) {
     // Partial accept (a>=1), LOSSLESS CROP fast-path (model exported with state_window).
     // The batched verify's row a is an EARLY row of a wide (M=N+1) forward, whose argmax is NOT
