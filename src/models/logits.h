@@ -17,6 +17,9 @@ struct Logits {
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
 
  private:
+  // dropped_rows is the count of input positions the model did not emit logits for.
+  void UpdateInputSequenceLengths(const DeviceSpan<int32_t>& next_tokens, size_t input_kv_length, size_t dropped_rows);
+
   State& state_;
   const Model& model_{state_.model_};
   size_t output_index_{~0U};
