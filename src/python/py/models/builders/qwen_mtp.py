@@ -309,9 +309,12 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             block_scales = block_scales.repeat_interleave(values.shape[1] // block_scales.shape[1], dim=1)
             return (values * block_scales * float(weight_scale_2.float().item())).to(torch.bfloat16)
         if weight.dtype == torch.float8_e4m3fn:
-            if weight_scale is None or weight_scale.numel() != 1:
-                raise ValueError(f"ModelOpt FP8 tensor '{name}' must have a scalar weight_scale.")
-            return (weight.float() * float(weight_scale.float().item())).to(torch.bfloat16)
+            if weight_scale is None or weight_scale.numel() not in (1, weight.shape[0]):
+                raise ValueError(
+                    f"ModelOpt FP8 tensor '{name}' must have a scalar or per-channel weight_scale, "
+                    f"got {None if weight_scale is None else tuple(weight_scale.shape)}."
+                )
+            return (weight.float() * weight_scale.float().reshape(-1, 1)).to(torch.bfloat16)
         return weight
 
     @classmethod

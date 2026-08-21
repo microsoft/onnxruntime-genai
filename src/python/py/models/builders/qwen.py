@@ -2403,7 +2403,26 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             self._mtp_ep = ep
             self._mtp_cache_dir = cache_dir
             self._mtp_extra_options = copy.deepcopy(extra_options)
+            self._drop_unusable_mtp_kv_scales()
             self._resolve_mtp_model_config(extra_options)
+
+    def _drop_unusable_mtp_kv_scales(self):
+        """Leave the MTP KV cache unquantized unless the scale file calibrates it.
+
+        Calibrated scales are per main-model layer, so the single-layer head can only
+        quantize its KV when the file carries an explicit ``mtp`` section.
+        """
+        scale_file = self._mtp_extra_options.get("kv_cache_scale_file")
+        if not scale_file:
+            return
+        try:
+            with open(scale_file, encoding="utf-8") as handle:
+                has_mtp_section = "mtp" in json.load(handle)
+        except (OSError, ValueError):
+            return
+        if not has_mtp_section:
+            self._mtp_extra_options.pop("kv_cache_quant_type", None)
+            self._mtp_extra_options.pop("kv_cache_scale_file", None)
 
     def _resolve_mtp_model_config(self, extra_options):
         """Resolve an independent MTP model configuration.
