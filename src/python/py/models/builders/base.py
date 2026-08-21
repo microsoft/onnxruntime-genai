@@ -198,7 +198,7 @@ class Model:
             "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
-            "attention_metadata": [2],                                                                                               # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
@@ -776,10 +776,9 @@ class Model:
         per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
 
-        # Calibrated per-layer scales are required and supplied via a JSON file:
-        #   {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}
-        # where each per-layer entry is a scalar (PER_TENSOR) or a length-scale_size
-        # vector (PER_CHANNEL).
+        # Calibrated per-layer scales are required and supplied via a JSON file. Optional
+        # `layer_ids` maps sparse scale entries to their original model layers; without it,
+        # the scale arrays use the legacy dense 0..num_layers-1 order.
         if self.kv_cache_attrs["scales_path"] == "":
             raise ValueError(
                 "Quantized KV cache requires calibrated scales; provide them via "
@@ -794,9 +793,36 @@ class Model:
         except (KeyError, TypeError) as error:
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
-        if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
+        layer_ids = scale_data.get("layer_ids")
+        if layer_ids is None:
+            layer_ids = list(range(self.num_layers))
+            expected_scale_count = self.num_layers
+        else:
+            if not isinstance(layer_ids, list) or any(type(layer_id) is not int for layer_id in layer_ids):
+                raise ValueError("kv_cache_scale_file layer_ids must be a list of integer model layer IDs.")
+            if not layer_ids:
+                raise ValueError("kv_cache_scale_file layer_ids must not be empty.")
+            if len(set(layer_ids)) != len(layer_ids):
+                raise ValueError("kv_cache_scale_file layer_ids must not contain duplicates.")
+            if any(layer_id < 0 or layer_id >= self.num_layers for layer_id in layer_ids):
+                raise ValueError(
+                    f"Scales file layer_ids must be in [0, {self.num_layers}), got {layer_ids}."
+                )
+            kv_input_names = self.input_names.get("past_key_values.key", [])
+            kv_layer_ids = {
+                int(parts[1])
+                for input_name in kv_input_names
+                if len(parts := input_name.split(".")) == 3 and parts[1].isdigit()
+            }
+            if set(layer_ids) != kv_layer_ids:
+                raise ValueError(
+                    f"kv_cache_scale_file layer_ids must match the model's KV-cache layers; "
+                    f"got {sorted(layer_ids)}, expected {sorted(kv_layer_ids)}."
+                )
+            expected_scale_count = len(layer_ids)
+        if len(k_scales_per_layer) != expected_scale_count or len(v_scales_per_layer) != expected_scale_count:
             raise ValueError(
-                f"Scales file must provide {self.num_layers} per-layer scales, "
+                f"kv_cache_scale_file must provide {expected_scale_count} per-layer scales, "
                 f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
             )
 
@@ -806,8 +832,8 @@ class Model:
         scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
 
         # Create a helper function for reformatting a scale tensor to the right output format
-        def make_kv_cache_scale(per_layer, layer_id):
-            scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
+        def make_kv_cache_scale(per_layer, scale_index, layer_id):
+            scale = np.asarray(per_layer[scale_index], dtype=np.float32).reshape(-1)
             if scale.size != scale_size:
                 raise ValueError(
                     f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}"
@@ -817,10 +843,10 @@ class Model:
             return scale.reshape(scale_shape)
 
         # Make initializers for each scale tensor
-        for layer_id in range(self.num_layers):
+        for scale_index, layer_id in enumerate(layer_ids):
             k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            self.make_initializer(make_kv_cache_scale(k_scales_per_layer, layer_id), k_scale_name)
-            self.make_initializer(make_kv_cache_scale(v_scales_per_layer, layer_id), v_scale_name)
+            self.make_initializer(make_kv_cache_scale(k_scales_per_layer, scale_index, layer_id), k_scale_name)
+            self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
         self.quant_config = self.extra_options.get("_quant_config")
@@ -3586,9 +3612,10 @@ class Model:
         #   16: attention_metadata
         # The scheduler-provided slot_mapping is not used here; slots are derived from
         # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
-        # can select a backend and size its launch without a device-to-host readback of the sequence
-        # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
+        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
+        # in CPU memory so the op can select a backend and size its launch without a device-to-host
+        # readback of the sequence lengths. Feeding it is what removes the per-node stream
+        # synchronization on the decode path.
         self.extend_with_optional_inputs(
             inputs,
             [

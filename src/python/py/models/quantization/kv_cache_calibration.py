@@ -20,7 +20,13 @@ where ``threshold`` per channel is the abs-max (``method="minmax"``), a high per
 ``|x|`` (``method="percentile"``, tames outliers), or the clip point that minimizes the
 quantization mean squared error (``method="mse"``). The output JSON is::
 
-    {"scales": {"k_scales": [<per-layer>...], "v_scales": [<per-layer>...]}}
+    {
+        "scales": {"k_scales": [<per-layer>...], "v_scales": [<per-layer>...]},
+        "layer_ids": [<model-layer-id>...]
+    }
+
+``layer_ids`` maps each scale entry to its model layer. It is contiguous for dense models and
+sparse for hybrid models where only full-attention layers own a KV cache.
 
 Typical two-step flow::
 
@@ -299,7 +305,12 @@ def _detect_kv_shape(sess, model_path: str) -> tuple[int, int]:
     """
     num_kv_heads = head_size = None
     for meta in sess.get_inputs():
-        if not meta.name.startswith("past_key_values."):
+        # Only the attention cache carries the [batch, num_kv_heads, past_seq_len, head_size]
+        # layout. Hybrid models also expose `past_key_values.<layer>.conv_state`
+        # and `.recurrent_state` inputs, which are 4-D/5-D linear-attention state buffers with a
+        # completely different meaning, so match on the `.key`/`.value` suffix rather than on the
+        # `past_key_values.` prefix alone.
+        if not (meta.name.startswith("past_key_values.") and meta.name.endswith((".key", ".value"))):
             continue
         shape = meta.shape
         if len(shape) == 4:
@@ -498,26 +509,30 @@ def calibrate_kv_scales(
         num_layers = len(present_keys)
     if num_layers <= 0:
         raise ValueError("Model has no present.*.key outputs; cannot calibrate KV scales.")
-    expected_layers = set(range(num_layers))
-    missing_keys = sorted(expected_layers - present_keys.keys())
-    missing_values = sorted(expected_layers - present_values.keys())
-    if missing_keys or missing_values:
+    # Hybrid attention models interleave full-attention and linear-attention layers, so only a
+    # subset of layers owns a KV cache and the `present.<layer>.key` indices are sparse (e.g.
+    # some models emit layers 3, 7, 11, ... 39). Calibrate whichever layers are present, in
+    # ascending layer order, instead of demanding a contiguous 0..N-1 range.
+    layer_ids = sorted(present_keys.keys() & present_values.keys())
+    unpaired = sorted(present_keys.keys() ^ present_values.keys())
+    if unpaired:
         raise ValueError(
-            "Calibration requires contiguous present.<layer>.key/value outputs starting at layer 0; "
-            f"missing keys={missing_keys}, values={missing_values}."
+            f"Every present.<layer>.key needs a matching present.<layer>.value; unpaired layers={unpaired}."
         )
-    read_names = [present_keys[i] for i in range(num_layers)] + [present_values[i] for i in range(num_layers)]
+    if len(layer_ids) < num_layers:
+        raise ValueError(
+            f"Requested num_layers={num_layers} but the model only exposes {len(layer_ids)} "
+            f"KV-cache layers (present.<layer>.key/value ids={layer_ids})."
+        )
+    layer_ids = layer_ids[:num_layers]
+    read_names = [present_keys[i] for i in layer_ids] + [present_values[i] for i in layer_ids]
     channels = num_kv_heads * head_size
 
     input_metas = {meta.name: meta for meta in sess.get_inputs()}
     for required_name in ("input_ids", "attention_mask"):
         if required_name not in input_metas:
             raise ValueError(f"Calibration model is missing required input '{required_name}'.")
-    past_metas = [
-        meta
-        for meta in input_metas.values()
-        if meta.name.startswith("past_key_values.") and meta.name.endswith((".key", ".value"))
-    ]
+    past_metas = [meta for meta in input_metas.values() if meta.name.startswith("past_key_values.")]
     supported_inputs = {"input_ids", "attention_mask", "position_ids", *(meta.name for meta in past_metas)}
     unsupported_inputs = sorted(input_metas.keys() - supported_inputs)
     if unsupported_inputs:
@@ -560,9 +575,20 @@ def calibrate_kv_scales(
                 raise ValueError(f"Unsupported position_ids shape {position_meta.shape}.")
             feeds["position_ids"] = position_ids
         for meta in past_metas:
-            feeds[meta.name] = np.zeros(
-                (1, num_kv_heads, 0, head_size), dtype=_numpy_dtype(meta.type)
-            )
+            if meta.name.endswith((".key", ".value")):
+                # Empty attention cache: prefill starts from zero past tokens.
+                feeds[meta.name] = np.zeros(
+                    (1, num_kv_heads, 0, head_size), dtype=_numpy_dtype(meta.type)
+                )
+            else:
+                # Linear-attention conv/recurrent state buffers on hybrid models. These are
+                # fixed-size (not sequence-growing), so allocate the declared shape with the
+                # symbolic batch dimension resolved to 1 and zero-initialize them, which is the
+                # correct "no history" state for the start of a sequence.
+                feeds[meta.name] = np.zeros(
+                    tuple(1 if not isinstance(dim, int) else dim for dim in meta.shape),
+                    dtype=_numpy_dtype(meta.type),
+                )
         outputs = sess.run(read_names, feeds)
 
         for i in range(num_layers):
@@ -615,7 +641,12 @@ def calibrate_kv_scales(
     os.makedirs(os.path.dirname(out_json), exist_ok=True)
     with open(out_json, "w", encoding="utf-8") as file:
         json.dump(
-            {"scales": {"k_scales": k_scales.tolist(), "v_scales": v_scales.tolist()}},
+            {
+                "scales": {"k_scales": k_scales.tolist(), "v_scales": v_scales.tolist()},
+                # Which model layers the scales belong to, in the same order as the arrays above.
+                # Contiguous for dense models; sparse for hybrid attention models.
+                "layer_ids": layer_ids,
+            },
             file,
             allow_nan=False,
         )
