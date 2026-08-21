@@ -110,13 +110,16 @@ child benchmark output is opt-in with `--verbose`.
 
 | Field | Notes |
 | --- | --- |
-| `scenario` | `decode_baseline` or `long_prefill`. |
+| `scenario` | `decode_baseline`, `long_prefill`, or `mixed_workload`. |
 | `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
-| `prompt_length_k` | RULER prompt length in thousands of tokens; `long_prefill` supports 32, 64, and 128. |
+| `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
+
+`mixed_workload` runs one long-prefill request alongside active decode requests. The full matrix
+uses a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses one generated token.
 
 ## Adding a scenario
 

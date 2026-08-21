@@ -10,6 +10,7 @@ flowchart LR
 
     C --> D[decode_baseline.cpp]
     C --> E[long_prefill.cpp]
+    C --> F[mixed_workload.cpp]
     C --> G[other_scenarios.cpp]
 
     D --> H[out/decode_baseline_results_ID.json]
@@ -40,6 +41,7 @@ onnxruntime-genai/benchmark/engine/
 |- scenarios/
     |- decode_baseline.cpp
     |- long_prefill.cpp
+    |- mixed_workload.cpp
     |- {other_scenarios}.cpp
     |- utils.cpp
 ```
@@ -103,6 +105,8 @@ Each scenario implementation file (under `scenarios/`) is responsible for:
 - validating that inputs are valid for that scenario
 - running the benchmark and recording scenario-appropriate metrics
 - producing scenario JSON outputs under `out/` (no per-scenario HTML)
+
+`mixed_workload` runs one long RULER prompt with shorter active decode prompts in the same engine.
 
 The dispatcher/visualizer is responsible for:
 
