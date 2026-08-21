@@ -144,6 +144,24 @@ TEST_F(RequestLifecycleTest, EmptyAppendIsRejected) {
   EXPECT_THROW(request->Continue({}), std::runtime_error);
 }
 
+TEST_F(RequestLifecycleTest, InvalidEosTokenIsRejected) {
+  for (const int invalid_eos_token_id : {-1, 5}) {
+    const std::string overlay =
+        R"({ "model": { "vocab_size": 5, "eos_token_id": )" +
+        std::to_string(invalid_eos_token_id) + " } }";
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder", nullptr, overlay);
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto params = MakeGreedyParams(*model);
+
+    try {
+      std::make_shared<Request>(params);
+      FAIL() << "Expected invalid eos_token_id to be rejected";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos);
+    }
+  }
+}
+
 TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
   auto request = NewRequest();
 
