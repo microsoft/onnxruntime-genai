@@ -130,7 +130,7 @@ jobs:
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
-          python3 -m pip install build/cpu/Release/wheel/onnxruntime_genai*.whl --no-deps
+          python3 -m pip install build/cpu/Release/wheel/onnxruntime_genai*.whl --force-reinstall --no-deps
 
       - name: Verify Build Artifacts
         if: always()

@@ -163,7 +163,7 @@ jobs:
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\cuda\torch\requirements.txt
           python -m pip install -r test\python\cuda\ort\requirements.txt
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --force-reinstall --no-deps
 
       - name: Run the synthetic Engine Python tests
         run: |
