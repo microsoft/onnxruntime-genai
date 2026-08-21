@@ -11,8 +11,9 @@ from functools import cache
 
 # Execution providers shipped as separate plug-in libraries that must be registered with
 # ONNX Runtime before use. Maps the GenAI provider name to the Python package that exposes
-# the plug-in library path via get_library_path().
+# the plug-in name and library path.
 PLUGIN_EP_PACKAGES = {
+    "cuda": "onnxruntime_ep_cuda",
     "webgpu": "onnxruntime_ep_webgpu",
 }
 

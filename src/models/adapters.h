@@ -11,7 +11,7 @@ struct Adapter {
   Adapter(const Adapter&) = delete;
   Adapter& operator=(const Adapter&) = delete;
 
-  Adapter(const char* adapter_file_path, Ort::Allocator* allocator);
+  explicit Adapter(const char* adapter_file_path);
 
  private:
   // AcquireRef/ReleaseRef/RefCount are intentionally private so that all
@@ -48,7 +48,6 @@ struct Adapters : std::enable_shared_from_this<Adapters>, ExternalRefCounted<Ada
   void ReleaseAdapter(const std::string& adapter_name);
 
  private:
-  const Model* model_;
   // Serializes all access to adapters_ and to per-Adapter ref counts so that
   // load/unload/acquire/release cannot race. Without this, the check-then-erase
   // pattern in UnloadAdapter (and concurrent std::unordered_map mutation) is a
