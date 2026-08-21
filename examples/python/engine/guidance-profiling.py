@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 
-
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -47,7 +46,7 @@ def summarize(values):
     }
 
 
-def generate(engine, request, tokenizer):
+def generate(engine, request, tokenizer, request_started_at):
     stream = tokenizer.create_stream()
     fragments = []
     token_count = 0
@@ -74,11 +73,30 @@ def generate(engine, request, tokenizer):
     decode_seconds = max(0.0, last_token_at - first_token_at)
     return "".join(fragments).strip(), {
         "tokens": token_count,
-        "ttft_ms": (first_token_at - started) * 1000,
-        "generation_ms": (completed - started) * 1000,
+        "ttft_after_admission_ms": (first_token_at - started) * 1000,
+        "end_to_end_ttft_ms": (first_token_at - request_started_at) * 1000,
+        "generation_after_admission_ms": (completed - started) * 1000,
+        "end_to_end_latency_ms": (completed - request_started_at) * 1000,
         "inter_token_ms": decode_seconds * 1000 / max(1, token_count - 1),
         "decode_tokens_per_second": (token_count - 1) / decode_seconds if decode_seconds > 0 else 0.0,
     }
+
+
+def validate_output(output):
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return False, False
+
+    schema_compliant = (
+        isinstance(parsed, dict)
+        and set(parsed) == {"city", "temperature_f", "conditions"}
+        and isinstance(parsed["city"], str)
+        and isinstance(parsed["temperature_f"], int)
+        and not isinstance(parsed["temperature_f"], bool)
+        and isinstance(parsed["conditions"], str)
+    )
+    return True, schema_compliant
 
 
 def run_once(engine, model, tokenizer, prompt_tokens, max_length, guided):
@@ -92,25 +110,37 @@ def run_once(engine, model, tokenizer, prompt_tokens, max_length, guided):
     setup_ms = (time.perf_counter() - setup_started) * 1000
 
     try:
+        admission_started = time.perf_counter()
         engine.add_request(request)
-        output, metrics = generate(engine, request, tokenizer)
+        admission_ms = (time.perf_counter() - admission_started) * 1000
+        output, metrics = generate(engine, request, tokenizer, setup_started)
     finally:
         engine.remove_request(request)
 
     metrics["setup_ms"] = setup_ms
-    try:
-        metrics["valid_json"] = isinstance(json.loads(output), dict)
-    except json.JSONDecodeError:
-        metrics["valid_json"] = False
+    metrics["admission_ms"] = admission_ms
+    metrics["parseable_json"], metrics["schema_compliant"] = validate_output(output)
+    metrics["output"] = output
     return metrics
 
 
 def aggregate(runs):
-    metric_names = ["setup_ms", "ttft_ms", "generation_ms", "inter_token_ms", "decode_tokens_per_second"]
+    metric_names = [
+        "setup_ms",
+        "admission_ms",
+        "ttft_after_admission_ms",
+        "end_to_end_ttft_ms",
+        "generation_after_admission_ms",
+        "end_to_end_latency_ms",
+        "inter_token_ms",
+        "decode_tokens_per_second",
+    ]
     result = {name: summarize([run[name] for run in runs]) for name in metric_names}
     result["iterations"] = len(runs)
     result["tokens"] = summarize([run["tokens"] for run in runs])
-    result["valid_json_runs"] = sum(run["valid_json"] for run in runs)
+    result["parseable_json_runs"] = sum(run["parseable_json"] for run in runs)
+    result["schema_compliant_runs"] = sum(run["schema_compliant"] for run in runs)
+    result["runs"] = runs
     return result
 
 
@@ -168,9 +198,9 @@ def run(args):
     if runs["guided"] and runs["unguided"]:
         guided_summary = summary["guided"]
         unguided_summary = summary["unguided"]
-        summary["guided_overhead_percent_p50"] = {
+        summary["guided_change_percent_p50"] = {
             metric: overhead_percent(guided_summary, unguided_summary, metric)
-            for metric in ["setup_ms", "ttft_ms", "generation_ms", "inter_token_ms"]
+            for metric in ["setup_ms", "end_to_end_ttft_ms", "inter_token_ms"]
         }
         baseline_throughput = unguided_summary["decode_tokens_per_second"]["p50"]
         guided_throughput = guided_summary["decode_tokens_per_second"]["p50"]
