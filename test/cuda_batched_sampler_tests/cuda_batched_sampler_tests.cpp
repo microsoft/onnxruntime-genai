@@ -72,8 +72,10 @@ TEST(LogitsMaskTests, UsesPaddedRowStrideForNonAlignedVocabularyCuda) {
   logits.CopyCpuToDevice();
 
   const std::array<uint32_t, batch_size * words_per_row> host_mask{{
-      uint32_t{1} << 0, uint32_t{1} << 0,
-      uint32_t{1} << 1, uint32_t{1} << 0,
+      uint32_t{1} << 0,
+      uint32_t{1} << 0,
+      uint32_t{1} << 1,
+      uint32_t{1} << 0,
   }};
   auto mask = device->Allocate<uint32_t>(host_mask.size());
   std::copy(host_mask.begin(), host_mask.end(), mask.CpuSpan().begin());
