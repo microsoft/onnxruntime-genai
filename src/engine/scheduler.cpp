@@ -154,13 +154,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     RequestStepPlan entry;
     DecodeFirstBudgetCandidate budget;
     size_t processed_sequence_length{};
+    size_t remaining_token_count{};
   };
   const auto allocated_requests = cache_manager_->AllocatedRequests();
   std::vector<Candidate> candidates;
   candidates.reserve(allocated_requests.size() + requests_pool_.size());
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
+  const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
 
-  const auto add_candidate = [&candidates, cache_query_token_cap](
+  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
     const auto snapshot = request->Snapshot();
@@ -180,6 +182,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
     candidate.entry.unprocessed_token_count = 1;
+    // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
+    // has committed tokens of its own left to push through, so it can never verify one.
+    candidate.entry.draft_token_count =
+        snapshot.is_prefill
+            ? 0
+            : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
     candidate.entry.target_cache_slots = RequiredSlots(
         static_cast<size_t>(snapshot.processed_sequence_length), 1);
     candidate.entry.whole_sequence_cache_slots =
@@ -198,6 +206,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);
+    candidate.remaining_token_count = static_cast<size_t>(remaining_token_count);
     candidates.push_back(std::move(candidate));
   };
 
@@ -236,8 +245,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
 
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
   std::vector<size_t> selected_processed_lengths;
+  std::vector<size_t> selected_remaining_lengths;
   selected_candidates.reserve(plan.requests.size());
   selected_processed_lengths.reserve(plan.requests.size());
+  selected_remaining_lengths.reserve(plan.requests.size());
   for (const auto& entry : plan.requests) {
     const auto candidate = std::find_if(
         candidates.begin(), candidates.end(),
@@ -248,6 +259,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       throw std::logic_error("Cache planning selected an unknown request.");
     selected_candidates.push_back(candidate->budget);
     selected_processed_lengths.push_back(candidate->processed_sequence_length);
+    selected_remaining_lengths.push_back(candidate->remaining_token_count);
   }
   const auto token_counts = AllocateDecodeFirstTokenBudget(
       selected_candidates, dynamic_batching.max_scheduled_tokens);
@@ -259,7 +271,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.graph_capture_eligible = true;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
-    entry.unprocessed_token_count = token_counts[i];
+    // The budget only distributes committed tokens. A step that stops short of the sequence tail
+    // has no row that predicts the first draft, so it cannot verify one.
+    if (token_counts[i] != selected_remaining_lengths[i]) {
+      entry.draft_token_count = 0;
+    }
+    entry.unprocessed_token_count = token_counts[i] + entry.draft_token_count;
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[i],
         entry.unprocessed_token_count);

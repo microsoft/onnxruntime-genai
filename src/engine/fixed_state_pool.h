@@ -127,8 +127,9 @@ class FixedStateReservation {
 
   // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
   // by publishing the operator's own state checkpoint after that token instead of the step's final
-  // state. This is the speculative-decoding rollback: a rejected draft costs one device copy rather
-  // than a replay forward. `kept_tokens == step_tokens` is the default and needs no call.
+  // state, and lowering the row's committed token boundary by the rejected tokens. This is the
+  // speculative-decoding rollback: a rejected draft costs one device copy rather than a replay
+  // forward. `kept_tokens == step_tokens` is the default and needs no call.
   void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all

@@ -238,7 +238,9 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
     // number of tokens already in the cache and therefore the base position for this step.
     const int64_t processed_sequence_length = request->ProcessedSequenceLength();
-    if (entry && (request->CurrentSequenceLength() != entry->sequence_length_before ||
+    if (entry && (request->CurrentSequenceLength() !=
+                      entry->sequence_length_before +
+                          static_cast<int64_t>(entry->draft_token_count) ||
                   SlotsAfterStep(processed_sequence_length, entry->unprocessed_token_count) !=
                       entry->target_cache_slots)) {
       throw std::runtime_error("Step plan processed sequence length does not match the request.");
@@ -408,7 +410,10 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 }
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
-  std::vector<size_t> valid_token_indices(scheduled_requests_.size());
+  // One row per request, plus the extra rows a speculative step needs to verify its drafts: the
+  // request's whole packed range ends with the row that predicts the token after the last draft.
+  std::vector<size_t> valid_token_indices;
+  valid_token_indices.reserve(scheduled_requests_.size());
   if (logits_are_per_token_) {
     if (execution_context_ && execution_context_->plan) {
       const auto& plan = *execution_context_->plan;
@@ -419,17 +424,29 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
         if (plan.requests[i].request != scheduled_requests_[i]) {
           throw std::runtime_error("Step plan order does not match logits batch order.");
         }
-        valid_token_indices[i] = plan.requests[i].logits_row_index;
+        const auto& entry = plan.requests[i];
+        for (size_t draft = entry.draft_token_count; draft > 0; --draft) {
+          valid_token_indices.push_back(entry.logits_row_index - draft);
+        }
+        valid_token_indices.push_back(entry.logits_row_index);
       }
     } else {
       for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
-        valid_token_indices[i] = running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1;
+        valid_token_indices.push_back(running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1);
         running_length += scheduled_requests_[i]->ScheduledTokenCount();
       }
     }
   } else {
+    const auto* plan = execution_context_ ? execution_context_->plan : nullptr;
+    if (plan && std::any_of(plan->requests.begin(), plan->requests.end(),
+                            [](const RequestStepPlan& entry) {
+                              return entry.draft_token_count != 0;
+                            })) {
+      throw std::runtime_error(
+          "Verifying draft tokens requires a model whose logits have one row per token.");
+    }
     for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
-      valid_token_indices[i] = i;
+      valid_token_indices.push_back(i);
     }
   }
 
@@ -446,7 +463,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   }
 
   std::vector<DeviceSpan<float>> logits_vector;
-  const std::vector<int64_t> logits_shape{static_cast<int64_t>(scheduled_requests_.size()),
+  const std::vector<int64_t> logits_shape{static_cast<int64_t>(valid_token_indices.size()),
                                           vocab_size};
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;

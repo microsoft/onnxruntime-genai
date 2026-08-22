@@ -746,7 +746,7 @@ TEST_F(FixedStatePoolTest, CommitPrefixRollsBackOnlyTheRequestedRow) {
   MakeResident(*pool, kRequestA, 4.0f);
   MakeResident(*pool, kRequestB, 5.0f);
   {
-    auto requests = std::array<Request, 2>{Request{kRequestA, 3}, Request{kRequestB, 3}};
+    auto requests = std::array<Request, 2>{Request{kRequestA, 3}, Request{kRequestB, 4}};
     auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
     FillStagedRows(reservation, 0, 99.0f);
     FillStagedRows(reservation, 1, 98.0f);
@@ -756,6 +756,10 @@ TEST_F(FixedStatePoolTest, CommitPrefixRollsBackOnlyTheRequestedRow) {
     reservation.Commit();
   }
 
+  // Rejecting three of the four tokens also moves row 1's committed boundary back to where the
+  // published checkpoint actually is.
+  EXPECT_EQ(pool->CommittedTokens(pool->HandleFor(kRequestA)), 3u);
+  EXPECT_EQ(pool->CommittedTokens(pool->HandleFor(kRequestB)), 1u);
   auto requests = std::array<Request, 2>{Request{kRequestA, 3}, Request{kRequestB, 3}};
   auto reservation = pool->Reserve(requests);
   ExpectInputRows(reservation, 0, 99.0f);  // Row 0 kept the whole step.
@@ -789,6 +793,21 @@ TEST_F(FixedStatePoolTest, CommitPrefixIsRejectedAfterPrepare) {
   FillStagedRows(reservation, 0, 1.0f);
   reservation.PrepareCommit();
   EXPECT_THROW(reservation.CommitPrefix(0, 2, 1), std::logic_error);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixIsRejectedTwiceForTheSameRow) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA, /*target_tokens=*/3);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  reservation.CommitPrefix(0, 3, 2);
+  EXPECT_THROW(reservation.CommitPrefix(0, 3, 2), std::logic_error);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixCannotRejectMoreTokensThanTheStepPlanned) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA, /*target_tokens=*/1);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  EXPECT_THROW(reservation.CommitPrefix(0, 4, 1), std::runtime_error);
 }
 
 }  // namespace

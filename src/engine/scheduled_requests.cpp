@@ -48,6 +48,7 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
                                      BatchedSamplingPlan* sampling_plan)
     : model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
   requests_.reserve(plan.requests.size());
+  draft_token_counts_.reserve(plan.requests.size());
   std::vector<const void*> request_ids;
   request_ids.reserve(plan.requests.size());
   for (const auto& entry : plan.requests) {
@@ -59,9 +60,15 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
     if (!IsExecutable(entry.request->status_)) {
       throw std::runtime_error("The dynamic step plan contains a request that is not executable.");
     }
+    if (entry.draft_token_count > entry.request->PendingDraftTokenCount()) {
+      throw std::runtime_error("The dynamic step plan verifies drafts the request never proposed.");
+    }
+    // A verify step sends the request's last committed token plus every draft, so the drafts the
+    // transaction is about to stage count towards what this step is allowed to schedule.
     const int64_t remaining =
         entry.request->CurrentSequenceLength() -
-        entry.request->ProcessedSequenceLength();
+        entry.request->ProcessedSequenceLength() +
+        static_cast<int64_t>(entry.draft_token_count);
     if (remaining <= 0 || entry.unprocessed_token_count == 0 ||
         entry.unprocessed_token_count > static_cast<size_t>(remaining)) {
       throw std::runtime_error(
@@ -71,19 +78,22 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
   }
   // Complete every potentially allocating output-bookkeeping operation before binding the plan or
   // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
-  // request can append at most one generated index.
+  // request can append its accepted drafts plus one generated token.
   for (const auto& entry : plan.requests) {
     const auto remaining =
         static_cast<size_t>(entry.request->CurrentSequenceLength() -
-                            entry.request->ProcessedSequenceLength());
+                            entry.request->ProcessedSequenceLength()) +
+        entry.draft_token_count;
     if (entry.unprocessed_token_count == remaining) {
-      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
+      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep +
+                                    entry.draft_token_count);
     }
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(
         entry.unprocessed_token_count);
     requests_.push_back(entry.request);
+    draft_token_counts_.push_back(entry.draft_token_count);
   }
 }
 
@@ -152,12 +162,52 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
     throw std::runtime_error("Cannot process logits without the decoder state.");
   }
 
+  // A verify step gets one row per draft on top of the row that predicts the request's next token.
+  size_t expected_rows = requests_.size();
+  for (size_t draft_count : draft_token_counts_) {
+    expected_rows += draft_count;
+  }
+
   std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
-  if (logits.size() != requests_.size()) {
+  if (logits.size() != expected_rows) {
     throw std::runtime_error("Logits size does not match the number of requests.");
   }
 
   return logits;
+}
+
+std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
+    std::vector<DeviceSpan<float>>& verify_rows) {
+  std::vector<DeviceSpan<float>> sampled_rows;
+  sampled_rows.reserve(requests_.size());
+  size_t row = 0;
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    const size_t draft_count =
+        i < draft_token_counts_.size() ? draft_token_counts_[i] : 0;
+    if (draft_count == 0) {
+      sampled_rows.push_back(verify_rows[row++]);
+      continue;
+    }
+
+    // Row j predicts the token at committed_length + j, which is exactly where draft j sits. Accept
+    // the longest prefix of the proposal the target model would have produced on its own; the row
+    // after it holds the token that replaces the first rejected draft, or the bonus token.
+    const auto drafts = requests_[i]->StagedDraftTokens();
+    size_t accepted_count = 0;
+    while (accepted_count < draft_count) {
+      auto row_values = verify_rows[row + accepted_count].CopyDeviceToCpu();
+      const auto predicted = static_cast<int32_t>(
+          std::max_element(row_values.begin(), row_values.end()) - row_values.begin());
+      if (predicted != drafts[accepted_count]) {
+        break;
+      }
+      ++accepted_count;
+    }
+    requests_[i]->RewindDraftsForTransaction(accepted_count);
+    sampled_rows.push_back(verify_rows[row + accepted_count]);
+    row += draft_count + 1;
+  }
+  return sampled_rows;
 }
 
 // Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
@@ -246,6 +296,11 @@ void ScheduledRequests::BeginTransaction() {
         request->SaveStateForTransaction();
       ++transaction_checkpoint_count_;
     }
+    // Drafts join the sequence only after every checkpoint exists, so an abort rewinds them for
+    // free through the same restore path as a sampled token.
+    for (size_t i = 0; i < draft_token_counts_.size(); ++i) {
+      requests_[i]->AppendDraftsForTransaction(draft_token_counts_[i]);
+    }
     if (transaction_uses_batched_sampler_) {
       batched_sampler_->SaveStateForTransaction(sampling_plan_->states);
       sampler_checkpoint_active_ = true;
@@ -268,7 +323,8 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     throw std::logic_error("Scheduled request transaction does not match the step plan.");
   }
 
-  auto logits = ProcessLogits();
+  auto verify_rows = ProcessLogits();
+  auto logits = SelectSampledRows(verify_rows);
   results.assign(requests_.size(), RequestStepResult{});
   if (transaction_uses_batched_sampler_) {
     sampling_plan_->logits.clear();

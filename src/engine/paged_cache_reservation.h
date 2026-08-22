@@ -83,6 +83,11 @@ class PagedCacheReservation {
   void FillWindowBlockTable(std::span<const void* const> request_ids,
                             size_t columns,
                             std::span<int32_t> output) const;
+  // Commits only the first `kept_slots` of the `step_slots` this request's step planned, leaving
+  // the rejected tail slots reserved-but-unwritten inside the blocks the request already owns. The
+  // speculative counterpart of FixedStateReservation::CommitPrefix; both have to be called with the
+  // same accepted prefix so the two states commit at one token boundary.
+  void CommitPrefix(const void* request_id, size_t step_slots, size_t kept_slots);
   // Validates every precondition this reservation's own CommitValidated relies on, without
   // mutating any state. For a reservation that still satisfies the publish contract it is the only
   // part of committing that can throw; CommitValidated additionally throws if the reservation is no

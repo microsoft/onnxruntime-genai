@@ -1385,6 +1385,178 @@ TEST_F(EngineStepTest, CompositeAggregateAdmissionCommitsEveryNewTable) {
       ValidateCompositeStateInvariants(engine.cache->Snapshot(), *fixed, snapshots).empty());
 }
 
+// ---------------------------------------------------------------------------------------------
+// Speculative decoding: a request proposes drafts, the step runs 1 + drafts rows, and the Engine
+// keeps the prefix the target model would have produced on its own.
+// ---------------------------------------------------------------------------------------------
+
+TEST_F(EngineStepTest, SpeculativeStepKeepsTheAcceptedPrefixAndReplacesTheRejectedDraft) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  ASSERT_EQ(request->status_, RequestStatus::Active);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  const std::vector<int32_t> drafts{11, 12, 13};
+  request->SetDraftTokens(drafts);
+  // Rows 0 and 1 confirm the first two drafts; row 2 disagrees, so its own token replaces draft 2
+  // and row 3 is never read.
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[1], 4u);
+  ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].row, 0u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].request_id, request.get());
+  EXPECT_EQ(engine.cache->prefix_commits[0].step_tokens, 4u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 3u);
+
+  std::vector<int32_t> produced;
+  while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
+  EXPECT_EQ(produced, (std::vector<int32_t>{11, 12, 21}));
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 3);
+  EXPECT_EQ(request->ProcessedSequenceLength(), length_after_prefill + 2);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+}
+
+TEST_F(EngineStepTest, SpeculativeStepRejectingTheFirstDraftAdvancesByOneToken) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+  engine.executor->SetVerifyRowTokens({21, 22, 23});
+
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].step_tokens, 3u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 1u);
+  std::vector<int32_t> produced;
+  while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
+  EXPECT_EQ(produced, (std::vector<int32_t>{21}));
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 1);
+}
+
+TEST_F(EngineStepTest, SpeculativeStepAcceptingEveryDraftAlsoTakesTheBonusToken) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 13, 25});
+
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 4u);
+  std::vector<int32_t> produced;
+  while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
+  EXPECT_EQ(produced, (std::vector<int32_t>{11, 12, 13, 25}));
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 4);
+  EXPECT_EQ(request->ProcessedSequenceLength(), length_after_prefill + 3);
+}
+
+TEST_F(EngineStepTest, RolledBackSpeculativeStepLeavesTheProposalPendingAndRetryable) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::PostProcessing);
+  EXPECT_THROW(engine.engine->Step(), EngineStepError);
+
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 2u);
+  EXPECT_EQ(request->AcceptedDraftTokenCount(), 0u);
+  EXPECT_TRUE(engine.cache->prefix_commits.empty());
+
+  engine.executor->SetVerifyRowTokens({11, 12, 25});
+  ASSERT_EQ(engine.engine->Step(), request);
+  std::vector<int32_t> produced;
+  while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
+  EXPECT_EQ(produced, (std::vector<int32_t>{11, 12, 25}));
+}
+
+TEST_F(EngineStepTest, DraftsAreRejectedWhenTheCacheCannotRollThemBack) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+
+  EXPECT_EQ(engine.engine->MaxDraftTokensPerStep(), 0u);
+  EXPECT_THROW(request->SetDraftTokens(std::vector<int32_t>{11}), std::runtime_error);
+}
+
+TEST_F(EngineStepTest, DraftsAreRejectedBeyondTheCacheWindowAndForSampledRequests) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  engine.cache->SetMaxDraftTokensPerStep(2);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  EXPECT_THROW(request->SetDraftTokens(std::vector<int32_t>{11, 12, 13}), std::runtime_error);
+
+  auto sampled_params = MakeGreedyParams(*model_);
+  sampled_params->search.do_sample = true;
+  sampled_params->search.top_k = 40;
+  sampled_params->search.temperature = 1.0f;
+  auto sampled = std::make_shared<Request>(sampled_params);
+  sampled->AddTokens(Prompt(20));
+  engine.engine->AddRequest(sampled);
+  EXPECT_THROW(sampled->SetDraftTokens(std::vector<int32_t>{11}), std::runtime_error);
+}
+
+TEST_F(EngineStepTest, PrefillingRequestDoesNotVerifyDrafts) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto params = MakeGreedyParams(*model_);
+  params->search.chunk_size = 2;
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt(10));  // three tokens, so the first chunk stops short of the tail
+  engine.engine->AddRequest(request);
+  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+
+  ASSERT_NE(engine.engine->Step(), nullptr);
+  // The first chunk stops short of the tail, and the second is still prompt, so neither can verify.
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[0], 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[1], 1u);
+  EXPECT_TRUE(engine.cache->prefix_commits.empty());
+  // A proposal only ever applies to the next step, so a committed step consumes it either way.
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+}
+
 TEST_F(EngineStepTest, CompositeCompletionRemovalFreesSlotForReadmission) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));  // force EOS to complete

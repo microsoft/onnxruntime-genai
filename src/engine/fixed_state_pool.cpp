@@ -408,6 +408,17 @@ void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t 
         "Fixed state prefix commit must keep between one and step_tokens tokens of a step no "
         "longer than the checkpoint window.");
   }
+  if (storage_->commit_kept_tokens[row] != 0) {
+    throw std::logic_error("Fixed state prefix commit is already set for this row.");
+  }
+  // The published state corresponds to the accepted prefix, so the row's committed token boundary
+  // has to drop by the rejected tokens as well; otherwise it would disagree with the paged cache.
+  const auto rejected_tokens = static_cast<uint64_t>(step_tokens - kept_tokens);
+  if (rejected_tokens > storage_->target_tokens[row]) {
+    throw std::runtime_error(
+        "Fixed state prefix commit rejects more tokens than the row's step planned.");
+  }
+  storage_->target_tokens[row] -= rejected_tokens;
   storage_->commit_step_tokens[row] = step_tokens;
   storage_->commit_kept_tokens[row] = kept_tokens;
 }

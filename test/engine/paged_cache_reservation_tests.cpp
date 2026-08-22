@@ -65,6 +65,49 @@ TEST(PagedCacheReservationTest, CommitConsumesExistingTailWithoutNewBlock) {
   EXPECT_TRUE(tables[0].blocks[0]->IsFull());
 }
 
+TEST(PagedCacheReservationTest, CommitPrefixCommitsOnlyTheAcceptedSlots) {
+  BlockPool pool{kBlockSize, 4};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 8, false},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+  ASSERT_EQ(reservation.ReservedBlockCount(), 1u);
+  // A four-token verify step of which two were accepted.
+  reservation.CommitPrefix(kRequestA, /*step_slots=*/4, /*kept_slots=*/2);
+  ASSERT_EQ(reservation.Deltas().size(), 1u);
+  EXPECT_EQ(reservation.Deltas()[0].target_slots, 6u);
+
+  reservation.Commit();
+
+  // The rejected slots stay inside the block the request now owns, ready for the next step.
+  EXPECT_EQ(tables[0].committed_slots, 6u);
+  EXPECT_EQ(tables[0].blocks.size(), 2u);
+  EXPECT_EQ(tables[0].blocks[1]->EmptySlots(), 2u);
+}
+
+TEST(PagedCacheReservationTest, CommitPrefixRejectsArgumentsOutsideThePlannedStep) {
+  BlockPool pool{kBlockSize, 4};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{kRequestA, 4, pool.AllocateBlocks(4)},
+  };
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 8, false},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+  EXPECT_THROW(reservation.CommitPrefix(kRequestB, 4, 2), std::runtime_error);
+  EXPECT_THROW(reservation.CommitPrefix(kRequestA, 4, 0), std::runtime_error);
+  EXPECT_THROW(reservation.CommitPrefix(kRequestA, 4, 5), std::runtime_error);
+  // The step length has to be the growth this reservation actually planned.
+  EXPECT_THROW(reservation.CommitPrefix(kRequestA, 3, 2), std::runtime_error);
+  reservation.Commit();
+  EXPECT_THROW(reservation.CommitPrefix(kRequestA, 4, 2), std::logic_error);
+}
+
 TEST(PagedCacheReservationTest, ProposedBlockTableIncludesReservationsAndPadding) {
   BlockPool pool{kBlockSize, 4};
   std::vector<PagedCacheBlockTable> tables{
