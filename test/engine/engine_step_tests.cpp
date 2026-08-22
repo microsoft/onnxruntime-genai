@@ -1557,6 +1557,71 @@ TEST_F(EngineStepTest, PrefillingRequestDoesNotVerifyDrafts) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
 }
 
+TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
+  model_ = LoadSyntheticCompositeModel();
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+  ASSERT_EQ(engine.cache->MaxDraftTokensPerStep(), 3u);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      EXPECT_EQ(binding.checkpoints, nullptr);  // no drafts, so no series is captured
+      FillFixedOutputRow(binding, 0, 10.0f);
+    }
+  });
+  ASSERT_EQ(engine.engine->Step(), request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ASSERT_NE(binding.checkpoints, nullptr);
+      FillFixedOutputRow(binding, 0, 99.0f);  // the step's final state, which must NOT be committed
+      const auto shape = binding.checkpoints->GetTensorTypeAndShapeInfo()->GetShape();
+      size_t row_elements = 1;
+      for (size_t axis = 2; axis < shape.size(); ++axis) {
+        row_elements *= static_cast<size_t>(shape[axis]);
+      }
+      auto* data = binding.checkpoints->GetTensorMutableData<float>();
+      for (size_t slot = 0; slot < static_cast<size_t>(shape[0]); ++slot) {
+        std::fill_n(data + slot * row_elements, row_elements, 20.0f + static_cast<float>(slot));
+      }
+    }
+  });
+
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  std::vector<int32_t> produced;
+  while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
+  EXPECT_EQ(produced, (std::vector<int32_t>{11, 12, 21}));
+
+  // Two accepted drafts plus the token the step started from: both states stop at the same token.
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  const auto expected_boundary = static_cast<uint64_t>(length_after_prefill + 2);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, expected_boundary);
+  const auto paged = engine.cache->Snapshot();
+  ASSERT_EQ(paged.requests.size(), 1u);
+  EXPECT_EQ(paged.requests[0].used_slots, expected_boundary);
+  EXPECT_TRUE(ValidateCompositeStateInvariants(paged, *fixed, {request->Snapshot()}).empty());
+
+  // A three-token step of which three were kept: the conv group is left-aligned so it publishes
+  // slot 2, and the right-aligned recurrent group publishes slot 4 - 4 + 3 - 1 = 2 as well.
+  engine.executor->SetVerifyRowTokens({});
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 22.0f);
+      FillFixedOutputRow(binding, 0, 30.0f);
+    }
+  });
+  EXPECT_EQ(engine.engine->Step(), request);
+}
+
 TEST_F(EngineStepTest, CompositeCompletionRemovalFreesSlotForReadmission) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));  // force EOS to complete

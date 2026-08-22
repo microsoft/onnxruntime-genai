@@ -52,6 +52,11 @@ MAX_BATCH_SIZE = 8
 CONTEXT_LENGTH = 128
 EOS_TOKEN_ID = 1
 
+# Speculative-rollback checkpoint window. Each fixed group also publishes the state after each of
+# the last CHECKPOINT_COUNT tokens of a step, so a partially accepted draft can roll back to it.
+# The two groups use opposite slot alignments, mirroring the real packed operators.
+CHECKPOINT_COUNT = 4
+
 
 def _const(name, array):
     tensor = numpy_helper.from_array(np.asarray(array))
@@ -75,6 +80,7 @@ def _decoder_graph():
         _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
         _const("state_one", np.asarray(1.0, dtype=np.float32)),
+        _const("checkpoint_axis", i64([0])),
     ]
 
     nodes = []
@@ -180,13 +186,27 @@ def _decoder_graph():
         for layer in layer_ids:
             in_name = f"past_{prefix}.{layer}"
             out_name = f"present_{prefix}.{layer}"
+            checkpoints_name = f"checkpoints_{prefix}.{layer}"
             shape = ["batch_size", *row_dims]
             inputs.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, shape))
             outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, shape))
+            outputs.append(
+                helper.make_tensor_value_info(
+                    checkpoints_name, TensorProto.FLOAT, [CHECKPOINT_COUNT, *shape]
+                )
+            )
             if prefix == "conv" and layer == 0:
                 nodes.append(helper.make_node("Add", [in_name, "state_one"], [out_name]))
             else:
                 nodes.append(helper.make_node("Identity", [in_name], [out_name]))
+            # Concatenating unsqueezed copies keeps the batch axis dynamic without any Shape math.
+            unsqueezed = f"{checkpoints_name}/unsqueezed"
+            nodes.append(helper.make_node("Unsqueeze", [in_name, "checkpoint_axis"], [unsqueezed]))
+            nodes.append(
+                helper.make_node(
+                    "Concat", [unsqueezed] * CHECKPOINT_COUNT, [checkpoints_name], axis=0
+                )
+            )
 
     add_fixed_group("conv", CONV_LAYERS, CONV_ROW)
     add_fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
@@ -246,10 +266,13 @@ def create_config(output_dir):
                     {
                         "kind": "fixed",
                         "layer_ids": CONV_LAYERS,
+                        "checkpoint_count": CHECKPOINT_COUNT,
+                        "checkpoint_alignment": "left",
                         "bindings": {
                             "state": {
                                 "input": "past_conv.%d",
                                 "output": "present_conv.%d",
+                                "checkpoints": "checkpoints_conv.%d",
                             },
                         },
                     },
@@ -270,10 +293,13 @@ def create_config(output_dir):
                     {
                         "kind": "fixed",
                         "layer_ids": RECURRENT_LAYERS,
+                        "checkpoint_count": CHECKPOINT_COUNT,
+                        "checkpoint_alignment": "right",
                         "bindings": {
                             "state": {
                                 "input": "past_recurrent.%d",
                                 "output": "present_recurrent.%d",
+                                "checkpoints": "checkpoints_recurrent.%d",
                             },
                         },
                     },
