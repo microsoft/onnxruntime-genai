@@ -272,20 +272,20 @@ void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decod
     return;
   }
 
-  if (decoder.state_groups->size() != 1 ||
-      decoder.state_groups->front().kind != StateGroupKind::PagedKeyValue ||
-      decoder.state_groups->front().layer_ids.size() != static_cast<size_t>(decoder.num_hidden_layers)) {
-    throw std::runtime_error(
-        "Dynamic batching currently supports only one dense paged_kv state group covering every decoder layer");
+  size_t paged_group_count = 0;
+  for (const auto& group : *decoder.state_groups) {
+    if (group.kind == StateGroupKind::Fixed) {
+      throw std::runtime_error(
+          "Dynamic batching does not yet support fixed decoder state groups");
+    }
+    if (group.kind == StateGroupKind::PagedKeyValue) {
+      ++paged_group_count;
+    }
   }
 
-  const auto& paged_kv = decoder.state_groups->front();
-  if (paged_kv.key->input != decoder.inputs.past_key_names ||
-      paged_kv.key->output != decoder.outputs.present_key_names ||
-      paged_kv.value->input != decoder.inputs.past_value_names ||
-      paged_kv.value->output != decoder.outputs.present_value_names) {
+  if (paged_group_count != 1) {
     throw std::runtime_error(
-        "Dynamic batching currently requires paged_kv bindings to match the decoder's legacy key/value names");
+        "Dynamic batching requires exactly one paged_kv decoder state group");
   }
 }
 
