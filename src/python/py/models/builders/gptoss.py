@@ -154,14 +154,6 @@ class GPTOSSModel(Model):
         cos_cache, sin_cache = freqs.cos() * self.rope_attrs["mscale"], freqs.sin() * self.rope_attrs["mscale"]
         return cos_cache, sin_cache
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        original_window_size = self.window_size
-        self.window_size = (
-            original_window_size if self.is_local(layer_id) else -1
-        )  # default is -1 in GroupQueryAttention kernel
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-        self.window_size = original_window_size
-
     def make_moe(self, layer_id, moe, root_input):
         if self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
             super().make_moe(layer_id, moe, root_input)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import onnx_ir as ir
@@ -34,28 +34,19 @@ from transformers import (
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.extra_options = extra_options
         self.make_config_init(config)
 
-        # Model attributes from config
+        # Context length attributes from config
         self.context_length = getattr(config, "seq_length", config.max_position_embeddings)
         self.original_context_length = (
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
             else self.context_length
         )
-        self.window_size = getattr(config, "sliding_window", -1)  # default is -1 in GroupQueryAttention kernel
+        self.make_context_length_init(config)
 
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: TRT-RTX
-        # evicts inside the EP, CPU and CUDA evict inside GroupQueryAttention (sliding_window_cache=1).
-        self.eps_with_windowed_kv_cache = self._resolve_windowed_kv_cache_eps(extra_options)
-        self.use_windowed_paged_kv_cache = self._resolve_windowed_paged_kv_cache(extra_options, self.window_size)
-
-        # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
-        # 0 means "use the EP default at runtime"; set explicitly to override.
-        # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
-        # CPU  optimal: 16 (amortises O(C) shift traffic; measured minimum at W+16 on EPYC).
-        self.window_kv_cache_slack = 0  # runtime will apply the EP default when this is 0
-
+        # Model attributes from config
         self.intermediate_size = (
             config.ffn_hidden_size
             if hasattr(config, "ffn_hidden_size")
@@ -113,10 +104,6 @@ class Model:
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
-        self.extra_options = extra_options
-
-        # Build packed, variable-length inputs for the continuous-batching engine.
-        self.use_paged_attention = extra_options.get("use_paged_attention", False)
 
         # States for building the model
         self.graph = ir.Graph(
@@ -465,37 +452,29 @@ class Model:
                 if not hasattr(config, key):
                     setattr(config, key, rope_params[key])
 
-    def _resolve_windowed_kv_cache_eps(extra_options):
-        """EPs allowed to give the sliding-window layers a cache shorter than max_length.
+    def make_context_length_init(self, config):
+        """Initialize settings related to context length (e.g. sliding window, paged KV-cache)."""
+        self.window_size = getattr(config, "sliding_window", -1)  # default is -1 in attention kernels
 
-        Empty means every layer keeps a full-length KV cache. PagedAttention has no windowed-cache
-        mode, so it never qualifies, and ``windowed_kv_cache=false`` opts out explicitly to build a
-        full-length-KV baseline from the same builder.
-        """
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx evicts
-        # inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
-        EPS_WITH_WINDOWED_KV_CACHE = {"trt-rtx", "cuda", "cpu"}
+        # Build packed, variable-length inputs for the continuous-batching engine.
+        self.use_paged_attention = self.extra_options.get("use_paged_attention", False)
+        use_windowed_kv_cache = self.extra_options.get("windowed_kv_cache", True)
 
-        if not extra_options.get("windowed_kv_cache", True) or extra_options.get("use_paged_attention", False):
-            return set()
-        return set(EPS_WITH_WINDOWED_KV_CACHE)
-
-
-    def _resolve_windowed_paged_kv_cache(extra_options, window_size):
-        """Whether the sliding-window layers get a ring of paged blocks instead of one block per token.
-
-        PagedAttention has its own flavour of windowed cache. A sliding-window layer only ever reads the
-        last ``window_size`` positions, so instead of one block per position it is given a short ring of
-        blocks that the runtime repeats across the block table. Position p then lands in slot
-        ``p mod (ring_blocks * block_size)`` and old positions are overwritten in place. The operator
-        needs no change: it already masks reads to ``[kv_end - window_size, kv_end]``.
-        """
-        return bool(
-            extra_options.get("windowed_kv_cache", True)
-            and extra_options.get("use_paged_attention", False)
-            and window_size is not None
-            and window_size > 0
+        # CPU and CUDA evict inside GroupQueryAttention. TRT-RTX evicts inside the EP.
+        self.eps_with_windowed_kv_cache = (
+            {"cpu", "cuda", "trt-rtx"}
+            if use_windowed_kv_cache and not self.use_paged_attention
+            else set()
         )
+        self.use_windowed_paged_kv_cache = bool(
+            use_windowed_kv_cache
+            and self.use_paged_attention
+            and self.window_size is not None
+            and self.window_size > 0
+        )
+
+        # Zero lets the runtime choose the EP-specific number of positions retained beyond the window.
+        self.window_kv_cache_slack = 0
 
     def make_ep_expansions_init(self):
         """
@@ -553,7 +532,7 @@ class Model:
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
-            if not self.use_windowed_paged_kv_cache:
+            if not self.has_windowed_paged_layers():
                 del self.input_names["block_table_windowed"]
         else:
             for name in [
@@ -1159,9 +1138,7 @@ class Model:
 
         if self.ep in self.eps_with_windowed_kv_cache and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
-            layer_idxs = [
-                layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)
-            ]
+            layer_idxs = [layer_id for layer_id in range(self.num_layers) if self.is_local(layer_id)]
 
             genai_config["model"]["decoder"]["sliding_window"] = {
                 "window_size": self.window_size,
@@ -1227,6 +1204,10 @@ class Model:
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
+    def is_local(self, layer_id):
+        """Return whether Hugging Face marks this layer as sliding-window attention."""
+        return self.layer_types[layer_id] == "sliding_attention"
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
@@ -1248,10 +1229,9 @@ class Model:
         A model can carry `sliding_window` in its config without the builder knowing which layers
         it applies to, in which case no layer reads the ring and nothing extra must be emitted.
         The runtime also needs at least one full-context layer to size the shared paged cache, so
-        an all-local export falls back to full paged caches. `is_local` is assigned by the subclass
-        after `Model.__init__`, so this cannot be asked from `make_inputs_init`, which runs during it.
+        an all-local export falls back to full paged caches.
         """
-        if not self.use_windowed_paged_kv_cache or not hasattr(self, "is_local"):
+        if not self.use_windowed_paged_kv_cache:
             return False
         local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
         return any(local_layers) and not all(local_layers)
@@ -1265,11 +1245,7 @@ class Model:
         if self.uses_windowed_paged_cache(layer_id):
             # Paged layout is [num_blocks, block_size, heads, head_size]; only the block count shrinks.
             return ["num_blocks_windowed", shape[1], shape[2], shape[3]]
-        if (
-            self.ep in self.eps_with_windowed_kv_cache
-            and hasattr(self, "is_local")
-            and self.is_local(layer_id)
-        ):
+        if self.ep in self.eps_with_windowed_kv_cache and self.is_local(layer_id):
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
@@ -1640,11 +1616,6 @@ class Model:
         return value
 
     def make_inputs_and_outputs(self):
-        # Only now, once the subclass has declared `is_local`, can we tell whether any layer reads
-        # the ring. Without one, `block_table_windowed` would be a graph input nothing consumes.
-        if "block_table_windowed" in self.input_names and not self.has_windowed_paged_layers():
-            del self.input_names["block_table_windowed"]
-
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for key in self.input_names:
@@ -3846,9 +3817,14 @@ class Model:
         #                   O_MatMul
         #                       |
         #                     O_Add
-        self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
-        self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
-        self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
+        original_window_size = self.window_size
+        self.window_size = original_window_size if self.is_local(layer_id) else -1
+        try:
+            self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+            self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+            self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
+        finally:
+            self.window_size = original_window_size
 
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         # Unpack attention weights if needed
