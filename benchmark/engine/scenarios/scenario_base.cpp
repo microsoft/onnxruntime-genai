@@ -47,7 +47,6 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
       {"prompt_length_k", config.prompt_length_k},
-      {"synthetic", config.synthetic},
       {"generation_tokens", config.generation_tokens},
       {"measured_runs", config.measured_runs}};
 
