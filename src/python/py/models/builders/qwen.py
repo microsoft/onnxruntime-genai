@@ -1504,12 +1504,8 @@ class Qwen35TextModel(Model):
         present_v = f"present.{layer_id}.value"
 
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
-        q_path = self.attention_attrs["q_path"]
-        k_path = self.attention_attrs["k_path"]
-        v_path = self.attention_attrs["v_path"]
-        # q_path/k_path/v_path are already packed [num_tokens, size] whenever this build uses
-        # PagedAttention's packed layout: every tensor upstream (root_input, the mRoPE rotation
-        # above) is already packed too, so PagedAttention needs no separate flatten/restore step.
+        # The attention paths are already packed [num_tokens, size] whenever this build uses
+        # PagedAttention's packed layout, so no separate flatten/restore step is needed.
         self.make_attention_op(
             attn_name,
             layer_id=layer_id,
