@@ -52,6 +52,29 @@ TEST(ArgMaxTests, DeviceRowResultsAccumulateBeforeOneHostCopyCuda) {
   EXPECT_TRUE(std::equal(expected.begin(), expected.end(), top1_cpu.begin()));
 }
 
+TEST(DeviceSpanTests, DeviceInputKeepsPaddingMetadataSeparateFromTokenIdsCuda) {
+  constexpr int32_t pad_token_id = 0;
+  constexpr int32_t non_pad_metadata = 1;
+  const std::array<int32_t, 3> token_ids{{5, 7, pad_token_id}};
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+
+  auto upload = device->Allocate<int32_t>(token_ids.size());
+  std::copy(token_ids.begin(), token_ids.end(), upload.CpuSpan().begin());
+  auto input = device->Allocate<int32_t>(token_ids.size());
+  std::fill(input.CpuSpan().begin(), input.CpuSpan().end(), non_pad_metadata);
+
+  upload.CopyCpuToDevice();
+  input.CopyFrom(upload);
+
+  // MTP passes `input` to Generator, whose Logits::Update reads this mirror as structural padding
+  // metadata. The actual ids, including a trailing pad-valued generated token, stay on device.
+  EXPECT_TRUE(std::all_of(input.CpuSpan().begin(), input.CpuSpan().end(),
+                          [](int32_t token) { return token == non_pad_metadata; }));
+  auto input_ids = input.CopyDeviceToCpu();
+  EXPECT_TRUE(std::equal(token_ids.begin(), token_ids.end(), input_ids.begin()));
+}
+
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   constexpr int vocab_size = 5;
   [[maybe_unused]] auto model = CreateCudaModel();

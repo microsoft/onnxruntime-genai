@@ -190,6 +190,10 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
       const int32_t head_non_pad = mtp_model_.config_->model.pad_token_id == 0 ? 1 : 0;
       std::fill(drafts_metadata_cpu.begin(), drafts_metadata_cpu.end(), head_non_pad);
 
+      head_tokens_upload_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
+      auto head_tokens_upload_cpu = head_tokens_upload_.CpuSpan();
+      std::fill(head_tokens_upload_cpu.begin(), head_tokens_upload_cpu.end(), head_non_pad);
+
       head_tokens_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
       auto head_tokens_cpu = head_tokens_device_.CpuSpan();
       std::fill(head_tokens_cpu.begin(), head_tokens_cpu.end(), head_non_pad);
@@ -776,10 +780,11 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
       mtp_->RewindToLength(pending_refeed_head_len_);  // drop last step's speculative drafts
       head_len_ = pending_refeed_head_len_;
       merged_tokens_[a_prev] = t;  // last row: the token committed at the top of this step
-      auto head_tokens_cpu = head_tokens_device_.CpuSpan();
-      std::copy_n(merged_tokens_.begin(), a_prev + 1, head_tokens_cpu.begin());
-      head_tokens_device_.CopyCpuToDevice();
+      auto head_tokens_upload_cpu = head_tokens_upload_.CpuSpan();
+      std::copy_n(merged_tokens_.begin(), a_prev + 1, head_tokens_upload_cpu.begin());
+      head_tokens_upload_.CopyCpuToDevice();
       auto head_tokens = head_tokens_device_.subspan(0, static_cast<size_t>(a_prev + 1));
+      head_tokens.CopyFrom(head_tokens_upload_.subspan(0, static_cast<size_t>(a_prev + 1)));
       current_token_device = head_tokens_device_.subspan(static_cast<size_t>(a_prev), 1);
       mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
       DraftHeadStepMultiToDevice(head_tokens, drafts_device_.subspan(0, 1));
@@ -789,9 +794,10 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
         mtp_->RewindToLength(pending_refeed_head_len_);
         head_len_ = pending_refeed_head_len_;
       }
-      head_tokens_device_.CpuSpan()[0] = t;
-      head_tokens_device_.CopyCpuToDevice();
+      head_tokens_upload_.CpuSpan()[0] = t;
+      head_tokens_upload_.CopyCpuToDevice();
       current_token_device = head_tokens_device_.subspan(0, 1);
+      current_token_device.CopyFrom(head_tokens_upload_.subspan(0, 1));
       mtp_->SetHiddenStates(hidden_slice_);
       DraftHeadStepToDevice(current_token_device, drafts_device_.subspan(0, 1));
     }
@@ -830,8 +836,8 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     forward validates N+1 tokens). The batched (M=N+1) forward is numerically ~equal but not
   //     bit-identical to single-token decode (different GEMM tiling for M=1 vs M>1, plus XQA-vs-
   //     Flash attention), so a greedy argmax can occasionally differ on near-ties. This is the same
-  //     tradeoff the N=1 verify already makes; the reject path below re-runs decode-consistently to
-  //     bound divergence from plain greedy. ---
+  //     tradeoff the N=1 verify already makes. The fallback reject path re-runs the committed prefix
+  //     from its snapshot; a windowed recurrent state crops and commits directly from this verify. ---
   // Snapshot the recurrent state so a rejected wide verify can replay the committed prefix with
   // decode-consistent numerics. A model exported with a recurrent-state window commits directly out
   // of the verify below and needs neither the replay nor the snapshot, which would otherwise cost

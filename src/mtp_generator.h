@@ -169,8 +169,11 @@ struct MtpGenerator {
   DeviceSpan<int32_t> drafts_device_;   // same drafts, kept on device between chained head forwards
   std::vector<int32_t> verify_tokens_;  // scratch: [t, d0..d_{N-1}] for the verify forward
   // CUDA greedy fast path: persistent input buffers avoid per-forward pinned-host temporaries.
-  // `head_tokens_device_` stages the first/fused head input and also supplies its last token to the
-  // verify buffer; the rest of the verify input is assembled from `drafts_device_` with D2D copies.
+  // Actual first/fused head ids are uploaded through `head_tokens_upload_`, then copied D2D into
+  // `head_tokens_device_` so its CPU mirror remains valid non-pad metadata for Logits::Update.
+  // Its last device token supplies the verify buffer; the remaining verify input is assembled from
+  // `drafts_device_` with D2D copies.
+  DeviceSpan<int32_t> head_tokens_upload_;
   DeviceSpan<int32_t> head_tokens_device_;
   DeviceSpan<int32_t> verify_tokens_device_;
   std::vector<int32_t> verify_argmax_;  // scratch: main argmax of the N+1 verify rows
