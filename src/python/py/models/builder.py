@@ -154,6 +154,7 @@ def check_extra_options(
         "fuse_qk_norm_gqa",
         "prune_lm_head",
         "use_paged_attention",
+        "windowed_kv_cache",
         "enable_mtp",
     ]
 
@@ -201,7 +202,7 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key in ("paged_block_size", "max_batch_size"):
+        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
             if key not in extra_options:
                 continue
             try:
@@ -748,6 +749,14 @@ def get_args():
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
+                    Only used when use_paged_attention is set and the model's sliding-window layers are served
+                    from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
+                    so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
+                    With paged attention, eligible local layers use a ring of blocks while at least one full-context
+                    layer remains. Without paged attention, supported execution providers use their windowed-cache
+                    mode. Set to false to give every layer a full-length KV cache for comparison or compatibility.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
