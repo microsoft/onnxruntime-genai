@@ -63,9 +63,9 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
         capture ? graph_buffers_.get() : nullptr);
   }
 
-  if (has_fixed_state_groups_) {
-    // Fixed tensors are allocated for each transaction, so their addresses cannot be replayed by a
-    // captured graph. Explicitly keep the CUDA EP eager even if capture was enabled for the session.
+  if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
+      graph_buffers_ == nullptr) {
+    // Inputs without persistent graph buffers have per-step addresses and must stay eager.
     context.run_options->AddConfigEntry("gpu_graph_id", "-1");
   } else if (graph_buffers_ != nullptr) {
     // -1 tells the CUDA EP to run eagerly. Otherwise every distinct decode shape gets its own
