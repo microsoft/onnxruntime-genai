@@ -1176,10 +1176,13 @@ class Qwen35TextModel(Model):
                 filtered_key_outputs.append(kv_key_outputs[i])
                 filtered_value_outputs.append(kv_value_outputs[i])
             else:
-                # Packed linear attention accumulates in FP32 V-major state. Dense LinearAttention
-                # retains its activation-typed K-major state contract.
+                # GatedDeltaNet owns the recurrence in every paged build and in the dense
+                # gated_delta_net export, and its state is V-major float32: the recurrence
+                # boundary is where reduced precision hurts most. The trailing extents swap,
+                # which is a no-op whenever the key and value head dims match.
+                v_major_state = self.use_paged_attention or self.linear_attn_op == "gated_delta_net"
                 conv_state_dtype = self.io_dtype
-                recurrent_state_dtype = ir.DataType.FLOAT if self.use_paged_attention else self.io_dtype
+                recurrent_state_dtype = ir.DataType.FLOAT if v_major_state else self.io_dtype
 
                 # linear_attention: add conv_state + recurrent_state. With state_window=W the
                 # window axis leads the batch axis on both the past and present side (the op
@@ -1197,24 +1200,10 @@ class Qwen35TextModel(Model):
                     self.linear_num_value_heads,
                     *(
                         [self.linear_value_head_dim, self.linear_key_head_dim]
-                        if self.use_paged_attention
+                        if v_major_state
                         else [self.linear_key_head_dim, self.linear_value_head_dim]
                     ),
                 ]
-                recurrent_state_dtype = state_dtype
-                if self.linear_attn_op == "gated_delta_net":
-                    # V-major and always float32: the recurrence boundary is where reduced
-                    # precision hurts most. The trailing extents swap, which is a no-op whenever
-                    # the key and value head dims match. With state_window=W this is the
-                    # operator's checkpoint window, whose last slot is the committed state.
-                    recurrent_state_shape = [
-                        *self._state_window_dims,
-                        "batch_size",
-                        self.linear_num_value_heads,
-                        self.linear_value_head_dim,
-                        self.linear_key_head_dim,
-                    ]
-                    recurrent_state_dtype = ir.DataType.FLOAT
 
                 self.input_names[f"past_state.{i}.conv"] = f"past_key_values.{i}.conv_state"
                 self.input_types[f"past_state.{i}.conv"] = conv_state_dtype
@@ -2047,11 +2036,13 @@ class Qwen35TextModel(Model):
             )
 
         # Split QKV, L2 norm, gates
-        if self.linear_attn_op == "gated_delta_net":
+        # The packed layout has its own GatedDeltaNet path below; this one is the dense
+        # rank-4 export with the operator's fused qwen/sigmoid gates and state window.
+        if not packed and self.linear_attn_op == "gated_delta_net":
             la_output = self._make_gated_delta_net(
                 layer_id,
                 linear_attn,
-                conv_out_t_output,
+                conv_out,
                 b_name,
                 a_name,
             )

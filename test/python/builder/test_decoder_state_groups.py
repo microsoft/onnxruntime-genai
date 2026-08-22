@@ -59,6 +59,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.model_type = "Qwen3_5_textForCausalLM"
     model.vocab_size = 248320
     model.window_size = None
+    model.use_windowed_paged_kv_cache = False
     model.eps_with_windowed_kv_cache = {"cuda"}
     model.attention_attrs = {"paged_block_size": 256}
     model.input_names = {
