@@ -62,6 +62,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.use_windowed_paged_kv_cache = False
     model.eps_with_windowed_kv_cache = {"cuda"}
     model.attention_attrs = {"paged_block_size": 256}
+    model._state_window = 0
     model.input_names = {
         "input_ids": "input_ids",
         "block_table": "block_table",
@@ -141,6 +142,23 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
         "input": "past_key_values.%d.recurrent_state",
         "output": "present.%d.recurrent_state",
     }
+    assert "checkpoint_count" not in groups[1]
+    assert "checkpoint_count" not in groups[2]
+
+
+def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
+    layer_types = ["full_attention" if (layer_id + 1) % 4 == 0 else "linear_attention" for layer_id in range(64)]
+    model = _make_config_model(Qwen35TextModel, layer_types=layer_types)
+    model._state_window = 4
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    groups = config["model"]["decoder"]["state_groups"]
+    assert groups[1]["checkpoint_count"] == 4
+    assert groups[1]["checkpoint_alignment"] == "left"
+    assert groups[1]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.conv_state"
+    assert groups[2]["checkpoint_count"] == 4
+    assert groups[2]["checkpoint_alignment"] == "right"
+    assert groups[2]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.recurrent_state"
 
 
 def test_qwen38_layer_types_support_reduced_official_fixture():
@@ -372,6 +390,7 @@ def test_qwen_packed_recurrent_io_is_fp32_v_major():
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.layer_types = ["linear_attention"]
     model._state_window_dims = []
+    model._state_window = 0
     model.linear_conv_dim = 48
     model.linear_conv_kernel_dim = 4
     model.linear_num_value_heads = 3
@@ -398,3 +417,113 @@ def test_qwen_packed_recurrent_io_is_fp32_v_major():
     assert model.input_shapes["past_state.0.recurrent"] == ["batch_size", 3, 8, 4]
     assert model.output_types["present_state.0.recurrent"] == base_module.ir.DataType.FLOAT
     assert model.output_shapes["present_state.0.recurrent"] == ["batch_size", 3, 8, 4]
+    assert "checkpoint_state.0.conv" not in model.output_names
+
+
+def test_qwen_packed_state_window_declares_checkpoint_outputs():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.layer_types = ["linear_attention"]
+    model._state_window_dims = []
+    model._state_window = 4
+    model.linear_conv_dim = 48
+    model.linear_conv_kernel_dim = 4
+    model.linear_num_value_heads = 3
+    model.linear_key_head_dim = 4
+    model.linear_value_head_dim = 8
+    model.input_names = {"past_key_values.key": [], "past_key_values.value": []}
+    model.output_names = {"present.key": [], "present.value": []}
+    model.input_types = {}
+    model.input_shapes = {}
+    model.output_types = {}
+    model.output_shapes = {}
+
+    model._setup_hybrid_cache_io()
+
+    # The committed state keeps its unwindowed shape; only the extra outputs carry the window.
+    assert model.input_shapes["past_state.0.recurrent"] == ["batch_size", 3, 8, 4]
+    assert model.output_shapes["present_state.0.recurrent"] == ["batch_size", 3, 8, 4]
+    assert model.output_names["checkpoint_state.0.conv"] == "checkpoints.0.conv_state"
+    assert model.output_shapes["checkpoint_state.0.conv"] == [4, "batch_size", 48, 3]
+    assert model.output_types["checkpoint_state.0.conv"] == base_module.ir.DataType.FLOAT16
+    assert model.output_names["checkpoint_state.0.recurrent"] == "checkpoints.0.recurrent_state"
+    assert model.output_shapes["checkpoint_state.0.recurrent"] == [4, "batch_size", 3, 8, 4]
+    assert model.output_types["checkpoint_state.0.recurrent"] == base_module.ir.DataType.FLOAT
+
+
+def test_varlen_ops_emit_checkpoint_outputs():
+    model = _recording_model()
+    model.make_varlen_causal_conv_with_state(
+        "/conv",
+        root_input="x",
+        weight="w",
+        bias="b",
+        cumulative_sequence_length="cu",
+        past_conv_state="past",
+        present_conv_state="present",
+        prefix_conv_state="prefix",
+        max_checkpoints=4,
+        output_shape=["num_tokens", 48],
+        present_conv_shape=["batch_size", 48, 3],
+        prefix_conv_shape=[4, "batch_size", 48, 3],
+    )
+    conv = model.nodes[-1][1]
+    assert conv["outputs"] == ["/conv/output_0", "present", "prefix"]
+    assert conv["max_checkpoints"] == 4
+    assert model.values[-1] == ("prefix", base_module.ir.DataType.FLOAT16, [4, "batch_size", 48, 3])
+
+    model.make_varlen_gated_delta_net(
+        "/gdn",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        checkpoints="ckpt",
+        state_checkpoints=4,
+        decay="decay",
+        beta="beta",
+        gate_shape=["num_tokens", 3],
+        output_shape=["num_tokens", 3, 8],
+        present_recurrent_shape=["batch_size", 3, 8, 4],
+        checkpoints_shape=[4, "batch_size", 3, 8, 4],
+    )
+    gdn = model.nodes[-1][1]
+    assert gdn["outputs"] == ["/gdn/output_0", "present", "ckpt"]
+    assert gdn["state_checkpoints"] == 4
+    assert model.values[-1] == ("ckpt", base_module.ir.DataType.FLOAT, [4, "batch_size", 3, 8, 4])
+
+
+def test_varlen_ops_reject_half_configured_checkpoints():
+    model = _recording_model()
+    with pytest.raises(ValueError, match="must be set together"):
+        model.make_varlen_causal_conv_with_state(
+            "/conv",
+            root_input="x",
+            weight="w",
+            bias="b",
+            cumulative_sequence_length="cu",
+            past_conv_state="past",
+            present_conv_state="present",
+            max_checkpoints=4,
+            output_shape=["num_tokens", 48],
+            present_conv_shape=["batch_size", 48, 3],
+        )
+    with pytest.raises(ValueError, match="must be set together"):
+        model.make_varlen_gated_delta_net(
+            "/gdn",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_length="cu",
+            past_recurrent_state="past",
+            present_recurrent_state="present",
+            checkpoints="ckpt",
+            decay="decay",
+            beta="beta",
+            gate_shape=["num_tokens", 3],
+            output_shape=["num_tokens", 3, 8],
+            present_recurrent_shape=["batch_size", 3, 8, 4],
+        )

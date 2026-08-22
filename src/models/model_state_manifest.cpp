@@ -113,6 +113,31 @@ void ValidateCompatiblePair(std::string_view group_label,
   }
 }
 
+// A checkpoints output is the state output with one leading slot axis of `count` entries.
+void ValidateCheckpointsShape(std::string_view group_label,
+                              std::string_view semantic,
+                              int count,
+                              const TensorMetadata& output,
+                              const TensorMetadata& checkpoints) {
+  if (checkpoints.data_type != output.data_type) {
+    throw std::runtime_error(
+        std::string{group_label} + " binding '" + std::string{semantic} +
+        "' checkpoints output '" + checkpoints.name +
+        "' has a different dtype than the state output '" + output.name + "'");
+  }
+  const bool shape_matches =
+      checkpoints.shape.size() == output.shape.size() + 1 &&
+      checkpoints.shape.front() == count &&
+      ShapesCompatible({checkpoints.shape.begin() + 1, checkpoints.shape.end()}, output.shape);
+  if (!shape_matches) {
+    throw std::runtime_error(
+        std::string{group_label} + " binding '" + std::string{semantic} +
+        "' checkpoints output '" + checkpoints.name + "' " + ShapeString(checkpoints.shape) +
+        " must be [" + std::to_string(count) + ", ...] over the state output '" +
+        output.name + "' " + ShapeString(output.shape));
+  }
+}
+
 void ValidatePagedGeometry(std::string_view group_label,
                            const TensorMetadata& tensor,
                            std::optional<TensorMetadata>& reference) {
@@ -182,6 +207,16 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       throw std::runtime_error(group_label + " requires exactly one state binding");
     }
 
+    const bool declares_checkpoints = group.state && !group.state->checkpoints.empty();
+    if (declares_checkpoints != (group.checkpoint_count > 0)) {
+      throw std::runtime_error(
+          group_label + " must declare a state checkpoints template and a positive "
+                        "checkpoint_count together, or neither");
+    }
+    if (group.checkpoint_count > 0 && group.kind != StateGroupKind::Fixed) {
+      throw std::runtime_error(group_label + " only fixed state groups support checkpoints");
+    }
+
     std::set<int> layer_ids;
     for (const int layer_id : group.layer_ids) {
       if (layer_id < 0 || layer_id >= decoder.num_hidden_layers) {
@@ -205,6 +240,9 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
     const auto validate_binding = [&](std::string_view semantic, const StateBinding& binding) {
       ValidateBindingTemplate(group_label, semantic, "input", binding.input);
       ValidateBindingTemplate(group_label, semantic, "output", binding.output);
+      if (!binding.checkpoints.empty()) {
+        ValidateBindingTemplate(group_label, semantic, "checkpoints", binding.checkpoints);
+      }
       for (const int layer_id : group.layer_ids) {
         for (const auto& name : {
                  ExpandBinding(binding.input, layer_id),
@@ -213,6 +251,12 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
             throw std::runtime_error(
                 group_label + " resolves more than one binding to '" + name + "'");
           }
+        }
+        if (!binding.checkpoints.empty() &&
+            !expanded_bindings.insert(ExpandBinding(binding.checkpoints, layer_id)).second) {
+          throw std::runtime_error(
+              group_label + " resolves more than one binding to '" +
+              ExpandBinding(binding.checkpoints, layer_id) + "'");
         }
       }
     };
@@ -258,6 +302,20 @@ void ModelStateManifest::ValidateSession(const ModelStateMetadata& metadata) con
             metadata.GetOutputShape(output_name),
             output_name};
         ValidateCompatiblePair(group_label, semantic, input, output);
+
+        if (!binding.checkpoints.empty()) {
+          const auto checkpoints_name = ExpandBinding(binding.checkpoints, layer_id);
+          if (!metadata.HasOutput(checkpoints_name)) {
+            throw std::runtime_error(
+                group_label + " binding '" + std::string{semantic} +
+                "' checkpoints output was not found: " + checkpoints_name);
+          }
+          TensorMetadata checkpoints{
+              metadata.GetOutputDataType(checkpoints_name),
+              metadata.GetOutputShape(checkpoints_name),
+              checkpoints_name};
+          ValidateCheckpointsShape(group_label, semantic, group.checkpoint_count, output, checkpoints);
+        }
 
         if (group.kind == StateGroupKind::PagedKeyValue) {
           ValidatePagedGeometry(group_label, input, paged_reference);

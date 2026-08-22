@@ -3462,6 +3462,12 @@ class Model:
         `root_input` is token-major `[num_tokens, channels]` instead of channel-first
         `[batch_size, channels, sequence_length]`; activation-typed state is keyed per scheduled
         request as `[batch_size, channels, kernel_size - 1]`.
+
+        `max_checkpoints=W` additionally emits `prefix_states`, `[W, batch_size, channels,
+        kernel_size - 1]`, holding the carry state after each of the first W local tokens of the
+        step. A speculative decoder promotes slot `a` to the committed state to roll back to an
+        accepted prefix of length `a + 1`. Unlike the dense `state_window`, the committed state
+        keeps its own unwindowed input and output, so the engine's fixed-state banks are unchanged.
         """
         inputs = [
             kwargs["root_input"],
@@ -3472,7 +3478,13 @@ class Model:
         ]
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
+        checkpoints = kwargs.get("prefix_conv_state", "")
+        max_checkpoints = kwargs.get("max_checkpoints", 0)
+        if bool(checkpoints) != bool(max_checkpoints):
+            raise ValueError("prefix_conv_state and max_checkpoints must be set together")
         outputs = [output, present_conv]
+        if checkpoints:
+            outputs.append(checkpoints)
         self.make_node(
             "VarlenCausalConvWithState",
             inputs=inputs,
@@ -3480,10 +3492,12 @@ class Model:
             name=name,
             domain="com.microsoft",
             activation=kwargs.get("activation", "silu"),
-            max_checkpoints=0,
+            max_checkpoints=max_checkpoints,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
+        if checkpoints:
+            self.make_value(checkpoints, self.io_dtype, shape=kwargs["prefix_conv_shape"])
 
     def make_linear_attention(self, name, **kwargs):
         inputs = [
@@ -3634,10 +3648,22 @@ class Model:
         ]
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
+        # `state_checkpoints=W` adds the right-aligned `checkpoints` output alongside the
+        # committed `final_state`: slot W-1 is the state after the last token of the step and
+        # slot W-1-k the state k tokens before it, which is the series a speculative decoder
+        # rolls back through. The committed state keeps its own unwindowed input and output so
+        # the engine's fixed-state banks stay as they are.
+        checkpoints = kwargs.get("checkpoints", "")
+        state_checkpoints = kwargs.get("state_checkpoints", 0)
+        if bool(checkpoints) != bool(state_checkpoints):
+            raise ValueError("checkpoints and state_checkpoints must be set together")
+        outputs = [output, present_recurrent]
+        if checkpoints:
+            outputs.append(checkpoints)
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
-            outputs=[output, present_recurrent],
+            outputs=outputs,
             name=name,
             domain="com.microsoft",
             update_rule=kwargs.get("update_rule", "gated_delta"),
@@ -3646,10 +3672,12 @@ class Model:
             beta_activation="none",
             qk_l2_norm=0,
             chunk_size=kwargs.get("chunk_size", 64),
-            state_checkpoints=0,
+            state_checkpoints=state_checkpoints,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
+        if checkpoints:
+            self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
