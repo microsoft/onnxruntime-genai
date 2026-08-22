@@ -477,6 +477,27 @@ scheduling state between those states.
 
 Finally, the engine swaps the staged ready list into `ready_requests_`. The first ready request is returned immediately, and later calls drain the rest without another model run.
 
+## Constrained decoding and tool calling
+
+Engine requests use the guidance configuration carried by their `GeneratorParams`. This allows
+concurrent requests to use different JSON schemas, regular expressions, or Lark grammars. Tool
+definitions and chat-template rendering remain application concerns; the Engine constrains the
+generated token stream but does not parse tool calls from the decoded output.
+
+Each guided request owns an independent constrained-logits processor. Its mask is applied before
+minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
+The processor snapshots its guidance and search configuration when the request is created, so later
+mutation of the caller-owned `GeneratorParams` cannot change an active grammar. After sampling, the
+selected token advances that request's grammar cursor.
+
+The grammar cursor participates in the same transaction as search and paged-cache state. A step
+checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
+on rollback. Draining an already-ready request does not advance the cursor again.
+
+Guidance fast-forward tokens are not currently supported by the Engine. Requests that enable them
+are rejected because each forced token would also need a corresponding model execution and paged
+KV-cache advancement inside the transaction.
+
 ## Rollback and failure handling
 
 The dynamic path separates failures into recoverable batch failures and fatal engine failures.
