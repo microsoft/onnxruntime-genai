@@ -1380,6 +1380,13 @@ OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
   OGA_CATCH
 }
 
+OgaResult* OgaEngineMaxDraftTokensPerStep(const OgaEngine* engine, size_t* out) {
+  OGA_TRY
+  *out = engine->MaxDraftTokensPerStep();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request) {
   OGA_TRY
   engine->AddRequest(request->shared_from_this());
@@ -1422,8 +1429,17 @@ OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
   OGA_CATCH
 }
 
-OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {
+OgaResult* OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens) {
   OGA_TRY
+  if (tokens->size() > 1) {
+    throw std::runtime_error("Request draft tokens must contain at most one sequence.");
+  }
+  request->SetDraftTokens(tokens->size() == 0 ? std::span<const int32_t>{} : (*tokens)[0]);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {  OGA_TRY
   *out = request->HasUnseenTokens();
   return nullptr;
   OGA_CATCH
