@@ -75,6 +75,10 @@ struct FixedStateBinding {
   OrtValue* input{};
   const char* output_name{};
   OrtValue* output{};
+  // Non-null only on a reservation that captures checkpoints: the step's per-token state series,
+  // shaped [checkpoint_count, row_count, row...]. CommitPrefix selects one slot of it to commit.
+  const char* checkpoints_name{};
+  OrtValue* checkpoints{};
 };
 
 enum class FixedStateReservationState {
@@ -119,6 +123,13 @@ class FixedStateReservation {
   std::span<const FixedStateBinding> Bindings() const;
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
+  bool CapturesCheckpoints() const;
+
+  // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
+  // by publishing the operator's own state checkpoint after that token instead of the step's final
+  // state. This is the speculative-decoding rollback: a rejected draft costs one device copy rather
+  // than a replay forward. `kept_tokens == step_tokens` is the default and needs no call.
+  void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
   // of its resources, synchronize once, and then publish them at a single infallible boundary:
@@ -184,7 +195,13 @@ class FixedStatePool {
   // Gather+output staging bytes a reservation of `row_count` scheduled rows will allocate. A pure
   // function of the pool's tensor geometry, so composite step planning can size the transaction
   // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
-  size_t PlannedStagingBytes(size_t row_count) const;
+  size_t PlannedStagingBytes(size_t row_count, bool capture_checkpoints = false) const;
+
+  // True when every fixed binding declares a checkpoints output, so reservations may capture the
+  // per-token state series a speculative step rolls back through.
+  bool SupportsCheckpoints() const;
+  // Shared checkpoint window of every fixed binding, or 0 when the model declares none.
+  size_t CheckpointCount() const;
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor
@@ -194,7 +211,10 @@ class FixedStatePool {
   // Admits a batch in scheduled row order. Ownership is inferred per request: an identity that
   // already owns a committed slot is treated as resident and keeps that slot; any other identity is
   // admitted provisionally and only becomes discoverable committed ownership on Commit.
-  FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests);
+  // `capture_checkpoints` additionally binds each tensor's checkpoints output, which is what makes
+  // FixedStateReservation::CommitPrefix available.
+  FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests,
+                                bool capture_checkpoints = false);
   void Release(const FixedStateSlotHandle& handle);
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;

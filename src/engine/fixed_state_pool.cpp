@@ -131,12 +131,20 @@ struct FixedStateReservation::Storage {
   std::vector<uint64_t> target_tokens;
   std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
+  std::vector<std::unique_ptr<OrtValue>> staged_checkpoints;
+  // Per row, the step length and the accepted prefix of it. Zero means "commit the step's final
+  // state", which is every row of a non-speculative step.
+  std::vector<size_t> commit_step_tokens;
+  std::vector<size_t> commit_kept_tokens;
   // The reservation owns the binding name strings so accessors stay valid even after the pool is
   // destroyed; FixedStateBinding::input_name/output_name point into these.
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
+  std::vector<std::string> checkpoints_names;
   std::vector<FixedStateBinding> bindings;
   size_t staging_bytes{};
+  size_t batch_rows{};
+  bool captures_checkpoints{};
 };
 
 struct FixedStatePool::Impl {
@@ -144,6 +152,9 @@ struct FixedStatePool::Impl {
     int layer_id{};
     std::string input_name;
     std::string output_name;
+    std::string checkpoints_name;
+    Config::Model::Decoder::CheckpointAlignment checkpoint_alignment{};
+    size_t checkpoint_count{};
     ONNXTensorElementDataType data_type{};
     std::vector<int64_t> session_shape;
     size_t row_bytes{};
@@ -280,6 +291,29 @@ struct FixedStatePool::Impl {
     destination.CopyFrom(source);
   }
 
+  // Which checkpoint slot of a `step_tokens`-long step holds the state after its token
+  // `kept_tokens - 1`. Left-aligned outputs index from the start of the step, right-aligned ones
+  // from its end.
+  static size_t CheckpointSlotFor(const TensorSpec& spec, size_t step_tokens, size_t kept_tokens) {
+    using Alignment = Config::Model::Decoder::CheckpointAlignment;
+    return spec.checkpoint_alignment == Alignment::Left
+               ? kept_tokens - 1
+               : spec.checkpoint_count - step_tokens + kept_tokens - 1;
+  }
+
+  // Same as StageRowIntoInactiveBank but sources one slot of the step's checkpoint series, which is
+  // laid out [checkpoint_count, batch_rows, row...].
+  void StageCheckpointIntoInactiveBank(const TensorSpec& spec, size_t slot_index,
+                                       uint8_t inactive_bank, size_t batch_row, size_t batch_rows,
+                                       size_t checkpoint_slot, OrtValue& checkpoints) {
+    auto destination = ByteWrapTensor(*device, *spec.banks[inactive_bank])
+                           .subspan(slot_index * spec.row_bytes, spec.row_bytes);
+    const auto source =
+        ByteWrapTensor(*device, checkpoints)
+            .subspan((checkpoint_slot * batch_rows + batch_row) * spec.row_bytes, spec.row_bytes);
+    destination.CopyFrom(source);
+  }
+
   std::shared_ptr<Model> model;
   DeviceInterface* device{};
   FixedStatePool* owner{};
@@ -288,6 +322,7 @@ struct FixedStatePool::Impl {
   size_t zeroing_scratch_bytes{};
   size_t active_staging_bytes{};
   size_t fixed_session_batch_size{};
+  size_t checkpoint_count{};
   uint64_t next_reservation_id{1};
   uint64_t active_reservation_id{};
   bool healthy{true};
@@ -350,6 +385,31 @@ std::span<const uint64_t> FixedStateReservation::TargetTokens() const {
 
 size_t FixedStateReservation::PlannedStagingBytes() const {
   return storage_ ? storage_->staging_bytes : 0;
+}
+
+bool FixedStateReservation::CapturesCheckpoints() const {
+  return storage_ && storage_->captures_checkpoints;
+}
+
+void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
+  if (!storage_ || !storage_->captures_checkpoints) {
+    throw std::logic_error(
+        "Committing a prefix requires a reservation that captures checkpoints.");
+  }
+  if (state_ != FixedStateReservationState::Reserved) {
+    throw std::logic_error("Fixed state reservation is no longer accepting prefix commits.");
+  }
+  if (row >= storage_->handles.size()) {
+    throw std::out_of_range("Fixed state prefix commit row is out of range.");
+  }
+  const size_t window = pool_ ? pool_->CheckpointCount() : 0;
+  if (kept_tokens == 0 || kept_tokens > step_tokens || step_tokens > window) {
+    throw std::runtime_error(
+        "Fixed state prefix commit must keep between one and step_tokens tokens of a step no "
+        "longer than the checkpoint window.");
+  }
+  storage_->commit_step_tokens[row] = step_tokens;
+  storage_->commit_kept_tokens[row] = kept_tokens;
 }
 
 void FixedStateReservation::ValidateCommit() const {
@@ -442,6 +502,11 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
       spec.layer_id = layer_id;
       spec.input_name = ExpandBinding(group.state->input, layer_id);
       spec.output_name = ExpandBinding(group.state->output, layer_id);
+      if (group.checkpoint_count > 0) {
+        spec.checkpoints_name = ExpandBinding(group.state->checkpoints, layer_id);
+        spec.checkpoint_count = static_cast<size_t>(group.checkpoint_count);
+        spec.checkpoint_alignment = group.checkpoint_alignment;
+      }
       spec.data_type =
           impl_->model->session_info_.GetInputDataType(spec.input_name);
       spec.session_shape =
@@ -498,6 +563,16 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
     throw std::runtime_error(
         "Fixed state pool requires at least one fixed state binding.");
   }
+  // A rollback has to move every fixed group's state together, so a partially checkpointed model
+  // could never actually roll back. Require all-or-nothing with a shared window.
+  const size_t checkpoint_count = impl_->tensors.front().checkpoint_count;
+  for (const auto& spec : impl_->tensors) {
+    if (spec.checkpoint_count != checkpoint_count) {
+      throw std::runtime_error(
+          "Fixed state bindings declare inconsistent checkpoint windows.");
+    }
+  }
+  impl_->checkpoint_count = checkpoint_count;
   // A session with a fixed batch dimension can only ever be served with exactly that many rows, so
   // a pool too small to hold a single batch could never satisfy any reservation.
   if (impl_->fixed_session_batch_size != 0 &&
@@ -554,19 +629,30 @@ size_t FixedStatePool::ActiveStagingBytes() const {
   return impl_->active_staging_bytes;
 }
 
-size_t FixedStatePool::PlannedStagingBytes(size_t row_count) const {
-  // One gather input and one staged output per fixed tensor, each `row_count` rows wide. This
-  // mirrors the accumulation in Reserve() so the plan and the resulting reservation agree exactly.
+size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkpoints) const {
+  // One gather input and one staged output per fixed tensor, each `row_count` rows wide, plus the
+  // checkpoint series when the step captures it. This mirrors the accumulation in Reserve() so the
+  // plan and the resulting reservation agree exactly.
+  const size_t copies_per_tensor =
+      capture_checkpoints ? 2 + impl_->checkpoint_count : 2;
   size_t bytes = 0;
   for (const auto& spec : impl_->tensors) {
     bytes = CheckedAdd(
         bytes,
         CheckedMultiply(
             CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
-            2, "staging allocation"),
+            copies_per_tensor, "staging allocation"),
         "staging allocation");
   }
   return bytes;
+}
+
+bool FixedStatePool::SupportsCheckpoints() const {
+  return impl_->checkpoint_count != 0;
+}
+
+size_t FixedStatePool::CheckpointCount() const {
+  return impl_->checkpoint_count;
 }
 
 FixedStateSlotHandle FixedStatePool::HandleFor(
@@ -592,12 +678,17 @@ bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
 }
 
 FixedStateReservation FixedStatePool::Reserve(
-    std::span<const FixedStateReservationRequest> requests) {
+    std::span<const FixedStateReservationRequest> requests,
+    bool capture_checkpoints) {
   impl_->EnsureHealthy();
   impl_->EnsureIdle();
   if (requests.empty()) {
     throw std::invalid_argument(
         "Fixed state reservation must contain at least one request.");
+  }
+  if (capture_checkpoints && impl_->checkpoint_count == 0) {
+    throw std::runtime_error(
+        "This model's fixed state bindings declare no checkpoints output.");
   }
   if (requests.size() > impl_->capacity) {
     throw std::runtime_error(
@@ -686,10 +777,16 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->provisional.resize(requests.size());
   storage->expected_state_generations.resize(requests.size());
   storage->target_tokens.resize(requests.size());
+  storage->commit_step_tokens.assign(requests.size(), 0);
+  storage->commit_kept_tokens.assign(requests.size(), 0);
+  storage->batch_rows = requests.size();
+  storage->captures_checkpoints = capture_checkpoints;
   storage->gathered_inputs.reserve(impl_->tensors.size());
   storage->staged_outputs.reserve(impl_->tensors.size());
+  storage->staged_checkpoints.reserve(capture_checkpoints ? impl_->tensors.size() : 0);
   storage->input_names.reserve(impl_->tensors.size());
   storage->output_names.reserve(impl_->tensors.size());
+  storage->checkpoints_names.reserve(capture_checkpoints ? impl_->tensors.size() : 0);
   storage->bindings.reserve(impl_->tensors.size());
 
   const size_t batch_rows = requests.size();
@@ -699,15 +796,26 @@ FixedStateReservation FixedStatePool::Reserve(
         impl_->device->GetAllocator(), shape, spec.data_type);
     auto staged = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), shape, spec.data_type);
+    std::unique_ptr<OrtValue> checkpoints;
+    if (capture_checkpoints) {
+      auto checkpoint_shape = shape;
+      checkpoint_shape.insert(checkpoint_shape.begin(),
+                              static_cast<int64_t>(spec.checkpoint_count));
+      checkpoints = OrtValue::CreateTensor(
+          impl_->device->GetAllocator(), checkpoint_shape, spec.data_type);
+    }
 
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
         CheckedMultiply(
             CheckedMultiply(batch_rows, spec.row_bytes, "staging allocation"),
-            2, "staging allocation"),
+            capture_checkpoints ? 2 + spec.checkpoint_count : 2, "staging allocation"),
         "staging allocation");
     storage->input_names.push_back(spec.input_name);
     storage->output_names.push_back(spec.output_name);
+    if (capture_checkpoints) {
+      storage->checkpoints_names.push_back(spec.checkpoints_name);
+    }
     storage->bindings.push_back(FixedStateBinding{
         StateGroupKind::Fixed,
         spec.layer_id,
@@ -715,9 +823,14 @@ FixedStateReservation FixedStatePool::Reserve(
         gathered.get(),
         storage->output_names.back().c_str(),
         staged.get(),
+        capture_checkpoints ? storage->checkpoints_names.back().c_str() : nullptr,
+        checkpoints.get(),
     });
     storage->gathered_inputs.push_back(std::move(gathered));
     storage->staged_outputs.push_back(std::move(staged));
+    if (capture_checkpoints) {
+      storage->staged_checkpoints.push_back(std::move(checkpoints));
+    }
   }
 
   for (size_t row = 0; row < plan.size(); ++row) {
@@ -905,8 +1018,16 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
       for (size_t row = 0; row < storage.handles.size(); ++row) {
         const auto& slot = impl_->slots[storage.handles[row].slot];
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
-        impl_->StageRowIntoInactiveBank(
-            spec, storage.handles[row].slot, inactive_bank, row, staged);
+        const size_t kept_tokens = storage.commit_kept_tokens[row];
+        if (kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row]) {
+          impl_->StageRowIntoInactiveBank(
+              spec, storage.handles[row].slot, inactive_bank, row, staged);
+          continue;
+        }
+        impl_->StageCheckpointIntoInactiveBank(
+            spec, storage.handles[row].slot, inactive_bank, row, storage.batch_rows,
+            Impl::CheckpointSlotFor(spec, storage.commit_step_tokens[row], kept_tokens),
+            *storage.staged_checkpoints[tensor_index]);
       }
     }
     impl_->device->Synchronize();

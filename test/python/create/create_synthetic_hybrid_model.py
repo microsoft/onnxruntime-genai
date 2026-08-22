@@ -42,6 +42,11 @@ RECURRENT_LAYERS = [2, 5]
 CONV_ROW = [2, 3]
 RECURRENT_ROW = [2, 2]
 
+# Speculative-rollback checkpoint window. Each fixed group also publishes the state after each of
+# the last CHECKPOINT_COUNT tokens of a step, which is what a partially accepted draft rolls back
+# to. The two groups use opposite slot alignments, mirroring the real packed operators.
+CHECKPOINT_COUNT = 4
+
 
 def _zeros(name, shape, dtype=np.float32):
     tensor = numpy_helper.from_array(np.zeros(shape, dtype=dtype))
@@ -67,12 +72,29 @@ def create_decoder(output_dir):
         for layer in layer_ids:
             in_name = f"past_{prefix}.{layer}"
             out_name = f"present_{prefix}.{layer}"
+            checkpoints_name = f"checkpoints_{prefix}.{layer}"
             shape = ["batch_size", *row_dims]
             inputs.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, shape))
             outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, shape))
+            outputs.append(
+                helper.make_tensor_value_info(
+                    checkpoints_name, TensorProto.FLOAT, [CHECKPOINT_COUNT, *shape]
+                )
+            )
             # Produce the present output with an Identity so it inherits the dynamic batch axis.
             nodes.append(helper.make_node("Identity", [in_name], [out_name]))
+            # Concatenating unsqueezed copies keeps the batch axis dynamic without any Shape math.
+            unsqueezed = f"{checkpoints_name}/unsqueezed"
+            nodes.append(
+                helper.make_node("Unsqueeze", [in_name, "checkpoint_axis"], [unsqueezed])
+            )
+            nodes.append(
+                helper.make_node(
+                    "Concat", [unsqueezed] * CHECKPOINT_COUNT, [checkpoints_name], axis=0
+                )
+            )
 
+    initializers.append(numpy_helper.from_array(np.array([0], dtype=np.int64), "checkpoint_axis"))
     add_fixed_group("conv", CONV_LAYERS, CONV_ROW)
     add_fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
 
@@ -129,20 +151,26 @@ def create_config(output_dir):
                     {
                         "kind": "fixed",
                         "layer_ids": CONV_LAYERS,
+                        "checkpoint_count": CHECKPOINT_COUNT,
+                        "checkpoint_alignment": "left",
                         "bindings": {
                             "state": {
                                 "input": "past_conv.%d",
                                 "output": "present_conv.%d",
+                                "checkpoints": "checkpoints_conv.%d",
                             },
                         },
                     },
                     {
                         "kind": "fixed",
                         "layer_ids": RECURRENT_LAYERS,
+                        "checkpoint_count": CHECKPOINT_COUNT,
+                        "checkpoint_alignment": "right",
                         "bindings": {
                             "state": {
                                 "input": "past_recurrent.%d",
                                 "output": "present_recurrent.%d",
+                                "checkpoints": "checkpoints_recurrent.%d",
                             },
                         },
                     },
