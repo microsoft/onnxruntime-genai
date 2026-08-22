@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from types import MethodType
 
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
@@ -17,9 +18,10 @@ spec.loader.exec_module(quantized_model)
 ModeloptModel = quantized_model.ModeloptModel
 
 
-def _make_model(tensors):
+def _make_model(tensors, quant_type="modelopt"):
     model = object.__new__(ModeloptModel)
     model._get = MethodType(lambda self, key: tensors.get(key), model)
+    model.quant_type = quant_type
     return model
 
 
@@ -49,6 +51,27 @@ def test_self_attention_fp8_keeps_calibrated_input_scale():
     module = _make_model(tensors)._linear_module(ATTENTION)
 
     assert module.input_scale.item() == 0.25
+
+
+def test_modelopt_fp8_rejects_per_channel_weight_scale():
+    tensors = {
+        f"{ATTENTION}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{ATTENTION}.weight_scale": torch.ones(4),
+    }
+
+    with pytest.raises(ValueError, match="must be a scalar"):
+        _make_model(tensors)._linear_module(ATTENTION)
+
+
+def test_compressed_tensors_fp8_accepts_per_channel_weight_scale():
+    tensors = {
+        f"{ATTENTION}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{ATTENTION}.weight_scale": torch.ones(4),
+    }
+
+    module = _make_model(tensors, quant_type="compressed-tensors")._linear_module(ATTENTION)
+
+    assert module.weight_scale.shape == (4,)
 
 
 def test_bf16_linear_attention_projection_stays_unquantized():

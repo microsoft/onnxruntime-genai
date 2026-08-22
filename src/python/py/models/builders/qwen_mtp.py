@@ -468,34 +468,10 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
 class Qwen35DenseMtpHead(Qwen35MtpHead):
     """Dense Qwen3.5/Qwen3.8 MTP head: one full-attention decoder layer with a dense MLP."""
 
+    _uses_moe_layers = False
+
     def _get_model_type(self, config):
         return Qwen35TextModel._get_model_type(self, config)
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Mark as the MTP head so the parent does not recursively build another.
-        self.is_mtp_head = True
-
-        config = copy.deepcopy(config)
-        text_config = getattr(config, "text_config", config)
-        text_config.num_hidden_layers = 1
-        text_config.layer_types = ["full_attention"]
-        config.num_hidden_layers = 1
-        config.layer_types = ["full_attention"]
-
-        self._mtp_layer_config = copy.deepcopy(text_config)
-        self._mtp_layer_config.layer_types = ["full_attention"]
-        self._mtp_layer_config.num_hidden_layers = 1
-
-        extra_options = copy.deepcopy(extra_options)
-        extra_options["num_hidden_layers"] = 1
-        Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        self._preserve_modelopt_mtp = self._should_preserve_modelopt_mtp(self.quant_type, extra_options)
-
-        self.input_names["hidden_states"] = "hidden_states"
-        self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
 
     def make_layer(self, layer_id, layer):
         return Qwen35TextModel.make_layer(self, layer_id, layer)

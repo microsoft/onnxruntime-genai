@@ -1796,6 +1796,8 @@ class ModeloptModel(QuantizedModel):
         # compressed-tensors FP8 uses per-channel weight scales; ModelOpt uses one per tensor.
         if tensor is None:
             raise ValueError(f"ModelOpt tensor '{name}' is missing.")
+        if self.quant_type == "modelopt" and tensor.numel() != 1:
+            raise ValueError(f"ModelOpt tensor '{name}' must be a scalar, got shape {tuple(tensor.shape)}.")
         if tensor.numel() not in {1, out_features}:
             raise ValueError(
                 f"ModelOpt tensor '{name}' must be a scalar or hold {out_features} per-channel values, "

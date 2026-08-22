@@ -2295,10 +2295,17 @@ class Qwen35MoeTextModel(Qwen35TextModel):
     unchanged from the parent class.
     """
 
+    _uses_moe_layers = True
+
     def _get_model_type(self, config):
         return "Qwen3_5_Moe_textForCausalLM" if self.is_text_only else "Qwen3_5_MoeForConditionalGeneration"
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        if not self._uses_moe_layers:
+            super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+            self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+            return
+
         # Map Qwen3.5-MoE config attributes to what the base class expects.
         if hasattr(config, "text_config"):
             tc = config.text_config
@@ -2946,12 +2953,10 @@ class Qwen35DenseTextModel(Qwen35MoeTextModel):
     ``Qwen35MoeTextModel``'s MTP head wiring.
     """
 
+    _uses_moe_layers = False
+
     def _get_model_type(self, config):
         return Qwen35TextModel._get_model_type(self, config)
-
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_layer(self, layer_id, layer):
         return Qwen35TextModel.make_layer(self, layer_id, layer)
