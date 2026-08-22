@@ -134,7 +134,7 @@ class GPTOSSModel(Model):
             )
 
         self.make_initializer(self.pack_original_mxfp4_blocks_for_qmoe(blocks), weight_name)
-        self.make_fp8e8m0_initializer(scales, scales_name)
+        self.make_initializer(scales, scales_name, to=ir.DataType.FLOAT8E8M0, raw=True)
         self.make_initializer(torch.ones(blocks.shape[0], dtype=torch.float32), global_scales_name)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):

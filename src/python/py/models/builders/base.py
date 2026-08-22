@@ -1115,6 +1115,10 @@ class Model:
             },
         }
 
+        for token_id_name in ("bot_token_id", "eot_token_id", "bor_token_id", "eor_token_id"):
+            if hasattr(config, token_id_name):
+                genai_config["model"][token_id_name] = int(getattr(config, token_id_name))
+
         if self.ep in self.eps_with_windowed_kv_cache and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
             layer_idxs = [
@@ -1457,19 +1461,54 @@ class Model:
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
 
-    def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None):
-        if to is not None:
-            # Cast the tensor lazily if `to` is provided
-            def tensor_func():
-                nonlocal tensor
-                tensor = tensor.to(to_torch_dtype(to))
-                return TorchTensor(tensor, name=name)
+    def make_initializer(
+        self,
+        tensor: torch.Tensor | np.ndarray | ir.TensorProtocol,
+        /,
+        name: str,
+        *,
+        to: ir.DataType | None = None,
+        raw: bool = False,
+    ):
+        """Register an initializer.
 
-            ir_tensor = ir.LazyTensor(tensor_func, dtype=to, shape=ir.Shape(tensor.shape), name=name)
+        Modes:
+            1) Default mode: infer the dtype from a tensor, Parameter, or ir.TensorProtocol.
+            2) Cast mode: numerically cast values to ``to`` through the corresponding torch dtype.
+            3) Encoded-bytes mode: with ``raw=True``, treat uint8 input as an already-encoded
+                    payload and stamp its ONNX dtype to ``to`` without numeric conversion.
+
+        Notes:
+            - ``to`` performs numeric conversion unless ``raw=True``; it does not otherwise
+                reinterpret the input bytes.
+            - Encoded-bytes mode is for formats such as FLOAT8E8M0 and FLOAT8E4M3FN whose
+                payload is supplied as raw uint8 bytes, and requires ``to`` to be specified.
+        """
+        if raw:
+            if to is None:
+                raise ValueError("A target dtype is required for a raw initializer.")
+            arr = tensor.detach().cpu().numpy() if isinstance(tensor, torch.Tensor) else np.asarray(tensor)
+            if arr.dtype != np.uint8:
+                raise TypeError(f"Raw initializer data must be uint8 encoded bytes, got {arr.dtype}.")
+            ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=to, name=name)
+
+        elif to is not None:
+            # Cast tensor from current dtype into target dtype
+            torch_dtype = to_torch_dtype(to)
+
+            def tensor_func():
+                t = tensor if isinstance(tensor, torch.Tensor) else torch.as_tensor(tensor)
+                return TorchTensor(t.to(torch_dtype), name=name)
+
+            shape = tensor.shape if hasattr(tensor, "shape") else torch.as_tensor(tensor).shape
+            ir_tensor = ir.LazyTensor(tensor_func, dtype=to, shape=ir.Shape(shape), name=name)
+
         elif isinstance(tensor, torch.nn.parameter.Parameter):
             ir_tensor = TorchTensor(tensor, name=name)
+
         else:
             ir_tensor = ir.tensor(tensor, name=name)
+
         value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
@@ -4338,63 +4377,6 @@ class Model:
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
-
-    def make_fp8e8m0_initializer(self, scales_uint8, name):
-        """Register a FLOAT8E8M0 initializer from raw ue8m0 code bytes (uint8).
-
-        MXFP4 block scales are stored as unsigned 8-bit exponents (ue8m0). torch has
-        no float8e8m0 dtype, so build the IR tensor directly from the raw uint8 bytes
-        and tag it FLOAT8E8M0 (the encoding the CUDA QMoE FP4 kernel expects).
-        """
-        arr = scales_uint8.detach().cpu().numpy().astype(np.uint8) if isinstance(scales_uint8, torch.Tensor) else np.asarray(scales_uint8, dtype=np.uint8)
-        ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=ir.DataType.FLOAT8E8M0, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
-        value.const_value = ir_tensor
-        self.model.graph.register_initializer(value)
-
-    def make_fp8e4m3_initializer(self, scales_uint8, name):
-        """Register a FLOAT8E4M3FN initializer from raw e4m3 code bytes (uint8).
-
-        NVFP4 block scales are stored as FP8 e4m3 bytes. Build the IR tensor directly
-        from the raw uint8 bytes and tag it FLOAT8E4M3FN (the encoding the CUDA QMoE
-        NVFP4 kernel expects).
-        """
-        arr = scales_uint8.detach().cpu().numpy().astype(np.uint8) if isinstance(scales_uint8, torch.Tensor) else np.asarray(scales_uint8, dtype=np.uint8)
-        ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=ir.DataType.FLOAT8E4M3FN, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
-        value.const_value = ir_tensor
-        self.model.graph.register_initializer(value)
-
-    def repack_modelopt_nvfp4_weight_codes(self, packed_nk2):
-        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes.
-
-        ``packed_nk2`` is uint8 ``[N, K/2]`` where each byte holds two adjacent K-axis
-        e2m1 codes for the same output row N (low nibble = even K, high nibble = odd K)
-        -- the layout Model Optimizer writes. Returns uint8 codes ``[N, K]`` (0-15).
-        """
-        if packed_nk2.dtype != torch.uint8:
-            packed_nk2 = packed_nk2.to(torch.uint8)
-        low = packed_nk2 & 0x0F
-        high = packed_nk2 >> 4
-        n = packed_nk2.shape[0]
-        codes = torch.stack((low, high), dim=-1).reshape(n, -1)  # [N, K]
-        return codes.contiguous()
-
-    def pack_nvfp4_codes_for_qmoe(self, codes_nk):
-        """Pack per-element e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout.
-
-        The QMoE FP4 kernel reads weights as ``[E, K, N/2]`` with each byte holding two
-        adjacent N-axis codes for the same K (even N = low nibble, odd N = high nibble).
-        """
-        if codes_nk.dtype != torch.uint8:
-            codes_nk = codes_nk.to(torch.uint8)
-        n = codes_nk.shape[0]
-        if n % 2 != 0:
-            raise ValueError(f"NVFP4 QMoE packing requires an even N={n} for nibble packing.")
-        codes_kn = codes_nk.T.contiguous()  # [K, N]
-        low = codes_kn[:, 0::2] & 0x0F
-        high = codes_kn[:, 1::2] & 0x0F
-        return ((high << 4) | low).contiguous()  # [K, N/2]
 
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).

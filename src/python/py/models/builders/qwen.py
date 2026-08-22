@@ -965,8 +965,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
     def is_native_nvfp4_moe(self, moe):
         if self.moe_attrs.get("quant_type") != "nvfp4":
             return False
-        first_expert = next(iter(moe.experts), None)
-        return first_expert is not None and getattr(first_expert.gate_proj, "weight_scale_2", None) is not None
+        return getattr(moe.experts, "quant_type", None) == "nvfp4"
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         op_type = self.moe_attrs["op_type"]
@@ -993,15 +992,19 @@ class Qwen35MoETextModel(Qwen35TextModel):
             self.moe_attrs["block_size"] = 16
             gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
             down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
-            self.make_nvfp4_moe_initializers(
-                moe.experts,
-                gate_up_proj_weight,
+            self.make_initializer(moe.experts.gate_up_qweight, gate_up_proj_weight)
+            self.make_initializer(moe.experts.down_qweight, down_proj_weight)
+            self.make_initializer(
+                moe.experts.gate_up_scales,
                 gate_up_proj_scales,
-                gate_up_proj_global_scales,
-                down_proj_weight,
-                down_proj_scales,
-                down_proj_global_scales,
+                to=ir.DataType.FLOAT8E4M3FN,
+                raw=True,
             )
+            self.make_initializer(
+                moe.experts.down_scales, down_proj_scales, to=ir.DataType.FLOAT8E4M3FN, raw=True
+            )
+            self.make_initializer(moe.experts.gate_up_global_scales, gate_up_proj_global_scales)
+            self.make_initializer(moe.experts.down_global_scales, down_proj_global_scales)
         elif op_type == "MoE":
             raw_gate_up = moe.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
@@ -1094,76 +1097,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
             shape=["batch_size", "sequence_length", self.hidden_size],
         )
         return f"{combine_name}/output_0"
-
-    def make_nvfp4_moe_initializers(
-        self,
-        experts,
-        gate_up_weight_name,
-        gate_up_scales_name,
-        gate_up_global_name,
-        down_weight_name,
-        down_scales_name,
-        down_global_name,
-    ):
-        """Emit QMoE NVFP4 initializers for all routed experts of one layer.
-
-        Reads the Model Optimizer per-expert tensors (``weight`` uint8 ``[N, K/2]``,
-        ``weight_scale`` e4m3 ``[N, K/16]``, ``weight_scale_2`` f32 scalar), repacks the
-        E2M1 codes into the CUDA QMoE ``[E, K, N/2]`` layout, and interleaves gate/up
-        along N for ``swiglu_fusion=1``. gate and up share one per-expert global scale.
-        """
-        gate_up_qw, gate_up_sc, gate_up_g = [], [], []
-        down_qw, down_sc, down_g = [], [], []
-        for expert_id, expert in enumerate(experts):
-            gate_prefix = f"expert.{expert_id}.gate_proj"
-            up_prefix = f"expert.{expert_id}.up_proj"
-            down_prefix = f"expert.{expert_id}.down_proj"
-            g_codes = self.repack_modelopt_nvfp4_weight_codes(expert.gate_proj.weight)
-            u_codes = self.repack_modelopt_nvfp4_weight_codes(expert.up_proj.weight)
-            if g_codes.shape != u_codes.shape:
-                raise ValueError(
-                    f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
-                    f"got {tuple(g_codes.shape)} and {tuple(u_codes.shape)}."
-                )
-            inter = g_codes.shape[0]
-            fused_codes = torch.stack([g_codes, u_codes], dim=1).reshape(2 * inter, -1)  # [2*inter, K]
-            gate_up_qw.append(self.pack_nvfp4_codes_for_qmoe(fused_codes))  # [K, inter]
-
-            scale_shape = (inter, g_codes.shape[1] // 16)
-            g_sc = self.modelopt_e4m3_bytes(expert.gate_proj.weight_scale, f"{gate_prefix}.weight_scale", scale_shape)
-            u_sc = self.modelopt_e4m3_bytes(expert.up_proj.weight_scale, f"{up_prefix}.weight_scale", scale_shape)
-            gate_up_sc.append(torch.stack([g_sc, u_sc], dim=1).reshape(2 * inter, -1))  # [2*inter, K/16] e4m3 bytes
-            gate_global = self.modelopt_positive_scalar(
-                expert.gate_proj.weight_scale_2, f"{gate_prefix}.weight_scale_2"
-            )
-            up_global = self.modelopt_positive_scalar(expert.up_proj.weight_scale_2, f"{up_prefix}.weight_scale_2")
-            if gate_global != up_global:
-                raise ValueError(
-                    f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
-                    f"got {gate_global} and {up_global}."
-                )
-            gate_up_g.append(gate_global)
-
-            d_codes = self.repack_modelopt_nvfp4_weight_codes(expert.down_proj.weight)
-            down_qw.append(self.pack_nvfp4_codes_for_qmoe(d_codes))  # [inter, hidden/2]
-            down_scale_shape = (d_codes.shape[0], d_codes.shape[1] // 16)
-            down_sc.append(
-                self.modelopt_e4m3_bytes(
-                    expert.down_proj.weight_scale,
-                    f"{down_prefix}.weight_scale",
-                    down_scale_shape,
-                )
-            )
-            down_g.append(
-                self.modelopt_positive_scalar(expert.down_proj.weight_scale_2, f"{down_prefix}.weight_scale_2")
-            )
-
-        self.make_initializer(torch.stack(gate_up_qw, dim=0).to(torch.uint8), gate_up_weight_name)
-        self.make_initializer(torch.stack(down_qw, dim=0).to(torch.uint8), down_weight_name)
-        self.make_fp8e4m3_initializer(torch.stack(gate_up_sc, dim=0), gate_up_scales_name)
-        self.make_fp8e4m3_initializer(torch.stack(down_sc, dim=0), down_scales_name)
-        self.make_initializer(torch.tensor(gate_up_g, dtype=torch.float32), gate_up_global_name)
-        self.make_initializer(torch.tensor(down_g, dtype=torch.float32), down_global_name)
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
         basename = f"/model/layers.{layer_id}/shared_expert"

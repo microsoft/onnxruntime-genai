@@ -54,7 +54,24 @@ from builders import (
     WhisperModel,
 )
 from quantization import KV_CACHE_QUANT_TYPES, QuantConfig
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
+
+
+def add_special_token_ids(config, tokenizer):
+    """Add supported tool-call and reasoning token IDs to a model config."""
+    token_options = {
+        "bot_token_id": ("<tool_call>", "<|tool_call|>"),
+        "eot_token_id": ("</tool_call>", "<|/tool_call|>"),
+        "bor_token_id": ("<think>",),
+        "eor_token_id": ("</think>",),
+    }
+    vocabulary = tokenizer.get_vocab()
+
+    for attribute, candidates in token_options.items():
+        for token in candidates:
+            if token in vocabulary:
+                setattr(config, attribute, int(vocabulary[token]))
+                break
 
 
 def parse_hf_token(hf_token):
@@ -85,6 +102,8 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_remote = extra_options.get("hf_remote", False)
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 

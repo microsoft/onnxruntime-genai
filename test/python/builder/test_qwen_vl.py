@@ -311,18 +311,27 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
         bos_token_id=1,
         eos_token_id=2,
         pad_token_id=0,
+        bot_token_id="10",
+        eot_token_id="11",
+        bor_token_id="12",
+        eor_token_id="13",
     )
     monkeypatch.setattr(base_module.GenerationConfig, "from_pretrained", lambda *_args, **_kwargs: config)
 
     Model.make_genai_config(model, config, {}, tmp_path)
 
     with open(tmp_path / "genai_config.json") as config_file:
-        decoder = json.load(config_file)["model"]["decoder"]
+        model_config = json.load(config_file)["model"]
+        decoder = model_config["decoder"]
 
     assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
+    assert model_config["bot_token_id"] == 10
+    assert model_config["eot_token_id"] == 11
+    assert model_config["bor_token_id"] == 12
+    assert model_config["eor_token_id"] == 13
 
 
 def test_qwen35_cache_names_follow_layer_types():

@@ -1659,14 +1659,11 @@ class OliveModel(GPTQModel):
 #   * attention (self_attn / linear_attn projections) : FP8 (per-tensor weight_scale).
 #   * everything else (norms, conv1d, router, embeddings) : BF16.
 #
-# The ONNX Runtime GenAI QMoE op consumes the NVFP4 *routed* experts natively
-# (quant_type="nvfp4"), and the Qwen builder reads those per-expert tensors
-# straight from the source safetensors (see make_nvfp4_moe_initializers). So this
-# loader only has to materialize the NON-routed weights the builder walks as plain
-# modules: it dequantizes the FP8 attention and NVFP4 shared-expert / lm_head to
-# BF16 and passes BF16 tensors through unchanged. Attention is exported through the
-# builder's native contrib-op path when requested. The dequantized copies retain
-# compatibility with the builder's standard fallback path.
+# The ONNX Runtime GenAI QMoE op consumes the NVFP4 routed experts natively
+# (quant_type="nvfp4"). This loader prepackages those tensors in the QMoE layout
+# and materializes the non-routed weights as modules for the builder. Attention,
+# shared-expert, and lm_head tensors retain their native ModelOpt representation
+# for contrib-op export, with standard builder paths available where applicable.
 
 
 class ModeloptDecoderLayer:
@@ -1694,12 +1691,18 @@ class ModeloptLinearModule(TensorModule):
         self.input_scale = None
 
 
+class ModeloptQMoEExperts:
+    """ModelOpt routed experts prepacked for the native NVFP4 QMoE operator."""
+
+    quant_type = "nvfp4"
+
+
 class ModeloptModel(QuantizedModel):
     """Loader for NVIDIA Model Optimizer NVFP4 + FP8 mixed-precision checkpoints.
 
     The base initializes the module surface the builder walks without running its
     eager integer-checkpoint loading path. This loader instead streams tensors on
-    demand and dequantizes only the non-routed weights to BF16.
+    demand and prepacks routed NVFP4 experts for native QMoE export.
     """
 
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
@@ -1842,6 +1845,63 @@ class ModeloptModel(QuantizedModel):
         module.weight = self._get(name)
         return module
 
+    def _prepare_qmoe_experts(self, experts):
+        def unpack(weight):
+            low = weight & 0x0F
+            high = weight >> 4
+            return torch.stack((low, high), dim=-1).reshape(weight.shape[0], -1)
+
+        def pack(codes):
+            if codes.shape[0] % 2 != 0:
+                raise ValueError(f"NVFP4 QMoE packing requires an even N={codes.shape[0]} for nibble packing.")
+            codes = codes.T.contiguous()
+            return ((codes[:, 1::2] << 4) | (codes[:, 0::2] & 0x0F)).contiguous()
+
+        def scale_bytes(projection):
+            return projection.weight_scale.view(torch.uint8).contiguous()
+
+        gate_up_weights, gate_up_scales, gate_up_globals = [], [], []
+        down_weights, down_scales, down_globals = [], [], []
+        for expert_id, expert in enumerate(experts):
+            gate_codes = unpack(expert.gate_proj.weight)
+            up_codes = unpack(expert.up_proj.weight)
+            if gate_codes.shape != up_codes.shape:
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up weights must have matching shapes, "
+                    f"got {tuple(gate_codes.shape)} and {tuple(up_codes.shape)}."
+                )
+
+            intermediate_size = gate_codes.shape[0]
+            fused_codes = torch.stack((gate_codes, up_codes), dim=1).reshape(2 * intermediate_size, -1)
+            gate_up_weights.append(pack(fused_codes))
+            gate_up_scales.append(
+                torch.stack((scale_bytes(expert.gate_proj), scale_bytes(expert.up_proj)), dim=1).reshape(
+                    2 * intermediate_size, -1
+                )
+            )
+
+            gate_global = expert.gate_proj.weight_scale_2.float().reshape(())
+            up_global = expert.up_proj.weight_scale_2.float().reshape(())
+            if gate_global.item() != up_global.item():
+                raise ValueError(
+                    f"ModelOpt expert {expert_id} gate/up global scales must match for fused QMoE, "
+                    f"got {gate_global.item()} and {up_global.item()}."
+                )
+            gate_up_globals.append(gate_global)
+
+            down_weights.append(pack(unpack(expert.down_proj.weight)))
+            down_scales.append(scale_bytes(expert.down_proj))
+            down_globals.append(expert.down_proj.weight_scale_2.float().reshape(()))
+
+        prepared = ModeloptQMoEExperts()
+        prepared.gate_up_qweight = torch.stack(gate_up_weights)
+        prepared.gate_up_scales = torch.stack(gate_up_scales)
+        prepared.gate_up_global_scales = torch.stack(gate_up_globals)
+        prepared.down_qweight = torch.stack(down_weights)
+        prepared.down_scales = torch.stack(down_scales)
+        prepared.down_global_scales = torch.stack(down_globals)
+        return prepared
+
     def _build_layer(self, layer_id):
         ns = self._simple_namespace
         p = f"model.language_model.layers.{layer_id}"
@@ -1893,6 +1953,7 @@ class ModeloptModel(QuantizedModel):
             expert.up_proj = self._linear_module(f"{expert_prefix}.up_proj")
             expert.down_proj = self._linear_module(f"{expert_prefix}.down_proj")
             mlp.experts.append(expert)
+        mlp.experts = self._prepare_qmoe_experts(mlp.experts)
         layer.mlp = mlp
         return layer
 

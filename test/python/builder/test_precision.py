@@ -88,6 +88,38 @@ builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 
 
+def test_add_special_token_ids_uses_first_available_candidate():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(
+        get_vocab=lambda: {
+            "<tool_call>": "10",
+            "<|tool_call|>": "11",
+            "<|/tool_call|>": "12",
+            "<think>": "13",
+            "</think>": "14",
+        }
+    )
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert config.bot_token_id == 10
+    assert config.eot_token_id == 12
+    assert config.bor_token_id == 13
+    assert config.eor_token_id == 14
+
+
+def test_add_special_token_ids_omits_tokens_not_in_vocabulary():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(get_vocab=lambda: {})
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert not hasattr(config, "bot_token_id")
+    assert not hasattr(config, "eot_token_id")
+    assert not hasattr(config, "bor_token_id")
+    assert not hasattr(config, "eor_token_id")
+
+
 # ---------------------------------------------------------------------------
 # int8 precision maps onnx_dtype to INT8/UINT8 (like int4 -> INT4/UINT4).
 # ---------------------------------------------------------------------------

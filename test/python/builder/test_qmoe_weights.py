@@ -134,6 +134,26 @@ def test_base_moe_orchestrates_model_hooks(monkeypatch):
     ]
 
 
+def test_make_initializer_preserves_raw_fp8_bytes():
+    if not hasattr(base_module.ir.DataType, "FLOAT8E8M0"):
+        pytest.skip("Installed onnx_ir does not support FLOAT8E8M0")
+
+    class InitializerGraph:
+        def register_initializer(self, value):
+            self.value = value
+
+    model = Model.__new__(Model)
+    model.values = {}
+    model.model = types.SimpleNamespace(graph=InitializerGraph())
+    encoded = torch.tensor([0x7F, 0x80], dtype=torch.uint8)
+
+    for dtype in (base_module.ir.DataType.FLOAT8E8M0, base_module.ir.DataType.FLOAT8E4M3FN):
+        model.make_initializer(encoded, dtype.name, to=dtype, raw=True)
+        proto = base_module.ir.serde.serialize_tensor(model.model.graph.value.const_value)
+        assert proto.data_type == dtype.value
+        assert proto.raw_data == bytes([0x7F, 0x80])
+
+
 def test_phi_moe_uses_base_layer_route():
     model = Phi3MoELongRoPEModel.__new__(Phi3MoELongRoPEModel)
     moe = object()
