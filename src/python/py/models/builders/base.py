@@ -1793,7 +1793,7 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if getattr(self, "quant_type", None) == "modelopt":
+        if getattr(self, "quant_type", None) in {"modelopt", "compressed-tensors"}:
             weight_scale = getattr(matmul, "weight_scale", None)
             weight_scale_2 = getattr(matmul, "weight_scale_2", None)
             if weight_scale_2 is not None:
@@ -1912,7 +1912,7 @@ class Model:
             block_size=block_size,
         )
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
         return basename
 
     def make_matmul_block_quantized_nvfp4_weight(
@@ -1945,7 +1945,7 @@ class Model:
             block_size=16,
         )
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
         return basename
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
