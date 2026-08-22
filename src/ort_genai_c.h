@@ -583,6 +583,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_mo
 OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 /** \brief Produce the next token via the draft/verify loop. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator);
+/** \brief Reset to an empty request while retaining allocated state and captured graphs. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_Reset(OgaMtpGenerator* generator);
 /** \brief Whether generation has reached EOS or max length. */
 OGA_EXPORT bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator);
 /** \brief Number of committed tokens (prompt + generated). */

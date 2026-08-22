@@ -669,6 +669,34 @@ void MtpGenerator::GenerateNextToken() {
   }
 }
 
+void MtpGenerator::Reset() {
+  main_->RewindToLength(0);
+  mtp_->RewindToLength(0);
+
+  if (sampling_) {
+    if (main_params_->search.random_seed == -1) {
+      std::random_device rd;
+      rng_.seed(rd());
+    } else {
+      rng_.seed(static_cast<uint32_t>(main_params_->search.random_seed));
+    }
+  }
+
+  sequence_.clear();
+  emitted_sequence_.clear();
+  pending_tokens_.clear();
+  stats_ = {};
+  next_token_ = 0;
+  length_ = 0;
+  head_len_ = 0;
+  primed_ = false;
+  done_ = false;
+  pending_draft_ = 0;
+  has_pending_draft_ = false;
+  pending_refeed_count_ = -1;
+  pending_refeed_head_len_ = 0;
+}
+
 void MtpGenerator::RunRound() {
   if (done_) return;
 
