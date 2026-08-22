@@ -12,7 +12,10 @@ Run the model builder to create the desired ONNX model.
 
 import argparse
 import os
+import sys
 import textwrap
+import time
+from contextlib import suppress
 from typing import Any
 
 import onnx_ir as ir
@@ -24,8 +27,8 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
-    GraniteMoeHybridModel,
     GraniteModel,
+    GraniteMoeHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
@@ -46,8 +49,8 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
-    Qwen35TextModel,
     Qwen35MoeTextModel,
+    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
@@ -55,6 +58,38 @@ from builders import (
 )
 from builders.quant_config import KV_CACHE_QUANT_TYPES, QuantConfig
 from transformers import AutoConfig
+
+try:
+    from ..telemetry.path_utils import (
+        normalize_execution_provider,
+        sanitize_model_identifier,
+        scrub_value_for_telemetry,
+    )
+except Exception:
+    telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    path_added = telemetry_root not in sys.path
+    if path_added:
+        sys.path.insert(0, telemetry_root)
+    try:
+        try:
+            from telemetry.path_utils import (
+                normalize_execution_provider,
+                sanitize_model_identifier,
+                scrub_value_for_telemetry,
+            )
+        except Exception:
+            # Telemetry must never make the standalone model builder unavailable.
+            def normalize_execution_provider(value):
+                return "trt-rtx" if value == "NvTensorRtRtx" else value
+
+            def sanitize_model_identifier(value):
+                return value if value in (None, "") else "[path]"
+
+            def scrub_value_for_telemetry(value):
+                return value if value is None or isinstance(value, (bool, int, float)) else "[redacted]"
+    finally:
+        if path_added and telemetry_root in sys.path:
+            sys.path.remove(telemetry_root)
 
 
 def apply_deprecated_extra_option_aliases(kv_pairs):
@@ -117,7 +152,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -409,7 +444,9 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = (
+        precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
+    )
 
     if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
@@ -441,19 +478,156 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def _normalize_execution_provider_name(execution_provider):
+    return normalize_execution_provider(execution_provider)
+
+
+def _sanitize_path_value(value):
+    """Redact filesystem paths while preserving non-path model identifiers.
+
+    Hugging Face repo IDs (e.g. "microsoft/phi-3-mini") are returned unchanged because
+    they are not treated as filesystem paths.
+    """
+    return sanitize_model_identifier(value)
+
+
+def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
+    """Exclude authentication/internal HF state and recursively scrub user-facing options."""
+    sanitized = {}
+    for key, value in extra_options.items():
+        if key in {"hf_token", "hf_details"}:
+            continue
+        sanitized[key] = scrub_value_for_telemetry(value)
+    return sanitized
+
+
+def _get_model_builder_telemetry():
+    """Return telemetry without making it a model-builder dependency."""
+    try:
+        try:
+            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
+        except Exception:
+            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            path_added = telemetry_root not in sys.path
+            if path_added:
+                sys.path.insert(0, telemetry_root)
+            try:
+                from telemetry import GenAITelemetry  # noqa: PLC0415
+            finally:
+                if path_added and telemetry_root in sys.path:
+                    sys.path.remove(telemetry_root)
+        return GenAITelemetry()
+    except Exception:
+        return None
+
+
+def _shutdown_model_builder_telemetry(max_seconds: float = 1.0) -> None:
+    """Best-effort bounded delivery for the model-builder CLI."""
+    telemetry = _get_model_builder_telemetry()
+    if telemetry is not None:
+        telemetry.shutdown(max_seconds)
+
+
+def _emit_model_build_telemetry(
+    action_name: str,
+    duration_ms: float,
+    success: bool,
+    config,
+    onnx_model,
+    precision: str,
+    execution_provider: str,
+    output_dir: str,
+    extra_options: dict[str, Any],
+    source_format: str = "huggingface",
+    fallback_model_name: str = "",
+) -> None:
+    try:
+        telemetry = _get_model_builder_telemetry()
+        if telemetry is None or not telemetry.accepts_detailed_events:
+            return
+
+        model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
+        hidden_size = getattr(config, "hidden_size", 0)
+        num_layers = getattr(config, "num_hidden_layers", 0)
+        num_attn_heads = getattr(config, "num_attention_heads", 0)
+        num_kv_heads = getattr(config, "num_key_value_heads", num_attn_heads)
+        vocab_size = getattr(config, "vocab_size", 0)
+        context_length = getattr(config, "max_position_embeddings", 0)
+
+        output_model_size = 0
+        if success and os.path.isdir(output_dir):
+            for filename in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, filename)
+                if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):
+                    output_model_size += os.path.getsize(file_path)
+
+        num_ops = 0
+        op_types = ""
+        has_custom_ops = False
+        if hasattr(onnx_model, "model") and onnx_model.model is not None:
+            with suppress(Exception):
+                graph = onnx_model.model.graph
+                if graph is not None:
+                    op_type_set = set()
+                    for node in graph:
+                        num_ops += 1
+                        op_type_set.add(node.op_type)
+                        if node.domain and not node.domain.startswith("ai.onnx"):
+                            has_custom_ops = True
+                    op_types = ",".join(sorted(op_type_set))
+
+        io_dtype_str = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
+        quant_type_str = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
+
+        telemetry.log_model_build(
+            action=action_name,
+            duration_ms=duration_ms,
+            success=success,
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or fallback_model_name),
+            model_type=str(model_type),
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_attn_heads=num_attn_heads,
+            num_kv_heads=num_kv_heads,
+            vocab_size=vocab_size,
+            context_length=context_length,
+            io_dtype=io_dtype_str,
+            quant_type=quant_type_str,
+            execution_provider=_normalize_execution_provider_name(execution_provider),
+            output_model_size_bytes=output_model_size,
+            num_onnx_operators=num_ops,
+            operator_types=op_types,
+            has_custom_ops=has_custom_ops,
+            source_format=source_format,
+            has_adapter="adapter_path" in extra_options,
+            extra_options=_sanitize_extra_options(extra_options),
+        )
+    except Exception:
+        return
+
+
 @torch.no_grad
-def create_model(
+def _create_model_impl(
     model_name,
     input_path,
     output_dir,
     precision,
     execution_provider,
     cache_dir,
+    _telemetry_state,
     **extra_options,
 ):
     # Update name alias for TRT-RTX
-    if execution_provider == "NvTensorRtRtx":
-        execution_provider = "trt-rtx"
+    overall_start = time.perf_counter()
+
+    normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
+    if normalized_execution_provider != execution_provider:
+        execution_provider = normalized_execution_provider
+        extra_options["use_qdq"] = True
+
+    # Normalize any deprecated extra_options names for direct API callers (the CLI
+    # path already handles this in check_extra_options).
+    apply_deprecated_extra_option_aliases(extra_options)
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -463,7 +637,9 @@ def create_model(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+        raise Exception(
+            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
+        ) from None
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -485,10 +661,14 @@ def create_model(
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -496,8 +676,12 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
+        )
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GptOssForCausalLM":
@@ -534,32 +718,57 @@ def create_model(
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3ForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
+    elif (
+        config.architectures[0] == "PhiMoEForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
+        print(
+            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
+        )
+        print(
+            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
+        )
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings == config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+    elif (
+        config.architectures[0] == "Phi3SmallForCausalLM"
+        and config.max_position_embeddings != config.original_max_position_embeddings
+    ):
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
@@ -567,7 +776,9 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3ForCausalLM":
@@ -581,7 +792,9 @@ def create_model(
         for key in text_config:
             if not hasattr(config, key):
                 setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
         extra_options["exclude_embeds"] = True
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
@@ -594,18 +807,93 @@ def create_model(
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
-    if not config_only:
-        # Make ONNX model
-        onnx_model.make_model(input_path)
+    # Determine source format for telemetry
+    source_format = "huggingface"
+    if input_path and input_path.lower().endswith(".gguf"):
+        source_format = "gguf"
 
-        # Save ONNX model
-        onnx_model.save_model(output_dir)
+    build_success = False
+    try:
+        if not config_only:
+            # Make ONNX model
+            onnx_model.make_model(input_path)
 
-    # Make GenAI config
-    onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
+            # Save ONNX model
+            onnx_model.save_model(output_dir)
 
-    # Copy Hugging Face processing files to output folder
-    onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+        # Make GenAI config
+        onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
+
+        # Copy Hugging Face processing files to output folder
+        onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+        build_success = True
+    finally:
+        overall_duration_ms = (time.perf_counter() - overall_start) * 1000
+        _telemetry_state["emitted"] = True
+        _emit_model_build_telemetry(
+            action_name="create_model",
+            duration_ms=overall_duration_ms,
+            success=build_success,
+            config=config,
+            onnx_model=onnx_model,
+            precision=precision,
+            execution_provider=execution_provider,
+            output_dir=output_dir,
+            extra_options=extra_options,
+            source_format=source_format,
+            fallback_model_name=model_name,
+        )
+
+
+def create_model(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    **extra_options,
+):
+    """Create a model and emit a minimal failure event even before model selection."""
+    overall_start = time.perf_counter()
+    telemetry_state = {"emitted": False}
+    normalized_input_path = input_path
+    # Initialize before the long-running build so heartbeat enrichment and
+    # queued-event delivery proceed while model conversion is underway.
+    _get_model_builder_telemetry()
+    try:
+        if input_path:
+            normalized_input_path = os.fsdecode(input_path)
+        return _create_model_impl(
+            model_name,
+            normalized_input_path,
+            output_dir,
+            precision,
+            execution_provider,
+            cache_dir,
+            telemetry_state,
+            **extra_options,
+        )
+    except Exception:
+        if not telemetry_state["emitted"]:
+            _emit_model_build_telemetry(
+                action_name="create_model",
+                duration_ms=(time.perf_counter() - overall_start) * 1000,
+                success=False,
+                config=None,
+                onnx_model=None,
+                precision=precision,
+                execution_provider=execution_provider,
+                output_dir="",
+                extra_options=extra_options,
+                source_format=(
+                    "gguf"
+                    if isinstance(normalized_input_path, str) and normalized_input_path.lower().endswith(".gguf")
+                    else "huggingface"
+                ),
+                fallback_model_name=normalized_input_path or model_name,
+            )
+        raise
 
 
 def get_args():
@@ -661,6 +949,12 @@ def get_args():
         type=str,
         default=os.path.join(".", "cache_dir"),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
+    )
+
+    parser.add_argument(
+        "--disable_telemetry",
+        action="store_true",
+        help="Disable all Python telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
@@ -846,6 +1140,9 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
+    # Honor --disable_telemetry before create_model constructs the telemetry singleton.
+    if args.disable_telemetry:
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     extra_options = parse_extra_options(
         args.model_name,
         args.input,
@@ -855,12 +1152,15 @@ if __name__ == "__main__":
         args.cache_dir,
         args.extra_options,
     )
-    create_model(
-        args.model_name,
-        args.input,
-        args.output,
-        args.precision,
-        args.execution_provider,
-        args.cache_dir,
-        **extra_options,
-    )
+    try:
+        create_model(
+            args.model_name,
+            args.input,
+            args.output,
+            args.precision,
+            args.execution_provider,
+            args.cache_dir,
+            **extra_options,
+        )
+    finally:
+        _shutdown_model_builder_telemetry()
