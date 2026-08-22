@@ -41,7 +41,7 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
-        self.eps_with_windowed_kv_cache = base_module.resolve_windowed_kv_cache_eps({})
+        self.eps_with_windowed_kv_cache = {"cpu", "cuda", "trt-rtx"}
         self.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
         self.num_attn_heads = 8
         self.num_kv_heads = 2

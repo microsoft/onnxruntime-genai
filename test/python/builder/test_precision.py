@@ -55,10 +55,11 @@ def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     )
 
     model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+    other_model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
     assert model.input_types["attention_metadata"] == ir.DataType.INT32
     assert model.input_shapes["attention_metadata"] == [3]
-    assert model.input_shapes["attention_metadata"] is not base.PAGED_ATTENTION_METADATA_SHAPE
+    assert model.input_shapes["attention_metadata"] is not other_model.input_shapes["attention_metadata"]
 
 
 def _load_builder_entrypoint_module():

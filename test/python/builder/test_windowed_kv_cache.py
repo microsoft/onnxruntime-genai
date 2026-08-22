@@ -49,30 +49,36 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
-resolve_windowed_kv_cache_eps = base_module.resolve_windowed_kv_cache_eps
 
 
 # ===========================================================================
-# resolve_windowed_kv_cache_eps: the windowed_kv_cache opt-out
+# make_context_length_init: the windowed_kv_cache opt-out
 # ===========================================================================
+
+
+def _window_model(extra_options):
+    model = Model.__new__(Model)
+    model.extra_options = extra_options
+    model.make_context_length_init(SimpleNamespace(sliding_window=128))
+    return model
 
 
 def test_windowed_kv_cache_is_on_by_default():
-    assert resolve_windowed_kv_cache_eps({}) == {"trt-rtx", "cuda", "cpu"}
+    assert _window_model({}).eps_with_windowed_kv_cache == {"trt-rtx", "cuda", "cpu"}
 
 
 @pytest.mark.parametrize("extra_options", [{"windowed_kv_cache": False}, {"use_paged_attention": True}])
 def test_windowed_kv_cache_can_be_turned_off(extra_options):
     # Explicit opt-out builds a full-length-KV baseline; PagedAttention has no windowed-cache
     # mode, so it never qualifies either way.
-    assert resolve_windowed_kv_cache_eps(extra_options) == set()
+    assert _window_model(extra_options).eps_with_windowed_kv_cache == set()
 
 
 def test_windowed_kv_cache_eps_are_not_shared_between_models():
     # The caller mutates nothing, but two models must not alias the same set.
-    first = resolve_windowed_kv_cache_eps({})
+    first = _window_model({}).eps_with_windowed_kv_cache
     first.discard("cuda")
-    assert "cuda" in resolve_windowed_kv_cache_eps({})
+    assert "cuda" in _window_model({}).eps_with_windowed_kv_cache
 
 
 # ===========================================================================
@@ -182,8 +188,7 @@ def _make_shape_model(ep, local_layers=()):
     model.ep = ep
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
     model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
-    if local_layers is not None:
-        model.is_local = lambda layer_id: layer_id in local_layers
+    model.layer_types = ["sliding_attention" if local_layers and layer_id in local_layers else "full_attention" for layer_id in range(2)]
     return model
 
 
@@ -215,7 +220,7 @@ def test_non_windowed_ep_keeps_sequence_dim(ep):
 
 
 def test_model_without_alternating_attention_keeps_sequence_dim():
-    # Models that never define is_local have a uniform attention pattern.
+    # Models without sliding_attention layers have a uniform attention pattern.
     model = _make_shape_model("cuda", local_layers=None)
 
     assert model.make_key_value_cache_shape(0, list(_CACHE_SHAPE)) == _CACHE_SHAPE

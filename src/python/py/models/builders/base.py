@@ -28,8 +28,16 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSpeechSeq2Seq,
     AutoTokenizer,
+    Gemma3ForConditionalGeneration,
     GenerationConfig,
+    Mistral3ForConditionalGeneration,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
 )
+
+from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:

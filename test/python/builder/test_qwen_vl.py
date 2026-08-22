@@ -277,6 +277,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
     model.hf_token = None
     model.hf_remote = False
     model.use_paged_attention = False
+    model.use_windowed_paged_kv_cache = False
     model.input_names = {
         "input_ids": "input_ids",
         "past_key_values.key": {1: "past_key_values.1.key"},
@@ -702,9 +703,8 @@ def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
         "quant_type": "nvfp4",
     }
     model.layernorm_attrs = {"skip_input": ""}
-    projection = types.SimpleNamespace(weight_scale_2=torch.tensor(1.0))
     moe = types.SimpleNamespace(
-        experts=[types.SimpleNamespace(gate_proj=projection)],
+        experts=types.SimpleNamespace(quant_type="nvfp4"),
         shared_expert=object(),
         shared_expert_gate=object(),
     )
