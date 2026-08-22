@@ -14,8 +14,9 @@ from types import SimpleNamespace
 import onnx_ir as ir
 import torch
 
-from .quant_config import resolve_dtype
-from .qwen import Qwen35MoeTextModel
+from quantization import resolve_dtype
+
+from .qwen import Qwen35MoETextModel
 
 
 def mtp_dtypes_from_quant_config(quant_config):
@@ -61,7 +62,7 @@ class _RMSNormWeight:
         self.weight = weight
 
 
-class Qwen35MtpHead(Qwen35MoeTextModel):
+class Qwen35MtpHead(Qwen35MoETextModel):
     """Qwen3.6 multi-token-prediction (MTP) self-speculative head builder.
 
     Emits a separate ``mtp.onnx`` graph that predicts token ``t_{i+2}`` from the
@@ -119,9 +120,6 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
     def make_model(self, input_path):
         # Inputs/outputs: standard decoder I/O plus the extra hidden_states input.
         self.make_inputs_and_outputs()
-
-        if self.kv_cache_quant_type != "none":
-            self.make_kv_cache_scale_initializers()
 
         # Load MTP-specific weights (discarded by HF ``from_pretrained``).
         self._load_mtp_weights(input_path)

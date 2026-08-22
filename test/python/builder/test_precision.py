@@ -22,7 +22,7 @@ import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
@@ -55,10 +55,11 @@ def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     )
 
     model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+    other_model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
     assert model.input_types["attention_metadata"] == ir.DataType.INT32
     assert model.input_shapes["attention_metadata"] == [3]
-    assert model.input_shapes["attention_metadata"] is not base.PAGED_ATTENTION_METADATA_SHAPE
+    assert model.input_shapes["attention_metadata"] is not other_model.input_shapes["attention_metadata"]
 
 
 def _load_builder_entrypoint_module():
@@ -72,7 +73,7 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
     # real, dependency-free modules rather than the catch-all above.
     builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
@@ -86,6 +87,38 @@ def _load_builder_entrypoint_module():
 base_module = _load_base_module()
 builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
+
+
+def test_add_special_token_ids_uses_first_available_candidate():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(
+        get_vocab=lambda: {
+            "<tool_call>": "10",
+            "<|tool_call|>": "11",
+            "<|/tool_call|>": "12",
+            "<think>": "13",
+            "</think>": "14",
+        }
+    )
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert config.bot_token_id == 10
+    assert config.eot_token_id == 12
+    assert config.bor_token_id == 13
+    assert config.eor_token_id == 14
+
+
+def test_add_special_token_ids_omits_tokens_not_in_vocabulary():
+    config = types.SimpleNamespace()
+    tokenizer = types.SimpleNamespace(get_vocab=lambda: {})
+
+    builder_module.add_special_token_ids(config, tokenizer)
+
+    assert not hasattr(config, "bot_token_id")
+    assert not hasattr(config, "eot_token_id")
+    assert not hasattr(config, "bor_token_id")
+    assert not hasattr(config, "eor_token_id")
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +201,12 @@ def _make_quant_model(bits):
     model = Model.__new__(Model)
     model.model = object()
     model.ep = "cpu"  # keep the CUDA prepack post-pass a no-op
-    model.matmulnbits_weights_prepacked = 0
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.quantization_algo = "default"
     model.int4_customized_weight_config = {}
     model.quant_attrs = {
         "bits": bits,
-        "qdq_block_size": 32,
+        "matmul_block_size": 32,
         "is_symmetric": True,
         "accuracy_level": 4,
         "nodes_to_exclude": [],
@@ -305,24 +338,6 @@ def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
     assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
 
 
-def test_resolved_quant_config_controls_method_and_overrides():
-    model = Model.__new__(Model)
-    model.quant_config = builder_module.QuantConfig.from_dict(
-        {
-            "weights": {
-                "type": "int4",
-                "method": "k_quant",
-                "overrides": [{"match": {"preset": "last_matmul"}, "type": "int8"}],
-            }
-        }
-    )
-
-    model.resolve_quant_config()
-
-    assert model.quantization_algo == "k_quant"
-    assert model.matmul_mixed_precision == {"last_matmul": "int8"}
-
-
 def test_state_window_must_be_non_negative(monkeypatch):
     with pytest.raises(ValueError, match="non-negative integer"):
         _run_check_extra_options(monkeypatch, {"state_window": "-1"})
@@ -375,47 +390,6 @@ def test_quantized_kv_cache_rejects_unsupported_provider(monkeypatch):
         _run_check_extra_options(
             monkeypatch, {"kv_cache_quant_type": "int8_per_tensor"}, precision="fp16", execution_provider="webgpu"
         )
-
-
-# ---------------------------------------------------------------------------
-# Deprecated int4_* extra_option names still map to the generalized names.
-# ---------------------------------------------------------------------------
-
-
-def test_deprecated_int4_aliases_are_renamed():
-    kv = {
-        "int4_accuracy_level": "2",
-        "int4_block_size": "64",
-        "int4_is_symmetric": "false",
-        "int4_op_types_to_quantize": "MatMul/Gather",
-        "int4_nodes_to_exclude": "/lm_head/MatMul",
-        "int4_algo_config": "k_quant",
-    }
-    builder_module.apply_deprecated_extra_option_aliases(kv)
-    assert kv == {
-        "accuracy_level": "2",
-        "block_size": "64",
-        "is_symmetric": "false",
-        "op_types_to_quantize": "MatMul/Gather",
-        "nodes_to_exclude": "/lm_head/MatMul",
-        "algo_config": "k_quant",
-    }
-
-
-def test_deprecated_alias_does_not_override_new_name():
-    # If both the old and new names are provided, the new name wins and the old key is dropped.
-    kv = {"int4_algo_config": "rtn", "algo_config": "k_quant"}
-    builder_module.apply_deprecated_extra_option_aliases(kv)
-    assert kv == {"algo_config": "k_quant"}
-
-
-def test_check_extra_options_accepts_deprecated_int4_names(monkeypatch):
-    # End-to-end through check_extra_options: deprecated names are normalized in-place.
-    kv = {"int4_algo_config": "k_quant", "int4_op_types_to_quantize": "MatMul/Gather"}
-    _run_check_extra_options(monkeypatch, kv, precision="int4")
-    assert kv["algo_config"] == "k_quant"
-    assert kv["op_types_to_quantize"] == ("MatMul", "Gather")
-    assert "int4_algo_config" not in kv and "int4_op_types_to_quantize" not in kv
 
 
 def test_shared_embeddings_with_untied_weights_is_rejected(monkeypatch):
@@ -475,15 +449,15 @@ def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.hidden_size = 64
-    assert model.hidden_state_shape() == ["batch_size", "sequence_length", 64]
+    assert model.make_hidden_state_shape() == ["batch_size", "sequence_length", 64]
 
 
 def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.hidden_size = 64
-    assert model.hidden_state_shape() == ["num_tokens", 64]
-    assert model.hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
+    assert model.make_hidden_state_shape() == ["num_tokens", 64]
+    assert model.make_hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
 
 
 @pytest.mark.parametrize(
@@ -501,8 +475,14 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
     model.vocab_size = 128
     model.num_kv_heads = 4
     model.head_size = 16
+    model.layer_types = ["full_attention"]
     model.extra_options = extra_options
-    model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
+    model.output_names = {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present.conv": {},
+        "present.recurrent": {},
+    }
     model.output_types = {"logits": ir.DataType.FLOAT16}
     model.output_shapes = {
         "hidden_states": ["batch_size", "sequence_length", model.hidden_size],

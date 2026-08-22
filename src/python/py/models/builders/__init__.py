@@ -11,7 +11,7 @@ from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
 from .gemma import Gemma2Model, Gemma3Model, GemmaModel
 from .gptoss import GPTOSSModel
-from .granite import GraniteModel, GraniteMoeHybridModel
+from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
@@ -29,7 +29,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, Qwen35MoeTextModel, QwenModel, VideoChatFlashQwenModel
+from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, Qwen35MoETextModel, QwenModel, VideoChatFlashQwenModel
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -40,7 +40,7 @@ __all__ = [
     "Gemma2Model",
     "Gemma3Model",
     "GemmaModel",
-    "GraniteMoeHybridModel",
+    "GraniteMoEHybridModel",
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
@@ -63,7 +63,7 @@ __all__ = [
     "Qwen3VLTextModel",
     "Qwen25VLTextModel",
     "Qwen35TextModel",
-    "Qwen35MoeTextModel",
+    "Qwen35MoETextModel",
     "QwenModel",
     "SmolLM3Model",
     "VideoChatFlashQwenModel",

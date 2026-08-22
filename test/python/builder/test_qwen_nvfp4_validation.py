@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py"))
 
 from models.builders.base import Model
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35MoETextModel
 
 
 @pytest.fixture
@@ -62,17 +62,9 @@ def test_native_nvfp4_rejects_non_nvfp4_weight():
         )
 
 
-def test_nvfp4_qmoe_rejects_mismatched_gate_up_global_scales():
-    model = object.__new__(Qwen35MoeTextModel)
+def test_native_nvfp4_moe_recognizes_preprocessed_experts():
+    model = object.__new__(Qwen35MoETextModel)
+    model.moe_attrs = {"quant_type": "nvfp4"}
+    moe = SimpleNamespace(experts=SimpleNamespace(quant_type="nvfp4"))
 
-    def projection(scale):
-        return SimpleNamespace(
-            weight=torch.zeros((16, 8), dtype=torch.uint8),
-            weight_scale=torch.ones((16, 1), dtype=torch.float8_e4m3fn),
-            weight_scale_2=torch.tensor(scale),
-        )
-
-    experts = [SimpleNamespace(gate_proj=projection(0.5), up_proj=projection(0.25), down_proj=projection(0.5))]
-
-    with pytest.raises(ValueError, match="gate/up global scales must match"):
-        model.make_nvfp4_moe_initializers(experts, "gw", "gs", "gg", "dw", "ds", "dg")
+    assert model.is_native_nvfp4_moe(moe)

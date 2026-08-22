@@ -48,33 +48,39 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
-resolve_windowed_paged_kv_cache = base_module.resolve_windowed_paged_kv_cache
 
 
 # ===========================================================================
-# resolve_windowed_paged_kv_cache: when the ring applies
+# make_context_length_init: when the ring applies
 # ===========================================================================
+
+
+def _window_model(extra_options, window_size):
+    model = Model.__new__(Model)
+    model.extra_options = extra_options
+    model.make_context_length_init(SimpleNamespace(sliding_window=window_size))
+    return model
 
 
 def test_ring_needs_paged_attention():
     # Without PagedAttention the sliding-window layers use the GQA windowed cache instead.
-    assert resolve_windowed_paged_kv_cache({}, 128) is False
+    assert _window_model({}, 128).use_windowed_paged_kv_cache is False
 
 
 def test_ring_is_on_for_paged_sliding_window_models():
-    assert resolve_windowed_paged_kv_cache({"use_paged_attention": True}, 128) is True
+    assert _window_model({"use_paged_attention": True}, 128).use_windowed_paged_kv_cache is True
 
 
 @pytest.mark.parametrize("window_size", [-1, 0, None])
 def test_ring_needs_a_window(window_size):
     # A model with no sliding-window layers has nothing to shorten.
-    assert resolve_windowed_paged_kv_cache({"use_paged_attention": True}, window_size) is False
+    assert _window_model({"use_paged_attention": True}, window_size).use_windowed_paged_kv_cache is False
 
 
 def test_ring_honours_the_windowed_kv_cache_opt_out():
     # windowed_kv_cache=false builds a full-length-KV baseline, paged or not.
     extra_options = {"use_paged_attention": True, "windowed_kv_cache": False}
-    assert resolve_windowed_paged_kv_cache(extra_options, 128) is False
+    assert _window_model(extra_options, 128).use_windowed_paged_kv_cache is False
 
 
 # ===========================================================================
@@ -86,8 +92,10 @@ def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
     model = Model.__new__(Model)
     model.use_windowed_paged_kv_cache = use_ring
     model.num_layers = num_layers
-    if local_layers is not None:
-        model.is_local = lambda layer_id: layer_id in local_layers
+    model.layer_types = [
+        "sliding_attention" if local_layers and layer_id in local_layers else "full_attention"
+        for layer_id in range(num_layers)
+    ]
     return model
 
 
@@ -104,7 +112,7 @@ def test_no_layer_uses_the_ring_when_it_is_off():
 
 
 def test_model_without_alternating_attention_uses_no_ring():
-    # Models with a uniform attention pattern never define is_local.
+    # Models with a uniform attention pattern have no sliding_attention layers.
     model = _make_layer_model(use_ring=True, local_layers=None)
 
     assert model.uses_windowed_paged_cache(0) is False
@@ -124,8 +132,7 @@ def test_ring_is_emitted_when_some_layer_is_local():
 
 
 def test_ring_is_not_emitted_without_local_layers():
-    # A paged model whose config carries sliding_window but whose builder cannot say which layers
-    # it applies to: nothing reads the ring, so nothing extra may be emitted for it.
+    # A paged model whose config carries sliding_window but has no local layers does not emit a ring.
     assert _make_layer_count_model(use_ring=True, local_layers=None).has_windowed_paged_layers() is False
 
 
@@ -188,6 +195,8 @@ def _make_inputs_model(use_paged_attention, use_ring):
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
     model.use_windowed_paged_kv_cache = use_ring
+    model.num_layers = 2
+    model.layer_types = ["sliding_attention", "full_attention"]
     model.num_kv_heads = 2
     model.head_size = 16
     model.input_names = {
@@ -199,6 +208,8 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "past.conv": {},
+        "past.recurrent": {},
     }
     model.input_shapes = {
         "input_ids": ["batch_size", "sequence_length"],
@@ -240,14 +251,15 @@ def test_non_paged_model_drops_every_paged_input():
 
 
 def _make_graph_model(use_ring, local_layers=(0,), num_layers=2):
-    model = _make_layer_count_model(use_ring, local_layers, num_layers)
+    model = _make_inputs_model(use_paged_attention=True, use_ring=use_ring)
+    model.num_layers = num_layers
+    model.layer_types = [
+        "sliding_attention" if local_layers and layer_id in local_layers else "full_attention"
+        for layer_id in range(num_layers)
+    ]
+    model.make_inputs_init()
     model.model = SimpleNamespace(graph=SimpleNamespace(inputs=[], outputs=[]))
     model.make_value = lambda name, dtype=None, shape=None: name
-    model.input_names = {
-        "input_ids": "input_ids",
-        "block_table": "block_table",
-        "block_table_windowed": "block_table_windowed",
-    }
     model.input_types = dict.fromkeys(model.input_names)
     model.input_shapes = {name: [] for name in model.input_names}
     model.output_names = {"logits": "logits"}
@@ -265,7 +277,6 @@ def test_graph_keeps_the_windowed_block_table_when_a_layer_reads_it():
 
 
 def test_graph_drops_the_windowed_block_table_when_no_layer_reads_it():
-    # is_local is assigned after Model.__init__, so make_inputs_init cannot make this call.
     model = _make_graph_model(use_ring=True, local_layers=None)
 
     model.make_inputs_and_outputs()
@@ -357,7 +368,6 @@ def _write_genai_config(
     all_local_layers=False,
 ):
     hf_config = SimpleNamespace(eos_token_id=[2])
-    monkeypatch.setattr(base_module, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: hf_config))
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
 
     model = Model.__new__(Model)
@@ -383,9 +393,10 @@ def _write_genai_config(
     # PagedAttention never qualifies for the GQA-style windowed cache.
     model.eps_with_windowed_kv_cache = set()
     model.window_kv_cache_slack = 0
-    # Alternating attention: even layers are sliding-window layers.
-    if has_local_layers:
-        model.is_local = lambda layer_id: all_local_layers or layer_id % 2 == 0
+    model.layer_types = [
+        "sliding_attention" if has_local_layers and (all_local_layers or layer_id % 2 == 0) else "full_attention"
+        for layer_id in range(num_layers)
+    ]
     model.input_names = {
         "input_ids": "input_ids",
         "block_table": "block_table",
@@ -398,7 +409,7 @@ def _write_genai_config(
     }
     model.output_names = {"logits": "logits", "present.key": [], "present.value": []}
 
-    model.make_genai_config("model_name_or_path", {}, str(out_dir))
+    model.make_genai_config(hf_config, {}, str(out_dir))
     return json.loads((Path(out_dir) / "genai_config.json").read_text())
 
 

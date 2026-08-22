@@ -10,44 +10,20 @@ import onnx_ir as ir
 import pytest
 import torch
 
-from models.builders.base import Model
-from models.builders.quant_config import QuantConfig
-from models.builders.qwen import Qwen35MoeTextModel, Qwen35TextModel
+from models.builders.qwen import Qwen35MoETextModel, Qwen35TextModel
 from models.builders.qwen_mtp import Qwen35MtpHead
+from quantization import QuantConfig
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
     """Run the MTP model config resolution on a bare stub of the builder."""
-    model = object.__new__(Qwen35MoeTextModel)
+    model = object.__new__(Qwen35MoETextModel)
     model._mtp_onnx_dtype = main_onnx_dtype
     model._mtp_io_dtype = ir.DataType.FLOAT16
     model._mtp_extra_options = dict(extra_options)
     model._mtp_ep = "cuda"
     model._resolve_mtp_model_config(extra_options)
     return model
-
-
-@pytest.mark.parametrize(
-    "model_class,is_text_only,expected",
-    [
-        (Qwen35TextModel, False, "Qwen3_5ForConditionalGeneration"),
-        (Qwen35TextModel, True, "Qwen3_5_textForCausalLM"),
-        (Qwen35MoeTextModel, False, "Qwen3_5_MoeForConditionalGeneration"),
-        (Qwen35MoeTextModel, True, "Qwen3_5_Moe_textForCausalLM"),
-        (Qwen35MtpHead, True, "Qwen3_5_Moe_textForCausalLM"),
-    ],
-)
-def test_qwen35_model_type_resolution(model_class, is_text_only, expected):
-    model = object.__new__(model_class)
-    model.is_text_only = is_text_only
-
-    assert model._get_model_type(None) == expected
-
-
-def test_base_model_type_resolution_uses_config_architecture():
-    config = SimpleNamespace(architectures=["ExampleForCausalLM"])
-
-    assert Model._get_model_type(None, config) == "ExampleForCausalLM"
 
 
 def test_no_mtp_config_inherits_main_model_settings():

@@ -439,7 +439,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 These options apply when exporting weight-only quantized models (`-p int4` for 4-bit weights or `-p int8` for 8-bit weights). Both precisions produce `MatMulNBits` ops and share the quantization options below; the `-p int8` build simply runs the final `MatMulNBits` quantization pass with 8-bit weights (and quantizes MoE experts to 8-bit to match).
 
-> **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are still accepted as deprecated aliases and will be removed in a future release.
+> **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are not accepted as deprecated aliases anymore and have been removed.
 
 
 ##### Accuracy Level
@@ -637,7 +637,7 @@ The scale file is produced by the `kv_cache_calibration` module, which runs a ba
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
 
 # 2. Calibrate the scales:
-python -m onnxruntime_genai.models.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
+python -m onnxruntime_genai.models.quantization.kv_cache_calibration --model path_to_baseline_folder --tokenizer path_to_local_folder_on_disk --out path_to_scales.json --quant-type int8_per_channel
 ```
 
 Then rebuild with the quantized KV cache:

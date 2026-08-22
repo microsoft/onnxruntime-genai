@@ -9,7 +9,7 @@ Builds a tiny synthetic modelopt-style checkpoint (one linear-attention layer,
 one full-attention layer, plus globals) and verifies that ModeloptModel:
   * builds the module tree the ONNX Runtime GenAI builder walks,
     * preserves FP8 and NVFP4 tensors in their original quantized formats, and
-    * materializes routed experts for native QMoE preprocessing.
+    * prepacks routed experts for native QMoE export.
 """
 
 import importlib.util
@@ -118,6 +118,9 @@ def _build_synthetic_checkpoint(d):
         add_nvfp4(f"{p}.mlp.experts.0.gate_proj", inter, hidden)
         add_nvfp4(f"{p}.mlp.experts.0.up_proj", inter, hidden)
         add_nvfp4(f"{p}.mlp.experts.0.down_proj", hidden, inter)
+        tensors[f"{p}.mlp.experts.0.up_proj.weight_scale_2"] = tensors[
+            f"{p}.mlp.experts.0.gate_proj.weight_scale_2"
+        ].clone()
 
     save_file(tensors, os.path.join(d, "model.safetensors"))
     with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
@@ -158,9 +161,16 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         assert l0.mlp.shared_expert.gate_proj.weight_scale_2.numel() == 1
         assert model.lm_head.weight.dtype == torch.uint8
 
-        # Routed experts are materialized once by the loader for native QMoE preprocessing.
-        assert len(l0.mlp.experts) == 1
-        assert l0.mlp.experts[0].gate_proj.weight.dtype == torch.uint8
+        # Routed experts are prepacked once by the loader for native QMoE export.
+        assert isinstance(l0.mlp.experts, QM.ModeloptQMoEExperts)
+        assert l0.mlp.experts.gate_up_qweight.shape[:2] == (1, model.embedding.weight.shape[1])
+        assert l0.mlp.experts.down_qweight.shape == (
+            1,
+            l0.mlp.experts.gate_up_qweight.shape[2],
+            model.embedding.weight.shape[1] // 2,
+        )
+        assert l0.mlp.experts.gate_up_scales.dtype == torch.uint8
+        assert l0.mlp.experts.gate_up_global_scales.shape == (1,)
         # Router / shared-expert-gate are present as plain tensors.
         assert l0.mlp.gate.weight is not None and l0.mlp.shared_expert_gate.weight is not None
         # All safetensors handles are released once loading finishes.
@@ -203,6 +213,15 @@ def test_modelopt_loader_rejects_bad_checkpoints():
         with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
             json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
         with pytest.raises(ValueError, match="attention variant cannot be determined"):
+            _load(d)
+
+    # Fused gate/up QMoE weights require one shared global scale per expert.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        tensors["model.language_model.layers.0.mlp.experts.0.up_proj.weight_scale_2"] *= 2
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with pytest.raises(ValueError, match="gate/up global scales must match"):
             _load(d)
     print("OK: ModeloptModel rejects ambiguous and incomplete checkpoints.")
 

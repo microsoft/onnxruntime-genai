@@ -34,7 +34,7 @@ Typical two-step flow::
     python -m onnxruntime_genai.models.builder -m <hf_model> -o <baseline_dir> -p int4 -e cuda
 
     # 2. calibrate, then rebuild with the quantized KV cache
-    python -m onnxruntime_genai.models.kv_cache_calibration \
+    python -m onnxruntime_genai.models.quantization.kv_cache_calibration \
         --model <baseline_dir> --tokenizer <hf_model> --out kv_scales.json
     python -m onnxruntime_genai.models.builder -m <hf_model> -o <final_dir> -p int4 -e cuda \
         --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=kv_scales.json

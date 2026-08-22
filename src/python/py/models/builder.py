@@ -24,7 +24,7 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
-    GraniteMoeHybridModel,
+    GraniteMoEHybridModel,
     GraniteModel,
     HunyuanDenseV1Model,
     InternLM2Model,
@@ -47,45 +47,31 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
-    Qwen35MoeTextModel,
+    Qwen35MoETextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.quant_config import KV_CACHE_QUANT_TYPES, QuantConfig
-from transformers import AutoConfig
+from quantization import KV_CACHE_QUANT_TYPES, QuantConfig
+from transformers import AutoConfig, AutoTokenizer
 
 
-def apply_deprecated_extra_option_aliases(kv_pairs):
-    """
-    Rename any deprecated extra_options keys to their new names in-place.
-
-    The weight-only quantization options were generalized from int4-specific names to
-    precision-agnostic names (they apply to int4/int8/... MatMulNBits quantization), so the
-    `int4_` prefix was dropped. The old names are kept as deprecated aliases so existing
-    consumers (e.g. Olive recipes) that still pass the old `int4_`-prefixed names keep working.
-    If both the old and new names are provided, the new name wins. Emits a deprecation warning
-    for each old name encountered. Remove this method (and its call sites) once consumers migrate.
-    """
-    # Maps deprecated old name -> new name.
-    deprecated_aliases = {
-        "int4_accuracy_level": "accuracy_level",
-        "int4_block_size": "block_size",
-        "int4_is_symmetric": "is_symmetric",
-        "int4_op_types_to_quantize": "op_types_to_quantize",
-        "int4_nodes_to_exclude": "nodes_to_exclude",
-        "int4_algo_config": "algo_config",
+def add_special_token_ids(config, tokenizer):
+    """Add supported tool-call and reasoning token IDs to a model config."""
+    token_options = {
+        "bot_token_id": ("<tool_call>", "<|tool_call|>"),
+        "eot_token_id": ("</tool_call>", "<|/tool_call|>"),
+        "bor_token_id": ("<think>",),
+        "eor_token_id": ("</think>",),
     }
-    for old_name, new_name in deprecated_aliases.items():
-        if old_name not in kv_pairs:
-            continue
-        print(
-            f"WARNING: extra_option '{old_name}' is deprecated and will be removed in a future release. "
-            f"Please use '{new_name}' instead."
-        )
-        kv_pairs.setdefault(new_name, kv_pairs[old_name])
-        del kv_pairs[old_name]
+    vocabulary = tokenizer.get_vocab()
+
+    for attribute, candidates in token_options.items():
+        for token in candidates:
+            if token in vocabulary:
+                setattr(config, attribute, int(vocabulary[token]))
+                break
 
 
 def parse_hf_token(hf_token):
@@ -116,6 +102,8 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_remote = extra_options.get("hf_remote", False)
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
         from peft import PeftConfig
 
@@ -148,8 +136,6 @@ def check_extra_options(
     """
     Check key-value pairs and set values correctly
     """
-    apply_deprecated_extra_option_aliases(extra_options)
-
     bools = [
         "is_symmetric",
         "exclude_embeds",
@@ -492,14 +478,10 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "gemma3_vl_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -508,7 +490,7 @@ def create_model(
     elif config.architectures[0] == "GraniteForCausalLM":
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteMoeHybridForCausalLM":
-        onnx_model = GraniteMoeHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = GraniteMoEHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
@@ -520,14 +502,11 @@ def create_model(
     elif config.architectures[0] == "MistralForCausalLM":
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Mistral3ForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
-        extra_options["exclude_embeds"] = True
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
@@ -549,43 +528,40 @@ def create_model(
     elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Phi4MMForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Qwen2ForCausalLM":
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
-        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen2_5_vl_text"
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3_vl_text"
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
         onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
-        onnx_model = Qwen35MoeTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
-        text_config = config.text_config
-        for key in text_config:
-            if not hasattr(config, key):
-                setattr(config, key, getattr(text_config, key))
-        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-        extra_options["exclude_embeds"] = True
-        onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen35MoETextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if not onnx_model.exclude_embeds:
+            onnx_model.model_type = "qwen3_5_moe_text"
+        else:
+            onnx_model.model_type = "qwen3_5_moe"
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "qwen2"
     elif config.architectures[0] == "WhisperForConditionalGeneration":
         onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
@@ -602,7 +578,7 @@ def create_model(
         onnx_model.save_model(output_dir)
 
     # Make GenAI config
-    onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
+    onnx_model.make_genai_config(config, extra_kwargs, output_dir)
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
