@@ -52,6 +52,7 @@ struct RequestStepPlan {
   const void* request_id{};
   int64_t sequence_length_before{};     // Search length before this transaction appends a token.
   size_t unprocessed_token_count{};     // Prompt chunk or single decode token sent to the model.
+  size_t draft_token_count{};           // Trailing speculative tokens of that count, verified this step.
   size_t packed_token_offset{};         // First row for this request in the flat varlen input.
   size_t logits_row_index{};            // Last packed row; its logits produce this request's next token.
   size_t target_cache_slots{};          // Committed KV slots required after the model run succeeds.

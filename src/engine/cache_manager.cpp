@@ -40,7 +40,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       fixed_requests.reserve(plan.requests.size());
       for (const auto& entry : plan.requests) {
         fixed_requests.push_back(FixedStateReservationRequest{
-            entry.request_id, entry.target_cache_slots, 0});
+        entry.request_id, entry.target_cache_slots, entry.draft_token_count});
       }
       fixed_reservation_.emplace(fixed_state_pool->Reserve(fixed_requests));
     }
@@ -48,6 +48,10 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
   PagedCacheReservation* PagedReservation() override {
     return &*paged_reservation_;
+  }
+
+  FixedStateReservation* FixedReservation() override {
+    return fixed_reservation_ ? &*fixed_reservation_ : nullptr;
   }
 
   std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
@@ -365,6 +369,13 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   if (new_slot_count > fixed_state_pool_->AvailableSlots()) {
     throw std::logic_error(
         "Paged planning selected more admissions than fixed state can reserve.");
+  }
+  const bool capture_state_updates = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (capture_state_updates && !fixed_state_pool_->SupportsStateUpdates()) {
+    throw std::logic_error(
+        "Planned draft verification on a model whose fixed state declares no compact updates.");
   }
   return result;
 }

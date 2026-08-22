@@ -14,6 +14,7 @@ namespace Generators {
 
 struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  virtual FixedStateReservation* FixedReservation() { return nullptr; }
   virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
   virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
   virtual size_t FixedStateStagingBytes() const { return 0; }
