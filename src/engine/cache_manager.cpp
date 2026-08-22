@@ -42,12 +42,17 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id, entry.target_cache_slots, 0});
       }
-      fixed_reservation_.emplace(fixed_state_pool->Reserve(fixed_requests));
+      fixed_reservation_.emplace(
+          fixed_state_pool->Reserve(fixed_requests, plan.fixed_state.capture_checkpoints));
     }
   }
 
   PagedCacheReservation* PagedReservation() override {
     return &*paged_reservation_;
+  }
+
+  FixedStateReservation* FixedReservation() override {
+    return fixed_reservation_ ? &*fixed_reservation_ : nullptr;
   }
 
   std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
@@ -366,6 +371,24 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     throw std::logic_error(
         "Paged planning selected more admissions than fixed state can reserve.");
   }
+
+  // Rolling a rejected draft back needs the operators' per-token state series, which costs a
+  // window's worth of extra staging, so only a step that actually verifies drafts asks for it.
+  const bool capture_checkpoints = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (capture_checkpoints && !fixed_state_pool_->SupportsCheckpoints()) {
+    throw std::logic_error(
+        "Planned draft verification on a model whose fixed state declares no checkpoints.");
+  }
+
+  plan.fixed_state = FixedStateResourcePlan{
+      true,
+      plan.requests.size(),
+      new_slot_count,
+      fixed_state_pool_->PlannedStagingBytes(plan.requests.size(), capture_checkpoints),
+      capture_checkpoints,
+  };
   return result;
 }
 

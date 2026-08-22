@@ -14,6 +14,11 @@ namespace Generators {
 
 struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  // The fixed reservation itself, so a speculative step can roll a row back to the state after its
+  // accepted prefix before the commit. Null for a paged-only reservation.
+  virtual FixedStateReservation* FixedReservation() { return nullptr; }
+  // Fixed decoder-state resources this reservation owns, in scheduled request row order. Empty for
+  // a paged-only reservation.
   virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
   virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
   virtual size_t FixedStateStagingBytes() const { return 0; }
