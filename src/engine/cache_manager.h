@@ -18,6 +18,7 @@ struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
   // Fixed decoder-state resources this reservation owns, in scheduled request row order. Empty for
   // a paged-only reservation.
+  virtual FixedStateReservation* FixedReservation() { return nullptr; }
   virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
   virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
   virtual size_t FixedStateStagingBytes() const { return 0; }

@@ -50,12 +50,11 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
         // mirror the paged target so both commit at one token boundary. The pool infers resident
-        // vs. new ownership itself, so no newly_admitted flag is passed. capture_count stays 0
-        // until MTP scheduling requests compact state_update captures, so no step currently
-        // reaches FixedStateReservation::CommitPrefix.
+        // vs. new ownership itself, so no newly_admitted flag is passed.
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id,
             entry.target_cache_slots,
+          entry.draft_token_count,
         });
       }
       if (entry.newly_admitted) {
@@ -75,6 +74,10 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
   PagedCacheReservation* PagedReservation() override {
     return &*paged_reservation_;
+  }
+
+  FixedStateReservation* FixedReservation() override {
+    return fixed_reservation_ ? &*fixed_reservation_ : nullptr;
   }
 
   std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
@@ -500,12 +503,19 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     throw StepPlanningConsistencyError(
         "Paged planning selected more admissions than fixed state can reserve.");
   }
-
+  const bool capture_state_updates = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (capture_state_updates && !fixed_state_pool_->SupportsStateUpdates()) {
+    throw std::logic_error(
+        "Planned draft verification on a model whose fixed state declares no compact updates.");
+  }
   plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),
       new_slot_count,
-      fixed_state_pool_->PlannedStagingBytes(plan.requests.size()),
+      fixed_state_pool_->PlannedStagingBytes(
+          plan.requests.size(), capture_state_updates),
   };
   return result;
 }
