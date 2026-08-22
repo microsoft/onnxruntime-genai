@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import onnx_ir as ir
 import pytest
 import torch
 
@@ -76,3 +77,45 @@ def test_nvfp4_qmoe_rejects_mismatched_gate_up_global_scales():
 
     with pytest.raises(ValueError, match="gate/up global scales must match"):
         model.make_nvfp4_moe_initializers(experts, "gw", "gs", "gg", "dw", "ds", "dg")
+
+
+def _recording_native_matmul_model(use_paged_attention):
+    """A bare Model with just enough state to emit one native quantized MatMul."""
+    model = object.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 8
+    model.use_paged_attention = use_paged_attention
+    model.values = []
+    model.make_initializer = lambda *args, **kwargs: None
+    model.make_node = lambda *args, **kwargs: None
+    model.make_value = lambda name, dtype, shape: model.values.append((name, shape))
+    return model
+
+
+@pytest.mark.parametrize("paged,expected", [(False, ["batch_size", "sequence_length", 4]), (True, ["num_tokens", 4])])
+def test_native_fp8_matmul_value_shape_follows_layout(paged, expected):
+    model = _recording_native_matmul_model(paged)
+
+    model.make_matmul_block_quantized_fp8_weight(
+        "/attention/MatMul",
+        "input",
+        torch.ones((4, 8), dtype=torch.float8_e4m3fn),
+        torch.ones((4, 1)),
+    )
+
+    assert model.values[-1][1] == expected
+
+
+@pytest.mark.parametrize("paged,expected", [(False, ["batch_size", "sequence_length", 4]), (True, ["num_tokens", 4])])
+def test_native_nvfp4_matmul_value_shape_follows_layout(paged, expected):
+    model = _recording_native_matmul_model(paged)
+
+    model.make_matmul_block_quantized_nvfp4_weight(
+        "/lm_head/MatMul",
+        "input",
+        torch.ones((4, 8), dtype=torch.uint8),
+        torch.ones((4, 1), dtype=torch.float8_e4m3fn),
+        1.0,
+    )
+
+    assert model.values[-1][1] == expected
