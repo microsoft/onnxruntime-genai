@@ -415,7 +415,9 @@ struct OgaTokenizer : OgaAbstract {
   }
 
   OgaString ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
-    return ApplyChatTemplateWithOptions(template_str, messages, tools, nullptr, add_generation_prompt);
+    const char* p{};
+    OgaCheckResult(OgaTokenizerApplyChatTemplate(this, template_str, messages, tools, add_generation_prompt, &p));
+    return p;
   }
 
   OgaString ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
