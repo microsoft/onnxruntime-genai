@@ -659,6 +659,10 @@ struct OgaMtpGenerator : OgaAbstract {
     OgaCheckResult(OgaMtpGenerator_GenerateNextToken(this));
   }
 
+  void Reset() {
+    OgaCheckResult(OgaMtpGenerator_Reset(this));
+  }
+
   bool IsDone() const {
     return OgaMtpGenerator_IsDone(this);
   }

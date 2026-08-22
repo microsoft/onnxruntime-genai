@@ -38,6 +38,10 @@ struct MtpGenerator {
   // internally; later calls drain those buffered tokens before another round runs.
   void GenerateNextToken();
 
+  // Rewind both inner generators to an empty request while retaining their allocated state and
+  // captured graphs. This is a full reset, not an arbitrary sequence rewind.
+  void Reset();
+
   bool IsDone() const;
 
   // The full committed token sequence (batch index 0).
