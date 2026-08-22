@@ -954,6 +954,94 @@ class VideoChatFlashQwenModel(QwenModel):
         )
 
 
+class Qwen35NormModule(torch.nn.Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+
+class Qwen35WeightModule(torch.nn.Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+
+class Qwen35LinearAttentionModule(torch.nn.Module):
+    def __init__(self, state_dict, prefix):
+        super().__init__()
+        self.in_proj_qkv = qwen35_make_linear(state_dict[f"{prefix}.in_proj_qkv.weight"])
+        self.in_proj_z = qwen35_make_linear(state_dict[f"{prefix}.in_proj_z.weight"])
+        self.in_proj_b = qwen35_make_linear(state_dict[f"{prefix}.in_proj_b.weight"])
+        self.in_proj_a = qwen35_make_linear(state_dict[f"{prefix}.in_proj_a.weight"])
+        self.conv1d = Qwen35WeightModule(state_dict[f"{prefix}.conv1d.weight"])
+        self.dt_bias = torch.nn.Parameter(state_dict[f"{prefix}.dt_bias"], requires_grad=False)
+        self.A_log = torch.nn.Parameter(state_dict[f"{prefix}.A_log"], requires_grad=False)
+        self.norm = Qwen35NormModule(state_dict[f"{prefix}.norm.weight"])
+        self.out_proj = qwen35_make_linear(state_dict[f"{prefix}.out_proj.weight"])
+
+
+class Qwen35FullAttentionModule(torch.nn.Module):
+    def __init__(self, state_dict, prefix):
+        super().__init__()
+        self.q_proj = qwen35_make_linear(state_dict[f"{prefix}.q_proj.weight"])
+        self.k_proj = qwen35_make_linear(state_dict[f"{prefix}.k_proj.weight"])
+        self.v_proj = qwen35_make_linear(state_dict[f"{prefix}.v_proj.weight"])
+        self.o_proj = qwen35_make_linear(state_dict[f"{prefix}.o_proj.weight"])
+        self.q_norm = Qwen35NormModule(state_dict[f"{prefix}.q_norm.weight"])
+        self.k_norm = Qwen35NormModule(state_dict[f"{prefix}.k_norm.weight"])
+
+
+class Qwen35MLPModule(torch.nn.Module):
+    def __init__(self, state_dict, prefix):
+        super().__init__()
+        self.gate_proj = qwen35_make_linear(state_dict[f"{prefix}.gate_proj.weight"])
+        self.up_proj = qwen35_make_linear(state_dict[f"{prefix}.up_proj.weight"])
+        self.down_proj = qwen35_make_linear(state_dict[f"{prefix}.down_proj.weight"])
+
+
+class Qwen35DecoderLayer(torch.nn.Module):
+    def __init__(self, state_dict, prefix, layer_type):
+        super().__init__()
+        self.input_layernorm = Qwen35NormModule(state_dict[f"{prefix}.input_layernorm.weight"])
+        self.post_attention_layernorm = Qwen35NormModule(state_dict[f"{prefix}.post_attention_layernorm.weight"])
+        if layer_type == "linear_attention":
+            self.linear_attn = Qwen35LinearAttentionModule(state_dict, f"{prefix}.linear_attn")
+        else:
+            self.self_attn = Qwen35FullAttentionModule(state_dict, f"{prefix}.self_attn")
+        self.mlp = Qwen35MLPModule(state_dict, f"{prefix}.mlp")
+
+
+class Qwen35LanguageModelWeights(torch.nn.Module):
+    def __init__(self, state_dict, config, layer_types):
+        super().__init__()
+        embed_weight = state_dict["model.language_model.embed_tokens.weight"]
+        self.embed_tokens = torch.nn.Embedding(embed_weight.shape[0], embed_weight.shape[1], device="meta")
+        self.embed_tokens.weight = torch.nn.Parameter(embed_weight, requires_grad=False)
+        self.layers = torch.nn.ModuleList(
+            [
+                Qwen35DecoderLayer(state_dict, f"model.language_model.layers.{layer_id}", layer_type)
+                for layer_id, layer_type in enumerate(layer_types[: config.num_hidden_layers])
+            ]
+        )
+        self.norm = Qwen35NormModule(state_dict["model.language_model.norm.weight"])
+
+
+class Qwen35TextWeights(torch.nn.Module):
+    def __init__(self, state_dict, config, layer_types):
+        super().__init__()
+        self.model = Qwen35LanguageModelWeights(state_dict, config, layer_types)
+        lm_head_weight = state_dict.get("model.language_model.lm_head.weight", self.model.embed_tokens.weight.data)
+        self.lm_head = qwen35_make_linear(lm_head_weight)
+
+
+def qwen35_make_linear(weight, bias=None):
+    linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=bias is not None, device="meta")
+    linear.weight = torch.nn.Parameter(weight, requires_grad=False)
+    if bias is not None:
+        linear.bias = torch.nn.Parameter(bias, requires_grad=False)
+    return linear
+
+
 class Qwen35TextModel(Model):
     """Qwen3.5 hybrid model builder.
 
@@ -996,6 +1084,8 @@ class Qwen35TextModel(Model):
                 config.rope_theta = rope_params["rope_theta"]
             if "partial_rotary_factor" in rope_params:
                 config.partial_rotary_factor = rope_params["partial_rotary_factor"]
+
+        self.qwen35_text_config = config
 
         # Parse layer types before super().__init__() because
         # make_quant_init() (via make_matmul_mixed_precision) is called from the base class init
@@ -1104,6 +1194,15 @@ class Qwen35TextModel(Model):
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
+
+    def load_weights(self, input_path):
+        if self.quant_type is not None or input_path.endswith(".gguf"):
+            return super().load_weights(input_path)
+
+        from .qwen35_vlm_export import load_qwen35_state_dict
+
+        state_dict = load_qwen35_state_dict(self.model_name_or_path, token=self.hf_token, cache_dir=self.cache_dir)
+        return Qwen35TextWeights(state_dict, self.qwen35_text_config, self.layer_types)
 
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
