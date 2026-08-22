@@ -182,6 +182,38 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
     drafts_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_);
     verify_tokens_.resize(num_speculative_tokens_ + 1);
     verify_argmax_.resize(num_speculative_tokens_ + 1);
+    if (num_speculative_tokens_ > 1 && device_draft_chain_ && !sampling_) {
+      // Device-only draft ids are also passed back into the head as one-token inputs. Logits uses
+      // the host mirror only as padding metadata when its output shape transitions back to M=1,
+      // so initialize that mirror to a known non-pad value; the actual draft stays on device.
+      auto drafts_metadata_cpu = drafts_device_.CpuSpan();
+      const int32_t head_non_pad = mtp_model_.config_->model.pad_token_id == 0 ? 1 : 0;
+      std::fill(drafts_metadata_cpu.begin(), drafts_metadata_cpu.end(), head_non_pad);
+
+      head_tokens_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
+      auto head_tokens_cpu = head_tokens_device_.CpuSpan();
+      std::fill(head_tokens_cpu.begin(), head_tokens_cpu.end(), head_non_pad);
+
+      verify_tokens_device_ = main_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
+      // Logits::Update inspects the DeviceSpan's host mirror only to derive each row's unpadded
+      // length. Every token in an MTP verify is structurally valid, even if its numeric id happens
+      // to equal pad_token_id, so keep a persistent all-non-pad metadata mirror. The actual ids in
+      // device memory are filled below with D2D copies and never copied back through this mirror.
+      auto verify_tokens_cpu = verify_tokens_device_.CpuSpan();
+      const int32_t main_non_pad = main_model_.config_->model.pad_token_id == 0 ? 1 : 0;
+      std::fill(verify_tokens_cpu.begin(), verify_tokens_cpu.end(), main_non_pad);
+
+      verify_argmax_device_ = main_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
+      (void)verify_argmax_device_.CpuSpan();
+
+      // Both sessions and all MTP-side CUDA operations use the shared GenAI stream. Let the CPU
+      // enqueue the chained head work and the main verify without an EP-end stream fence; the
+      // target argmax/logits readback below is the explicit synchronization before CPU acceptance.
+      // Scope this to the persistent device-input path: host-token, sampling, N=1, and non-CUDA
+      // generators retain their existing per-Run synchronization behavior.
+      main_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+      mtp_->SetRuntimeOption("disable_synchronize_execution_providers", "1");
+    }
     merged_tokens_.resize(static_cast<size_t>(num_speculative_tokens_) + 1);
     // Per-size [1,j,H] hidden buffers (j=1..N+1) so the post-verify head refeed of the j accepted
     // drafts runs as ONE batched head forward instead of one forward per token. The greedy path
@@ -261,15 +293,6 @@ void MtpGenerator::CaptureDraftToDevice(DeviceSpan<int32_t> draft) {
   draft.CopyCpuToDevice();
 }
 
-void MtpGenerator::DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draft) {
-  std::array<int32_t, 1> tok{token};
-  mtp_->AppendTokens(cpu_span<const int32_t>(tok));
-  stats_.draft_forward_passes++;
-  ++head_len_;
-  CaptureDraftToDevice(draft);
-  CaptureHeadFeedbackHidden();
-}
-
 void MtpGenerator::DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<int32_t> draft) {
   mtp_->AppendTokens(token);
   stats_.draft_forward_passes++;
@@ -335,10 +358,10 @@ int32_t MtpGenerator::DraftHeadStepMulti(const int32_t* tokens, int count) {
   return draft;
 }
 
-void MtpGenerator::DraftHeadStepMultiToDevice(const int32_t* tokens, int count, DeviceSpan<int32_t> draft) {
-  mtp_->AppendTokens(cpu_span<const int32_t>(tokens, static_cast<size_t>(count)));
+void MtpGenerator::DraftHeadStepMultiToDevice(DeviceSpan<int32_t> tokens, DeviceSpan<int32_t> draft) {
+  mtp_->AppendTokens(tokens);
   stats_.draft_forward_passes++;
-  head_len_ += static_cast<size_t>(count);
+  head_len_ += tokens.size();
   CaptureDraftToDevice(draft);
   CaptureHeadFeedbackHidden();
 }
@@ -470,11 +493,33 @@ void MtpGenerator::ArgmaxMainRows(int first_row, int num_rows, int32_t* out) {
   // The CUDA distributed-select Top-K implementation is batch-1 only. The N=1 MTP verify uses
   // two rows and is covered by its existing tuned path, but N>1 verifies have 3+ rows. Submit
   // those rows independently so each invocation uses the proven batch-1 path while keeping the
-  // full logits device-resident. This is a compatibility bridge until Top-K has a native batched
-  // argmax path for the large Qwen vocabulary.
+  // full logits device-resident. Store all top-1 ids on device and copy them to the host together,
+  // reducing N+1 device-to-host synchronizations to one. This is a compatibility bridge until
+  // Top-K has a native batched argmax path for the large Qwen vocabulary.
   if (num_rows > 2) {
     const uint8_t* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
     const size_t row_bytes = static_cast<size_t>(vocab_size_) * Ort::SizeOf(type);
+
+    if (verify_argmax_device_.size() >= static_cast<size_t>(num_rows)) {
+      bool all_device = true;
+      for (int row = 0; row < num_rows; ++row) {
+        const void* row_ptr = base + static_cast<size_t>(first_row + row) * row_bytes;
+        if (!main_model_.p_device_->ArgMaxDevice(
+                row_ptr, type, 1, vocab_size_,
+                verify_argmax_device_.subspan(static_cast<size_t>(row), 1))) {
+          all_device = false;
+          break;
+        }
+      }
+      if (all_device) {
+        auto device_argmax = verify_argmax_device_.CopyDeviceToCpu();
+        std::copy_n(device_argmax.begin(), num_rows, out);
+        return;
+      }
+    }
+
+    // Preserve the prior host-output path on non-CUDA devices and as a fallback if the CUDA
+    // device-output implementation does not support the logits type.
     bool all_device = true;
     for (int row = 0; row < num_rows; ++row) {
       const void* row_ptr = base + static_cast<size_t>(first_row + row) * row_bytes;
@@ -724,22 +769,31 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // this step's first draft from its last row -- exactly what a separate refeed forward plus an
   // M=1 draft forward produced, at one forward instead of two.
   size_t head_start = 0;
+  DeviceSpan<int32_t> current_token_device;
   if (device_draft_chain_) {
     if (pending_refeed_count_ > 0) {
       const int a_prev = pending_refeed_count_;
       mtp_->RewindToLength(pending_refeed_head_len_);  // drop last step's speculative drafts
       head_len_ = pending_refeed_head_len_;
       merged_tokens_[a_prev] = t;  // last row: the token committed at the top of this step
+      auto head_tokens_cpu = head_tokens_device_.CpuSpan();
+      std::copy_n(merged_tokens_.begin(), a_prev + 1, head_tokens_cpu.begin());
+      head_tokens_device_.CopyCpuToDevice();
+      auto head_tokens = head_tokens_device_.subspan(0, static_cast<size_t>(a_prev + 1));
+      current_token_device = head_tokens_device_.subspan(static_cast<size_t>(a_prev), 1);
       mtp_->SetHiddenStates(refeed_multi_[a_prev + 1]);
-      DraftHeadStepMultiToDevice(merged_tokens_.data(), a_prev + 1, drafts_device_.subspan(0, 1));
+      DraftHeadStepMultiToDevice(head_tokens, drafts_device_.subspan(0, 1));
     } else {
       if (pending_refeed_count_ == 0) {
         // Nothing was accepted last step: only the speculative drafts need dropping.
         mtp_->RewindToLength(pending_refeed_head_len_);
         head_len_ = pending_refeed_head_len_;
       }
+      head_tokens_device_.CpuSpan()[0] = t;
+      head_tokens_device_.CopyCpuToDevice();
+      current_token_device = head_tokens_device_.subspan(0, 1);
       mtp_->SetHiddenStates(hidden_slice_);
-      DraftHeadStepToDevice(t, drafts_device_.subspan(0, 1));
+      DraftHeadStepToDevice(current_token_device, drafts_device_.subspan(0, 1));
     }
     pending_refeed_count_ = -1;
     head_start = head_len_ - 1;  // head KV length before t was appended
@@ -748,8 +802,6 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
       DraftHeadStepToDevice(drafts_device_.subspan(static_cast<size_t>(k - 1), 1),
                             drafts_device_.subspan(static_cast<size_t>(k), 1));
     }
-    auto drafts_cpu = drafts_device_.CopyDeviceToCpu();
-    std::copy_n(drafts_cpu.begin(), N, drafts_.begin());
   } else {
     if (pending_refeed_count_ > 0) {
       const int a_prev = pending_refeed_count_;
@@ -786,11 +838,38 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // 2*num_layers device copies on EVERY step.
   const bool direct_commit = main_->CanCropRecurrentState();
   if (!direct_commit) main_->SnapshotState();
-  verify_tokens_[0] = t;
-  for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
-  main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
+
+  const bool device_verify_input = verify_tokens_device_.size() >= static_cast<size_t>(N + 1);
+  if (device_verify_input) {
+    // Keep the entire draft -> target dependency on the shared CUDA stream. In particular, do not
+    // call drafts_device_.CopyDeviceToCpu() before AppendTokens: that fence would expose the main
+    // CUDA-graph submission latency after both head graphs completed. The current token was already
+    // staged for the first/fused head input, and both D2D copies below follow the draft argmaxes in
+    // stream order.
+    verify_tokens_device_.subspan(0, 1).CopyFrom(current_token_device);
+    verify_tokens_device_.subspan(1, static_cast<size_t>(N))
+        .CopyFrom(drafts_device_.subspan(0, static_cast<size_t>(N)));
+    main_->AppendTokens(verify_tokens_device_.subspan(0, static_cast<size_t>(N + 1)));
+  } else {
+    verify_tokens_[0] = t;
+    for (int k = 0; k < N; ++k) verify_tokens_[k + 1] = drafts_[k];
+    main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
+  }
   stats_.target_forward_passes++;
   ArgmaxMainRows(0, N + 1, verify_argmax_.data());  // main's real token after each verify position
+
+  if (device_verify_input) {
+    // ArgmaxMainRows is the existing CPU acceptance boundary and synchronizes the target result.
+    // Read the small draft-id vector only after the target graph and its argmax have been queued;
+    // the extra copy observes the same stream order and preserves the host acceptance logic below.
+    auto drafts_cpu = drafts_device_.CopyDeviceToCpu();
+    std::copy_n(drafts_cpu.begin(), N, drafts_.begin());
+    // Preserve the device ids but restore the CPU mirror's only contract for the next round: each
+    // chained draft input is structurally one valid token. This matters after a fused M>1 head run,
+    // when Logits::Update scans the next M=1 input's host mirror while resizing its output.
+    const int32_t head_non_pad = mtp_model_.config_->model.pad_token_id == 0 ? 1 : 0;
+    std::fill(drafts_cpu.begin(), drafts_cpu.end(), head_non_pad);
+  }
   OrtValue* vhidden = main_->state_->GetOutput(hs_name.c_str());
 
   // --- Longest accepted prefix (greedy match against the main model). ---
