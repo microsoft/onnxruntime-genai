@@ -82,8 +82,15 @@ struct ScheduledRequests {
  private:
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
+  // Verifies each drafted request's proposal against the target model's own rows, rewinds the
+  // rejected tail, and returns the one row per request that the sampler must select from.
+  std::vector<DeviceSpan<float>> SelectSampledRows(
+      std::vector<DeviceSpan<float>>& verify_rows);
 
   std::vector<std::shared_ptr<Request>> requests_;
+  // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
+  // outside a dynamic step plan.
+  std::vector<size_t> draft_token_counts_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::unique_ptr<ExecutionContext> execution_context_;

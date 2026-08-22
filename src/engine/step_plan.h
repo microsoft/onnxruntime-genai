@@ -21,6 +21,11 @@ struct StepPlanningConsistencyError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// Upper bound on the speculative drafts a single request may attach to one decode step. The
+// packed recurrent-state operators checkpoint at most eight tokens, so no cache can roll back
+// further than a step of that length.
+inline constexpr size_t kMaxDraftTokensPerStep = 7;
+
 enum class StepOutcomeKind {
   NoWork,
   CapacityDeferred,
