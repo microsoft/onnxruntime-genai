@@ -273,10 +273,10 @@ void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decod
   }
 
   size_t paged_group_count = 0;
+  bool has_fixed_group = false;
   for (const auto& group : *decoder.state_groups) {
     if (group.kind == StateGroupKind::Fixed) {
-      throw std::runtime_error(
-          "Dynamic batching does not yet support fixed decoder state groups");
+      has_fixed_group = true;
     }
     if (group.kind == StateGroupKind::PagedKeyValue) {
       ++paged_group_count;
@@ -286,6 +286,10 @@ void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decod
   if (paged_group_count != 1) {
     throw std::runtime_error(
         "Dynamic batching requires exactly one paged_kv decoder state group");
+  }
+  if (has_fixed_group) {
+    throw std::runtime_error(
+        "Dynamic batching does not yet support fixed decoder state groups");
   }
 }
 

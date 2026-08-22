@@ -38,6 +38,16 @@ inline std::shared_ptr<Model> LoadSyntheticHybridModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
 }
 
+// Loads the tiny checked-in composite decoder used by the Engine composite-transaction tests. Its
+// config declares one paged_kv group (layers [1, 4]) alongside two fixed decoder state groups
+// (convolution [0, 3] and recurrent [2, 5]) plus engine.dynamic_batching, so CacheManager::Create
+// builds a real PagedKeyValueCache and a real FixedStatePool. The composite tests drive it with the
+// recording executor doubles, so the ONNX graph is never executed; the fixed present outputs are
+// Identity pass-throughs and only the declared session I/O has to validate.
+inline std::shared_ptr<Model> LoadSyntheticCompositeModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+}
+
 // Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request
 // advances deterministically (SelectTop) when fed scripted logits.
 inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
