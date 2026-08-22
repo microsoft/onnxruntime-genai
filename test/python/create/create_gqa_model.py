@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Create a tiny model with GQA for testing CUDA graph capture.
+"""Create a tiny model with GQA and recurrent state for testing CUDA graph capture.
 
 Generates a qwen2-type LLM (decoder-only) that supports
-past_present_share_buffer and CUDA graph capture.
+past_present_share_buffer, recurrent-state sharing, and CUDA graph capture.
 
 The decoder model is run through ORT's transformer optimizer to ensure proper
 CUDA EP partitioning for graph capture compatibility.
@@ -29,6 +29,7 @@ HEAD_SIZE = HIDDEN_SIZE // NUM_HEADS  # 16
 NUM_LAYERS = 2
 INTERMEDIATE_SIZE = 128
 MAX_SEQ_LEN = 128
+RECURRENT_LAYER = 0
 
 
 def rand_init(name, shape, dtype=np.float16, scale=0.02):
@@ -67,6 +68,60 @@ def create_decoder(output_dir):
                 f"past_key_values.{i}.value", onnx_dtype, ["batch_size", NUM_KV_HEADS, "past_seq_len", HEAD_SIZE]
             )
         )
+
+    graph_inputs.extend(
+        [
+            helper.make_tensor_value_info(
+                f"past_key_values.{RECURRENT_LAYER}.conv_state", onnx_dtype, ["batch_size", 1, 1]
+            ),
+            helper.make_tensor_value_info(
+                f"past_key_values.{RECURRENT_LAYER}.recurrent_state", onnx_dtype, ["batch_size", 1, 1, 1]
+            ),
+        ]
+    )
+    graph_outputs.extend(
+        [
+            helper.make_tensor_value_info(
+                f"present.{RECURRENT_LAYER}.conv_state", onnx_dtype, ["batch_size", 1, 1]
+            ),
+            helper.make_tensor_value_info(
+                f"present.{RECURRENT_LAYER}.recurrent_state", onnx_dtype, ["batch_size", 1, 1, 1]
+            ),
+        ]
+    )
+
+    # Make the recurrent state non-idempotent and observable in the logits. During initial
+    # CUDA-graph capture ORT internally re-runs the decoder, so failing to restore aliased state
+    # changes the state_logits contribution relative to a single eager run.
+    inits.append(numpy_helper.from_array(np.array(0.125, dtype=np.float16), "state_increment"))
+    nodes.append(
+        helper.make_node(
+            "Add",
+            [f"past_key_values.{RECURRENT_LAYER}.conv_state", "state_increment"],
+            [f"present.{RECURRENT_LAYER}.conv_state"],
+        )
+    )
+    nodes.append(
+        helper.make_node(
+            "Add",
+            [f"past_key_values.{RECURRENT_LAYER}.recurrent_state", "state_increment"],
+            [f"present.{RECURRENT_LAYER}.recurrent_state"],
+        )
+    )
+    inits.append(
+        numpy_helper.from_array(
+            np.linspace(-1.0, 1.0, VOCAB_SIZE, dtype=np.float16).reshape(1, VOCAB_SIZE),
+            "state_logits.weight",
+        )
+    )
+    inits.append(numpy_helper.from_array(np.array([1], dtype=np.int64), "state_logits.axes"))
+    nodes.append(
+        helper.make_node(
+            "Flatten", [f"present.{RECURRENT_LAYER}.conv_state"], ["state_scalar"], axis=1
+        )
+    )
+    nodes.append(helper.make_node("MatMul", ["state_scalar", "state_logits.weight"], ["state_logits_2d"]))
+    nodes.append(helper.make_node("Unsqueeze", ["state_logits_2d", "state_logits.axes"], ["state_logits"]))
 
     # Derive seqlens_k and total_sequence_length from attention_mask
     # These are small CPU-side computations that ORT handles outside graph capture
@@ -171,7 +226,8 @@ def create_decoder(output_dir):
         helper.make_node("LayerNormalization", [prev, "norm.w", "norm.b"], ["final_ln"], epsilon=1e-5, axis=-1)
     )
     inits.append(rand_init("lm_head.w", [HIDDEN_SIZE, VOCAB_SIZE]))
-    nodes.append(helper.make_node("MatMul", ["final_ln", "lm_head.w"], ["logits"]))
+    nodes.append(helper.make_node("MatMul", ["final_ln", "lm_head.w"], ["base_logits"]))
+    nodes.append(helper.make_node("Add", ["base_logits", "state_logits"], ["logits"]))
     graph_outputs.insert(0, helper.make_tensor_value_info("logits", onnx_dtype, ["batch_size", "seq_len", VOCAB_SIZE]))
 
     graph = helper.make_graph(nodes, "decoder", graph_inputs, graph_outputs, initializer=inits)

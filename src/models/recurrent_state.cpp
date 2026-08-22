@@ -108,7 +108,8 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+  const bool share_buffers_configured =
+      state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
 
   // WebGPU prohibits binding the same buffer as both read-only (input) and
   // read-write (output) storage in the same compute pass, so it must use
@@ -126,8 +127,10 @@ RecurrentState::RecurrentState(State& state)
   // sharing to retain double buffering as a diagnostic fallback.
   bool share_under_graph_capture = true;
   GetEnv("ORTGENAI_SHARE_RECURRENT_STATE_UNDER_GRAPH_CAPTURE", share_under_graph_capture);
-  graph_double_buffer_ = !is_webgpu && state_.params_->use_graph_capture && !share_under_graph_capture;
-  share_buffers_ = !is_webgpu && !graph_double_buffer_;
+  const bool graph_capture_enabled = !is_webgpu && state_.params_->use_graph_capture;
+  share_buffers_ = !is_webgpu &&
+                   (graph_capture_enabled ? share_under_graph_capture : share_buffers_configured);
+  graph_double_buffer_ = graph_capture_enabled && !share_buffers_;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);
@@ -350,9 +353,11 @@ void RecurrentState::SaveForGraphCapture() {
 }
 
 void RecurrentState::RestoreAfterGraphCapture(int graph_id) {
+  auto& device = *model_.p_device_kvcache_;
   for (auto& span : graph_capture_backup_) {
     span.CopyCpuToDevice();
   }
+  device.Synchronize();
   graph_capture_backup_.clear();
   graph_capture_fixed_up_.push_back(graph_id);
 }
