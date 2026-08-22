@@ -68,6 +68,20 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     return fixed_reservation_ ? fixed_reservation_->PlannedStagingBytes() : 0;
   }
 
+  void CommitPrefix(size_t row, const void* request_id,
+                    size_t step_tokens, size_t kept_tokens) override {
+    if (prepared_ || committed_) {
+      throw std::logic_error(
+          "Composite cache step reservation no longer accepts prefix commits.");
+    }
+    // Fixed first: it is the only one of the two that can reject the request (no checkpoints, or a
+    // step longer than the checkpoint window), so the paged boundary is never lowered on its own.
+    if (fixed_reservation_) {
+      fixed_reservation_->CommitPrefix(row, step_tokens, kept_tokens);
+    }
+    paged_reservation_->CommitPrefix(request_id, step_tokens, kept_tokens);
+  }
+
   void ValidateCommit() const override {
     if (committed_) {
       throw std::logic_error("Composite cache step reservation can only be committed once.");
@@ -345,6 +359,20 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
+
+size_t PagedCacheManager::MaxDraftTokensPerStep() const {
+  // Recurrent state can only be replayed through the compact transitions the operators captured.
+  // Without fixed state the paged KV boundary alone decides, and any tail slot can be left
+  // uncommitted.
+  size_t limit = kMaxDraftTokensPerStep;
+  if (fixed_state_pool_) {
+    limit = std::min(limit, fixed_state_pool_->StateUpdateCapacity());
+  }
+  if (const size_t query_cap = MaxQueryTokensPerRequest(); query_cap != 0) {
+    limit = std::min(limit, query_cap - 1);
+  }
+  return limit;
+}
 
 std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;

@@ -130,6 +130,10 @@ class FixedStateReservation {
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
   bool CapturesStateUpdates() const;
+
+  // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
+  // by replaying the captured compact updates through the accepted transition and lowering the
+  // row's committed token boundary by the rejected tokens. Must be called before PrepareCommit.
   void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
