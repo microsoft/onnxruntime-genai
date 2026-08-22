@@ -1296,6 +1296,32 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, cons
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens);
 
 /**
+ * \brief Proposes speculative draft tokens for the request's next engine step.
+ *
+ * The step then runs one row per draft on top of its own token, verifies each draft against the
+ * model's prediction, and keeps the accepted prefix. The proposal applies to the next step only:
+ * a committed step consumes it whether or not it could verify it. Passing an empty sequence clears
+ * the proposal. Requires a greedy request and an engine whose cache can roll a rejected draft back
+ * (see OgaEngineMaxDraftTokensPerStep).
+ *
+ * \param[in] request The request to propose drafts for.
+ * \param[in] tokens One sequence holding the draft continuation, in order.
+ * \return OgaResult containing the error message if the proposal was rejected, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens);
+
+/**
+ * \brief Reports how many speculative draft tokens one request may attach to a single engine step.
+ *
+ * Zero means this engine cannot roll a rejected draft back, so OgaRequestSetDraftTokens will fail.
+ *
+ * \param[in] engine The engine to query.
+ * \param[out] out The maximum draft token count.
+ * \return OgaResult containing the error message on failure, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerStep(const OgaEngine* engine, size_t* out);
+
+/**
  * \brief Destroys the given request.
  *
  * This function releases one external request handle. Releasing the final handle marks a submitted request abandoned;
