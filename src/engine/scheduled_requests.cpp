@@ -29,6 +29,29 @@ std::optional<BatchedSamplingParams> ResolveSampleArgs(const Config::Search& sea
   return BatchedSamplingParams{-1, search.top_p, search.temperature};
 }
 
+// Greedy token for every row, computed on the device so that the full vocabulary never crosses the
+// bus. Returns nothing when the rows are not one contiguous block (the decoder only guarantees that
+// when it converts the batch in a single launch) or when the device has no top-1 kernel, leaving the
+// caller on its host fallback.
+std::vector<int32_t> TryDeviceArgmaxPerRow(DeviceInterface& device,
+                                           std::vector<DeviceSpan<float>>& rows) {
+  if (rows.empty())
+    return {};
+
+  const size_t vocab_size = rows[0].size();
+  const float* base = rows[0].Span().data();
+  for (size_t i = 1; i < rows.size(); ++i) {
+    if (rows[i].size() != vocab_size || rows[i].Span().data() != base + i * vocab_size)
+      return {};
+  }
+
+  std::vector<int32_t> tokens(rows.size());
+  if (!device.ArgMax(base, Ort::TypeToTensorType<float>, static_cast<int>(rows.size()),
+                     static_cast<int>(vocab_size), tokens.data()))
+    return {};
+  return tokens;
+}
+
 }  // namespace
 
 ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
@@ -180,6 +203,16 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
+
+  // Verification only needs each draft row's argmax. Reading a whole vocabulary row back to the host
+  // costs about a megabyte and a stream synchronization per draft, which on a large-vocabulary model
+  // is comparable to the step itself, so ask the device for the token ids in one launch instead.
+  const bool step_has_drafts = std::any_of(draft_token_counts_.begin(), draft_token_counts_.end(),
+                                           [](size_t count) { return count != 0; });
+  const std::vector<int32_t> row_argmax =
+      step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
+                      : std::vector<int32_t>{};
+
   size_t row = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {
     const size_t draft_count =
@@ -200,9 +233,14 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       if (requests_[i]->IsStopToken(drafts[accepted_count])) {
         break;
       }
-      auto row_values = verify_rows[row + accepted_count].CopyDeviceToCpu();
-      const auto predicted = static_cast<int32_t>(
-          std::max_element(row_values.begin(), row_values.end()) - row_values.begin());
+      int32_t predicted;
+      if (!row_argmax.empty()) {
+        predicted = row_argmax[row + accepted_count];
+      } else {
+        auto row_values = verify_rows[row + accepted_count].CopyDeviceToCpu();
+        predicted = static_cast<int32_t>(
+            std::max_element(row_values.begin(), row_values.end()) - row_values.begin());
+      }
       if (predicted != drafts[accepted_count]) {
         break;
       }
