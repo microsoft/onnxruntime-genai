@@ -698,8 +698,17 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
 
-  bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
-  State::Run(*model_.decoder_session_, graph_capture_this_run);
+  const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
+  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
+  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+
+  const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+    recurrent_state_->SaveForGraphCapture();
+    State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
+    recurrent_state_->RestoreAfterGraphCapture(graph_id);
+  }
+  State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
   return logits_.Get();
 }
 
