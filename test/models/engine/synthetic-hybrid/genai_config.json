@@ -32,10 +32,13 @@
             0,
             3
           ],
+          "checkpoint_count": 4,
+          "checkpoint_alignment": "left",
           "bindings": {
             "state": {
               "input": "past_conv.%d",
-              "output": "present_conv.%d"
+              "output": "present_conv.%d",
+              "checkpoints": "checkpoints_conv.%d"
             }
           },
           "state_update": {
@@ -52,10 +55,13 @@
             2,
             5
           ],
+          "checkpoint_count": 4,
+          "checkpoint_alignment": "right",
           "bindings": {
             "state": {
               "input": "past_recurrent.%d",
-              "output": "present_recurrent.%d"
+              "output": "present_recurrent.%d",
+              "checkpoints": "checkpoints_recurrent.%d"
             }
           },
           "state_update": {

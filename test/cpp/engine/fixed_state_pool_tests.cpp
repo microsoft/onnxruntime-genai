@@ -100,6 +100,31 @@ void ExpectInputRows(const FixedStateReservation& reservation, size_t row, float
   }
 }
 
+// Writes one slot of a binding's checkpoint series, laid out [checkpoint_count, row_count, row...].
+void FillCheckpointRow(const FixedStateBinding& binding, size_t checkpoint_slot, size_t row_count,
+                       size_t row, float value) {
+  const auto shape = binding.checkpoints->GetTensorTypeAndShapeInfo()->GetShape();
+  size_t row_elements = 1;
+  for (size_t axis = 2; axis < shape.size(); ++axis) {
+    row_elements *= static_cast<size_t>(shape[axis]);
+  }
+  auto* data = binding.checkpoints->GetTensorMutableData<float>();
+  std::fill_n(data + (checkpoint_slot * row_count + row) * row_elements, row_elements, value);
+}
+
+// Fills every checkpoint slot of every binding so a wrong slot selection is always detectable:
+// slot j of a left-aligned binding and slot j of a right-aligned one both get `base + j`.
+void FillCheckpointSeries(FixedStateReservation& reservation, size_t row_count, size_t row,
+                          float base) {
+  for (const auto& binding : reservation.Bindings()) {
+    const auto slots =
+        static_cast<size_t>(binding.checkpoints->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+    for (size_t slot = 0; slot < slots; ++slot) {
+      FillCheckpointRow(binding, slot, row_count, row, base + static_cast<float>(slot));
+    }
+  }
+}
+
 // ONNX element type shorthands for the direct geometry tests.
 constexpr auto kFloat = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
 constexpr auto kDouble = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
@@ -804,6 +829,139 @@ TEST(FixedStateGeometryTest, RejectsScalarWithoutBatchAxis) {
   const std::array<int64_t, 0> output{};
   EXPECT_THROW(ValidateFixedStateGeometry("past", kFloat, input, "present", kFloat, output),
                std::runtime_error);
+}
+
+TEST_F(FixedStatePoolTest, ReportsCheckpointSupport) {
+  auto pool = MakePool();
+  EXPECT_TRUE(pool->SupportsCheckpoints());
+  EXPECT_EQ(pool->CheckpointCount(), 4u);
+}
+
+TEST_F(FixedStatePoolTest, CheckpointsAreBoundOnlyWhenCaptured) {
+  auto pool = MakePool();
+  {
+    auto requests = One(kRequestA);
+    auto reservation = pool->Reserve(requests);
+    EXPECT_FALSE(reservation.CapturesCheckpoints());
+    for (const auto& binding : reservation.Bindings()) {
+      EXPECT_EQ(binding.checkpoints, nullptr);
+      EXPECT_EQ(binding.checkpoints_name, nullptr);
+    }
+    reservation.Discard();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  EXPECT_TRUE(reservation.CapturesCheckpoints());
+  ASSERT_EQ(reservation.Bindings().size(), 4u);
+  EXPECT_STREQ(reservation.Bindings()[0].checkpoints_name, "checkpoints_conv.0");
+  EXPECT_STREQ(reservation.Bindings()[2].checkpoints_name, "checkpoints_recurrent.2");
+  EXPECT_EQ(reservation.Bindings()[0].checkpoints->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{4, 1, 2, 3}));
+  EXPECT_EQ(reservation.Bindings()[2].checkpoints->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{4, 1, 2, 2, 2}));
+}
+
+TEST_F(FixedStatePoolTest, CapturingCheckpointsAddsWindowStagingBytes) {
+  auto pool = MakePool();
+  const auto plain = pool->PlannedStagingBytes(2);
+  const auto captured = pool->PlannedStagingBytes(2, /*capture_checkpoints=*/true);
+  // Two staging copies per tensor become two plus the four-slot window.
+  EXPECT_EQ(captured, plain * 3);
+
+  auto requests = std::array<Request, 2>{Request{kRequestA, 1}, Request{kRequestB, 1}};
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  EXPECT_EQ(reservation.PlannedStagingBytes(), captured);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixPublishesTheAlignedCheckpointSlot) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/3);
+    auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+    FillStagedRows(reservation, 0, 99.0f);  // The step's final state, which must NOT be committed.
+    FillCheckpointSeries(reservation, /*row_count=*/1, /*row=*/0, /*base=*/10.0f);
+    // A three-token step of which two were accepted: the conv group is left-aligned so the state
+    // after token 1 is slot 1, the recurrent group is right-aligned so it is slot 4 - 3 + 1 = 2.
+    reservation.CommitPrefix(0, /*step_tokens=*/3, /*kept_tokens=*/2);
+    reservation.Commit();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  const auto bindings = reservation.Bindings();
+  ExpectInputRow(bindings[0], 0, 11.0f);  // conv.0, left-aligned slot 1
+  ExpectInputRow(bindings[1], 0, 11.0f);  // conv.3
+  ExpectInputRow(bindings[2], 0, 12.0f);  // recurrent.2, right-aligned slot 2
+  ExpectInputRow(bindings[3], 0, 12.0f);  // recurrent.5
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixOfTheWholeStepUsesTheFinalState) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/3);
+    auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+    FillStagedRows(reservation, 0, 99.0f);
+    FillCheckpointSeries(reservation, /*row_count=*/1, /*row=*/0, /*base=*/10.0f);
+    reservation.CommitPrefix(0, /*step_tokens=*/3, /*kept_tokens=*/3);
+    reservation.Commit();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  ExpectInputRows(reservation, 0, 99.0f);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixRollsBackOnlyTheRequestedRow) {
+  auto pool = MakePool(2);
+  MakeResident(*pool, kRequestA, 4.0f);
+  MakeResident(*pool, kRequestB, 5.0f);
+  {
+    auto requests = std::array<Request, 2>{Request{kRequestA, 3}, Request{kRequestB, 3}};
+    auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+    FillStagedRows(reservation, 0, 99.0f);
+    FillStagedRows(reservation, 1, 98.0f);
+    FillCheckpointSeries(reservation, /*row_count=*/2, /*row=*/0, /*base=*/10.0f);
+    FillCheckpointSeries(reservation, /*row_count=*/2, /*row=*/1, /*base=*/20.0f);
+    reservation.CommitPrefix(1, /*step_tokens=*/4, /*kept_tokens=*/1);
+    reservation.Commit();
+  }
+
+  auto requests = std::array<Request, 2>{Request{kRequestA, 3}, Request{kRequestB, 3}};
+  auto reservation = pool->Reserve(requests);
+  ExpectInputRows(reservation, 0, 99.0f);  // Row 0 kept the whole step.
+  const auto bindings = reservation.Bindings();
+  ExpectInputRow(bindings[0], 1, 20.0f);  // conv, left-aligned slot 0
+  ExpectInputRow(bindings[2], 1, 20.0f);  // recurrent, right-aligned slot 4 - 4 + 0 = 0
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixRequiresACapturingReservation) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  EXPECT_THROW(reservation.CommitPrefix(0, 2, 1), std::logic_error);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixRejectsOutOfContractArguments) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  EXPECT_THROW(reservation.CommitPrefix(1, 2, 1), std::out_of_range);
+  EXPECT_THROW(reservation.CommitPrefix(0, 2, 0), std::runtime_error);
+  EXPECT_THROW(reservation.CommitPrefix(0, 2, 3), std::runtime_error);
+  // A step longer than the window has no checkpoint for its earlier tokens.
+  EXPECT_THROW(reservation.CommitPrefix(0, 5, 2), std::runtime_error);
+}
+
+TEST_F(FixedStatePoolTest, CommitPrefixIsRejectedAfterPrepare) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  FillStagedRows(reservation, 0, 1.0f);
+  reservation.PrepareCommit();
+  EXPECT_THROW(reservation.CommitPrefix(0, 2, 1), std::logic_error);
 }
 
 }  // namespace
