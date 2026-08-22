@@ -23,6 +23,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Prune Language Modeling Head](#prune-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
+    - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)](#export-a-modelopt-nvfp4fp8-checkpoint-qwen36)
@@ -281,7 +282,7 @@ Note that this is the same as outputting embeddings since the last hidden states
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` and `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. Set `prune_lm_head=true` to select the final packed hidden state for each sequence before the LM head and output `[batch_size, vocab_size]` logits. By default, it projects every packed hidden state and outputs `[num_tokens, vocab_size]` logits.
 
-Paged attention supports CUDA with `fp16` or `bf16` precision and cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`.
+Paged attention supports CUDA with `fp16` or `bf16` precision and cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` defaults to `paged_block_size`, must be a positive integer, and is written to `search.chunk_size`; it applies only to models whose sliding-window layers are served from a ring of blocks, which hold `paged_chunk_size + window_size - 1` positions and therefore require chunked prefill.
 
 ```bash
 # From wheel:
@@ -289,6 +290,18 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
+```
+
+#### Disable Windowed KV Cache
+
+By default, sliding-window layers use a reduced KV cache on supported execution providers. With paged attention, eligible local layers use a ring of blocks when the exported model also contains at least one full-context layer. Set `windowed_kv_cache=false` to give every layer a full-length KV cache, which is useful for performance comparisons or compatibility testing. The option defaults to `true` and applies to both paged and non-paged models.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true windowed_kv_cache=false
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true windowed_kv_cache=false
 ```
 
 #### Enable Shared Embeddings
@@ -358,7 +371,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf
 
 When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. If the checkpoint declares `kv_cache_quant_algo=FP8`, the KV cache is exported as FP8 as well. CUDA linear-attention gate fusion is enabled automatically.
 
-The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops.
+The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
 #### Enable MTP Head (Qwen3.6)
 
@@ -615,7 +628,7 @@ The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tenso
 
 The scales applied to the KV cache are supplied through a required calibration file:
 
-- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). This option is required when `kv_cache_quant_type` is enabled.
+- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...model layer IDs...]}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). `layer_ids` maps each scale entry to its model layer; it is contiguous for dense models and sparse for hybrid models where only full-attention layers own a KV cache. This option is required when `kv_cache_quant_type` is enabled.
 
 The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
 

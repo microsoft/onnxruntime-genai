@@ -115,7 +115,18 @@ def test_model_declares_paged_config():
     assert dynamic_batching["block_size"] == _BLOCK_SIZE
     assert config["model"]["vocab_size"] == _VOCAB_SIZE
     assert config["model"]["eos_token_id"] == _EOS_TOKEN_ID
+    assert config["model"]["decoder"]["inputs"]["attention_metadata"] == "attention_metadata"
     assert config["search"]["do_sample"] is False
+
+
+def test_model_declares_three_value_attention_metadata():
+    graph = onnx.load(_MODEL_DIR / "decoder.onnx", load_external_data=False).graph
+    metadata = next(input_value for input_value in graph.input if input_value.name == "attention_metadata")
+    tensor_type = metadata.type.tensor_type
+
+    assert tensor_type.elem_type == onnx.TensorProto.INT32
+    assert len(tensor_type.shape.dim) == 1
+    assert tensor_type.shape.dim[0].dim_value == 3
 
 
 def test_model_declares_per_request_fp16_logits():

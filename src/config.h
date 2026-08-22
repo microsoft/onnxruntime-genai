@@ -335,10 +335,20 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct SharedInitializer {
+      std::string name;
+      std::string data_file;
+      std::string offset;
+      std::string length;
+      int data_type{};
+      std::vector<int64_t> shape;
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -440,10 +450,13 @@ struct Config {
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
         bool is_lm_head{false};
-        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
-                                    // This is the index of the session that needs to be reset during the execution of the current session.
-                                    // This is a temporary solution until the QNN driver updates are available.
-                                    // Once the driver updates are available, this option will be deprecated.
+        bool inherit_session_options{false};  // If true, the top level (decoder) session options are used as the
+                                              // base for this component's session options, which are then overlaid
+                                              // on top of them.
+        int reset_session_idx{-1};            // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                              // This is the index of the session that needs to be reset during the execution of the current session.
+                                              // This is a temporary solution until the QNN driver updates are available.
+                                              // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
@@ -457,6 +470,7 @@ struct Config {
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};

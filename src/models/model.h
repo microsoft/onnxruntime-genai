@@ -132,6 +132,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
+  std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                           const char* template_kwargs, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
@@ -220,6 +222,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
@@ -238,10 +241,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      bool cloned_from_parent = false,
+                                      bool append_providers = true);
 
  protected:
   void CreateSessionOptions();
+  void AddSharedInitializers();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
