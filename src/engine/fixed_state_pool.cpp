@@ -5,7 +5,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -375,11 +375,10 @@ void FixedStateReservation::PublishCommit() noexcept {
   }
   // PublishCommit must only be reached after a successful PrepareCommit. Anything else is a caller
   // sequencing bug that would silently diverge fixed state from the rest of a composite commit.
-  assert(state_ == FixedStateReservationState::Prepared &&
-         "PublishCommit requires a successful PrepareCommit");
-  if (state_ == FixedStateReservationState::Prepared) {
-    pool_->PublishCommit(*this);
+  if (state_ != FixedStateReservationState::Prepared) {
+    std::terminate();
   }
+  pool_->PublishCommit(*this);
 }
 
 void FixedStateReservation::Commit() {
