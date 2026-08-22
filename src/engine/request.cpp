@@ -285,6 +285,11 @@ std::span<const int32_t> Request::StagedDraftTokens() const {
   return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
 }
 
+bool Request::IsStopToken(int32_t token) const {
+  const auto& stop_tokens = params_->config.model.eos_token_id;
+  return std::find(stop_tokens.begin(), stop_tokens.end(), token) != stop_tokens.end();
+}
+
 void Request::AppendDraftsForTransaction(size_t draft_count) {
   if (draft_count == 0) {
     return;
@@ -465,19 +470,20 @@ void Request::SaveStateForExternalSamplingTransaction() {
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
-  const auto sequence_length_before = CurrentSequenceLength();
   PrepareGenerationForTransaction(logits);
   SelectNextToken();
-  return StageGeneration(sequence_length_before);
+  return StageGeneration();
 }
 
 void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
+  // Accepted drafts are already on the sequence, so this is the boundary past which any further
+  // growth is the token the sampler itself produced.
+  sequence_length_before_sampling_ = CurrentSequenceLength();
   ApplyLogitsProcessors(logits);
 }
 
-RequestStepResult Request::StageGenerationForTransaction(
-    const RequestStepPlan& plan) {
-  return StageGeneration(plan.sequence_length_before);
+RequestStepResult Request::StageGenerationForTransaction() {
+  return StageGeneration();
 }
 
 void Request::RestoreStateForTransaction() {
@@ -546,10 +552,10 @@ void Request::SelectNextToken() {
   }
 }
 
-RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
+RequestStepResult Request::StageGeneration() {
   search_->CompleteGeneration();
   const bool done = search_->IsDone();
-  const bool token_appended = CurrentSequenceLength() > sequence_length_before;
+  const bool token_appended = CurrentSequenceLength() > sequence_length_before_sampling_;
   int32_t token = 0;
   if (token_appended) {
     token = search_->GetNextTokens().CpuSpan().back();

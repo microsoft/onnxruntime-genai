@@ -195,6 +195,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     const auto drafts = requests_[i]->StagedDraftTokens();
     size_t accepted_count = 0;
     while (accepted_count < draft_count) {
+      // A stop token ends the turn, so it has to be produced by the sampler, which applies the
+      // search's end-of-sequence handling. Appending it as a draft would emit it and carry on.
+      if (requests_[i]->IsStopToken(drafts[accepted_count])) {
+        break;
+      }
       auto row_values = verify_rows[row + accepted_count].CopyDeviceToCpu();
       const auto predicted = static_cast<int32_t>(
           std::max_element(row_values.begin(), row_values.end()) - row_values.begin());
@@ -356,7 +361,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     for (size_t i = 0; i < requests_.size(); ++i) {
       if (!requests_[i]->IsChunkComplete())
         continue;
-      results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+      results[i] = requests_[i]->StageGenerationForTransaction();
       ++sampling_index;
     }
     return;

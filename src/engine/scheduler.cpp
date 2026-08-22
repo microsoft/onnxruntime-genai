@@ -181,17 +181,21 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request = request;
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
-    candidate.entry.unprocessed_token_count = 1;
     // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
     // has committed tokens of its own left to push through, so it can never verify one.
     candidate.entry.draft_token_count =
         snapshot.is_prefill
             ? 0
             : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
+    // The cache plans blocks from these two counts before the token budget below fixes the step
+    // length, so both have to cover the drafts the step may append past the committed sequence.
+    candidate.entry.unprocessed_token_count = 1 + candidate.entry.draft_token_count;
     candidate.entry.target_cache_slots = RequiredSlots(
-        static_cast<size_t>(snapshot.processed_sequence_length), 1);
+        static_cast<size_t>(snapshot.processed_sequence_length),
+        candidate.entry.unprocessed_token_count);
     candidate.entry.whole_sequence_cache_slots =
-        SlotsForWholeSequence(snapshot.current_sequence_length);
+        SlotsForWholeSequence(snapshot.current_sequence_length +
+                              static_cast<int64_t>(candidate.entry.draft_token_count));
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
     auto prefill_token_cap = request->SearchOptions().chunk_size;
