@@ -21,6 +21,37 @@ std::unique_ptr<OgaModel> CreateCudaModel() {
   return OgaModel::Create(*config);
 }
 
+TEST(ArgMaxTests, DeviceRowResultsAccumulateBeforeOneHostCopyCuda) {
+  constexpr int num_rows = 4;
+  constexpr int first_row = 1;
+  constexpr int total_rows = num_rows + 2;
+  constexpr int vocab_size = 248320;  // Qwen3.8 vocabulary; selects the batch-1 distributed path.
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+
+  auto logits = device->Allocate<float>(static_cast<size_t>(total_rows) * vocab_size);
+  auto logits_cpu = logits.CpuSpan();
+  std::fill(logits_cpu.begin(), logits_cpu.end(), -1.0f);
+  const std::array<int32_t, num_rows> expected{{3, 100001, vocab_size - 1, 17}};
+  for (int row = 0; row < num_rows; ++row) {
+    logits_cpu[static_cast<size_t>(first_row + row) * vocab_size + expected[row]] = 10.0f + row;
+  }
+  logits.CopyCpuToDevice();
+
+  auto top1_device = device->Allocate<int32_t>(num_rows);
+  for (int row = 0; row < num_rows; ++row) {
+    ASSERT_TRUE(device->ArgMaxDevice(
+        logits.Span().data() + static_cast<size_t>(first_row + row) * vocab_size,
+        Ort::TypeToTensorType<float>, 1, vocab_size,
+        top1_device.subspan(static_cast<size_t>(row), 1)));
+  }
+
+  // Mirrors the N>1 MTP verify path: all batch-1 kernels and their D2D result copies are queued
+  // first, followed by one D2H copy/synchronization for the complete set of token ids.
+  auto top1_cpu = top1_device.CopyDeviceToCpu();
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), top1_cpu.begin()));
+}
+
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   constexpr int vocab_size = 5;
   [[maybe_unused]] auto model = CreateCudaModel();
