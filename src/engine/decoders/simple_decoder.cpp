@@ -2,16 +2,24 @@
 // Licensed under the MIT License.
 
 #include "simple_decoder.h"
+#include "hybrid_decoder_io.h"
 #include "static_batch_decoder_io.h"
 #include "varlen_decoder_io.h"
+#include "../../models/model_state_manifest.h"
 
 namespace Generators {
 
 SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
                              std::shared_ptr<CacheManager> cache_manager)
     : model_{model}, cache_manager_{cache_manager} {
+  const ModelStateManifest manifest{model_->config_->model.decoder};
+  has_fixed_state_groups_ = manifest.HasFixedStateGroups();
+  const bool has_position_ids = model_->session_info_.HasInput(
+      model_->config_->model.decoder.inputs.position_ids);
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
-      cache_manager_->SupportsDynamicBatching()) {
+      cache_manager_->SupportsDynamicBatching() &&
+      !has_fixed_state_groups_ &&
+      !has_position_ids) {
     graph_buffers_ = std::make_unique<VarlenGraphBuffers>(*model_);
   }
 }
@@ -42,14 +50,24 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                        (context.plan ? context.plan->graph_capture_eligible
                                      : IsPureDecodeStep(scheduled_requests));
 
-  std::unique_ptr<DecoderIO> decoder_state =
-      cache_manager_->SupportsDynamicBatching()
-          ? static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<VarlenDecoderIO>(
-                model_, scheduled_requests, cache_manager_, &context,
-                capture ? graph_buffers_.get() : nullptr))
-          : static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
+  std::unique_ptr<DecoderIO> decoder_state;
+  if (!cache_manager_->SupportsDynamicBatching()) {
+    decoder_state = std::make_unique<StaticBatchDecoderIO>(
+        model_, scheduled_requests, cache_manager_);
+  } else if (has_fixed_state_groups_) {
+    decoder_state = std::make_unique<HybridDecoderIO>(
+        model_, scheduled_requests, cache_manager_, context);
+  } else {
+    decoder_state = std::make_unique<VarlenDecoderIO>(
+        model_, scheduled_requests, cache_manager_, &context,
+        capture ? graph_buffers_.get() : nullptr);
+  }
 
-  if (graph_buffers_ != nullptr) {
+  if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
+      graph_buffers_ == nullptr) {
+    // Inputs without persistent graph buffers have per-step addresses and must stay eager.
+    context.run_options->AddConfigEntry("gpu_graph_id", "-1");
+  } else if (graph_buffers_ != nullptr) {
     // -1 tells the CUDA EP to run eagerly. Otherwise every distinct decode shape gets its own
     // annotation id: the EP runs that id once eagerly, captures it on the next occurrence, and
     // replays from then on.

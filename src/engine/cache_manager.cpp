@@ -12,14 +12,6 @@ namespace Generators {
 
 namespace {
 
-bool HasFixedStateGroups(const ModelStateManifest& manifest) {
-  return std::any_of(
-      manifest.StateGroups().begin(), manifest.StateGroups().end(),
-      [](const Config::Model::Decoder::StateGroup& group) {
-        return group.kind == Config::Model::Decoder::StateGroupKind::Fixed;
-      });
-}
-
 // One transaction reservation over both the paged KV cache and, when the model declares fixed
 // decoder-state groups, the fixed-state pool. It plans and reserves both up front, validates both
 // before publishing either, stages all fallible fixed device work into inactive banks during
@@ -184,9 +176,14 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 }  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
+  const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     return std::make_unique<PagedCacheManager>(model);
+  }
+  if (manifest.HasFixedStateGroups()) {
+    throw std::runtime_error(
+        "Fixed decoder state groups require engine.dynamic_batching");
   }
 
   return std::make_unique<StaticCacheManager>(model);
@@ -291,7 +288,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
-  if (HasFixedStateGroups(manifest)) {
+  if (manifest.HasFixedStateGroups()) {
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
         model, manifest,
         model_->config_->engine.dynamic_batching->max_batch_size);
