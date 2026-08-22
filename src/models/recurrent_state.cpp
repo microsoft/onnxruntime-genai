@@ -120,14 +120,11 @@ RecurrentState::RecurrentState(State& state)
 
   // Under CUDA-graph capture the recurrent (conv + linear-attention) state is updated in
   // place (present_state aliased onto past_state), and ORT re-runs the model several times
-  // inside the first Run() of each captured shape to warm up and capture. An accumulator is
-  // therefore advanced once per internal run instead of once, which derails greedy decoding
-  // (observed MMLU-Pro collapse ~85% -> ~21% with graph on). Double-buffering avoids it
-  // because the extra runs all read the same unchanged `past` buffer. The cheaper
-  // alternative keeps the shared buffer and undoes the capture run instead (see
-  // ShouldFixUpGraphCapture): that halves the recurrent-state footprint and needs one
-  // captured graph variant rather than two.
-  bool share_under_graph_capture = false;
+  // inside the first Run() of each captured shape to warm up and capture. Save/restore around
+  // that first capture (see ShouldFixUpGraphCapture) keeps the update correct while using half
+  // the recurrent-state memory and one graph variant. The environment override can disable
+  // sharing to retain double buffering as a diagnostic fallback.
+  bool share_under_graph_capture = true;
   GetEnv("ORTGENAI_SHARE_RECURRENT_STATE_UNDER_GRAPH_CAPTURE", share_under_graph_capture);
   graph_double_buffer_ = !is_webgpu && state_.params_->use_graph_capture && !share_under_graph_capture;
   share_buffers_ = !is_webgpu && !graph_double_buffer_;
