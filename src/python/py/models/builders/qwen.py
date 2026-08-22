@@ -1096,7 +1096,7 @@ class Qwen35TextModel(Model):
         if self.linear_num_value_heads % self.linear_num_key_heads != 0:
             raise ValueError(
                 "linear_num_value_heads must be divisible by linear_num_key_heads "
-                "for VarlenLinearAttention"
+                "for GatedDeltaNet"
             )
 
         # Full attention uses QK norm and output gating
@@ -1950,7 +1950,7 @@ class Qwen35TextModel(Model):
         Uses com.microsoft contrib ops:
         - CausalConvWithState / VarlenCausalConvWithState: fused depthwise conv1d + SiLU + carry
           state, dense channel-first [B,C,S] or packed token-major [num_tokens,C].
-        - LinearAttention / VarlenLinearAttention: fused linear attention with GQA, dense
+        - LinearAttention / GatedDeltaNet: fused linear attention with GQA, dense
           [B,S,...] or packed token-major [num_tokens,...].
 
         Dense and packed builds share every op except the two above: state batch dimension is
@@ -2033,7 +2033,7 @@ class Qwen35TextModel(Model):
             a_name,
         )
 
-        # --- Fused recurrence: LinearAttention / VarlenLinearAttention (com.microsoft) ---
+        # --- Fused recurrence: LinearAttention / GatedDeltaNet (com.microsoft) ---
         past_recurrent = f"past_key_values.{layer_id}.recurrent_state"
         present_recurrent = f"present.{layer_id}.recurrent_state"
 
