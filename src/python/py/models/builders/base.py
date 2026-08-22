@@ -1952,7 +1952,7 @@ class Model:
             block_size=block_size,
         )
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
         return basename
 
     def make_matmul_block_quantized_nvfp4_weight(
@@ -1985,7 +1985,7 @@ class Model:
             block_size=16,
         )
         seq_dim = kwargs.get("seq_dim", "sequence_length")
-        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape(seq_dim=seq_dim, last_dim=out_features))
         return basename
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
