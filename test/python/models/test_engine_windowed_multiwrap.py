@@ -162,7 +162,7 @@ def test_continuation_crosses_two_window_ring_wraps_and_matches_clean_replay(tes
     first_turn = _run_turn(engine, request)
 
     assert first_turn == _EXPECTED_FIRST_TURN
-    assert request.status == og.RequestStatus.TURN_COMPLETE
+    assert request.is_turn_complete()
     first_turn_length = len(_INITIAL_PROMPT) + len(first_turn)
     assert first_turn_length == 3
     assert first_turn_length < _MAX_LENGTH
@@ -172,12 +172,12 @@ def test_continuation_crosses_two_window_ring_wraps_and_matches_clean_replay(tes
     # the full/windowed caches disagree. Tokens at positions 11 and 12 check
     # both columns of the two-block ring before EOS at position 13.
     request.continue_with(np.asarray(_CONTINUATION, dtype=np.int32))
-    assert request.status == og.RequestStatus.QUEUED
+    assert not request.is_turn_complete()
     second_turn = _run_turn(engine, request)
 
     assert second_turn == _EXPECTED_SECOND_TURN
     assert _INVARIANT_FAILURE_TOKEN_ID not in second_turn
-    assert request.status == og.RequestStatus.TURN_COMPLETE
+    assert request.is_turn_complete()
     retained_length = first_turn_length + len(_CONTINUATION) + len(second_turn)
     assert retained_length == 14
     assert retained_length < _MAX_LENGTH
