@@ -515,8 +515,11 @@ using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
 using DecoderStateUpdateKind = Config::Model::Decoder::StateUpdateKind;
+using DecoderCheckpointAlignment = Config::Model::Decoder::CheckpointAlignment;
 
 constexpr int kMaxStateUpdateCapacity = 8;
+// Both packed state operators cap their checkpoint window at eight slots.
+constexpr int kMaxStateCheckpoints = 8;
 
 struct StateUpdate_Element : JSON::Element {
   explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
@@ -573,6 +576,8 @@ struct StateBinding_Element : JSON::Element {
       v_.input = JSON::Get<std::string_view>(value);
     } else if (name == "output") {
       v_.output = JSON::Get<std::string_view>(value);
+    } else if (name == "checkpoints") {
+      v_.checkpoints = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -628,6 +633,22 @@ struct StateGroup_Element : JSON::Element {
         v_.kind = DecoderStateGroupKind::Fixed;
       } else {
         throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+      }
+    } else if (name == "checkpoint_count") {
+      v_.checkpoint_count = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.checkpoint_count < 0 || v_.checkpoint_count > kMaxStateCheckpoints) {
+        throw std::runtime_error("Decoder state group checkpoint_count must be in [0, " +
+                                 std::to_string(kMaxStateCheckpoints) + "]");
+      }
+    } else if (name == "checkpoint_alignment") {
+      const auto alignment = JSON::Get<std::string_view>(value);
+      if (alignment == "left") {
+        v_.checkpoint_alignment = DecoderCheckpointAlignment::Left;
+      } else if (alignment == "right") {
+        v_.checkpoint_alignment = DecoderCheckpointAlignment::Right;
+      } else {
+        throw std::runtime_error("Unsupported decoder state group checkpoint_alignment '" +
+                                 std::string{alignment} + "'");
       }
     } else {
       throw JSON::unknown_value_error{};

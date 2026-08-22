@@ -69,6 +69,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.window_size = None
     model.eps_with_windowed_kv_cache = {"cuda"}
     model.attention_attrs = {"paged_block_size": 256}
+    model._state_window = 0
     model.input_names = {
         "input_ids": "input_ids",
         "block_table": "block_table",
@@ -233,6 +234,23 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
+    assert "checkpoint_count" not in groups[1]
+    assert "checkpoint_count" not in groups[2]
+
+
+def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
+    layer_types = ["full_attention" if (layer_id + 1) % 4 == 0 else "linear_attention" for layer_id in range(64)]
+    model = _make_config_model(Qwen35TextModel, layer_types=layer_types)
+    model.context_length_attrs["state_window"] = 4
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    groups = config["model"]["decoder"]["state_groups"]
+    assert groups[1]["checkpoint_count"] == 4
+    assert groups[1]["checkpoint_alignment"] == "left"
+    assert groups[1]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.conv"
+    assert groups[2]["checkpoint_count"] == 4
+    assert groups[2]["checkpoint_alignment"] == "right"
+    assert groups[2]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.recurrent"
 
 
 def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path):
@@ -537,7 +555,7 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
     [
         (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
         (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
-        (True, "linear_attention", 1, "cuda", "require state_window=0"),
+        (True, "linear_attention", 9, "cuda", r"state_window in \[0, 8\]"),
         (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
 )
@@ -575,9 +593,9 @@ def _packed_gated_delta_net_model(
     model.linear_value_dim = 24
     model.linear_conv_kernel_dim = 4
     model.linear_num_key_heads = 2
-    model.linear_num_value_heads = 3
     model.linear_key_head_dim = 4
     model.linear_value_head_dim = 8
+    model.linear_num_value_heads = 3
     model.input_names = {}
     model.input_types = {"past.conv": model.io_dtype, "past.recurrent": model.io_dtype}
     model.input_shapes = {"past.conv": [4, "old"], "past.recurrent": [4, "old"]}
@@ -689,3 +707,137 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
     qwen_module.torch.testing.assert_close(exported_a_log, a_log)
     assert output.endswith("/gdn_out/Reshape/output_0")
+
+
+def test_qwen_packed_state_window_declares_checkpoint_outputs():
+    model = _packed_gated_delta_net_model(capacity=0)
+    model.context_length_attrs["state_window"] = 4
+    model.configure_gated_delta_net_io()
+
+    # The committed state keeps its unwindowed shape; only the extra outputs carry the window.
+    assert model.input_shapes["past.recurrent"] == ["batch_size", 3, 8, 4]
+    assert model.output_shapes["present.recurrent"] == ["batch_size", 3, 8, 4]
+    assert model.output_names["checkpoint.conv"] == {0: "checkpoints.0.conv"}
+    assert model.output_shapes["checkpoint.conv"] == [4, "batch_size", 48, 3]
+    assert model.output_types["checkpoint.conv"] == base_module.ir.DataType.FLOAT16
+    assert model.output_names["checkpoint.recurrent"] == {0: "checkpoints.0.recurrent"}
+    assert model.output_shapes["checkpoint.recurrent"] == [4, "batch_size", 3, 8, 4]
+    assert model.output_types["checkpoint.recurrent"] == base_module.ir.DataType.FLOAT
+
+
+def test_varlen_ops_emit_checkpoint_outputs():
+    model = _recording_model()
+    model.make_varlen_causal_conv_with_state(
+        "/conv",
+        root_input="x",
+        weight="w",
+        bias="b",
+        cumulative_sequence_length="cu",
+        past_conv_state="past",
+        present_conv_state="present",
+        prefix_conv_state="prefix",
+        max_checkpoints=4,
+        output_shape=["num_tokens", 48],
+        present_conv_shape=["batch_size", 48, 3],
+        prefix_conv_shape=[4, "batch_size", 48, 3],
+    )
+    conv = model.nodes[-1][1]
+    assert conv["outputs"] == ["/conv/output_0", "present", "prefix"]
+    assert conv["max_checkpoints"] == 4
+    assert model.values[-1] == ("prefix", base_module.ir.DataType.FLOAT16, [4, "batch_size", 48, 3])
+
+    model.make_varlen_gated_delta_net(
+        "/gdn",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        checkpoints="ckpt",
+        state_checkpoints=4,
+        decay="decay",
+        beta="beta",
+        gate_shape=["num_tokens", 3],
+        output_shape=["num_tokens", 3, 8],
+        present_recurrent_shape=["batch_size", 3, 8, 4],
+        checkpoints_shape=[4, "batch_size", 3, 8, 4],
+    )
+    gdn = model.nodes[-1][1]
+    assert gdn["outputs"] == ["/gdn/output_0", "present", "ckpt"]
+    assert gdn["state_checkpoints"] == 4
+    assert model.values[-1] == ("ckpt", base_module.ir.DataType.FLOAT, [4, "batch_size", 3, 8, 4])
+
+
+def test_varlen_ops_reject_half_configured_checkpoints():
+    model = _recording_model()
+    with pytest.raises(ValueError, match="must be set together"):
+        model.make_varlen_causal_conv_with_state(
+            "/conv",
+            root_input="x",
+            weight="w",
+            bias="b",
+            cumulative_sequence_length="cu",
+            past_conv_state="past",
+            present_conv_state="present",
+            max_checkpoints=4,
+            output_shape=["num_tokens", 48],
+            present_conv_shape=["batch_size", 48, 3],
+        )
+    with pytest.raises(ValueError, match="must be set together"):
+        model.make_varlen_gated_delta_net(
+            "/gdn",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_length="cu",
+            past_recurrent_state="past",
+            present_recurrent_state="present",
+            checkpoints="ckpt",
+            decay="decay",
+            beta="beta",
+            gate_shape=["num_tokens", 3],
+            output_shape=["num_tokens", 3, 8],
+            present_recurrent_shape=["batch_size", 3, 8, 4],
+        )
+
+
+def test_varlen_ops_reject_compact_updates_with_checkpoints():
+    model = _recording_model()
+    with pytest.raises(ValueError, match="cannot be emitted together"):
+        model.make_varlen_causal_conv_with_state(
+            "/conv",
+            root_input="x",
+            weight="w",
+            bias="b",
+            cumulative_sequence_length="cu",
+            past_conv_state="past",
+            present_conv_state="present",
+            state_update_capacity=3,
+            prefix_conv_state="prefix",
+            max_checkpoints=4,
+        )
+    with pytest.raises(ValueError, match="cannot be emitted together"):
+        model.make_varlen_gated_delta_net(
+            "/gdn",
+            q_path="q",
+            k_path="k",
+            v_path="v",
+            cumulative_sequence_length="cu",
+            past_recurrent_state="past",
+            present_recurrent_state="present",
+            decay="decay",
+            beta="beta",
+            gate_shape=["num_tokens", 3],
+            state_update_capacity=3,
+            checkpoints="ckpt",
+            state_checkpoints=4,
+        )
+
+
+def test_qwen_rejects_compact_updates_with_paged_state_window():
+    model = _packed_gated_delta_net_model(capacity=3)
+    model.context_length_attrs["state_window"] = 4
+
+    with pytest.raises(ValueError, match="cannot both be enabled"):
+        model.configure_gated_delta_net_io()

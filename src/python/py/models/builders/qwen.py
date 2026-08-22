@@ -118,7 +118,9 @@ class Qwen35TextModel(Model):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep != "cuda":
             raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
-        if uses_gated_delta_net and state_window:
+        if use_paged_attention and not 0 <= state_window <= 8:
+            raise ValueError("paged GatedDeltaNet exports require state_window in [0, 8]")
+        if not use_paged_attention and linear_attn_op == "gated_delta_net" and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -175,6 +177,22 @@ class Qwen35TextModel(Model):
             self.output_shapes["present.recurrent"] = recurrent_shape
 
         capacity = self.context_length_attrs["state_update_capacity"]
+        checkpoint_count = self.context_length_attrs["state_window"] if self.use_paged_attention else 0
+        if capacity and checkpoint_count:
+            raise ValueError("state_update_capacity and paged state_window cannot both be enabled")
+
+        if checkpoint_count:
+            self.output_names["checkpoint.conv"] = {
+                layer_id: f"checkpoints.{layer_id}.conv" for layer_id in linear_layers
+            }
+            self.output_types["checkpoint.conv"] = self.io_dtype
+            self.output_shapes["checkpoint.conv"] = [checkpoint_count, *self.output_shapes["present.conv"]]
+            self.output_names["checkpoint.recurrent"] = {
+                layer_id: f"checkpoints.{layer_id}.recurrent" for layer_id in linear_layers
+            }
+            self.output_types["checkpoint.recurrent"] = ir.DataType.FLOAT
+            self.output_shapes["checkpoint.recurrent"] = [checkpoint_count, *self.output_shapes["present.recurrent"]]
+
         if not capacity:
             return
 
@@ -332,6 +350,7 @@ class Qwen35TextModel(Model):
 
         if self.use_paged_attention:
             conv_op_name = f"{basename}/VarlenCausalConvWithState"
+            checkpoint_count = self.context_length_attrs["state_window"]
             self.make_varlen_causal_conv_with_state(
                 conv_op_name,
                 root_input=conv_input,
@@ -342,6 +361,9 @@ class Qwen35TextModel(Model):
                 present_conv_state=self.output_names["present.conv"][layer_id],
                 output_shape=["num_tokens", self.linear_conv_dim],
                 present_conv_shape=self.output_shapes["present.conv"],
+                prefix_conv_state=(self.output_names["checkpoint.conv"][layer_id] if checkpoint_count else ""),
+                max_checkpoints=checkpoint_count,
+                prefix_conv_shape=(self.output_shapes["checkpoint.conv"] if checkpoint_count else []),
                 **self.make_conv_state_update_kwargs(layer_id),
             )
             linear_output = self.make_gated_delta_net_layer(
@@ -501,12 +523,16 @@ class Qwen35TextModel(Model):
             "output_shape": [*token_shape, value_heads, value_head_dim],
         }
         if packed:
+            checkpoint_count = self.context_length_attrs["state_window"]
             self.make_varlen_gated_delta_net(
                 op_name,
                 cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
                 past_recurrent_state=self.input_names["past.recurrent"][layer_id],
                 present_recurrent_state=self.output_names["present.recurrent"][layer_id],
                 present_recurrent_shape=recurrent_shape,
+                checkpoints=(self.output_names["checkpoint.recurrent"][layer_id] if checkpoint_count else ""),
+                state_checkpoints=checkpoint_count,
+                checkpoints_shape=(self.output_shapes["checkpoint.recurrent"] if checkpoint_count else []),
                 **self.make_recurrent_state_update_kwargs(layer_id),
                 **shared_kwargs,
             )
@@ -730,6 +756,11 @@ class Qwen35TextModel(Model):
                     }
                 },
             }
+            checkpoint_count = self.context_length_attrs["state_window"]
+            if checkpoint_count:
+                group["bindings"]["state"]["checkpoints"] = f"checkpoints.%d.{state_name}"
+                group["checkpoint_count"] = checkpoint_count
+                group["checkpoint_alignment"] = "left" if state_name == "conv" else "right"
             state_update_capacity = (
                 self.context_length_attrs["state_update_capacity"]
                 if "state_update.capture_count" in self.input_names

@@ -138,6 +138,108 @@ std::string CaptureValidationError(const ModelStateManifest& manifest,
   return {};
 }
 
+// The speculative-rollback variant of the fixed group: the committed state keeps its shape and
+// the per-token series arrives through a separate output with one leading slot axis.
+Config::Model::Decoder MakeCheckpointDecoder(int checkpoint_count = 4) {
+  auto decoder = MakeSparseDecoder();
+  auto& fixed = decoder.state_groups->at(1);
+  fixed.state->checkpoints = "checkpoints.%d.conv";
+  fixed.checkpoint_count = checkpoint_count;
+  fixed.checkpoint_alignment = Config::Model::Decoder::CheckpointAlignment::Left;
+  return decoder;
+}
+
+FakeModelStateMetadata MakeCheckpointMetadata(int checkpoint_count = 4) {
+  auto metadata = MakeValidMetadata();
+  for (const int layer_id : {0, 2}) {
+    metadata.AddOutput(
+        "checkpoints." + std::to_string(layer_id) + ".conv",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+        {checkpoint_count, -1, 8192, 3});
+  }
+  return metadata;
+}
+
+TEST(ModelStateManifestTest, ValidatesCheckpointOutputs) {
+  const ModelStateManifest manifest{MakeCheckpointDecoder()};
+
+  EXPECT_NO_THROW(manifest.ValidateSession(MakeCheckpointMetadata()));
+}
+
+TEST(ModelStateManifestTest, RejectsMissingCheckpointOutput) {
+  const ModelStateManifest manifest{MakeCheckpointDecoder()};
+
+  const auto message = CaptureValidationError(manifest, MakeValidMetadata());
+  EXPECT_NE(message.find("checkpoints output was not found: checkpoints.0.conv"),
+            std::string::npos)
+      << message;
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointCountMismatch) {
+  const ModelStateManifest manifest{MakeCheckpointDecoder(4)};
+
+  const auto message = CaptureValidationError(manifest, MakeCheckpointMetadata(3));
+  EXPECT_NE(message.find("must be [4, ...]"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointRankMismatch) {
+  const ModelStateManifest manifest{MakeCheckpointDecoder()};
+  auto metadata = MakeCheckpointMetadata();
+  metadata.AddOutput(
+      "checkpoints.0.conv",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 8192, 3});
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("must be [4, ...]"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointCountWithoutTemplate) {
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->back().checkpoint_count = 4;
+
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointTemplateWithoutCount) {
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->back().state->checkpoints = "checkpoints.%d.conv";
+
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointsOnPagedGroup) {
+  auto decoder = MakeSparseDecoder();
+  auto& paged = decoder.state_groups->front();
+  paged.checkpoint_count = 4;
+  paged.key->checkpoints = "checkpoints.%d.key";
+
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, RejectsCheckpointTemplateColliding) {
+  auto decoder = MakeCheckpointDecoder();
+  decoder.state_groups->back().state->checkpoints = "present.%d.conv";
+
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
+  const ModelStateManifest hybrid{MakeSparseDecoder()};
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::Fixed));
+  EXPECT_TRUE(hybrid.HasFixedStateGroups());
+
+  Config::Model::Decoder legacy;
+  legacy.num_hidden_layers = 4;
+  const ModelStateManifest dense{legacy};
+  EXPECT_FALSE(dense.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_FALSE(dense.HasFixedStateGroups());
+}
+
 TEST(ModelStateManifestTest, ValidatesEveryExpandedBinding) {
   const ModelStateManifest manifest{MakeSparseDecoder()};
   const auto metadata = MakeValidMetadata();
@@ -250,6 +352,53 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   })";
   auto valid_config = std::make_unique<Config>(model_path, valid_overlay);
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
+}
+
+TEST(ModelStateManifestTest, ParsesCheckpointStateGroupFields) {
+  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const auto overlay = R"({
+    "model": {"decoder": {"state_groups": [{
+      "kind": "fixed",
+      "layer_ids": [0],
+      "checkpoint_count": 4,
+      "checkpoint_alignment": "left",
+      "bindings": {
+        "state": {
+          "input": "past_key_values.%d.conv",
+          "output": "present.%d.conv",
+          "checkpoints": "checkpoints.%d.conv"
+        }
+      }
+    }]}}
+  })";
+  const Config config{model_path, overlay};
+
+  ASSERT_TRUE(config.model.decoder.state_groups.has_value());
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 1u);
+  const auto& group = config.model.decoder.state_groups->front();
+  EXPECT_EQ(group.checkpoint_count, 4);
+  EXPECT_EQ(group.checkpoint_alignment, Config::Model::Decoder::CheckpointAlignment::Left);
+  ASSERT_TRUE(group.state.has_value());
+  EXPECT_EQ(group.state->checkpoints, "checkpoints.%d.conv");
+}
+
+TEST(ModelStateManifestTest, RejectsOutOfRangeCheckpointCount) {
+  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const auto overlay = R"({
+    "model": {"decoder": {"state_groups": [{
+      "kind": "fixed",
+      "layer_ids": [0],
+      "checkpoint_count": 9,
+      "bindings": {
+        "state": {
+          "input": "past_key_values.%d.conv",
+          "output": "present.%d.conv",
+          "checkpoints": "checkpoints.%d.conv"
+        }
+      }
+    }]}}
+  })";
+  EXPECT_THROW((Config{model_path, overlay}), std::runtime_error);
 }
 
 TEST(ModelStateManifestTest, AcceptsFixedDynamicEngineContract) {

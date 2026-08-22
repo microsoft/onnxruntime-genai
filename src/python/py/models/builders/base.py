@@ -2085,7 +2085,7 @@ class Model:
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
     def make_varlen_causal_conv_with_state(self, name, **kwargs):
-        """Emit packed causal convolution with optional compact state updates."""
+        """Emit packed causal convolution with an optional compact update or checkpoint series."""
         inputs = [
             kwargs["root_input"],
             kwargs["weight"],
@@ -2094,6 +2094,12 @@ class Model:
             kwargs["past_conv_state"],
         ]
         state_update_capacity = kwargs.get("state_update_capacity", 0)
+        checkpoints = kwargs.get("prefix_conv_state", "")
+        max_checkpoints = kwargs.get("max_checkpoints", 0)
+        if bool(checkpoints) != bool(max_checkpoints):
+            raise ValueError("prefix_conv_state and max_checkpoints must be set together")
+        if state_update_capacity and max_checkpoints:
+            raise ValueError("compact state updates and checkpoints cannot be emitted together")
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
 
@@ -2102,10 +2108,14 @@ class Model:
         outputs = [output, present_conv]
         if state_update_capacity:
             outputs.append(kwargs["state_update_value"])
+        elif checkpoints:
+            outputs.append(checkpoints)
 
         attributes = {"activation": kwargs.get("activation", "silu")}
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
+        elif max_checkpoints:
+            attributes["max_checkpoints"] = max_checkpoints
         self.make_node(
             "VarlenCausalConvWithState",
             inputs=inputs,
@@ -2118,6 +2128,8 @@ class Model:
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
         if state_update_capacity:
             self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
+        elif checkpoints:
+            self.make_value(checkpoints, self.io_dtype, shape=kwargs["prefix_conv_shape"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -3943,7 +3955,7 @@ class Model:
         self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
-        """Emit packed GatedDeltaNet with optional compact transition capsules."""
+        """Emit packed GatedDeltaNet with an optional compact update or checkpoint series."""
         decay, beta = self.make_gated_delta_net_gates(name, kwargs)
         inputs = [
             kwargs["q_path"],
@@ -3959,6 +3971,12 @@ class Model:
         if bool(a_log) != bool(dt_bias):
             raise ValueError("a_log and dt_bias must be set together")
         state_update_capacity = kwargs.get("state_update_capacity", 0)
+        checkpoints = kwargs.get("checkpoints", "")
+        state_checkpoints = kwargs.get("state_checkpoints", 0)
+        if bool(checkpoints) != bool(state_checkpoints):
+            raise ValueError("checkpoints and state_checkpoints must be set together")
+        if state_update_capacity and state_checkpoints:
+            raise ValueError("compact state updates and checkpoints cannot be emitted together")
         if a_log or state_update_capacity:
             inputs.extend([a_log, dt_bias])
         state_update_capture_count = kwargs.get("state_update_capture_count", "")
@@ -3977,10 +3995,14 @@ class Model:
         outputs = [output, present_recurrent]
         if state_update_capacity:
             outputs.append(kwargs["state_update_capsule"])
+        elif checkpoints:
+            outputs.append(checkpoints)
 
         attributes = self.make_gated_delta_net_attributes(kwargs)
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
+        elif state_checkpoints:
+            attributes["state_checkpoints"] = state_checkpoints
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
@@ -3997,6 +4019,8 @@ class Model:
                 ir.DataType.FLOAT,
                 shape=kwargs["state_update_capsule_shape"],
             )
+        elif checkpoints:
+            self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
         decay = f"{name}/output_0"
@@ -4025,83 +4049,6 @@ class Model:
             kwargs.get("cos_cache", ""),
             kwargs.get("sin_cache", ""),
         ]
-        output = f"{name}/output_0"
-        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node(
-            "SparseAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            sparse_block_size=self.attention_attrs["block_sparse"]["sparse_block_size"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rope_attrs["interleaved"],
-        )
-
-    def make_paged_attention(self, name, **kwargs):
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs.get("past_k", ""),
-            kwargs.get("past_v", ""),
-            kwargs["cumulative_sequence_lengths"],
-            kwargs["past_sequence_lengths"],
-            kwargs["block_table"],
-            kwargs.get("cos_cache", ""),
-            kwargs.get("sin_cache", ""),
-        ]
-
-        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_inputs(**kwargs)
-        k_scale_name, v_scale_name = self.get_kv_cache_scale_inputs(**kwargs)
-
-        # Optional trailing inputs of PagedAttention, in schema order:
-        #   10: slot_mapping, 11: head_sink, 12: q_norm_weight, 13: k_norm_weight, 14: k_scale, 15: v_scale,
-        #   16: attention_metadata
-        # The scheduler-provided slot_mapping is not used here; slots are derived from
-        # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
-        # in CPU memory so the op can select a backend and size its launch without a device-to-host
-        # readback of the sequence lengths. Feeding it is what removes the per-node stream
-        # synchronization on the decode path.
-        self.extend_with_optional_inputs(
-            inputs,
-            [
-                "",  # slot_mapping
-                kwargs.get("sinks", ""),  # head_sink
-                q_norm_weight,
-                k_norm_weight,
-                k_scale_name,
-                v_scale_name,
-                kwargs.get("attention_metadata", ""),
-            ],
-        )
-
-        output = f"{name}/output_0"
-        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        # PagedAttention derives the cache element type from the tensor itself, so unlike
-        # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
-        attributes = self.get_attention_op_attributes(**kwargs)
-        self.make_node(
-            "PagedAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            **attributes,
-        )
-        self.make_value(output, self.io_dtype, shape=["num_tokens", self.head_size * self.num_attn_heads])
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        # Make nodes for the Attention subgraph
-        #
-        # MultiHeadAttention example:
-        #
-        #               root_input
-        #              /     |     \
         #       Q_MatMul  K_MatMul  V_MatMul  4D causal mask  past_key  past_value
         #           |        |         |            |            |           |
         #         Q_Add    K_Add     V_Add          +------------+-----------+

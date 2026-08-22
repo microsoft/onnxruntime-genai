@@ -397,6 +397,16 @@ struct Config {
       struct StateBinding {
         std::string input;
         std::string output;
+        // Optional third output exposing the per-token state series of this state, shaped
+        // [checkpoint_count, ...output shape]. Present only on models exported for speculative
+        // decoding; the runtime promotes one slot to `output` to roll back a rejected draft.
+        std::string checkpoints;
+      };
+
+      // Which slot of a checkpoint output corresponds to which token of the step.
+      enum class CheckpointAlignment {
+        Left,   // Slot j is the state after local token j (VarlenCausalConvWithState).
+        Right,  // Slot count-1 is the state after the last token (GatedDeltaNet).
       };
 
       enum class StateUpdateKind {
@@ -423,6 +433,8 @@ struct Config {
         std::optional<StateBinding> value;
         std::optional<StateBinding> state;
         std::optional<StateUpdate> state_update;
+        int checkpoint_count{0};
+        CheckpointAlignment checkpoint_alignment{CheckpointAlignment::Right};
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.
