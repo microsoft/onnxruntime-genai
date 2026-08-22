@@ -63,6 +63,17 @@ void HybridDecoderIO::BindFixedState() {
     inputs_.push_back(binding.input);
     output_names_.push_back(binding.output_name);
     outputs_.push_back(binding.output);
+    // A step that verifies drafts also fetches the per-token state series it may roll back to.
+    // Leaving it unbound on every other step keeps the operators from writing it at all.
+    if (binding.checkpoints) {
+      if (!binding.checkpoints_name ||
+          !output_names.insert(binding.checkpoints_name).second) {
+        throw std::runtime_error(
+            "Hybrid fixed state contains an invalid or duplicate checkpoints binding.");
+      }
+      output_names_.push_back(binding.checkpoints_name);
+      outputs_.push_back(binding.checkpoints);
+    }
   }
 }
 
