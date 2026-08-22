@@ -477,6 +477,14 @@ class Model:
                 self.make_attention_mask_reformatting_for_gqa = (
                     WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__get__(self, self.__class__)
                 )
+                # Qwen3.5 VL: replace the Shape-based synthetic position_ids
+                # subgraph with a Shape-free equivalent so no Memcpy nodes are
+                # inserted. Bound as an instance attribute so the subclass's
+                # class method is shadowed at call time. Harmless for models
+                # that never call _make_synthetic_position_ids.
+                self._make_synthetic_position_ids = (
+                    WebGPU.make_synthetic_position_ids_graph_capture.__get__(self, self.__class__)
+                )
 
         else:
             return
@@ -1674,6 +1682,19 @@ class Model:
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_cum_sum(self, name, inputs, dtype, shape, exclusive=0, reverse=0):
+        # inputs = [x, axis_scalar_tensor_name]
+        output = f"{name}/output_0"
+        self.make_node(
+            "CumSum",
+            inputs=inputs,
+            outputs=[output],
+            name=name,
+            exclusive=exclusive,
+            reverse=reverse,
+        )
         self.make_value(output, dtype, shape=shape)
 
     def make_sqrt(self, name, inputs, dtype, shape):
