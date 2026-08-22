@@ -60,24 +60,22 @@ void Engine::AddRequest(std::shared_ptr<Request> request) {
     request->ValidateEngineCompatibility();
   }
 
-  // Track the request before assignment so every successfully submitted request can later be found
-  // even when the scheduler and cache hold it through implementation-specific containers. The
-  // registry allocation therefore happens before any request lifecycle mutation.
-  tracked_requests_.push_back(request);
-  try {
-    request->Assign(shared_from_this());
-    scheduler_->AddRequest(request);
-  } catch (...) {
-    tracked_requests_.pop_back();
-    throw;
-  }
+  auto request_preparation = request->PrepareAdmission();
+  tracked_requests_.reserve(tracked_requests_.size() + 1);
+  auto scheduler_preparation = scheduler_->PrepareAddRequest(request);
+
+  request_preparation.sampling_state =
+      std::move(scheduler_preparation.sampling_state);
+  request->CommitAdmission(shared_from_this(), std::move(request_preparation));
+  scheduler_->CommitAddRequest(request, std::move(scheduler_preparation));
+  tracked_requests_.emplace_back(request);
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   if (request && IsClosed(request->status_)) {
     return;
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
   }
 
@@ -93,7 +91,7 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
   staged_ready_requests_.erase(
       std::remove(staged_ready_requests_.begin(), staged_ready_requests_.end(), request),
       staged_ready_requests_.end());
-  request->CompleteClose();
+  request->CompleteCloseFromEngine(*this);
   tracked_requests_.erase(
       std::remove_if(
           tracked_requests_.begin(), tracked_requests_.end(),
@@ -105,8 +103,8 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 void Engine::ReclaimAbandonedRequests() {
-  // ExternalRelease only publishes an atomic abandonment marker. Engine entry points are externally
-  // serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
+  // ExternalRelease only publishes synchronized external-lifecycle state. Engine entry points are
+  // externally serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
   // release, ready-notification purge, and terminal close.
   std::vector<std::shared_ptr<Request>> abandoned_requests;
   abandoned_requests.reserve(tracked_requests_.size());
@@ -119,8 +117,8 @@ void Engine::ReclaimAbandonedRequests() {
               return true;
             }
             if (!IsClosed(request->status_) &&
-                request->engine_.lock().get() == this &&
-                request->IsExternallyAbandoned()) {
+                request->BelongsTo(*this) &&
+                request->ExternalReferencesAbandoned()) {
               abandoned_requests.push_back(request);
             }
             return false;
@@ -129,7 +127,7 @@ void Engine::ReclaimAbandonedRequests() {
 
   for (const auto& request : abandoned_requests) {
     // Recheck defensively in case an external owner was reacquired before this serialized boundary.
-    if (request->IsExternallyAbandoned()) {
+    if (request->ExternalReferencesAbandoned()) {
       RemoveRequest(request);
     }
   }
@@ -139,7 +137,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (request->engine_.lock().get() != this) {
+  if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
   }
 
@@ -174,7 +172,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
     message = AddExceptionCause(
         std::move(message) + " Closing the poisoned request also failed.",
         std::current_exception());
-    request->CompleteClose();
+    request->CompleteCloseFromEngine(*this);
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,

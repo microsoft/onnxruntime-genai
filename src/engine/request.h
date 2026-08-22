@@ -16,15 +16,6 @@
 
 namespace Generators {
 
-struct Request;
-struct ScheduledRequests;
-struct StaticBatchScheduler;
-
-template <>
-struct ExternalRefCountedTraits<Request> {
-  static constexpr bool notify_external_reference_changes = true;
-};
-
 struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
@@ -34,6 +25,21 @@ struct RequestStepResult {
 // Every Engine Request has one sequence and one beam, so a chunk-complete step can append at most
 // one generated-output index.
 inline constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
+
+struct RequestAdmissionPreparation {
+  RequestAdmissionPreparation();
+  ~RequestAdmissionPreparation();
+  RequestAdmissionPreparation(RequestAdmissionPreparation&&) noexcept;
+  RequestAdmissionPreparation& operator=(RequestAdmissionPreparation&&) noexcept;
+  RequestAdmissionPreparation(const RequestAdmissionPreparation&) = delete;
+  RequestAdmissionPreparation& operator=(const RequestAdmissionPreparation&) = delete;
+
+  std::unique_ptr<Search> search;
+  std::unique_ptr<BatchedSamplerState> sampling_state;
+  std::vector<int32_t> tokens_host;
+  int64_t prompt_sequence_length{};
+  int64_t seen_sequence_length{};
+};
 
 /**
  * @class Request
@@ -54,13 +60,12 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   Request(std::shared_ptr<GeneratorParams> params);
 
-  /**
-   * @brief Assigns this request to a specific engine for processing.
-   * @param engine Shared pointer to the Engine to be used for processing this request.
-   *
-   * Once assigned, the request will finalize the prefill tokens and prepare for scheduling.
-   */
+  // Compatibility helper for tests and direct scheduler clients. Engine admission uses the
+  // prepare/commit methods below so no ownership is published until every throwing step succeeds.
   void Assign(std::shared_ptr<Engine> engine);
+  RequestAdmissionPreparation PrepareAdmission() const;
+  void CommitAdmission(std::shared_ptr<Engine> engine,
+                       RequestAdmissionPreparation&& preparation) noexcept;
 
   /**
    * @brief Updates the status of the request to Active and prepares it for processing.
@@ -172,6 +177,11 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void Remove();
 
+  // Internal lifecycle capabilities used by Engine orchestration. These keep ownership and terminal
+  // mutation inside Request instead of exposing its weak owner or granting Engine private access.
+  bool BelongsTo(const Engine& engine) const noexcept;
+  void CompleteCloseFromEngine(const Engine& engine) noexcept;
+
   /**
    * @brief Checks if the request is in prefill mode.
    * @return True while the tokens the application supplied have not all been through the model.
@@ -238,6 +248,10 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void AdvanceChunk();
 
+  // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
+  // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
+  void PrepareForStep(size_t max_generated_token_indices);
+
   RequestStatus status_{RequestStatus::Unassigned};
 
   /**
@@ -271,6 +285,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Returns this request's persistent random state for the given batched sampler.
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
+  void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
 
   /**
    * @brief Retrieves the generator parameters associated with this request.
@@ -310,18 +325,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<size_t> unseen_token_indices_;
   size_t next_unseen_token_index_{};
   int64_t seen_sequence_length_{};
-  friend struct Engine;
-  friend struct ExternalRefCounted<Request>;
-  friend struct ScheduledRequests;
-  friend struct StaticBatchScheduler;
-
-  void CompleteClose();
-  void OnFirstExternalReference() noexcept;
-  void OnLastExternalReference() noexcept;
-  bool IsExternallyAbandoned() const noexcept;
-  // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
-  // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
-  void PrepareForStep(size_t max_generated_token_indices);
+  void CompleteClose() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -334,7 +338,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
-  std::atomic<bool> externally_abandoned_{false};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();

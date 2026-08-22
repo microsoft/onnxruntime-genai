@@ -12,7 +12,7 @@ The current dynamic path manages paged KV decoder state together with per-reques
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
-> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes completion and unseen-output access as well as lifecycle mutation. Final handle release only publishes an atomic abandonment marker; cleanup runs at the next serialized Engine boundary. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
+> **Serialization requirement:** Except for releasing an external request handle, every call on an `Engine` and on any `Request` owned by that engine must be externally serialized with `Engine::Step()`. This includes completion and unseen-output access as well as lifecycle mutation. Final handle release only publishes an abandonment marker; cleanup runs at the next serialized Engine boundary. External handle zero/one transitions serialize the self-owner and base-owned lifecycle state, so a concurrent handle returned by `Engine::Step()` cannot be erased by the previous handle's final release. The API is otherwise not thread-safe, and idempotent terminal removal only makes sequential retries harmless.
 
 The main implementation is under `src/engine/`:
 
@@ -62,6 +62,13 @@ return ready requests one at a time
 ```
 
 The step is transactional. Planning and reservation do not immediately change committed request or cache state. If a recoverable failure occurs before commit, the engine restores the request search state and releases the reserved cache blocks. A failure during the commit boundary is considered fatal because the engine can no longer guarantee that all cooperating components agree on the committed state.
+
+Diagnostic invariant snapshots cross-check each committed full-cache table's used slots against its
+Request's `processed_sequence_length_`. For windowed caches, the full and ring-cache owner sets must
+match. Full-cache tables, ring-cache tables, and active reservation deltas must all refer to known
+Request snapshots, and each reservation records both its full-cache and window-cache block ownership
+so inconsistent membership or unattributed reserved blocks are detectable. These checks are test and
+diagnostic machinery; they do not add validation to the runtime hot path.
 
 ## How the dynamic path is selected
 
@@ -115,15 +122,20 @@ The request is not owned by an engine. `AddTokens()` accumulates the initial pro
 
 ### `Assigned`
 
-`Engine::AddRequest()` validates the request, calls `Request::Assign()`, and adds it to the scheduler pool.
+`Engine::AddRequest()` validates the request, prepares a detached search sequence, device prompt,
+host mirrors, sampler state, scheduler capacity, and Engine tracking capacity, then commits the
+request and inserts it into the scheduler using nonthrowing moves into reserved storage.
 
 This is the queued state. `Engine::AddRequest()` moves a new request here before first admission.
 `Continue()` also moves a cache-resident `TurnComplete` request here while its next input waits for
 execution.
 
-For a new request, assignment moves the prompt into `Search`, creates the host-side token mirror,
-initializes the sequence counters, and records the owning Engine. `AddTokens()` and `Continue()` are
-both rejected while already queued. Input must leave room for at least one generated token below
+For a new request, admission does not publish Engine ownership or queued status until all request and
+scheduler preparation succeeds. A preparation failure therefore leaves the request `Unassigned`
+with its original prompt intact and eligible for retry. Commit moves the prepared prompt into
+`Search`, installs the host-side token mirror and sampler state, initializes the sequence counters,
+records the owning Engine, and inserts the request into the scheduler. `AddTokens()` and `Continue()`
+are both rejected while already queued. Input must leave room for at least one generated token below
 `max_length`.
 
 `max_length` is the cumulative total sequence limit for the entire session: the initial prompt, generated output, and every continuation input all count against the same limit. `Continue()` does not reset it, and it is not a per-turn generation budget.
@@ -146,6 +158,10 @@ the model's chat template.
 `AddTokens()` remains an initial-input-only operation.
 
 A submitted request remains owned by its Engine and resident at `TurnComplete`. `Remove()` releases that ownership immediately. If every external handle is released instead, the request is marked abandoned and reclaimed before the Engine's next `AddRequest()` or `Step()` boundary.
+
+Automatic abandonment on final handle destruction is transitional behavior, not logical close. The
+external-reference machinery keeps that behavior race-free today, but the production ownership layer
+should keep handle destruction separate from explicit request close rather than reusing this policy.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Remove()` when they no

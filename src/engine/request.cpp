@@ -9,6 +9,13 @@
 
 namespace Generators {
 
+RequestAdmissionPreparation::RequestAdmissionPreparation() = default;
+RequestAdmissionPreparation::~RequestAdmissionPreparation() = default;
+RequestAdmissionPreparation::RequestAdmissionPreparation(
+    RequestAdmissionPreparation&&) noexcept = default;
+RequestAdmissionPreparation& RequestAdmissionPreparation::operator=(
+    RequestAdmissionPreparation&&) noexcept = default;
+
 namespace {
 
 DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
@@ -55,36 +62,52 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   search_->DeferCompletion(true);
 }
 
-void Request::OnFirstExternalReference() noexcept {
-  externally_abandoned_.store(false, std::memory_order_release);
+bool Request::BelongsTo(const Engine& engine) const noexcept {
+  return engine_.lock().get() == &engine;
 }
 
-void Request::OnLastExternalReference() noexcept {
-  externally_abandoned_.store(true, std::memory_order_release);
-}
-
-bool Request::IsExternallyAbandoned() const noexcept {
-  return externally_abandoned_.load(std::memory_order_acquire);
+void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  CompleteClose();
 }
 
 void Request::Assign(std::shared_ptr<Engine> engine) {
+  auto preparation = PrepareAdmission();
+  CommitAdmission(std::move(engine), std::move(preparation));
+}
+
+RequestAdmissionPreparation Request::PrepareAdmission() const {
   if (status_ != RequestStatus::Unassigned) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
   if (prefill_input_ids_.empty()) {
     throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
   }
-  engine_ = engine;
-  status_ = RequestStatus::Assigned;
 
+  RequestAdmissionPreparation preparation;
+  preparation.search = CreateSearch(*params_);
+  preparation.search->DeferCompletion(true);
   auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
+  preparation.search->AppendTokens(device_tokens);
+  preparation.prompt_sequence_length = preparation.search->GetSequenceLength();
+  preparation.seen_sequence_length = preparation.prompt_sequence_length;
+  preparation.tokens_host.reserve(params_->search.max_length);
+  preparation.tokens_host.insert(
+      preparation.tokens_host.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
+  return preparation;
+}
+
+void Request::CommitAdmission(std::shared_ptr<Engine> engine,
+                              RequestAdmissionPreparation&& preparation) noexcept {
+  search_ = std::move(preparation.search);
+  batched_sampler_state_ = std::move(preparation.sampling_state);
+  tokens_host_ = std::move(preparation.tokens_host);
+  prompt_sequence_length_ = preparation.prompt_sequence_length;
+  seen_sequence_length_ = preparation.seen_sequence_length;
   processed_sequence_length_ = 0;
-  search_->AppendTokens(device_tokens);
-  prompt_sequence_length_ = CurrentSequenceLength();
-  seen_sequence_length_ = CurrentSequenceLength();
-  tokens_host_.reserve(params_->search.max_length);
-  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
   prefill_input_ids_.clear();
+  engine_ = std::move(engine);
+  status_ = RequestStatus::Assigned;
 }
 
 void Request::PrepareForStep(size_t max_generated_token_indices) {
@@ -157,7 +180,7 @@ void Request::Remove() {
   engine->RemoveRequest(shared_from_this());
 }
 
-void Request::CompleteClose() {
+void Request::CompleteClose() noexcept {
   engine_.reset();
   status_ = RequestStatus::Closed;
 }
@@ -480,6 +503,12 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
   if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
     batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
   return *batched_sampler_state_;
+}
+
+void Request::CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept {
+  if (state) {
+    batched_sampler_state_ = std::move(state);
+  }
 }
 
 void Request::CompleteGeneration() {
