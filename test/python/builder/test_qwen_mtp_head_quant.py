@@ -10,10 +10,8 @@ import onnx_ir as ir
 import pytest
 import torch
 
-import models.builders.qwen as qwen_module
-from models.builders.qwen import Qwen35MoEModel, Qwen35MTPModel
-
-QuantConfig = qwen_module.QuantConfig
+from models.builders.qwen import Qwen35MoEModel
+from loaders.qwen import QwenMTPModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -181,10 +179,11 @@ def test_mtp_dense_fp4_requires_a_supported_dense_format():
 def test_modelopt_mtp_loader_consumes_parsed_modules():
     layer = SimpleNamespace()
     embedding = torch.ones((2, 2), dtype=torch.bfloat16)
+    embedding_module = SimpleNamespace(weight=embedding)
     lm_head = SimpleNamespace(weight_scale_2=torch.tensor(0.5))
     fc = SimpleNamespace(weight_scale_2=torch.tensor(0.25))
     parsed = SimpleNamespace(
-        embedding=SimpleNamespace(weight=embedding),
+        embedding=embedding_module,
         lm_head=lm_head,
         mtp=SimpleNamespace(
             fc=fc,
@@ -194,13 +193,9 @@ def test_modelopt_mtp_loader_consumes_parsed_modules():
             layers=[layer],
         ),
     )
-    head = object.__new__(Qwen35MTPModel)
-    head.load_weights = lambda input_path: parsed
+    mtp = QwenMTPModel.from_modelopt(parsed, layer_config=None, preserve_quantization=True)
 
-    head.preserve_modelopt_mtp = True
-    head.load_modelopt_mtp("checkpoint")
-
-    assert head.mtp_embed_weight is embedding
-    assert head.mtp_lm_head is lm_head
-    assert head.mtp_fc is fc
-    assert head.mtp_layer is layer
+    assert mtp.embedding is embedding_module
+    assert mtp.lm_head is lm_head
+    assert mtp.fc is fc
+    assert mtp.layers == [layer]

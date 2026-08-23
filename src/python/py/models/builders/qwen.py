@@ -7,14 +7,12 @@
 # Portions of this file consist of AI generated content.
 
 import copy
-import glob
 import json
 import os
 
 import numpy as np
 import onnx_ir as ir
 import torch
-from quantization import QuantConfig, resolve_dtype
 from transformers import Qwen2ForCausalLM
 
 from .base import Model
@@ -479,20 +477,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Keep the checkpoint's original FP8 (E4M3) weights instead of dequantizing them
-        # to fp16 and re-quantizing to int4/int8. Both the self-attention q/k/v/o projections
-        # and the GatedDeltaNet (linear-attention) ``in_proj_qkv`` / ``in_proj_z`` / ``out_proj``
-        # projections are emitted as the weight-only ``MatMulBlockQuantizedFp8Weight`` contrib op.
-        # ModelOpt FP8 KV-cache metadata is mapped onto the generic
-        # `kv_cache_quant_type=fp8_per_tensor` machinery before this model is initialized.
-
-        # Keep the checkpoint's original NVFP4 (E2M1) *dense* weights instead of dequantizing
-        # them to fp16 and re-quantizing to int4/int8. The shared-expert MLP and lm_head
-        # projections are emitted as the weight-only ``MatMulBlockQuantizedFp4Weight`` contrib op straight from
-        # the ModelOpt tensors (E2M1 codes + E4M3 block scale + fp32 global scale). NOTE: the
-        # NVFP4 *routed MoE experts* are controlled separately by ``moe_quant_type=nvfp4``
-        # (native NVFP4 QMoE); this flag only covers the dense NVFP4 modules.
-
         # MoE attributes specific to Qwen-3.5 MoE
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
@@ -613,43 +597,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return shared_output, f"{gate_sigmoid_name}/output_0"
 
 
-def mtp_dtypes_from_quant_config(quant_config):
-    io_dtype = {
-        "fp16": ir.DataType.FLOAT16,
-        "bf16": ir.DataType.BFLOAT16,
-        "fp32": ir.DataType.FLOAT,
-    }[quant_config.io_dtype]
-    weights = resolve_dtype(quant_config.weights.type)
-    if weights.kind == "mx":
-        raise ValueError(
-            f"MTP dense weights.type={weights.name} is not supported; use int4/int8/none for dense weights "
-            "and select mxfp4/nvfp4 independently through moe.type"
-        )
-    if weights.kind != "int":
-        return io_dtype, io_dtype
-
-    signed = weights.signed is not False and quant_config.weights.symmetric
-    if weights.bits == 8:
-        onnx_dtype = ir.DataType.INT8 if signed else ir.DataType.UINT8
-    else:
-        onnx_dtype = ir.DataType.INT4 if signed else ir.DataType.UINT4
-    return io_dtype, onnx_dtype
-
-
-class LinearWeight:
-    def __init__(self, weight, weight_scale=None, weight_scale_2=None, input_scale=None, bias=None):
-        self.weight = weight
-        self.weight_scale = weight_scale
-        self.weight_scale_2 = weight_scale_2
-        self.input_scale = input_scale
-        self.bias = bias
-
-
-class RMSNormWeight:
-    def __init__(self, weight):
-        self.weight = weight
-
-
 class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
 
@@ -711,23 +658,6 @@ class Qwen35MoEModel(MTPModel):
             cache_dir,
             mtp_options,
         )
-
-    def resolve_mtp_model_config(self, extra_options):
-        mtp_quant_config_value = extra_options.get("mtp_quant_config")
-        if mtp_quant_config_value is None:
-            return
-
-        inherited_options = {
-            key: copy.deepcopy(extra_options[key]) for key in ("hf_token", "hf_remote") if key in extra_options
-        }
-        quant_config = (
-            copy.deepcopy(mtp_quant_config_value)
-            if isinstance(mtp_quant_config_value, QuantConfig)
-            else QuantConfig.from_json(mtp_quant_config_value)
-        )
-        self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = mtp_dtypes_from_quant_config(quant_config)
-        inherited_options["_quant_config"] = quant_config
-        self.mtp_attrs["extra_options"] = inherited_options
 
     def make_model(self, input_path):
         self.decoder.make_model(input_path)
@@ -808,7 +738,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         extra_options["num_hidden_layers"] = 1
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.preserve_modelopt_mtp = self.quant_type == "modelopt" and "_quant_config" not in extra_options
+        self.preserve_mtp_quantization = "_quant_config" not in extra_options
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
@@ -823,10 +753,10 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         self.layernorm_attrs["skip_input"] = projected
         self.layernorm_attrs["first_layernorm"] = True
 
-        self.make_layer(0, self.mtp_layer)
-        self.make_layernorm(1, RMSNormWeight(self.mtp_norm_weight), skip=True, simple=True, location="final_norm")
+        self.make_layer(0, self.mtp_weights.layers[0])
+        self.make_layernorm(1, self.mtp_weights.norm, skip=True, simple=True, location="final_norm")
         mtp_norm_output = self.layernorm_attrs["output_0"]
-        self.make_lm_head(self.mtp_lm_head)
+        self.make_lm_head(self.mtp_weights.lm_head)
 
         hidden_states_output = "hidden_states_out"
         self.make_node(
@@ -843,105 +773,23 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         self.model.graph.outputs.append(hidden_states_value)
 
         self.make_postprocessing_nodes()
-        del self.mtp_layer
+        del self.mtp_weights
 
     def load_mtp_weights(self, input_path):
-        if self.quant_type == "modelopt":
-            self.load_modelopt_mtp(input_path)
-        else:
-            self.load_safetensor_mtp(input_path)
-
-    def load_safetensor_mtp(self, input_path):
-        import safetensors.torch as safetensors_torch  # noqa: PLC0415
-
         model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
-        shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
-        if not shards:
-            raise FileNotFoundError(f"No .safetensors files found in '{model_dir}' for MTP weight loading.")
-
-        mtp_state = {}
-        embed_weight = None
-        lm_head_weight = None
-        embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
-        for shard in shards:
-            with safetensors_torch.safe_open(shard, framework="pt") as safetensors_file:
-                for key in safetensors_file:
-                    if key.startswith("mtp."):
-                        mtp_state[key] = safetensors_file.get_tensor(key)
-                    elif key in embed_keys:
-                        embed_weight = safetensors_file.get_tensor(key)
-                    elif key == "lm_head.weight":
-                        lm_head_weight = safetensors_file.get_tensor(key)
-
-        if not mtp_state:
-            raise ValueError(f"No 'mtp.*' weights found in '{model_dir}'; this model has no MTP head.")
-        if embed_weight is None:
-            raise ValueError(
-                "Could not find the token embedding weight "
-                "('model.embed_tokens.weight' or 'model.language_model.embed_tokens.weight') "
-                "for the MTP head embedding."
-            )
-        if lm_head_weight is None:
-            raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
-
-        self.make_mtp_modules(mtp_state, embed_weight, lm_head_weight)
-
-    def make_mtp_modules(self, mtp_state, embed_weight, lm_head_weight):
         try:
-            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (  # noqa: PLC0415
-                Qwen3_5MoeDecoderLayer,
-            )
-        except ImportError as exc:
-            raise ImportError(
-                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
-            ) from exc
+            from loaders.qwen import QwenMTPModel  # noqa: PLC0415
+        except ImportError:
+            from onnxruntime_genai.models.loaders.qwen import QwenMTPModel  # noqa: PLC0415
 
-        self.mtp_embed_weight = embed_weight
-        self.mtp_lm_head = LinearWeight(lm_head_weight)
-        self.mtp_fc = LinearWeight(mtp_state["mtp.fc.weight"])
-        self.mtp_pre_fc_norm_embedding_weight = mtp_state["mtp.pre_fc_norm_embedding.weight"]
-        self.mtp_pre_fc_norm_hidden_weight = mtp_state["mtp.pre_fc_norm_hidden.weight"]
-        self.mtp_norm_weight = mtp_state["mtp.norm.weight"]
-
-        mtp_layer = Qwen3_5MoeDecoderLayer(self.mtp_layer_config, layer_idx=0)
-        layer_state = {
-            key[len("mtp.layers.0.") :]: value
-            for key, value in mtp_state.items()
-            if key.startswith("mtp.layers.0.")
-        }
-        missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
-        if missing or unexpected:
-            details = []
-            if missing:
-                details.append(f"missing={missing}")
-            if unexpected:
-                details.append(f"unexpected={unexpected}")
-            raise ValueError("Invalid MTP decoder-layer weights: " + ", ".join(details))
-        mtp_layer.eval()
-        self.mtp_layer = mtp_layer
-
-    def load_modelopt_mtp(self, input_path):
-        model = self.load_weights(input_path)
-        if model.mtp is None:
-            raise ValueError(f"No 'mtp.*' weights found in '{input_path}'; this model has no MTP head.")
-        if not self.preserve_modelopt_mtp:
-            mtp_state = model.dequantize_state(model.mtp.state)
-            lm_head_weight = model.dequantize_tensor(
-                model.lm_head.weight,
-                model.lm_head.weight_scale,
-                model.lm_head.weight_scale_2,
-                "lm_head.weight",
-            )
-            self.make_mtp_modules(mtp_state, model.embedding.weight, lm_head_weight)
-            return
-
-        self.mtp_embed_weight = model.embedding.weight
-        self.mtp_lm_head = model.lm_head
-        self.mtp_fc = model.mtp.fc
-        self.mtp_pre_fc_norm_embedding_weight = model.mtp.pre_fc_norm_embedding.weight
-        self.mtp_pre_fc_norm_hidden_weight = model.mtp.pre_fc_norm_hidden.weight
-        self.mtp_norm_weight = model.mtp.norm.weight
-        self.mtp_layer = model.mtp.layers[0]
+        self.mtp_weights = QwenMTPModel.from_pretrained(
+            self.quant_type,
+            input_path,
+            model_dir,
+            self.mtp_layer_config,
+            preserve_quantization=self.preserve_mtp_quantization,
+            load_quantized_model=self.load_weights,
+        )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
         weight_name = f"{name[1:].replace('/', '.')}.weight"
@@ -963,7 +811,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         basename = "/model/mtp"
 
         embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_embed_weight, embed_weight, to=self.io_dtype)
+        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
         embed_gather = f"{basename}/embed_tokens/Gather"
         embed_output = f"{embed_gather}/output_0"
         self.make_node(
@@ -975,12 +823,12 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         self.make_value(embed_output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
 
         embedding_norm = self.make_offset_rmsnorm(
-            f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_pre_fc_norm_embedding_weight
+            f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding.weight
         )
         hidden_states_norm = self.make_offset_rmsnorm(
             f"{basename}/pre_fc_norm_hidden",
             self.input_names["hidden_states"],
-            self.mtp_pre_fc_norm_hidden_weight,
+            self.mtp_weights.pre_fc_norm_hidden.weight,
         )
 
         concat_name = f"{basename}/fc/Concat"
@@ -992,5 +840,5 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             axis=-1,
         )
 
-        fc_name = self.make_matmul(self.mtp_fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
+        fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"

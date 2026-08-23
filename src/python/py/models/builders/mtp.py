@@ -8,6 +8,7 @@ import copy
 import os
 
 import onnx_ir as ir
+from quantization import QuantConfig
 
 from .base import Model
 
@@ -26,6 +27,23 @@ class MTPModel(Model):
             "extra_options": None,  # Builder options inherited or overridden for MTP.
         }
         return copy.deepcopy(extra_options)
+
+    def resolve_mtp_model_config(self, extra_options):
+        mtp_quant_config_value = extra_options.get("mtp_quant_config")
+        if mtp_quant_config_value is None:
+            return
+
+        inherited_options = {
+            key: copy.deepcopy(extra_options[key]) for key in ("hf_token", "hf_remote") if key in extra_options
+        }
+        quant_config = (
+            copy.deepcopy(mtp_quant_config_value)
+            if isinstance(mtp_quant_config_value, QuantConfig)
+            else QuantConfig.from_json(mtp_quant_config_value)
+        )
+        self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = quant_config.to_onnx_dtypes()
+        inherited_options["_quant_config"] = quant_config
+        self.mtp_attrs["extra_options"] = inherited_options
 
     def is_shared_initializer(self, name):
         return name in self.mtp_attrs["shared_initializer_names"] or name.startswith(

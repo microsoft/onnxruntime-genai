@@ -329,6 +329,26 @@ class QuantConfig:
         if self.io_dtype not in IO_DTYPES:
             raise ValueError(f"io_dtype must be one of {list(IO_DTYPES)}, got '{self.io_dtype}'")
 
+    def to_onnx_dtypes(self) -> tuple[ir.DataType, ir.DataType]:
+        io_dtype = {
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "fp32": ir.DataType.FLOAT,
+        }[self.io_dtype]
+        weights = resolve_dtype(self.weights.type)
+        if weights.kind == "mx":
+            raise ValueError(
+                f"Dense weights.type={weights.name} is not supported; use int4/int8/none for dense weights "
+                "and select mxfp4/nvfp4 independently through moe.type"
+            )
+        if weights.kind != "int":
+            return io_dtype, io_dtype
+
+        signed = weights.signed is not False and self.weights.symmetric
+        if weights.bits == 8:
+            return io_dtype, ir.DataType.INT8 if signed else ir.DataType.UINT8
+        return io_dtype, ir.DataType.INT4 if signed else ir.DataType.UINT4
+
     # -- Loading -----------------------------------------------------------
 
     @classmethod

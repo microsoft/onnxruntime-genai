@@ -57,9 +57,9 @@ class QuantizedTensorModule:
 
 
 class TensorModule:
-    def __init__(self):
-        self.weight = None
-        self.bias = None
+    def __init__(self, weight=None, bias=None):
+        self.weight = weight
+        self.bias = bias
         self.quant_type = "none"
         self.exclude_from_quantization = False
         self.weight_scale = None
