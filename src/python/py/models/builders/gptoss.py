@@ -515,10 +515,6 @@ class GPTOSSModel(Model):
         self.layernorm_attrs["skip_input"] = f"{weighted_sum_squeeze_name}/output_0"
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        basename = f"/model/layers.{layer_id}/moe"
-        op_type = self.moe_attrs["op_type"]
-        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
-
         has_packed_experts = getattr(moe.experts, "quant_type", None) is not None
         moe_quant_type = self.moe_attrs.get("quant_type")
         if moe_quant_type == "nvfp4":
@@ -528,14 +524,8 @@ class GPTOSSModel(Model):
             raise ValueError("moe_quant_type=nvfp4 is not supported for GPT-OSS. Use moe_quant_type=mxfp4.")
         is_fp4_moe = moe_quant_type == "fp4"
 
-        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
-        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        gate_up_proj_zero_points = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
-        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
-        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-        down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
         # HF GptOssExperts stores the expert weights input-major:
         #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
@@ -589,11 +579,9 @@ class GPTOSSModel(Model):
         gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
         gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        gate_up_proj_zero_points = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-        down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
         gate_up_proj_zero_points, down_proj_zero_points = self.moe_attrs.get("zero_point_names", {}).get(
             layer_id, ("", "")

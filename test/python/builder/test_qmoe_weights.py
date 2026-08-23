@@ -332,6 +332,44 @@ def test_base_rejects_packed_expert_quant_type_mismatch():
         model.make_moe_expert_initializers(0, experts)
 
 
+def test_base_emits_declared_mxfp4_scale_format_and_globals():
+    model = Model.__new__(Model)
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.moe_attrs = {
+        "op_type": "QMoE",
+        "quant_type": "fp4",
+        "global_scale_names": {},
+        "zero_point_names": {},
+    }
+    experts = types.SimpleNamespace(
+        quant_type="fp4",
+        block_size=32,
+        scale_dtype=base_module.ir.DataType.FLOAT8E8M0,
+        scales_raw=True,
+        weights_prepacked=None,
+        gate_up_qweight=torch.zeros(1, 32, 2, dtype=torch.uint8),
+        gate_up_scales=torch.zeros(1, 4, 1, dtype=torch.uint8),
+        gate_up_zero_points=None,
+        gate_up_global_scales=torch.ones(1),
+        down_qweight=torch.zeros(1, 32, 1, dtype=torch.uint8),
+        down_scales=torch.zeros(1, 2, 1, dtype=torch.uint8),
+        down_zero_points=None,
+        down_global_scales=torch.ones(1),
+    )
+    initializers = {}
+    model.make_initializer = lambda tensor, name, **kwargs: initializers.setdefault(name, kwargs)
+
+    model.make_moe_expert_initializers(2, experts)
+
+    scale_name = "model.layers.2.moe.experts.gate_up_proj.scales"
+    assert initializers[scale_name] == {"to": base_module.ir.DataType.FLOAT8E8M0, "raw": True}
+    assert model.moe_attrs["block_size"] == 32
+    assert model.moe_attrs["global_scale_names"][2] == (
+        "model.layers.2.moe.experts.gate_up_proj.global_scales",
+        "model.layers.2.moe.experts.down_proj.global_scales",
+    )
+
+
 def test_gptoss_fp4_delegates_normalized_experts_to_base():
     model = GPTOSSModel.__new__(GPTOSSModel)
     model.moe_attrs = {"op_type": "QMoE", "quant_type": "fp4"}

@@ -26,7 +26,6 @@ from loaders.base import (
 )
 from loaders.quark import QuarkModel
 
-
 _BASE_MODEL = object.__new__(QuantizedModel)
 _QUARK_MODEL = object.__new__(QuarkModel)
 

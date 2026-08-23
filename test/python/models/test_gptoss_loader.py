@@ -5,9 +5,8 @@ import json
 
 import onnx_ir as ir
 import torch
-from safetensors.torch import save_file
-
 from loaders.gptoss import GptOssMXFP4Loader
+from safetensors.torch import save_file
 
 
 def _projection_tensors(layer_id=0):
