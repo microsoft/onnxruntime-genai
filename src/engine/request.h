@@ -320,6 +320,12 @@ struct Request : std::enable_shared_from_this<Request>,
   // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
   // exactly as long as the search after its own transaction rewind.
   void DiscardStagedDrafts() noexcept;
+  // The Engine-hosted MTP head mirrors target-committed tokens in a scheduler-private request. It
+  // never samples from this request; these helpers append decided tokens and advance its processed
+  // boundary only after the auxiliary cache transaction commits.
+  void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
+  void RewindAuxiliaryDecoderTo(size_t sequence_length);
+  void CommitAuxiliaryDecoderStep() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -344,6 +350,8 @@ struct Request : std::enable_shared_from_this<Request>,
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
+  int64_t transaction_processed_sequence_length_{};
+  size_t transaction_tokens_host_size_{};
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
