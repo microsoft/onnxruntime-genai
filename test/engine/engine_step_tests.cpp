@@ -1143,7 +1143,7 @@ TEST_F(EngineStepTest, CompositePostProcessingFailurePreservesResidentState) {
   });
 
   ASSERT_EQ(engine.engine->Step(), request);  // prefill commits: state_gen 1, committed 3, bank = 5
-  expected_input = 5.0f;                       // the decode step gathers the published value
+  expected_input = 5.0f;                      // the decode step gathers the published value
   staged_output = 99.0f;
   engine.executor->SetNextFailure(ScriptedExecutionFailure::PostProcessing);
   try {
@@ -1479,6 +1479,48 @@ TEST_F(EngineStepTest, SpeculativeStepAcceptingEveryDraftAlsoTakesTheBonusToken)
   EXPECT_EQ(request->ProcessedSequenceLength(), length_after_prefill + 3);
 }
 
+TEST_F(EngineStepTest, SpeculativeTelemetryAggregatesAcceptanceLengths) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+  ASSERT_EQ(engine.engine->Step(), request);
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{14, 15});
+  engine.executor->SetVerifyRowTokens({24, 25, 26});
+  ASSERT_EQ(engine.engine->Step(), request);
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  request->SetDraftTokens(std::vector<int32_t>{16});
+  engine.executor->SetVerifyRowTokens({16, 26});
+  ASSERT_EQ(engine.engine->Step(), request);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.target_forward_passes, 4u);
+  EXPECT_EQ(stats.draft_forward_passes, 0u);
+  EXPECT_EQ(stats.rounds, 3u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 6u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 5u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 3u);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[2], 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 3.0f / 5.0f);
+  EXPECT_FLOAT_EQ(stats.avg_draft_tokens_per_round, 2.0f);
+}
+
 TEST_F(EngineStepTest, RolledBackSpeculativeStepLeavesTheProposalPendingAndRetryable) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -1499,12 +1541,23 @@ TEST_F(EngineStepTest, RolledBackSpeculativeStepLeavesTheProposalPendingAndRetry
   EXPECT_EQ(request->PendingDraftTokenCount(), 2u);
   EXPECT_EQ(request->AcceptedDraftTokenCount(), 0u);
   EXPECT_TRUE(engine.cache->prefix_commits.empty());
+  auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.target_forward_passes, 2u);
+  EXPECT_EQ(stats.rounds, 0u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 0u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
 
   engine.executor->SetVerifyRowTokens({11, 12, 25});
   ASSERT_EQ(engine.engine->Step(), request);
   std::vector<int32_t> produced;
   while (request->HasUnseenTokens()) produced.push_back(request->UnseenToken());
   EXPECT_EQ(produced, (std::vector<int32_t>{11, 12, 25}));
+  stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.target_forward_passes, 3u);
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 2u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+  EXPECT_EQ(stats.acceptance_length_histogram[2], 1u);
 }
 
 TEST_F(EngineStepTest, DraftsAreRejectedWhenTheCacheCannotRollThemBack) {

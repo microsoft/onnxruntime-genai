@@ -6,6 +6,7 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "../speculative_stats.h"
 
 /**
  * @file engine.h
@@ -127,6 +128,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   size_t MaxDraftTokensPerStep() const;
 
+  /**
+   * @brief Returns cumulative speculative-decoding work and acceptance statistics.
+   */
+  SpeculativeStats GetSpeculativeStats() const noexcept;
+
  private:
   struct MtpStep {
     StepPlan plan;
@@ -147,6 +153,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RollbackMtpStep(MtpStep& step);
   void CommitMtpStep(MtpStep& step);
   void PublishMtpDrafts(MtpStep& step);
+  void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
   void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
@@ -172,6 +179,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
+  SpeculativeStats speculative_stats_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
   std::vector<std::weak_ptr<Request>> tracked_requests_;

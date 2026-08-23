@@ -871,6 +871,28 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthCount(
+    const OgaSpeculativeStats* stats, size_t accepted_length, uint64_t* value) {
+  OGA_TRY
+  if (!stats || !value)
+    throw std::invalid_argument("stats and value must not be null.");
+  if (accepted_length >= stats->acceptance_length_histogram.size())
+    throw std::out_of_range("accepted_length is outside the statistics histogram.");
+  *value = stats->acceptance_length_histogram[accepted_length];
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthHistogramSize(
+    const OgaSpeculativeStats* stats, size_t* value) {
+  OGA_TRY
+  if (!stats || !value)
+    throw std::invalid_argument("stats and value must not be null.");
+  *value = stats->acceptance_length_histogram.size();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     const OgaSpeculativeStats* stats, const char* name, double* value) {
   OGA_TRY
@@ -1383,6 +1405,17 @@ OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
 OgaResult* OgaEngineMaxDraftTokensPerStep(const OgaEngine* engine, size_t* out) {
   OGA_TRY
   *out = engine->MaxDraftTokensPerStep();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineGetSpeculativeStats(
+    const OgaEngine* engine, OgaSpeculativeStats** out) {
+  OGA_TRY
+  if (!engine || !out)
+    throw std::invalid_argument("engine and out must not be null.");
+  *out = ReturnUnique<OgaSpeculativeStats>(
+      std::make_unique<Generators::SpeculativeStats>(engine->GetSpeculativeStats()));
   return nullptr;
   OGA_CATCH
 }
