@@ -2049,7 +2049,7 @@ class Qwen35TextModel(Model):
             v_thd = reshape_thd(v_out, "v", n_kv, hv)
             present_recurrent_shape = ["batch_size", n_kv, hv, hk]
             la_op_name = f"{basename}/GatedDeltaNet"
-            self.make_gated_delta_net(
+            self.make_varlen_gated_delta_net(
                 la_op_name,
                 q_path=q_thd,
                 k_path=k_thd,

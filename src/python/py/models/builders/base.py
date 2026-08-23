@@ -3420,44 +3420,11 @@ class Model:
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
 
-    def make_varlen_linear_attention(self, name, **kwargs):
-        """Packed-layout counterpart of `make_linear_attention`.
-
-        Query, key, and value use THD `[num_tokens, heads, dim]` layouts. State is required FP32
-        V-major `[batch_size, value_heads, value_dim, key_dim]`.
-        """
-        inputs = [
-            kwargs["q_path"],
-            kwargs["k_path"],
-            kwargs["v_path"],
-            kwargs["cumulative_sequence_length"],
-            kwargs["past_recurrent_state"],
-            kwargs["decay"],
-            kwargs["beta"],
-        ]
-        output = f"{name}/output_0"
-        present_recurrent = kwargs["present_recurrent_state"]
-        outputs = [output, present_recurrent]
-        self.make_node(
-            "VarlenLinearAttention",
-            inputs=inputs,
-            outputs=outputs,
-            name=name,
-            domain="com.microsoft",
-            update_rule=kwargs.get("update_rule", "gated_delta"),
-            scale=kwargs.get("scale", 1.0),
-            decay_activation=kwargs.get("decay_activation", "none"),
-            beta_activation=kwargs.get("beta_activation", "none"),
-            max_checkpoints=0,
-        )
-        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
-
-    def make_gated_delta_net(self, name, **kwargs):
+    def make_varlen_gated_delta_net(self, name, **kwargs):
         """Emit the GatedDeltaNet evaluation path with precomputed normalization and gates.
 
-        This intentionally keeps the same upstream graph as `make_varlen_linear_attention` so
-        model-level comparisons isolate the recurrent operator rather than its optional fusions.
+        This intentionally consumes precomputed normalization and gates so model-level comparisons
+        isolate the recurrent operator rather than its optional fusions.
         """
         if self.io_dtype == ir.DataType.BFLOAT16:
             raise ValueError(

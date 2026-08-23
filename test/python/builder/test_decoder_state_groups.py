@@ -205,45 +205,10 @@ def test_varlen_causal_conv_emits_reviewed_required_state_contract():
     assert "state_window" not in node
 
 
-def test_varlen_linear_attention_emits_reviewed_fp32_state_contract():
-    model = _recording_model()
-    state_shape = ["batch_size", 16, 128, 128]
-    model.make_varlen_linear_attention(
-        "/linear",
-        q_path="q",
-        k_path="k",
-        v_path="v",
-        cumulative_sequence_length="cu",
-        past_recurrent_state="past",
-        present_recurrent_state="present",
-        decay="decay",
-        beta="beta",
-        gate_shape=["num_tokens", 16],
-        output_shape=["num_tokens", 16, 128],
-        present_recurrent_shape=state_shape,
-        update_rule="gated_delta",
-        scale=1.0,
-    )
-
-    op_type, node = model.nodes[0]
-    assert op_type == "VarlenLinearAttention"
-    assert node["inputs"] == ["q", "k", "v", "cu", "past", "decay", "beta"]
-    assert node["outputs"] == ["/linear/output_0", "present"]
-    assert node["update_rule"] == "gated_delta"
-    assert node["scale"] == 1.0
-    assert node["decay_activation"] == "none"
-    assert node["beta_activation"] == "none"
-    assert node["max_checkpoints"] == 0
-    assert "q_num_heads" not in node
-    assert "kv_num_heads" not in node
-    assert "state_window" not in node
-    assert model.values[-1] == ("present", base_module.ir.DataType.FLOAT, state_shape)
-
-
 def test_gated_delta_net_evaluation_preserves_precomputed_gate_contract():
     model = _recording_model()
     state_shape = ["batch_size", 16, 128, 128]
-    model.make_gated_delta_net(
+    model.make_varlen_gated_delta_net(
         "/gdn",
         q_path="q",
         k_path="k",
@@ -299,10 +264,10 @@ def test_gated_delta_net_evaluation_rejects_bf16_but_accepts_fp32():
     model = _recording_model()
     model.io_dtype = base_module.ir.DataType.BFLOAT16
     with pytest.raises(ValueError, match="does not support bfloat16"):
-        model.make_gated_delta_net("/gdn")
+        model.make_varlen_gated_delta_net("/gdn")
 
     model.io_dtype = base_module.ir.DataType.FLOAT
-    model.make_gated_delta_net(
+    model.make_varlen_gated_delta_net(
         "/gdn_fp32",
         q_path="q",
         k_path="k",
@@ -341,7 +306,7 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     reshapes = []
     model.make_reshape = lambda name, inputs, dtype, shape: reshapes.append((name, inputs, dtype, shape))
     linear_calls = []
-    model.make_gated_delta_net = lambda name, **kwargs: linear_calls.append((name, kwargs))
+    model.make_varlen_gated_delta_net = lambda name, **kwargs: linear_calls.append((name, kwargs))
     outputs = []
     model._make_linear_attention_output = lambda *args: outputs.append(args)
 
