@@ -309,16 +309,32 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto sequence_lengths_cpu_span = sequence_lengths_span.CpuSpan();
 
+  DeviceSpan<int32_t> device_input_ids =
+      execution_context_ ? execution_context_->input_ids : DeviceSpan<int32_t>{};
+  if (!device_input_ids.empty()) {
+    if (device_input_ids.size() != num_tokens) {
+      throw std::runtime_error("Packed device input IDs do not match the step token count.");
+    }
+    if (!model->p_device_inputs_->Cast(
+            device_input_ids.Span().data(), device_span.Span().data(),
+            Ort::TypeToTensorType<int32_t>, Ort::TypeToTensorType<int64_t>, num_tokens)) {
+      throw std::runtime_error("The model device cannot cast packed input IDs to int64.");
+    }
+  }
+
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokensCpu();
+    const size_t input_id_count = request->ScheduledTokenCount();
     const RequestStepPlan* entry = plan ? &plan->requests[i] : nullptr;
     if (entry && (entry->request != request ||
-                  entry->unprocessed_token_count != input_ids.size() ||
+                  entry->unprocessed_token_count != input_id_count ||
                   entry->packed_token_offset != running_length)) {
       throw std::runtime_error("Step plan token layout does not match the scheduled request.");
     }
-    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    if (device_input_ids.empty()) {
+      auto input_ids = request->UnprocessedTokensCpu();
+      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    }
 
     // The batch is represented as three coordinated arrays:
     //   input_ids                  = all pending tokens concatenated
@@ -336,11 +352,13 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     }
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);
 
-    running_length += input_ids.size();
+    running_length += input_id_count;
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
   }
 
-  device_span.CopyCpuToDevice();
+  if (device_input_ids.empty()) {
+    device_span.CopyCpuToDevice();
+  }
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 

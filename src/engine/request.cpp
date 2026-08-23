@@ -364,6 +364,18 @@ void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
 }
 
+void Request::AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  search_->AppendTokens(tokens);
+  const int32_t non_pad = params_->config.model.pad_token_id == 0 ? 1 : 0;
+  tokens_host_.insert(tokens_host_.end(), tokens.size(), non_pad);
+}
+
 void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
   if (status_ != RequestStatus::Active ||
       processed_sequence_length_ != CurrentSequenceLength() ||
