@@ -8,6 +8,7 @@ When generating or reviewing code in the Python Model Builder (`src/python/py/mo
 
 - [README.md](../../src/python/py/models/README.md)
 - [DESIGN.md](../../src/python/py/models/DESIGN.md)
+- [LOADERS.md](../../src/python/py/models/loaders/LOADERS.md)
 - [QUANTIZATION.md](../../src/python/py/models/quantization/QUANTIZATION.md)
 
 Read both documents to understand the intended usage, supported models, design principles, and architectural constraints before suggesting or reviewing any code changes in this area.
