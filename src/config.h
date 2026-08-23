@@ -597,6 +597,10 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
 void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
+// Build the decoder-model view used to run model.mtp as an internal session. The projection keeps
+// the main model's device, batching and paged-attention contract, but replaces model-specific
+// decoder state with the single MTP attention layer.
+std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
