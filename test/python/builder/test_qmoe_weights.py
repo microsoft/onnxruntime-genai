@@ -305,7 +305,7 @@ def test_modelopt_selects_native_quantization_from_metadata(monkeypatch):
     )
 
     assert options["moe_quant_type"] == "nvfp4"
-    assert options["kv_cache_quant_type"] == "fp8_per_tensor"
+    assert "kv_cache_quant_type" not in options
 
 
 def test_modelopt_rejects_non_cuda_execution_provider(monkeypatch):

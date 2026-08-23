@@ -115,17 +115,6 @@ class VideoChatFlashQwenModel(QwenModel):
 
 class Qwen35TextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # ModelOpt's FP8 KV-cache metadata maps to the generic fp8_per_tensor path in builder.py.
-        # Without a calibration file, preserve the checkpoint's shared unit-scale convention.
-        quantization_config = getattr(config, "quantization_config", {})
-        self.fp8_kv_cache = extra_options.get("kv_cache_quant_type", "none") == "fp8_per_tensor"
-        self._legacy_fp8_kv_cache = (
-            quantization_config.get("quant_method") == "modelopt"
-            and self.fp8_kv_cache
-            and not extra_options.get("kv_cache_scale_file", None)
-        )
-        self._kv_cache_scale_created = False
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -138,85 +127,6 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["use_fp32"] = True
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
-
-    def get_kv_cache_scale_inputs(self, **kwargs):
-        # ModelOpt compatibility mode: every layer shares ONE unit PER_TENSOR scale initializer
-        # named `kv_cache_scale`, created lazily at the first GroupQueryAttention node. The
-        # ModelOpt checkpoint exports no calibrated k/v scale, so this is a straight E4M3
-        # round-trip of the KV cache. Keeping the shared name and the lazy creation point keeps
-        # the exported graph (and the external-data layout) identical to the released RC model.
-        if self._legacy_fp8_kv_cache:
-            if not self._kv_cache_scale_created:
-                self.make_initializer(torch.tensor([1.0], dtype=torch.float32), "kv_cache_scale", to=ir.DataType.FLOAT)
-                self._kv_cache_scale_created = True
-            return "kv_cache_scale", "kv_cache_scale"
-        return super().get_kv_cache_scale_inputs(**kwargs)
-
-    def extend_with_optional_inputs(self, inputs, optional_inputs):
-        # The ModelOpt compatibility export emits all four trailing optional GroupQueryAttention
-        # inputs (k_scale, v_scale, q_norm_weight, k_norm_weight), including empty placeholders,
-        # rather than trimming the unused trailing ones. Reproduce that byte-for-byte.
-        if self._legacy_fp8_kv_cache and any(optional_inputs):
-            inputs.extend(optional_inputs)
-            return
-        super().extend_with_optional_inputs(inputs, optional_inputs)
-
-    def make_kv_cache_scale_initializers(self):
-        """Emit KV cache quantization scales only for the layers that own a KV cache.
-
-        Qwen3.5/3.6 is a hybrid stack, so only ``full_attention`` layers run
-        GroupQueryAttention. The calibration file may therefore be indexed either by absolute
-        layer id (``num_layers`` entries) or by full-attention order (one entry per KV layer).
-        """
-        if self._legacy_fp8_kv_cache:
-            # The single shared scale is created on demand in `get_kv_cache_scale_inputs`.
-            return
-
-        kv_layers = [i for i, lt in enumerate(self.layer_types) if lt == "full_attention"]
-        per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
-        scale_size = self.num_kv_heads * self.head_size if per_channel else 1
-
-        scale_file = self.kv_cache_attrs["scales_path"]
-        if not scale_file:
-            raise ValueError(
-                "Quantized KV cache requires calibrated scales; provide them via extra_options['kv_cache_scale_file']."
-            )
-
-        with open(scale_file, encoding="utf-8") as file:
-            scale_data = json.load(file)
-        # The MTP head is a separate graph with its own single KV-cache layer whose activation
-        # distribution differs from the main stack, so it carries its own calibrated scales in an
-        # optional `mtp` section of the same file. This keeps one `kv_cache_scale_file` covering
-        # both `text.onnx` and `mtp.onnx`, which is all the builder CLI accepts.
-        if getattr(self, "is_mtp_head", False) and "mtp" in scale_data:
-            scale_data = scale_data["mtp"]
-        try:
-            k_scales = scale_data["scales"]["k_scales"]
-            v_scales = scale_data["scales"]["v_scales"]
-        except (KeyError, TypeError) as error:
-            raise ValueError("kv_cache_scale_file must contain scales.k_scales and scales.v_scales.") from error
-        if len(k_scales) != len(v_scales) or len(k_scales) not in (self.num_layers, len(kv_layers)):
-            raise ValueError(
-                f"kv_cache_scale_file must provide {self.num_layers} (per layer) or "
-                f"{len(kv_layers)} (per KV layer) scales, got k={len(k_scales)} v={len(v_scales)}"
-            )
-        # Absolute layer ids when the file covers every layer, else full-attention order.
-        by_layer_id = len(k_scales) == self.num_layers
-        scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
-
-        def make_scale(per_layer, index, layer_id):
-            scale = np.asarray(per_layer[index], dtype=np.float32).reshape(-1)
-            if scale.size != scale_size:
-                raise ValueError(f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}")
-            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
-                raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
-            return scale.reshape(scale_shape)
-
-        for order, layer_id in enumerate(kv_layers):
-            index = layer_id if by_layer_id else order
-            k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            self.make_initializer(make_scale(k_scales, index, layer_id), k_scale_name)
-            self.make_initializer(make_scale(v_scales, index, layer_id), v_scale_name)
 
     def make_inputs_and_outputs(self):
         # Qwen-3.5 uses 3D position_ids

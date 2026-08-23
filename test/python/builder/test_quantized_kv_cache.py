@@ -429,32 +429,34 @@ def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
         assert arr.shape == (2, 1, 16)
 
 
-def test_hybrid_qwen_paged_per_channel_scales_use_canonical_shape(tmp_path):
+def test_graph_named_scale_section_is_selected(tmp_path):
     scale_size = 2 * 16
     scale_file = tmp_path / "kv_scales.json"
     scale_file.write_text(
         json.dumps(
             {
-                "scales": {
-                    "k_scales": [[0.1] * scale_size],
-                    "v_scales": [[0.2] * scale_size],
+                "mtp": {
+                    "scales": {
+                        "k_scales": [[0.1] * scale_size],
+                        "v_scales": [[0.2] * scale_size],
+                    }
                 }
             }
         )
     )
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model = Model.__new__(Model)
     model.kv_cache_attrs = {"quant_mode": "PER_CHANNEL", "scales_path": str(scale_file)}
     model.use_paged_attention = True
+    model.filename = "mtp.onnx"
     model.num_kv_heads = 2
     model.head_size = 16
-    model.num_layers = 2
-    model.layer_types = ["linear_attention", "full_attention"]
-    model._legacy_fp8_kv_cache = False
+    model.num_layers = 1
+    model.input_names = {"past_key_values.key": ["past_key_values.0.key"]}
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
 
-    assert set(captured) == {"model.layers.1.attn.k_scale", "model.layers.1.attn.v_scale"}
+    assert set(captured) == {"model.layers.0.attn.k_scale", "model.layers.0.attn.v_scale"}
     for arr in captured.values():
         assert arr.shape == (2, 1, 16)
 

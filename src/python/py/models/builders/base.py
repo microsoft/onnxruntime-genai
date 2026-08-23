@@ -855,10 +855,13 @@ class Model:
 
         with open(self.kv_cache_attrs["scales_path"], encoding="utf-8") as file:
             scale_data = json.load(file)
+        scale_section = os.path.splitext(os.path.basename(getattr(self, "filename", "model.onnx")))[0]
+        if scale_section in scale_data:
+            scale_data = scale_data[scale_section]
         try:
             k_scales_per_layer = scale_data["scales"]["k_scales"]
             v_scales_per_layer = scale_data["scales"]["v_scales"]
-        except (KeyError, TypeError) as error:
+        except (KeyError, TypeError):
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
         layer_ids = scale_data.get("layer_ids")

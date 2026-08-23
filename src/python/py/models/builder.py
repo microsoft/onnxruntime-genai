@@ -310,8 +310,6 @@ def check_extra_options(
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
             raise ValueError("ModelOpt checkpoints require moe_quant_type=nvfp4 to preserve the original experts.")
         extra_options["moe_quant_type"] = "nvfp4"
-        if str(quantization_config.get("kv_cache_quant_algo", "")).upper() == "FP8":
-            extra_options.setdefault("kv_cache_quant_type", "fp8_per_tensor")
 
     state_window = int(extra_options.get("state_window", 0))
     if state_window >= 0:

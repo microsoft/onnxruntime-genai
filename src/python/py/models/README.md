@@ -369,7 +369,7 @@ This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda -c cache_dir_to_store_temp_files
 ```
 
-When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. If the checkpoint declares `kv_cache_quant_algo=FP8`, the KV cache is exported as FP8 as well. CUDA linear-attention gate fusion is enabled automatically.
+When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. KV-cache quantization remains explicit and requires calibrated scales supplied through `kv_cache_quant_type` and `kv_cache_scale_file`. CUDA linear-attention gate fusion is enabled automatically.
 
 The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
