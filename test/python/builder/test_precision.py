@@ -273,42 +273,6 @@ def _run_check_extra_options(
     )
 
 
-# ---------------------------------------------------------------------------
-# MTP options are normalized and enforce the main-model output contract.
-# ---------------------------------------------------------------------------
-
-
-def test_enable_mtp_false_string_is_disabled(monkeypatch):
-    options = {"enable_mtp": "false"}
-
-    _run_check_extra_options(monkeypatch, options)
-
-    assert options["enable_mtp"] is False
-
-
-def test_enable_mtp_requires_hidden_states(monkeypatch):
-    with pytest.raises(ValueError, match="requires include_hidden_states=true"):
-        _run_check_extra_options(monkeypatch, {"enable_mtp": "true"})
-
-
-@pytest.mark.parametrize("option", ["exclude_lm_head", "prune_lm_head"])
-def test_enable_mtp_rejects_incompatible_lm_head_options(monkeypatch, option):
-    with pytest.raises(ValueError, match=option):
-        _run_check_extra_options(
-            monkeypatch,
-            {"enable_mtp": "true", "include_hidden_states": "true", option: "true"},
-        )
-
-
-def test_enable_mtp_accepts_valid_main_model_outputs(monkeypatch):
-    options = {"enable_mtp": "true", "include_hidden_states": "true"}
-
-    _run_check_extra_options(monkeypatch, options)
-
-    assert options["enable_mtp"] is True
-    assert options["include_hidden_states"] is True
-
-
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
     options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
 
@@ -336,6 +300,41 @@ def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
     )
 
     assert captured["mtp_quant_config"] == ('{"weights":{"overrides":[{"match":{"name":"name=a"},"exclude":true}]}}')
+
+
+def test_qwen35_moe_architecture_selects_composite_builder(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeQwen35MoEModel:
+        exclude_embeds = False
+
+        def __init__(self, *args):
+            captured["args"] = args
+
+        def make_genai_config(self, *args):
+            captured["genai_config"] = args
+
+        def save_processing(self, *args):
+            captured["processing"] = args
+
+    config = types.SimpleNamespace(architectures=["Qwen3_5MoeForConditionalGeneration"])
+    monkeypatch.setattr(builder_module, "Qwen35MoEModel", FakeQwen35MoEModel)
+
+    builder_module.create_model(
+        "fake-model",
+        str(tmp_path / "input"),
+        str(tmp_path / "output"),
+        "fp16",
+        "cpu",
+        str(tmp_path / "cache"),
+        config_only=True,
+        hf_details={"extra_kwargs": {}, "hf_name": "fake-model", "hf_config": config},
+    )
+
+    assert captured["args"][0] is config
+    assert captured["args"][5]["config_only"] is True
+    assert captured["genai_config"][0] is config
+    assert captured["processing"][0] == "fake-model"
 
 
 def test_state_window_must_be_non_negative(monkeypatch):

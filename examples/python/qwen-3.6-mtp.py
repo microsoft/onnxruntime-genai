@@ -22,7 +22,7 @@ Two ways to run it are shown:
 Both require:
   * the main Qwen3.6 decoder exported with ``include_hidden_states=true`` (so it exposes
     a ``hidden_states`` output), and
-  * the MTP head (``mtp.onnx``, exported with ``enable_mtp=true``), loaded as a standalone
+    * the MTP head (``mtp.onnx``), exported when the model configuration declares MTP layers
     model whose ``hidden_states`` input is fed the main model's last hidden state.
 
 See ``qwen-3.6-mtp.md`` for the design and export instructions.

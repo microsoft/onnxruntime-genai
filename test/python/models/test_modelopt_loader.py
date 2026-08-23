@@ -12,29 +12,23 @@ one full-attention layer, plus globals) and verifies that ModeloptModel:
     * prepacks routed experts for native QMoE export.
 """
 
-import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
-def _load_quantized_model_module():
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "quantized_model.py"
-    )
-    spec = importlib.util.spec_from_file_location("_genai_quantized_model_under_test", os.path.abspath(path))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-QM = _load_quantized_model_module()
+from loaders import modelopt as model_opt_module
+from loaders import quant_model as quant_model_module
+from loaders.base import QuantizedModel
 
 _FP4_LUT = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
@@ -134,12 +128,12 @@ def _build_synthetic_checkpoint(d):
 def test_modelopt_loader_tree_preserves_quantized_tensors():
     with tempfile.TemporaryDirectory() as d:
         _build_synthetic_checkpoint(d)
-        model = QM.QuantModel.from_pretrained(
+        model = quant_model_module.QuantModel.from_pretrained(
             "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
         )
 
-        assert isinstance(model, QM.QuantizedModel)
-        assert isinstance(model.lm_head, QM.ModeloptLinearModule)
+        assert isinstance(model, QuantizedModel)
+        assert isinstance(model.lm_head, model_opt_module.TensorModule)
         mods = model.modules()
         assert mods[0] is model.embedding and mods[-1] is model.lm_head
         assert len(model.layers) == 2
@@ -162,7 +156,7 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         assert model.lm_head.weight.dtype == torch.uint8
 
         # Routed experts are prepacked once by the loader for native QMoE export.
-        assert isinstance(l0.mlp.experts, QM.ModeloptQMoEExperts)
+        assert isinstance(l0.mlp.experts, model_opt_module.QuantizedExperts)
         assert l0.mlp.experts.gate_up_qweight.shape[:2] == (1, model.embedding.weight.shape[1])
         assert l0.mlp.experts.down_qweight.shape == (
             1,
@@ -174,12 +168,12 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         # Router / shared-expert-gate are present as plain tensors.
         assert l0.mlp.gate.weight is not None and l0.mlp.shared_expert_gate.weight is not None
         # All safetensors handles are released once loading finishes.
-        assert not model._open_handles
+        assert not model.handles
     print("OK: ModeloptModel builds the tree and preserves FP8/NVFP4 tensors.")
 
 
 def _load(d):
-    return QM.QuantModel.from_pretrained(
+    return quant_model_module.QuantModel.from_pretrained(
         "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
     )
 

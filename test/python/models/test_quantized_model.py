@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Unit tests for quantized_model.py lm_head tensor loading and VLM key normalisation.
+"""Unit tests for base.py lm_head tensor loading and VLM key normalisation.
 
 These tests verify that lm_head tensors are assigned correctly regardless
 of the iteration order returned by safetensors.torch.load_file(), and that
@@ -11,8 +11,14 @@ correctly so future refactors do not silently break quantised VLM loading.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
-from onnxruntime_genai.models.quantized_model import (
+
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
+
+from loaders.base import (
     QuantizedModel,
     QuantizedTensorModule,
     TensorModule,

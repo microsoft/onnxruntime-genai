@@ -415,13 +415,13 @@ class Model:
         self.quant_attrs = {
             "accuracy_level": self.quant_config.weights.accuracy_level,
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
-            "matmul_block_size": int(self.quant_config.weights.block_size),
+            "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,
             "op_types_to_quantize": self.quant_config.weights.op_types,
             "nodes_to_exclude": nodes_to_exclude,
             "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
-            "use_qdq": self.quant_config.runtime.use_qdq,
+            "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
         self.make_quant_init(config)
 
@@ -1006,7 +1006,7 @@ class Model:
         if base_method == "rtn" or (base_method == "default" and bits != 4):
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs["matmul_block_size"]}",
+                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
@@ -1014,7 +1014,7 @@ class Model:
         if base_method == "k_quant":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs["matmul_block_size"]}",
+                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp",
             )
@@ -5005,9 +5005,9 @@ class Model:
         if input_path.endswith(".gguf"):
             # Load GGUF model
             try:
-                from gguf_model import GGUFModel
+                from loaders.gguf import GGUFModel
             except ImportError:
-                from onnxruntime_genai.models.gguf_model import GGUFModel
+                from onnxruntime_genai.models.loaders.gguf import GGUFModel
             model = GGUFModel.from_pretrained(
                 self.model_type,
                 input_path,
@@ -5023,9 +5023,9 @@ class Model:
         elif self.quant_type is not None:
             # Load quantized PyTorch model
             try:
-                from quantized_model import QuantModel
+                from loaders.quant_model import QuantModel
             except ImportError:
-                from onnxruntime_genai.models.quantized_model import QuantModel
+                from onnxruntime_genai.models.loaders.quant_model import QuantModel
 
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size

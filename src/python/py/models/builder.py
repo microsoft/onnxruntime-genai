@@ -24,8 +24,8 @@ from builders import (
     Gemma3Model,
     GemmaModel,
     GPTOSSModel,
-    GraniteMoEHybridModel,
     GraniteModel,
+    GraniteMoEHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
@@ -47,12 +47,12 @@ from builders import (
     Qwen3VLTextModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
-    Qwen35MoETextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
+from builders.qwen import Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_TYPES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
 
@@ -155,7 +155,6 @@ def check_extra_options(
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
-        "enable_mtp",
     ]
 
     for key in bools:
@@ -175,15 +174,6 @@ def check_extra_options(
         if state_window < 0:
             raise ValueError("state_window must be a non-negative integer.")
         extra_options["state_window"] = state_window
-
-    if extra_options.get("enable_mtp", False):
-        if not extra_options.get("include_hidden_states", False):
-            raise ValueError("enable_mtp requires include_hidden_states=true on the main model.")
-        incompatible_options = [
-            key for key in ("exclude_lm_head", "prune_lm_head") if extra_options.get(key, False)
-        ]
-        if incompatible_options:
-            raise ValueError("enable_mtp cannot be combined with " + ", ".join(incompatible_options) + ".")
 
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
@@ -552,7 +542,7 @@ def create_model(
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
-        onnx_model = Qwen35MoETextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen35MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_moe_text"
         else:
@@ -729,9 +719,6 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
-                enable_mtp = Export the Qwen3.6 MoE MTP self-speculative head as mtp.onnx. Default is false.
-                    Requires include_hidden_states=true, exclude_lm_head=false, prune_lm_head=false,
-                    and source safetensors containing mtp.* weights.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
                 state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).

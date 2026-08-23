@@ -17,6 +17,7 @@ from .internlm import InternLM2Model
 from .lfm2 import LFM2Model
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
+from .mtp import MTPModel
 from .nemotron import NemotronModel
 from .olmo import OLMoModel
 from .phi import (
@@ -29,7 +30,17 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, Qwen35TextModel, Qwen35MoETextModel, QwenModel, VideoChatFlashQwenModel
+from .qwen import (
+    Qwen3Model,
+    Qwen3VLTextModel,
+    Qwen25VLTextModel,
+    Qwen35MoEModel,
+    Qwen35MoETextModel,
+    Qwen35MTPModel,
+    Qwen35TextModel,
+    QwenModel,
+    VideoChatFlashQwenModel,
+)
 from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
@@ -46,6 +57,7 @@ __all__ = [
     "InternLM2Model",
     "LFM2Model",
     "LlamaModel",
+    "MTPModel",
     "Mistral3TextModel",
     "MistralModel",
     "Model",
@@ -59,11 +71,13 @@ __all__ = [
     "Phi3VModel",
     "Phi4MMModel",
     "PhiModel",
+    "Qwen25VLTextModel",
     "Qwen3Model",
     "Qwen3VLTextModel",
-    "Qwen25VLTextModel",
-    "Qwen35TextModel",
+    "Qwen35MoEModel",
     "Qwen35MoETextModel",
+    "Qwen35MTPModel",
+    "Qwen35TextModel",
     "QwenModel",
     "SmolLM3Model",
     "VideoChatFlashQwenModel",
