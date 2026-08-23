@@ -7,7 +7,7 @@ import onnx_ir as ir
 import torch
 from safetensors.torch import save_file
 
-from models.loaders.gptoss import GptOssMXFP4Loader
+from loaders.gptoss import GptOssMXFP4Loader
 
 
 def _projection_tensors(layer_id=0):

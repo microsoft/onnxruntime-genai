@@ -334,21 +334,23 @@ def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
         GPTOSSModel.make_moe_preprocessing(model, 0, mlp, "root")
 
 
-def test_gptoss_original_mxfp4_blocks_pack_to_qmoe_layout():
-    blocks = torch.arange(2 * 4 * 2 * 16, dtype=torch.uint8).reshape(2, 4, 2, 16)
-    packed = GPTOSSModel.__new__(GPTOSSModel).pack_original_mxfp4_blocks_for_qmoe(blocks)
+def test_gptoss_fp4_delegates_normalized_experts_to_base():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "fp4"}
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    packed_experts = object()
+    calls = []
+    model.load_mxfp4_experts = lambda layer_id: packed_experts
+    model.make_moe_expert_initializers = lambda *args: calls.append(args)
+    model.make_initializer = lambda *args, **kwargs: None
+    experts = types.SimpleNamespace(
+        gate_up_proj_bias=torch.ones(2, 4),
+        down_proj_bias=torch.ones(2, 2),
+    )
 
-    low_codes = blocks & 0x0F
-    high_codes = blocks >> 4
-    codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
-    codes[..., 0::2] = low_codes
-    codes[..., 1::2] = high_codes
-    codes = codes.reshape(2, 4, 64)
-    codes_kn = codes.permute(0, 2, 1).contiguous()
-    expected = (codes_kn[..., 1::2] << 4) | codes_kn[..., 0::2]
+    model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
 
-    assert packed.shape == (2, 64, 2)
-    assert torch.equal(packed, expected)
+    assert calls == [(3, packed_experts)]
 
 
 class _FakeMoEModel:

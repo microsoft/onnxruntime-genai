@@ -5,7 +5,6 @@
 # --------------------------------------------------------------------------
 import onnx_ir as ir
 import torch
-from pathlib import Path
 
 from .base import Model
 
@@ -21,121 +20,16 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
-        self._mxfp4_weight_map = None
-        self._mxfp4_weight_map_loaded = False
-        self._mxfp4_snapshot_dir = None
-        self._mxfp4_tensor_cache = {}
 
-    def _get_mxfp4_snapshot_dir(self):
-        if self._mxfp4_snapshot_dir is not None:
-            return self._mxfp4_snapshot_dir
-
-        model_path = Path(self.model_name_or_path)
-        if model_path.is_dir():
-            self._mxfp4_snapshot_dir = model_path
-            return self._mxfp4_snapshot_dir
-
+    def load_mxfp4_experts(self, layer_id):
         try:
-            from huggingface_hub import snapshot_download
-        except ImportError as e:
-            raise RuntimeError("huggingface_hub is required to locate original GPT-OSS MXFP4 weights.") from e
+            from loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
+        except ImportError:
+            from onnxruntime_genai.models.loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
 
-        self._mxfp4_snapshot_dir = Path(
-            snapshot_download(
-                self.model_name_or_path,
-                cache_dir=self.cache_dir,
-                token=self.hf_token,
-                local_files_only=True,
-            )
-        )
-        return self._mxfp4_snapshot_dir
-
-    def _get_mxfp4_weight_map(self):
-        if self._mxfp4_weight_map_loaded:
-            return self._mxfp4_weight_map
-
-        snapshot_dir = self._get_mxfp4_snapshot_dir()
-        index_path = snapshot_dir / "model.safetensors.index.json"
-        if index_path.exists():
-            import json
-
-            with open(index_path) as f:
-                self._mxfp4_weight_map = json.load(f)["weight_map"]
-        else:
-            safetensors_files = sorted(snapshot_dir.glob("*.safetensors"))
-            if len(safetensors_files) != 1:
-                raise RuntimeError(
-                    f"Could not locate original GPT-OSS MXFP4 safetensors index in {snapshot_dir}."
-                )
-            self._mxfp4_weight_map = None
-        self._mxfp4_weight_map_loaded = True
-        return self._mxfp4_weight_map
-
-    def _load_original_mxfp4_tensor(self, tensor_name):
-        if tensor_name in self._mxfp4_tensor_cache:
-            return self._mxfp4_tensor_cache[tensor_name]
-
-        snapshot_dir = self._get_mxfp4_snapshot_dir()
-        weight_map = self._get_mxfp4_weight_map()
-
-        if weight_map is None:
-            candidate_files = sorted(snapshot_dir.glob("*.safetensors"))
-        else:
-            if tensor_name not in weight_map:
-                raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in safetensors index.")
-            candidate_files = [snapshot_dir / weight_map[tensor_name]]
-
-        try:
-            from safetensors import safe_open
-        except ImportError as e:
-            raise RuntimeError("safetensors is required to load original GPT-OSS MXFP4 weights.") from e
-
-        for tensor_file in candidate_files:
-            with safe_open(tensor_file, framework="pt", device="cpu") as f:
-                if tensor_name in f.keys():
-                    tensor = f.get_tensor(tensor_name)
-                    self._mxfp4_tensor_cache[tensor_name] = tensor
-                    return tensor
-
-        raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in {snapshot_dir}.")
-
-    def pack_original_mxfp4_blocks_for_qmoe(self, blocks):
-        """Pack GPT-OSS checkpoint MXFP4 blocks to QMoE's column-major layout.
-
-        GPT-OSS stores blocks as [E, N, K/32, 16], with each byte holding two
-        adjacent K-axis FP4 e2m1 codes for the same output row N. CUDA QMoE
-        expects [E, K, N/2], with each byte holding two adjacent N-axis codes for
-        the same K (even N in low nibble, odd N in high nibble).
-        """
-        if blocks.dtype != torch.uint8:
-            blocks = blocks.to(torch.uint8)
-        if blocks.ndim != 4 or blocks.shape[-1] != 16:
-            raise ValueError(f"GPT-OSS MXFP4 blocks must have shape [E, N, K/32, 16], got {tuple(blocks.shape)}.")
-        if blocks.shape[1] % 2 != 0:
-            raise ValueError(f"GPT-OSS MXFP4 output dimension N must be even, got {blocks.shape[1]}.")
-
-        even_n = blocks[:, 0::2, :, :]
-        odd_n = blocks[:, 1::2, :, :]
-        packed_even_k = ((odd_n & 0x0F) << 4) | (even_n & 0x0F)
-        packed_odd_k = ((odd_n >> 4) << 4) | (even_n >> 4)
-        packed = torch.stack((packed_even_k, packed_odd_k), dim=-1)
-        return packed.permute(0, 2, 3, 4, 1).reshape(blocks.shape[0], blocks.shape[2] * 32, blocks.shape[1] // 2).contiguous()
-
-    def make_original_mxfp4_qmoe_initializers(self, layer_id, proj, weight_name, scales_name, global_scales_name):
-        blocks = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.moe.experts.{proj}_blocks")
-        scales = self._load_original_mxfp4_tensor(f"model.layers.{layer_id}.moe.experts.{proj}_scales")
-        if scales.dtype != torch.uint8:
-            scales = scales.to(torch.uint8)
-        expected_scale_shape = blocks.shape[:-1]
-        if tuple(scales.shape) != tuple(expected_scale_shape):
-            raise ValueError(
-                f"GPT-OSS MXFP4 scales for layer {layer_id} {proj} must have shape {tuple(expected_scale_shape)}, "
-                f"got {tuple(scales.shape)}."
-            )
-
-        self.make_initializer(self.pack_original_mxfp4_blocks_for_qmoe(blocks), weight_name)
-        self.make_initializer(scales, scales_name, to=ir.DataType.FLOAT8E8M0, raw=True)
-        self.make_initializer(torch.ones(blocks.shape[0], dtype=torch.float32), global_scales_name)
+        if not hasattr(self, "_mxfp4_loader"):
+            self._mxfp4_loader = GptOssMXFP4Loader(self.model_name_or_path, self.cache_dir, self.hf_token)
+        return self._mxfp4_loader.prepare_experts(layer_id)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -645,15 +539,6 @@ class GPTOSSModel(Model):
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
         down_proj_zero_points = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
 
-        # FP4 (MXFP4) per-expert float32 global scales (empty for the integer QMoE path).
-        gate_up_proj_global_scales = ""
-        down_proj_global_scales = ""
-
-        # Per-expert quantized weight lists are only populated on the non-Quark QMoE
-        # path below; initialize them so the shape helper never sees an undefined name.
-        gate_up_proj_qweight_list = None
-        down_proj_qweight_list = None
-
         # HF GptOssExperts stores the expert weights input-major:
         #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
         # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
@@ -666,88 +551,20 @@ class GPTOSSModel(Model):
             gate_up_proj_layout = moe.experts.gate_up_proj.transpose(-1, -2)
             down_proj_layout = moe.experts.down_proj.transpose(-1, -2)
 
-        if op_type == "MoE" and not has_quark_experts:
-            # Save non-quantized MoE weights as initializers
-            self.make_initializer(
-                gate_up_proj_layout.view(self.moe_attrs["num_experts"], -1, self.hidden_size),
-                gate_up_proj_weight,
-                to=self.io_dtype,
-            )
-            self.make_initializer(
-                down_proj_layout.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size),
-                down_proj_weight,
-                to=self.io_dtype,
-            )
+        if is_fp4_moe:
+            self.make_moe_expert_initializers(layer_id, self.load_mxfp4_experts(layer_id))
+        elif not has_quark_experts:
+            self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_proj_layout, down_proj_layout)
         else:
-            if is_fp4_moe and not has_quark_experts:
-                # Preserve the original GPT-OSS checkpoint MXFP4 experts. The
-                # Hugging Face loader may expose dequantized BF16 weights here;
-                # re-quantizing those changes many FP4 codes/scales. Read the
-                # original *_blocks/*_scales tensors and only repack their byte
-                # layout for CUDA QMoE.
-                self.moe_attrs["block_size"] = 32
-                gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
-                down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
-                self.make_original_mxfp4_qmoe_initializers(
-                    layer_id, "gate_up_proj", gate_up_proj_weight, gate_up_proj_scales, gate_up_proj_global_scales
-                )
-                self.make_original_mxfp4_qmoe_initializers(
-                    layer_id, "down_proj", down_proj_weight, down_proj_scales, down_proj_global_scales
-                )
-            else:
-                if has_quark_experts:
-                    # Use pre-quantized Quark experts
-                    gate_up_proj_qweight_tensor, gate_up_proj_scales_tensor, gate_up_proj_zero_points_tensor = (
-                        moe.experts.fc1_weights,
-                        moe.experts.fc1_scales,
-                        moe.experts.fc1_zero_points,
-                    )
-                    down_proj_qweight_tensor, down_proj_scales_tensor, down_proj_zero_points_tensor = (
-                        moe.experts.fc2_weights,
-                        moe.experts.fc2_scales,
-                        moe.experts.fc2_zero_points,
-                    )
-
-                    # Save zero point as initializers
-                    self.make_initializer(gate_up_proj_zero_points_tensor, gate_up_proj_zero_points)
-                    self.make_initializer(down_proj_zero_points_tensor, down_proj_zero_points)
-                else:
-                    # Create and save quantized MoE weights as initializers
-                    gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
-                    down_proj_qweight_list, down_proj_scales_list = [], []
-
-                    for i in range(self.moe_attrs["num_experts"]):
-                        qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
-                        gate_up_proj_qweight_list.append(qweight1)
-                        gate_up_proj_scales_list.append(scales1)
-                        qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
-                        down_proj_qweight_list.append(qweight2)
-                        down_proj_scales_list.append(scales2)
-
-                    gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
-                    gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
-                    down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
-                    down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
-
-                gate_up_proj_qweight_shape, down_proj_qweight_shape = self.make_qmoe_weight_initializer_shapes(
-                    gate_up_proj_qweight_list if not has_quark_experts else None,
-                    down_proj_qweight_list if not has_quark_experts else None,
-                    has_quark_experts,
-                )
-
-                # Save qweight tensors
-                self.make_initializer(
-                    gate_up_proj_qweight_tensor.view(gate_up_proj_qweight_shape),
-                    gate_up_proj_weight,
-                )
-                self.make_initializer(
-                    down_proj_qweight_tensor.view(down_proj_qweight_shape),
-                    down_proj_weight,
-                )
-
-                # Save scales tensors
-                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+            gate_up_proj_qweight_shape, down_proj_qweight_shape = self.make_qmoe_weight_initializer_shapes(
+                None, None, True
+            )
+            self.make_initializer(moe.experts.fc1_weights.view(gate_up_proj_qweight_shape), gate_up_proj_weight)
+            self.make_initializer(moe.experts.fc2_weights.view(down_proj_qweight_shape), down_proj_weight)
+            self.make_initializer(moe.experts.fc1_scales, gate_up_proj_scales, to=self.io_dtype)
+            self.make_initializer(moe.experts.fc2_scales, down_proj_scales, to=self.io_dtype)
+            self.make_initializer(moe.experts.fc1_zero_points, gate_up_proj_zero_points)
+            self.make_initializer(moe.experts.fc2_zero_points, down_proj_zero_points)
 
         # Save biases (shared for all paths)
         if has_quark_experts:
@@ -790,12 +607,8 @@ class GPTOSSModel(Model):
 
         has_quark_experts = self.has_quark_experts(moe.experts)
         use_zero_points = has_quark_experts and self.ep != "trt-rtx"
-        use_global_scales = self.moe_attrs.get("quant_type") == "fp4" and not has_quark_experts
-        gate_up_proj_global_scales = (
-            f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales" if use_global_scales else ""
-        )
-        down_proj_global_scales = (
-            f"model.layers.{layer_id}.moe.experts.down_proj.global_scales" if use_global_scales else ""
+        gate_up_proj_global_scales, down_proj_global_scales = self.moe_attrs.get("global_scale_names", {}).get(
+            layer_id, ("", "")
         )
 
         moe_name = f"{basename}/{op_type}"
