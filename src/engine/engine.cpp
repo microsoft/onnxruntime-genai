@@ -10,6 +10,8 @@
 
 namespace Generators {
 
+static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
+
 namespace {
 
 std::shared_ptr<GeneratorParams> CloneRequestParams(
@@ -328,6 +330,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     context.cache_reservation = step->reservation->PagedReservation();
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
     mtp_model_executor_->Decode(mtp_requests, context);
+    ++speculative_stats_.draft_forward_passes;
     auto logits = mtp_requests.ProcessLogits();
     const auto first_drafts = GreedyTokens(mtp_model_, logits);
     for (size_t i = 0; i < first_drafts.size(); ++i) {
@@ -405,6 +408,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       chain_context.cache_reservation = step->reservation->PagedReservation();
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
       mtp_model_executor_->Decode(chain_requests, chain_context);
+      ++speculative_stats_.draft_forward_passes;
       auto chain_logits = chain_requests.ProcessLogits();
       const auto chain_drafts = GreedyTokens(mtp_model_, chain_logits);
       for (size_t row = 0; row < active_feed_indices.size(); ++row) {
@@ -496,6 +500,30 @@ void Engine::CommitMtpStep(MtpStep& step) {
 void Engine::PublishMtpDrafts(MtpStep& step) {
   for (size_t i = 0; i < step.plan.requests.size(); ++i) {
     step.target_requests[i]->SetDraftTokens(step.drafts[i]);
+  }
+}
+
+void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
+  for (const auto& entry : plan.requests) {
+    if (entry.draft_token_count == 0) {
+      continue;
+    }
+
+    const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    ++speculative_stats_.rounds;
+    ++speculative_stats_.completed_rounds;
+    speculative_stats_.draft_tokens_proposed += entry.draft_token_count;
+    speculative_stats_.draft_tokens_evaluated +=
+        std::min(accepted + 1, entry.draft_token_count);
+    speculative_stats_.draft_tokens_accepted += accepted;
+    ++speculative_stats_.acceptance_length_histogram[accepted];
+    if (accepted == 0) {
+      ++speculative_stats_.zero_accept_rounds;
+    } else if (accepted == entry.draft_token_count) {
+      ++speculative_stats_.full_accept_rounds;
+    } else {
+      ++speculative_stats_.partial_accept_rounds;
+    }
   }
 }
 
@@ -890,6 +918,7 @@ void Engine::RunStatic() {
 
     try {
       model_executor_->Decode(scheduled_requests);
+      ++speculative_stats_.target_forward_passes;
       scheduled_requests.GenerateNextTokens(step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -1106,6 +1135,7 @@ void Engine::RunDynamic() {
       scheduled_requests.BeginTransaction();
       request_transaction_active = true;
       model_executor_->Decode(scheduled_requests, context);
+      ++speculative_stats_.target_forward_passes;
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
       rollback_transaction();
@@ -1223,6 +1253,7 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         CommitMtpStep(*mtp_step);
       }
+      RecordSpeculativeCommit(step_plan_);
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
@@ -1465,6 +1496,20 @@ size_t Engine::MaxDraftTokensPerStep() const {
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
+}
+
+SpeculativeStats Engine::GetSpeculativeStats() const noexcept {
+  auto stats = speculative_stats_;
+  if (stats.draft_tokens_evaluated != 0) {
+    stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
+                            static_cast<float>(stats.draft_tokens_evaluated);
+  }
+  if (stats.rounds != 0) {
+    stats.avg_draft_tokens_per_round =
+        static_cast<float>(stats.draft_tokens_proposed) /
+        static_cast<float>(stats.rounds);
+  }
+  return stats;
 }
 
 }  // namespace Generators

@@ -6,6 +6,7 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "../decoding/speculative_stats.h"
 
 #include <thread>
 
@@ -167,6 +168,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   size_t MaxDraftTokensPerStep() const;
 
+  /**
+   * @brief Returns cumulative speculative-decoding work and acceptance statistics.
+   */
+  SpeculativeStats GetSpeculativeStats() const noexcept;
+
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
@@ -201,10 +207,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
     std::unique_ptr<CacheStepReservation> reservation;
   };
 
-  void ReclaimAbandonedRequests();
-  std::shared_ptr<Request> DrainReadyRequest();
-  std::shared_ptr<Request> StepDynamic();
-  std::shared_ptr<Request> StepStatic();
   std::unique_ptr<MtpStep> PrepareMtpStep(
       const StepPlan& target_plan,
       const std::vector<RequestStepResult>& target_results,
@@ -212,6 +214,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RollbackMtpStep(MtpStep& step);
   void CommitMtpStep(MtpStep& step);
   void PublishMtpDrafts(MtpStep& step);
+  void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
       std::exception_ptr append_error,
@@ -237,6 +240,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
+  SpeculativeStats speculative_stats_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
   std::vector<size_t> staged_event_order_;
