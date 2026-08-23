@@ -338,7 +338,7 @@ class Model:
             "q_path": "",                                    # Q path to attention
             "k_path": "",                                    # K path to attention
             "v_path": "",                                    # V path to attention
-            "o_path": "",                                    # O path to attention
+            "o_path": "",                                    # O path from attention
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
             "softcap": attn_softcap,                         # Softcap value to prevent values from exploding in attention
@@ -362,7 +362,7 @@ class Model:
         self.make_attention_init(config)
 
         # KV-cache specific variables
-        quant_scheme = extra_options.get("kv_cache_quant_scheme", "none") or "none"
+        quant_scheme = extra_options.get("kv_cache_quant_scheme", "none")
         quant_type = (
             ir.DataType.INT8
             if quant_scheme.startswith("int8")
@@ -780,7 +780,7 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_kv_cache_init(self):
-        if self.kv_cache_attrs["quant_type"] == "none":
+        if self.kv_cache_attrs["quant_scheme"] == "none":
             # Return early if quantized KV caches aren't used
             return
 
@@ -800,14 +800,14 @@ class Model:
             # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
             raise ValueError(
                 "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_type']}'."
+                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_scheme']}'."
             )
 
         cache_dtype = (
             # FP8 E4M3: stored one byte per element (no bit-packing), kernel selects the fp8
             # path from the cache element type; kv_cache_bit_width stays 8.
             ir.DataType.FLOAT8E4M3FN
-            if self.kv_cache_attrs["quant_type"].startswith("fp8")
+            if self.kv_cache_attrs["quant_scheme"].startswith("fp8")
             else ir.DataType.UINT8
             if self.kv_cache_attrs["bit_width"] == 4
             else ir.DataType.INT8
@@ -850,27 +850,30 @@ class Model:
         # `layer_ids` maps sparse scale entries to their original model layers; without it,
         # the scale arrays use the legacy dense 0..num_layers-1 order.
         if self.kv_cache_attrs["scales_path"] == "":
-            raise ValueError(
-                "Quantized KV cache requires calibrated scales; provide them via "
-                "extra_options['kv_cache_scale_file']."
-            )
+            return
 
+        # Load JSON file
         with open(self.kv_cache_attrs["scales_path"], encoding="utf-8") as file:
             scale_data = json.load(file)
+
+        # Identify the section of the JSON file corresponding to this model.
         scale_section = os.path.splitext(os.path.basename(getattr(self, "filename", "model.onnx")))[0]
         if scale_section in scale_data:
             scale_data = scale_data[scale_section]
+
+        # Load per-layer scales for KV caches
         try:
             k_scales_per_layer = scale_data["scales"]["k_scales"]
             v_scales_per_layer = scale_data["scales"]["v_scales"]
         except (KeyError, TypeError):
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
-        layer_ids = scale_data.get("layer_ids")
+        layer_ids = scale_data.get("layer_ids", None)
         if layer_ids is None:
             layer_ids = list(range(self.num_layers))
             expected_scale_count = self.num_layers
         else:
+            # Validate layer ids
             if not isinstance(layer_ids, list) or any(type(layer_id) is not int for layer_id in layer_ids):
                 raise ValueError("kv_cache_scale_file layer_ids must be a list of integer model layer IDs.")
             if not layer_ids:
@@ -881,6 +884,8 @@ class Model:
                 raise ValueError(
                     f"Scales file layer_ids must be in [0, {self.num_layers}), got {layer_ids}."
                 )
+
+
             kv_input_names = self.input_names.get("past_key_values.key", [])
             kv_layer_ids = {
                 int(parts[1])
@@ -922,7 +927,7 @@ class Model:
             self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
-        self.quant_config = self.extra_options.get("_quant_config")
+        self.quant_config = self.extra_options.get("_quant_config", None)
         if self.quant_config is None:
             self.quant_config = QuantConfig.from_extra_options(
                 extra_options=self.extra_options,
@@ -1216,7 +1221,7 @@ class Model:
                 "slide_key_value_cache": False,
                 "slide_inputs": False,
                 "layers": [
-                    layer_id for layer_id in range(self.num_layers) if self.uses_windowed_paged_cache(layer_id)
+                    layer_id for layer_id in range(self.num_layers) if self.is_windowed_paged_layer(layer_id)
                 ],
                 "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
             }
@@ -1275,7 +1280,7 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
-    def uses_windowed_paged_cache(self, layer_id):
+    def is_windowed_paged_layer(self, layer_id):
         """True when this layer's paged KV cache is a ring sized to the window rather than to the
         full context. Such layers read a different block table and a differently sized cache."""
         return self.has_windowed_paged_layers() and self.is_local(layer_id)
@@ -1299,7 +1304,7 @@ class Model:
         Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
         unify them with the full-attention layers, whose cache is allocated at max_length.
         """
-        if self.uses_windowed_paged_cache(layer_id):
+        if self.is_windowed_paged_layer(layer_id):
             # Paged layout is [num_blocks, block_size, heads, head_size]; only the block count shrinks.
             return ["num_blocks_windowed", shape[1], shape[2], shape[3]]
         if self.ep in self.eps_with_windowed_kv_cache and self.is_local(layer_id):
@@ -3473,7 +3478,7 @@ class Model:
             # because the op indexes them with the token's true position.
             block_table = (
                 self.input_names["block_table_windowed"]
-                if self.uses_windowed_paged_cache(kwargs["layer_id"])
+                if self.is_windowed_paged_layer(kwargs["layer_id"])
                 else self.input_names["block_table"]
             )
             self.make_paged_attention(
