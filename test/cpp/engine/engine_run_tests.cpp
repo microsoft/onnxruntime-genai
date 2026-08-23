@@ -1656,6 +1656,46 @@ TEST_F(EngineRunTest, SpeculativeRunAcceptingEveryDraftEmitsBonusToken) {
   EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 4);
 }
 
+TEST_F(EngineRunTest, SpeculativeTelemetryAggregatesAcceptanceLengths) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+  std::array<EngineEvent, 4> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+
+  request->SetDraftTokens(std::vector<int32_t>{14, 15});
+  engine.executor->SetVerifyRowTokens({24, 25, 26});
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+
+  request->SetDraftTokens(std::vector<int32_t>{16});
+  engine.executor->SetVerifyRowTokens({16, 26});
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.target_forward_passes, 4u);
+  EXPECT_EQ(stats.draft_forward_passes, 0u);
+  EXPECT_EQ(stats.rounds, 3u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 6u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 5u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 3u);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[2], 1u);
+  EXPECT_FLOAT_EQ(stats.acceptance_rate, 3.0f / 5.0f);
+  EXPECT_FLOAT_EQ(stats.avg_draft_tokens_per_round, 2.0f);
+}
+
 TEST_F(EngineRunTest, SpeculativeOverflowCancellationFinishesLastTokenEvent) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;

@@ -819,6 +819,14 @@ OGA_EXPORT void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* sta
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     const OgaSpeculativeStats* stats, const char* name, uint64_t* value);
 
+/** \brief Gets the number of rounds that accepted exactly the requested number of draft tokens. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthCount(
+    const OgaSpeculativeStats* stats, size_t accepted_length, uint64_t* value);
+
+/** \brief Gets the number of bins in the acceptance-length histogram. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthHistogramSize(
+    const OgaSpeculativeStats* stats, size_t* value);
+
 /** \brief Gets a timing, rate, ratio, average, or speedup value from a statistics snapshot. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     const OgaSpeculativeStats* stats, const char* name, double* value);
@@ -1456,6 +1464,20 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetDraftTokens(OgaRequest* request,
  * \return OgaResult containing the error message on failure, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaEngine* engine, size_t* out);
+
+/**
+ * \brief Returns a cumulative snapshot of Engine speculative-decoding statistics.
+ *
+ * Target and draft forward-pass counters include successful model executions even if a later
+ * transaction phase rolls back. Proposal, acceptance, and acceptance-length counters include only
+ * committed speculative steps.
+ *
+ * \param[in] engine The engine to query.
+ * \param[out] out The newly allocated statistics snapshot. Destroy it with OgaDestroySpeculativeStats.
+ * \return OgaResult containing the error message on failure, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetSpeculativeStats(
+    const OgaEngine* engine, OgaSpeculativeStats** out);
 
 /**
  * \brief Destroys the given request.
