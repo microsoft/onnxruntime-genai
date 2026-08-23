@@ -660,15 +660,18 @@ def test_cuda_raw_per_channel_quantization_does_not_require_qmoe_pack_pybind(mon
 
 
 @pytest.mark.skipif(not _ort_cuda_available(), reason="onnxruntime CUDA pybind not available")
-def test_cutlass_prepacked_scales_are_positive_with_full_range_symmetric_quantization():
-    """The synced CudaQuantizer full-range symmetric path returns positive
-    scales, and the encoded shapes must match the QMoE op's prepacked layout."""
+def test_cutlass_prepacked_scales_preserve_mlas_sign():
     model = _FakeMoEModel("cuda", 128, -1)
     torch.manual_seed(0)
     weights = torch.randn(256, 256) * 0.05  # [N, K]
     qweight, scales = Model._cutlass_prepacked_blockwise_quantize(model, weights)
 
+    blocked = weights.reshape(256, 2, 128)
+    argmax = blocked.abs().argmax(dim=2, keepdim=True)
+    expected_scales = blocked.gather(2, argmax).squeeze(2) / -8.0
+
     assert qweight.dtype == torch.uint8
     assert tuple(qweight.shape) == (256, 128)  # [K, N/2] for INT4
     assert tuple(scales.shape) == (256, 2)  # [N, K/block]
-    assert (scales > 0).all()
+    assert (scales < 0).any() and (scales > 0).any()
+    assert torch.equal(scales, expected_scales)
