@@ -64,6 +64,58 @@ class QuarkModel(QuantizedModel):
         into the format expected by the QMoE operator.
         """
         self.repack_qmoe_weights(experts)
+        self.finalize_packed_experts(experts)
+
+    def finalize_packed_experts(self, experts):
+        first_expert = experts[min(experts.keys())]
+        first_projection = (
+            first_expert.gate_up_proj
+            if first_expert.gate_up_proj.qweight is not None
+            else first_expert.gate_proj
+        )
+        experts.quant_type = "int"
+        experts.block_size = first_projection.group_size
+        experts.gate_up_qweight = experts.fc1_weights
+        experts.gate_up_scales = experts.fc1_scales
+        experts.gate_up_zero_points = experts.fc1_zero_points
+        experts.down_qweight = experts.fc2_weights
+        experts.down_scales = experts.fc2_scales
+        experts.down_zero_points = experts.fc2_zero_points
+        experts.gate_up_bias = self.combine_gate_up_biases(experts)
+        experts.down_bias = self.combine_down_biases(experts)
+
+    @staticmethod
+    def combine_gate_up_biases(experts):
+        combined_biases = []
+        for expert_id in sorted(experts.keys()):
+            expert = experts[expert_id]
+            if expert.gate_up_proj.qweight is not None:
+                bias = expert.gate_up_proj.bias
+                if bias is None:
+                    bias = torch.zeros(expert.gate_up_proj.qweight.shape[0])
+            else:
+                gate_bias = expert.gate_proj.bias
+                if gate_bias is None:
+                    gate_bias = torch.zeros(expert.gate_proj.qweight.shape[0])
+                up_bias = expert.up_proj.bias
+                if up_bias is None:
+                    up_bias = torch.zeros(expert.up_proj.qweight.shape[0])
+                bias = torch.empty(gate_bias.shape[0] + up_bias.shape[0], dtype=gate_bias.dtype)
+                bias[::2] = gate_bias
+                bias[1::2] = up_bias
+            combined_biases.append(bias)
+        return torch.stack(combined_biases)
+
+    @staticmethod
+    def combine_down_biases(experts):
+        combined_biases = []
+        for expert_id in sorted(experts.keys()):
+            down_proj = experts[expert_id].down_proj
+            bias = down_proj.bias
+            if bias is None:
+                bias = torch.zeros(down_proj.qweight.shape[0])
+            combined_biases.append(bias)
+        return torch.stack(combined_biases)
 
     def repack_qmoe_weights(self, experts):
         """

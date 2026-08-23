@@ -323,15 +323,13 @@ def test_modelopt_native_quantization_is_independent_of_graph_precision(monkeypa
     assert options["moe_quant_type"] == "nvfp4"
 
 
-def test_gptoss_fp4_rejects_quark_experts_before_emitting_nodes():
-    model = types.SimpleNamespace(
-        moe_attrs={"op_type": "QMoE", "quant_type": "fp4"},
-        has_quark_experts=lambda experts: True,
-    )
-    mlp = types.SimpleNamespace(experts=types.SimpleNamespace(fc1_weights=torch.empty(0), fc2_weights=torch.empty(0)))
+def test_base_rejects_packed_expert_quant_type_mismatch():
+    model = Model.__new__(Model)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "fp4"}
+    experts = types.SimpleNamespace(quant_type="int")
 
-    with pytest.raises(ValueError, match="pre-quantized Quark GPT-OSS experts"):
-        GPTOSSModel.make_moe_preprocessing(model, 0, mlp, "root")
+    with pytest.raises(ValueError, match="Checkpoint experts use int, but QMoE is configured for fp4"):
+        model.make_moe_expert_initializers(0, experts)
 
 
 def test_gptoss_fp4_delegates_normalized_experts_to_base():
@@ -351,6 +349,24 @@ def test_gptoss_fp4_delegates_normalized_experts_to_base():
     model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
 
     assert calls == [(3, packed_experts)]
+
+
+def test_gptoss_delegates_packed_checkpoint_experts_to_base():
+    model = GPTOSSModel.__new__(GPTOSSModel)
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "int"}
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    calls = []
+    experts = types.SimpleNamespace(
+        quant_type="int",
+        gate_up_bias=torch.ones(2, 4),
+        down_bias=torch.ones(2, 2),
+    )
+    model.make_moe_expert_initializers = lambda *args: calls.append(args)
+    model.make_initializer = lambda *args, **kwargs: None
+
+    model.make_moe_preprocessing(3, types.SimpleNamespace(experts=experts), "root")
+
+    assert calls == [(3, experts)]
 
 
 class _FakeMoEModel:
@@ -400,46 +416,7 @@ class _RealMoEModel:
         self.extra_options = extra_options or {}
 
 
-class _FakeGPTOSSModel:
-    make_qmoe_weight_initializer_shapes = GPTOSSModel.make_qmoe_weight_initializer_shapes
-
-    def __init__(self, ep, weights_prepacked):
-        self.ep = ep
-        self.hidden_size = 96
-        self.intermediate_size = 128
-        self.moe_attrs = {"expert_weight_bits": 4, "num_experts": 2, "weights_prepacked": weights_prepacked}
-
-
 _W = torch.zeros(8, 128)  # dummy expert weight [N, K]
-
-
-@pytest.mark.parametrize(
-    "weights_prepacked,gate_shape,down_shape,expected_gate_shape,expected_down_shape",
-    [
-        (-1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
-        (0, (256, 48), (96, 64), (2, 256, 48), (2, 96, 64)),
-        (1, (96, 128), (128, 48), (2, 96, 128), (2, 128, 48)),
-    ],
-)
-def test_gptoss_qmoe_initializer_shapes_match_schema(
-    weights_prepacked,
-    gate_shape,
-    down_shape,
-    expected_gate_shape,
-    expected_down_shape,
-):
-    model = _FakeGPTOSSModel("cuda", weights_prepacked)
-    gate_up_qweights = [torch.zeros(gate_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
-    down_qweights = [torch.zeros(down_shape, dtype=torch.uint8) for _ in range(model.moe_attrs["num_experts"])]
-
-    gate_up_initializer_shape, down_initializer_shape = model.make_qmoe_weight_initializer_shapes(
-        gate_up_qweights,
-        down_qweights,
-        has_quark_experts=False,
-    )
-
-    assert tuple(torch.stack(gate_up_qweights, dim=0).view(gate_up_initializer_shape).shape) == expected_gate_shape
-    assert tuple(torch.stack(down_qweights, dim=0).view(down_initializer_shape).shape) == expected_down_shape
 
 
 @pytest.mark.parametrize("weights_prepacked", [-1, 1])

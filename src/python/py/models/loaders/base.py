@@ -113,10 +113,12 @@ class QuantizedExperts:
         self.gate_up_scales = None
         self.gate_up_zero_points = None
         self.gate_up_global_scales = None
+        self.gate_up_bias = None
         self.down_qweight = None
         self.down_scales = None
         self.down_zero_points = None
         self.down_global_scales = None
+        self.down_bias = None
 
     def add_expert(self, expert_id: int) -> QuantizedExpert:
         """Add a new expert and return it."""

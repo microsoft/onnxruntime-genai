@@ -19,6 +19,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
 from loaders.base import (
+    QuantizedExperts,
     QuantizedModel,
     QuantizedTensorModule,
     TensorModule,
@@ -28,6 +29,34 @@ from loaders.quark import QuarkModel
 
 _BASE_MODEL = object.__new__(QuantizedModel)
 _QUARK_MODEL = object.__new__(QuarkModel)
+
+
+def test_quark_finalizes_generic_packed_experts():
+    experts = QuantizedExperts()
+    for expert_id in range(2):
+        expert = experts.add_expert(expert_id)
+        expert.gate_proj.qweight = torch.zeros(3, 4, dtype=torch.uint8)
+        expert.gate_proj.group_size = 32
+        expert.gate_proj.bias = torch.tensor([1.0, 2.0, 3.0]) + expert_id
+        expert.up_proj.qweight = torch.zeros(3, 4, dtype=torch.uint8)
+        expert.up_proj.bias = torch.tensor([4.0, 5.0, 6.0]) + expert_id
+        expert.down_proj.qweight = torch.zeros(2, 3, dtype=torch.uint8)
+        expert.down_proj.bias = torch.tensor([7.0, 8.0]) + expert_id
+    experts.fc1_weights = torch.zeros(2, 6, 2, dtype=torch.uint8)
+    experts.fc1_scales = torch.ones(2, 6, 1)
+    experts.fc1_zero_points = torch.zeros(2, 6, 1, dtype=torch.uint8)
+    experts.fc2_weights = torch.zeros(2, 2, 2, dtype=torch.uint8)
+    experts.fc2_scales = torch.ones(2, 2, 1)
+    experts.fc2_zero_points = torch.zeros(2, 2, 1, dtype=torch.uint8)
+
+    _QUARK_MODEL.finalize_packed_experts(experts)
+
+    assert experts.quant_type == "int"
+    assert experts.block_size == 32
+    assert experts.gate_up_qweight is experts.fc1_weights
+    assert experts.down_zero_points is experts.fc2_zero_points
+    assert torch.equal(experts.gate_up_bias[0], torch.tensor([1.0, 4.0, 2.0, 5.0, 3.0, 6.0]))
+    assert torch.equal(experts.down_bias[1], torch.tensor([8.0, 9.0]))
 
 
 class _FakeQuantizedModel:
