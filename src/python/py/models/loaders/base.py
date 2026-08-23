@@ -21,24 +21,6 @@ import torch
 from safetensors.torch import load_file
 
 
-def normalize_vlm_weight_name(name):
-    """Normalize a checkpoint tensor key for VLM/Quark conventions.
-
-    Returns None if the tensor should be skipped (vision-tower weights), or
-    the normalized key string otherwise.
-    """
-    # Skip vision tower weights in VLM checkpoints
-    if name.startswith(("model.visual.", "model.vision.", "visual.")):
-        return None
-    # Normalize common VLM prefix so existing LLM regex + parsing keeps working
-    if name.startswith("model.language_model."):
-        name = "model." + name[len("model.language_model."):]
-    # Normalize Quark weight_quantizer.* naming to flat weight_* naming
-    name = name.replace(".weight_quantizer.scale", ".weight_scale")
-    name = name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
-    return name
-
-
 class QuantizedTensorModule:
     def __init__(self):
         self.qweight = None
@@ -50,15 +32,15 @@ class QuantizedTensorModule:
         self.in_features = 0
         self.out_features = 0
         self.bits = None
-        self._group_size = None
+        self.group_size_value = None
 
     @property
     def group_size(self):
-        return self._group_size if self._group_size != -1 else self.in_features
+        return self.group_size_value if self.group_size_value != -1 else self.in_features
 
     @group_size.setter
     def group_size(self, value):
-        self._group_size = value
+        self.group_size_value = value
 
     def __str__(self):
         qweight = f"qweight = {self.qweight.shape}, {self.qweight}\n"
@@ -97,6 +79,7 @@ class QuantizedAttention:
 
 class QuantizedExpert:
     """Represents a single expert in MoE with quantized weights."""
+
     def __init__(self, expert_id: int):
         self.expert_id = expert_id
         self.gate_proj = QuantizedTensorModule()
@@ -107,9 +90,10 @@ class QuantizedExpert:
 
 class QuantizedExperts:
     """Container for all experts in a MoE layer."""
+
     def __init__(self):
         """Pre-processed experts attributes"""
-        self._experts = {}
+        self.experts = {}
         """QMoE packed attributes"""
         self.fc1_weights = None
         self.fc1_scales = None
@@ -128,9 +112,9 @@ class QuantizedExperts:
 
     def add_expert(self, expert_id: int) -> QuantizedExpert:
         """Add a new expert and return it."""
-        if expert_id not in self._experts:
-            self._experts[expert_id] = QuantizedExpert(expert_id)
-        return self._experts[expert_id]
+        if expert_id not in self.experts:
+            self.experts[expert_id] = QuantizedExpert(expert_id)
+        return self.experts[expert_id]
 
     def get_expert(self, expert_id: int) -> QuantizedExpert:
         """Get an expert by ID, creating if it doesn't exist."""
@@ -138,15 +122,15 @@ class QuantizedExperts:
 
     def items(self):
         """Get (expert_id, expert) pairs."""
-        return self._experts.items()
+        return self.experts.items()
 
     def values(self):
         """Get all experts."""
-        return self._experts.values()
+        return self.experts.values()
 
     def keys(self):
         """Get all expert IDs."""
-        return self._experts.keys()
+        return self.experts.keys()
 
     def __getitem__(self, expert_id: int) -> QuantizedExpert:
         """Get expert by ID."""
@@ -155,7 +139,7 @@ class QuantizedExperts:
     @property
     def num_experts(self) -> int:
         """Number of experts."""
-        return len(self._experts)
+        return len(self.experts)
 
     def set_weight_data(self, expert_id: int, proj_type: str, param_type: str, tensor, bits: int, group_size: int):
         """Set weight data for a specific expert projection.
@@ -176,14 +160,14 @@ class QuantizedExperts:
 
         # Map parameter names
         param_mapping = {
-            'weight': 'qweight',
-            'weight_zero_point': 'qzeros',
-            'weight_scale': 'scales',
-            'scales': 'scales',
-            'qweight': 'qweight',
-            'qzeros': 'qzeros',
-            'bias': 'bias',
-            'g_idx': 'g_idx'
+            "weight": "qweight",
+            "weight_zero_point": "qzeros",
+            "weight_scale": "scales",
+            "scales": "scales",
+            "qweight": "qweight",
+            "qzeros": "qzeros",
+            "bias": "bias",
+            "g_idx": "g_idx",
         }
 
         attr_name = param_mapping.get(param_type, param_type)
@@ -191,11 +175,11 @@ class QuantizedExperts:
 
     def __str__(self):
         """String representation of all experts in the MoE layer."""
-        if not self._experts:
+        if not self.experts:
             return "QuantizedExperts(num_experts=0)"
 
         lines = [f"QuantizedExperts(num_experts={self.num_experts})"]
-        for expert_id, expert in sorted(self._experts.items()):
+        for expert_id, expert in sorted(self.experts.items()):
             lines.append(f"  QuantizedExperts {expert_id}:")
             lines.append(f"  gate_proj: {expert.gate_proj}")
             lines.append(f"  up_proj: {expert.up_proj}")
@@ -253,8 +237,8 @@ class QuantizedModel:
         if not load_weights:
             return
 
-        self._quant_attrs = quant_attrs
-        self._load_quant_config(quant_attrs)
+        self.quant_attrs = quant_attrs
+        self.load_quant_config(quant_attrs)
 
         lm_head_tensors = {}
         for weight_file in os.listdir(input_path):
@@ -263,7 +247,7 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for raw_name, tensor in weights.items():
-                    name = normalize_vlm_weight_name(raw_name)
+                    name = self.normalize_weight_name(raw_name)
                     if name is None:
                         continue
 
@@ -572,14 +556,10 @@ class QuantizedModel:
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 q_dim = (
-                                    q_size // (32 // local_bits)
-                                    if quant_type in {"awq", "gptq", "quark"}
-                                    else q_size
+                                    q_size // (32 // local_bits) if quant_type in {"awq", "gptq", "quark"} else q_size
                                 )
                                 kv_dim = (
-                                    kv_size // (32 // local_bits)
-                                    if quant_type in {"awq", "gptq", "quark"}
-                                    else kv_size
+                                    kv_size // (32 // local_bits) if quant_type in {"awq", "gptq", "quark"} else kv_size
                                 )
                                 tensor_map["self_attn.q_proj.qzeros"] = tensor[:, :q_dim]
                                 tensor_map["self_attn.k_proj.qzeros"] = tensor[:, q_dim : q_dim + kv_dim]
@@ -676,13 +656,20 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.bias
                             tensor_map["mlp.gate_proj.bias"] = tensor[:intermediate_size]
                             tensor_map["mlp.up_proj.bias"] = tensor[intermediate_size:]
-                        elif bool(re.match(r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|gate_up_proj|down_proj)\.(weight|bias|qweight|scales|qzeros|weight_scale|weight_zero_point|g_idx)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model\.layers\.\d+\.mlp\.experts\.\d+\.(gate_proj|up_proj|gate_up_proj|down_proj)\.(weight|bias|qweight|scales|qzeros|weight_scale|weight_zero_point|g_idx)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.mlp.experts.expert_id.proj_type.param_type
                             split_name = name.split(".")
                             expert_id = int(split_name[5])
                             proj_type = split_name[-2]
                             param_type = split_name[-1]
-                            module.mlp.experts.set_weight_data(expert_id, proj_type, param_type, tensor, local_bits, local_group_size)
+                            module.mlp.experts.set_weight_data(
+                                expert_id, proj_type, param_type, tensor, local_bits, local_group_size
+                            )
                         elif bool(re.match(r"^model\.layers\.\d+\.mlp\.router\.(weight|bias)$", name)):
                             # model.layers.layer_id.mlp.router.weight
                             # model.layers.layer_id.mlp.router.bias
@@ -698,7 +685,7 @@ class QuantizedModel:
                             for sub_name in tensor_name.split(".")[:-1]:
                                 submodule = getattr(submodule, sub_name)
                             if isinstance(submodule, QuantizedTensorModule):
-                                for q_attr, q_value in [("bits", local_bits), ("_group_size", local_group_size)]:
+                                for q_attr, q_value in [("bits", local_bits), ("group_size_value", local_group_size)]:
                                     if getattr(submodule, q_attr) is not None and getattr(submodule, q_attr) != q_value:
                                         raise ValueError(
                                             f"Quantization {q_attr} mismatch for {name}: expected {getattr(submodule, q_attr)}, got {q_value}."
@@ -707,7 +694,7 @@ class QuantizedModel:
                             setattr(submodule, tensor_name.split(".")[-1], tensor_value)
 
         # Process collected lm_head tensors in defined order to avoid ordering issues
-        self._assign_lm_head_tensors(lm_head_tensors)
+        self.assign_lm_head_tensors(lm_head_tensors)
 
         # Set LM head weights + biases if not already set
         if isinstance(self.lm_head, TensorModule) and self.lm_head.weight is None:
@@ -723,26 +710,31 @@ class QuantizedModel:
         # Set properties of each layer based on quantization type
         self.set_properties()
 
-    # Canonical name mapping for lm_head tensors (transformer.output_layer.* -> lm_head.*)
-    _LM_HEAD_NAME_MAP = {
-        "transformer.output_layer.weight": "lm_head.weight",
-        "transformer.output_layer.bias": "lm_head.bias",
-        "transformer.output_layer.qweight": "lm_head.qweight",
-        "transformer.output_layer.qzeros": "lm_head.qzeros",
-        "transformer.output_layer.weight_zero_point": "lm_head.weight_zero_point",
-        "transformer.output_layer.scales": "lm_head.scales",
-        "transformer.output_layer.weight_scale": "lm_head.weight_scale",
-        "transformer.output_layer.g_idx": "lm_head.g_idx",
-    }
+    def normalize_weight_name(self, name):
+        """Normalize a checkpoint tensor key to the shared model structure."""
+        if name.startswith(("model.visual.", "model.vision.", "visual.")):
+            return None
+        if name.startswith("model.language_model."):
+            name = "model." + name[len("model.language_model.") :]
+        return name
 
-    def _assign_lm_head_tensors(self, lm_head_tensors):
+    def assign_lm_head_tensors(self, lm_head_tensors):
         """Assign collected lm_head tensors in a defined order so that weight/bias
         are always processed before quantization parameters (scales, qzeros, etc.),
         regardless of safetensors dict iteration order."""
-        # Normalize names to canonical lm_head.* form
+        name_map = {
+            "transformer.output_layer.weight": "lm_head.weight",
+            "transformer.output_layer.bias": "lm_head.bias",
+            "transformer.output_layer.qweight": "lm_head.qweight",
+            "transformer.output_layer.qzeros": "lm_head.qzeros",
+            "transformer.output_layer.weight_zero_point": "lm_head.weight_zero_point",
+            "transformer.output_layer.scales": "lm_head.scales",
+            "transformer.output_layer.weight_scale": "lm_head.weight_scale",
+            "transformer.output_layer.g_idx": "lm_head.g_idx",
+        }
         normalized = {}
         for name, value in lm_head_tensors.items():
-            canonical = self._LM_HEAD_NAME_MAP.get(name, name)
+            canonical = name_map.get(name, name)
             normalized[canonical] = value
 
         # Process weight and bias first, then quantization tensors
@@ -766,19 +758,19 @@ class QuantizedModel:
             elif key == "lm_head.bias":
                 self.lm_head.bias = tensor
             elif key == "lm_head.qweight":
-                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.initialize_quantized_lm_head(local_bits, local_group_size)
                 self.lm_head.qweight = tensor
             elif key in {"lm_head.qzeros", "lm_head.weight_zero_point"}:
-                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.initialize_quantized_lm_head(local_bits, local_group_size)
                 self.lm_head.qzeros = tensor
             elif key in {"lm_head.scales", "lm_head.weight_scale"}:
-                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.initialize_quantized_lm_head(local_bits, local_group_size)
                 self.lm_head.scales = tensor
             elif key == "lm_head.g_idx":
-                self._initialize_quantized_lm_head(local_bits, local_group_size)
+                self.initialize_quantized_lm_head(local_bits, local_group_size)
                 self.lm_head.g_idx = tensor
 
-    def _load_quant_config(self, quant_attrs):
+    def load_quant_config(self, quant_attrs):
         self.global_group_size = quant_attrs["config"]["group_size"]
         self.global_bits = quant_attrs["config"]["bits"]
 
@@ -790,7 +782,7 @@ class QuantizedModel:
         # 'group_size' is globally defined for all layers
         return self.global_group_size
 
-    def _initialize_quantized_lm_head(self, bits, group_size):
+    def initialize_quantized_lm_head(self, bits, group_size):
         """
         Initialize `QuantizedTensorModule` for LM head if not already set
         """
@@ -806,125 +798,65 @@ class QuantizedModel:
         if module is not None and module.g_idx is None:
             module.g_idx = torch.tensor([i // module.group_size for i in range(module.in_features)], dtype=torch.int32)
 
-    def set_properties(self):
-        """
-        Set in_features, out_features, and g_idx based on quantization type
-        """
+    def quantized_tensor_modules(self):
         if isinstance(self.lm_head, QuantizedTensorModule):
-            if self.quant_type == "awq" or self.quant_type == "quark":
-                self.lm_head.out_features = self.lm_head.scales.shape[1]
-                self.lm_head.in_features = self.lm_head.qweight.shape[0]
-                # Set g_idx if not already set
-                self.set_g_idx(self.lm_head.g_idx)
-            elif self.quant_type == "gptq":
-                self.lm_head.out_features = self.lm_head.qweight.shape[1]
-                self.lm_head.in_features = self.lm_head.g_idx.shape[0]
-            elif self.quant_type == "olive":
-                # Olive format: qweight is (out_features, packed_in_features) uint8
-                # packed_in_features = in_features * bits / 8
-                self.lm_head.out_features = self.lm_head.qweight.shape[0]
-                self.lm_head.in_features = self.lm_head.qweight.shape[1] * 8 // self.lm_head.bits
-            else:
-                raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
-        for module in self.layers:
-            if self.quant_type == "awq" or self.quant_type == "quark":
-                # Set in_features and out_features
-                module.self_attn.q_proj.out_features = module.self_attn.q_proj.scales.shape[1]
-                module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0]
-                module.self_attn.k_proj.out_features = module.self_attn.k_proj.scales.shape[1]
-                module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0]
-                module.self_attn.v_proj.out_features = module.self_attn.v_proj.scales.shape[1]
-                module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
-                module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
-                module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
+            yield self.lm_head
 
-                # Set g_idx if not already set
-                self.set_g_idx(module.self_attn.q_proj.g_idx)
-                self.set_g_idx(module.self_attn.k_proj.g_idx)
-                self.set_g_idx(module.self_attn.v_proj.g_idx)
-                self.set_g_idx(module.self_attn.o_proj.g_idx)
-                self.set_g_idx(module.mlp.gate_proj.g_idx)
-                self.set_g_idx(module.mlp.up_proj.g_idx)
-                self.set_g_idx(module.mlp.down_proj.g_idx)
+        for layer in self.layers:
+            for module in layer.self_attn.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    yield module
+            for module in layer.mlp.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    yield module
+                elif isinstance(module, QuantizedExperts):
+                    for expert in module.values():
+                        for projection in expert.__dict__.values():
+                            if isinstance(projection, QuantizedTensorModule):
+                                yield projection
 
-                if module.mlp.experts.num_experts > 0:
-                    for _, expert in module.mlp.experts.items():
-                        if expert.gate_up_proj.qweight is not None:
-                            expert.gate_up_proj.out_features = expert.gate_up_proj.scales.shape[1]
-                            expert.gate_up_proj.in_features = expert.gate_up_proj.qweight.shape[0]
-                            # Set g_idx if not already set
-                            self.set_g_idx(expert.gate_up_proj.g_idx)
-                            self.set_g_idx(expert.down_proj.g_idx)
-                        else:
-                            expert.gate_proj.out_features = expert.gate_proj.scales.shape[1]
-                            expert.gate_proj.in_features = expert.gate_proj.qweight.shape[0]
-                            expert.up_proj.out_features = expert.up_proj.scales.shape[1]
-                            expert.up_proj.in_features = expert.up_proj.qweight.shape[0]
-                            # Set g_idx if not already set
-                            self.set_g_idx(expert.gate_proj.g_idx)
-                            self.set_g_idx(expert.up_proj.g_idx)
-                            self.set_g_idx(expert.down_proj.g_idx)
+    def set_properties(self):
+        """Set tensor dimensions and format-specific properties."""
+        for module in self.quantized_tensor_modules():
+            if module.qweight is not None:
+                self.set_quantized_tensor_properties(module)
 
-                        expert.down_proj.out_features = expert.down_proj.scales.shape[1]
-                        expert.down_proj.in_features = expert.down_proj.qweight.shape[0]
-                else:
-                    module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
-                    module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
-                    module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
-                    module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
-                    module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
-                    module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
+    def set_quantized_tensor_properties(self, module):
+        raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
 
-                    self.set_g_idx(module.mlp.gate_proj.g_idx)
-                    self.set_g_idx(module.mlp.up_proj.g_idx)
-                    self.set_g_idx(module.mlp.down_proj.g_idx)
-            elif self.quant_type == "gptq":
-                # Set in_features and out_features
-                module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
-                module.self_attn.q_proj.in_features = module.self_attn.q_proj.g_idx.shape[0]
-                module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[1]
-                module.self_attn.k_proj.in_features = module.self_attn.k_proj.g_idx.shape[0]
-                module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[1]
-                module.self_attn.v_proj.in_features = module.self_attn.v_proj.g_idx.shape[0]
-                module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[1]
-                module.self_attn.o_proj.in_features = module.self_attn.o_proj.g_idx.shape[0]
-                module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[1]
-                module.mlp.gate_proj.in_features = module.mlp.gate_proj.g_idx.shape[0]
-                module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[1]
-                module.mlp.up_proj.in_features = module.mlp.up_proj.g_idx.shape[0]
-                module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
-                module.mlp.down_proj.in_features = module.mlp.down_proj.g_idx.shape[0]
+    def prepare_quantized_tensor(self, module):
+        pass
 
-            elif self.quant_type == "olive":
-                module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[0]
-                module.self_attn.q_proj.in_features = (
-                    module.self_attn.q_proj.qweight.shape[1] * 8 // module.self_attn.q_proj.bits
-                )
-                module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[0]
-                module.self_attn.k_proj.in_features = (
-                    module.self_attn.k_proj.qweight.shape[1] * 8 // module.self_attn.k_proj.bits
-                )
-                module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[0]
-                module.self_attn.v_proj.in_features = (
-                    module.self_attn.v_proj.qweight.shape[1] * 8 // module.self_attn.v_proj.bits
-                )
-                module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[0]
-                module.self_attn.o_proj.in_features = (
-                    module.self_attn.o_proj.qweight.shape[1] * 8 // module.self_attn.o_proj.bits
-                )
-                module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[0]
-                module.mlp.gate_proj.in_features = (
-                    module.mlp.gate_proj.qweight.shape[1] * 8 // module.mlp.gate_proj.bits
-                )
-                module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[0]
-                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[1] * 8 // module.mlp.up_proj.bits
-                module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[0]
-                module.mlp.down_proj.in_features = (
-                    module.mlp.down_proj.qweight.shape[1] * 8 // module.mlp.down_proj.bits
-                )
+    def repack_experts(self, experts):
+        pass
 
-            else:
-                raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
+    def repack_quantized_tensor(self, module, clear_g_idx):
+        if module.qweight is None:
+            return
+        self.prepare_quantized_tensor(module)
+        self.unpack(module)
+        self.repack(module)
+        if clear_g_idx:
+            module.g_idx = None
+
+    def repack_quantized_tensors(self, clear_g_idx):
+        for layer_id, layer in enumerate(self.layers):
+            if layer_id >= self.num_layers:
+                break
+            print(f"Unpacking and repacking layer {layer_id}")
+
+            for module in layer.self_attn.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    self.repack_quantized_tensor(module, clear_g_idx)
+
+            for module in layer.mlp.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    self.repack_quantized_tensor(module, clear_g_idx)
+                elif isinstance(module, QuantizedExperts) and module.num_experts > 0:
+                    self.repack_experts(module)
+
+        if isinstance(self.lm_head, QuantizedTensorModule):
+            self.repack_quantized_tensor(self.lm_head, clear_g_idx)
 
     def modules(self):
         """

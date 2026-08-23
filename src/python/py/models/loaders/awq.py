@@ -6,44 +6,18 @@
 
 import torch
 
-from .base import QuantizedModel, QuantizedTensorModule
+from .base import QuantizedModel
 
 
 class AWQModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.repack_quantized_tensors(clear_g_idx=True)
 
-        # Unpack and repack all `QuantizedTensorModule` classes in model
-        for i, layer in enumerate(self.layers):
-            if i >= self.num_layers:
-                break
-            print(f"Unpacking and repacking layer {i}")
-
-            # Unpack and repack all `QuantizedTensorModule` classes in attention
-            self_attn = getattr(layer, "self_attn", None) or getattr(layer, "self_attention", None)
-            for _, q_tensors in self_attn.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
-
-                    # Set `g_idx` to None since it's not used in `MatMulNBits`
-                    q_tensors.g_idx = None
-
-            # Unpack and repack all `QuantizedTensorModule` classes in MLP
-            for _, q_tensors in layer.mlp.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
-
-                    # Set `g_idx` to None since it's not used in `MatMulNBits`
-                    q_tensors.g_idx = None
-
-        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            self.unpack(self.lm_head)
-            self.repack(self.lm_head)
-
-            # Set `g_idx` to None since it's not used in `MatMulNBits`
-            self.lm_head.g_idx = None
+    def set_quantized_tensor_properties(self, module):
+        module.out_features = module.scales.shape[1]
+        module.in_features = module.qweight.shape[0]
+        self.set_g_idx(module)
 
     def unpack_qweight(self, module):
         """

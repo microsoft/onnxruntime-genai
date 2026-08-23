@@ -6,50 +6,27 @@
 
 import torch
 
-from .base import QuantizedExperts, QuantizedModel, QuantizedTensorModule
+from .base import QuantizedModel
 
 
 class QuarkModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.repack_quantized_tensors(clear_g_idx=True)
 
-        # Unpack and repack all `QuantizedTensorModule` classes in model
-        for i, layer in enumerate(self.layers):
-            if i >= self.num_layers:
-                break
-            print(f"Unpacking and repacking layer {i}")
+    def set_quantized_tensor_properties(self, module):
+        module.out_features = module.scales.shape[1]
+        module.in_features = module.qweight.shape[0]
+        self.set_g_idx(module)
 
-            # Unpack and repack all `QuantizedTensorModule` classes in attention
-            self_attn = getattr(layer, "self_attn", None) or getattr(layer, "self_attention", None)
-            for _, q_tensors in self_attn.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
+    def normalize_weight_name(self, name):
+        name = super().normalize_weight_name(name)
+        if name is None:
+            return None
+        name = name.replace(".weight_quantizer.scale", ".weight_scale")
+        return name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
 
-                    # Set `g_idx` to None since it's not used in `MatMulNBits`
-                    q_tensors.g_idx = None
-
-            # Unpack and repack all `QuantizedTensorModule` classes in MLP
-            for _, q_tensors in layer.mlp.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
-
-                    # Set `g_idx` to None since it's not used in `MatMulNBits`
-                    q_tensors.g_idx = None
-
-                if isinstance(q_tensors, QuantizedExperts) and q_tensors.num_experts > 0:
-                    # Process each expert
-                    self.unpack_repack_experts(q_tensors)
-
-        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            self.unpack(self.lm_head)
-            self.repack(self.lm_head)
-
-            # Set `g_idx` to None since it's not used in `MatMulNBits`
-            self.lm_head.g_idx = None
-
-    def unpack_repack_experts(self, experts):
+    def repack_experts(self, experts):
         """
         Unpacks weights from pre-quantized Quark experts
         """
@@ -95,14 +72,18 @@ class QuarkModel(QuantizedModel):
         where even indices are for gate and odd indices are for up.
         """
         has_split_gate_up = all(
-            expert.gate_proj is not None and expert.gate_proj.qweight is not None and expert.up_proj is not None and expert.up_proj.qweight is not None for expert in experts.values()
+            expert.gate_proj is not None
+            and expert.gate_proj.qweight is not None
+            and expert.up_proj is not None
+            and expert.up_proj.qweight is not None
+            for expert in experts.values()
         )
 
         if has_split_gate_up:
             self.combine_and_repack_gate_up(experts)
-            self.repack_projections(experts, ['down_proj'])
+            self.repack_projections(experts, ["down_proj"])
         else:
-            self.repack_projections(experts, ['gate_up_proj', 'down_proj'])
+            self.repack_projections(experts, ["gate_up_proj", "down_proj"])
 
     def repack_projections(self, experts, projection_types):
         for proj_type in projection_types:
@@ -133,7 +114,7 @@ class QuarkModel(QuantizedModel):
             scales = torch.stack(scales_list, dim=0)
             zero_points = torch.stack(zero_points_list, dim=0)
 
-            if proj_type == 'down_proj':
+            if proj_type == "down_proj":
                 experts.fc2_weights, experts.fc2_scales, experts.fc2_zero_points = (
                     qweight,
                     scales.to(torch.float16),
@@ -173,22 +154,33 @@ class QuarkModel(QuantizedModel):
         up_weights = torch.stack(up_experts_weights, axis=0)
 
         # Concatenate along last dim, then reshape to [experts, inter*2, hidden]
-        fc1 = torch.concat([gate_weights, up_weights], axis=-1).view(up_weights.shape[0], up_weights.shape[1]*2, up_weights.shape[2])
+        fc1 = torch.concat([gate_weights, up_weights], axis=-1).view(
+            up_weights.shape[0], up_weights.shape[1] * 2, up_weights.shape[2]
+        )
 
-        packed_weights = [self.repack_qweight(fc1[expert_id], bits=experts[expert_id].gate_proj.bits) for expert_id in sorted(experts.keys())]
+        packed_weights = [
+            self.repack_qweight(fc1[expert_id], bits=experts[expert_id].gate_proj.bits)
+            for expert_id in sorted(experts.keys())
+        ]
         # Stack into a 3D tensor: [num_experts, inter_size * 2, hidden_size // pack_size]
         final_fc1 = torch.stack(packed_weights, dim=0)
 
         # Stack scales: [experts, inter, hidden // block_size]
         gate_scales = torch.stack(gate_expert_scales, axis=0).transpose(-1, -2)  # [experts, inter, hidden // 32]
         up_scales = torch.stack(up_expert_scales, axis=0).transpose(-1, -2)  # [experts, inter, hidden // 32]
-        fc1_scales = torch.concat([gate_scales, up_scales], axis=-1).view(up_scales.shape[0], up_scales.shape[1]*2, up_scales.shape[2])
+        fc1_scales = torch.concat([gate_scales, up_scales], axis=-1).view(
+            up_scales.shape[0], up_scales.shape[1] * 2, up_scales.shape[2]
+        )
 
         gate_zero_points = torch.stack(gate_expert_zero_points, axis=0)
         up_zero_points = torch.stack(up_expert_zero_points, axis=0)
         fc1_zero_points = torch.concat([gate_zero_points, up_zero_points], axis=1)
 
-        experts.fc1_weights, experts.fc1_scales, experts.fc1_zero_points = final_fc1, fc1_scales.to(torch.float16), fc1_zero_points
+        experts.fc1_weights, experts.fc1_scales, experts.fc1_zero_points = (
+            final_fc1,
+            fc1_scales.to(torch.float16),
+            fc1_zero_points,
+        )
 
     def repack_qweight(self, weights, bits) -> torch.Tensor:
         """
@@ -219,7 +211,7 @@ class QuarkModel(QuantizedModel):
 
         return packed_weight
 
-    def _load_quant_config(self, quant_attrs):
+    def load_quant_config(self, quant_attrs):
         self.global_quant_config = quant_attrs["config"]["global_quant_config"]["weight"]
         self.global_group_size = self.global_quant_config["group_size"]
         global_dtype = self.global_quant_config["dtype"]
@@ -235,8 +227,8 @@ class QuarkModel(QuantizedModel):
 
     def get_layer_bits(self, layer_name):
         name = layer_name.split(".")[0]
-        if name in self._quant_attrs["config"]["layer_quant_config"]:
-            layer_quant_config = self._quant_attrs["config"]["layer_quant_config"][name]["weight"]
+        if name in self.quant_attrs["config"]["layer_quant_config"]:
+            layer_quant_config = self.quant_attrs["config"]["layer_quant_config"][name]["weight"]
             local_dtype = layer_quant_config["dtype"]
 
             dtype_bits_maps = {
@@ -250,8 +242,8 @@ class QuarkModel(QuantizedModel):
 
     def get_layer_group_size(self, layer_name):
         name = layer_name.split(".")[0]
-        if name in self._quant_attrs["config"]["layer_quant_config"]:
-            layer_quant_config = self._quant_attrs["config"]["layer_quant_config"][name]["weight"]
+        if name in self.quant_attrs["config"]["layer_quant_config"]:
+            layer_quant_config = self.quant_attrs["config"]["layer_quant_config"][name]["weight"]
             return layer_quant_config["group_size"]
         return self.global_group_size
 
@@ -317,14 +309,14 @@ class QuarkModel(QuantizedModel):
         if to_unpack.ndim == 2:
             unpacked = (to_unpack.unsqueeze(-1) >> shifts.view(1, 1, -1)).view(to_unpack.shape[0], -1).to(torch.int8)
             if reorder:
-                ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+                order = [0, 4, 1, 5, 2, 6, 3, 7]
                 order_tensor = torch.arange(
                     unpacked.shape[-1],
                     dtype=torch.int32,
                     device=unpacked.device,
                 )
                 order_tensor = order_tensor.view(-1, 8)
-                order_tensor = order_tensor[:, ORDER].view(-1)
+                order_tensor = order_tensor[:, order].view(-1)
                 unpacked = unpacked[:, order_tensor]
         elif to_unpack.ndim == 0:
             unpacked = to_unpack

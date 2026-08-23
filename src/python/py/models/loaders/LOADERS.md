@@ -1,6 +1,6 @@
 # Model Loaders
 
-This directory contains the model loaders used by the ONNX model builders. Each
+This directory contains the model loaders used by the model builder. Each
 loader translates a source model or checkpoint format from its original
 implementation into the common, builder-facing intermediate representation
 (IR).

@@ -8,49 +8,20 @@ import re
 
 import torch
 
-from .base import QuantizedModel, QuantizedTensorModule
+from .base import QuantizedModel
 
 
 class GPTQModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.repack_quantized_tensors(clear_g_idx=not quant_attrs["use_g_idx"])
 
-        # Unpack and repack all `QuantizedTensorModule` classes in model
-        for i, layer in enumerate(self.layers):
-            if i >= self.num_layers:
-                break
-            print(f"Unpacking and repacking layer {i}")
+    def set_quantized_tensor_properties(self, module):
+        module.out_features = module.qweight.shape[1]
+        module.in_features = module.g_idx.shape[0]
 
-            # Unpack and repack all `QuantizedTensorModule` classes in attention
-            for _, q_tensors in layer.self_attn.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.handle_qzeros(q_tensors)
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
-
-                    if not quant_attrs["use_g_idx"]:
-                        # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None
-
-            # Unpack and repack all `QuantizedTensorModule` classes in MLP
-            for _, q_tensors in layer.mlp.__dict__.items():
-                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.handle_qzeros(q_tensors)
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
-
-                    if not quant_attrs["use_g_idx"]:
-                        # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None
-
-        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            self.handle_qzeros(self.lm_head)
-            self.unpack(self.lm_head)
-            self.repack(self.lm_head)
-
-            if not quant_attrs["use_g_idx"]:
-                # Set `g_idx` to None since it's not used in `MatMulNBits`
-                self.lm_head.g_idx = None
+    def prepare_quantized_tensor(self, module):
+        self.handle_qzeros(module)
 
     def handle_qzeros(self, module):
         """
@@ -76,8 +47,8 @@ class GPTQModel(QuantizedModel):
         self.pack_qzeros(temp_module)
         module.qzeros = temp_module.qzeros
 
-    def _load_quant_config(self, quant_attrs):
-        super()._load_quant_config(quant_attrs)
+    def load_quant_config(self, quant_attrs):
+        super().load_quant_config(quant_attrs)
         self.overrides = quant_attrs["config"].get("dynamic", {})
 
     def get_overrides(self, layer_name):

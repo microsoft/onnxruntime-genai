@@ -15,8 +15,12 @@ class OliveModel(GPTQModel):
     - qzeros: (out_features, packed_num_groups) uint8, packed along last dim
     """
 
-    def _load_quant_config(self, quant_attrs):
-        super()._load_quant_config(quant_attrs)
+    def set_quantized_tensor_properties(self, module):
+        module.out_features = module.qweight.shape[0]
+        module.in_features = module.qweight.shape[1] * 8 // module.bits
+
+    def load_quant_config(self, quant_attrs):
+        super().load_quant_config(quant_attrs)
         self.overrides = quant_attrs["config"]["overrides"] or {}
 
     def get_layer_bits(self, layer_name):
@@ -29,11 +33,9 @@ class OliveModel(GPTQModel):
 
     def handle_qzeros(self, module):
         """Olive uses unsigned quantization, no offset needed."""
-        pass
 
     def unpack(self, module):
         """Skip unpack for Olive format."""
-        pass
 
     def repack(self, module):
         """
