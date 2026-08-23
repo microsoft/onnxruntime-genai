@@ -53,7 +53,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35MoEModel
-from quantization import KV_CACHE_QUANT_TYPES, QuantConfig
+from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
 
 
@@ -284,19 +284,19 @@ def check_extra_options(
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
-    if "kv_cache_quant_type" in extra_options:
-        quant_type = extra_options["kv_cache_quant_type"].lower()
-        if quant_type not in KV_CACHE_QUANT_TYPES:
+    if "kv_cache_quant_scheme" in extra_options:
+        quant_scheme = extra_options["kv_cache_quant_scheme"].lower()
+        if quant_scheme not in KV_CACHE_QUANT_SCHEMES:
             raise ValueError(
-                f"kv_cache_quant_type must be one of {sorted(KV_CACHE_QUANT_TYPES)}, "
-                f"got '{extra_options['kv_cache_quant_type']}'"
+                f"kv_cache_quant_scheme must be one of {sorted(KV_CACHE_QUANT_SCHEMES)}, "
+                f"got '{extra_options['kv_cache_quant_scheme']}'"
             )
-        if quant_type != "none" and execution_provider not in {"cpu", "cuda"}:
+        if quant_scheme != "none" and execution_provider not in {"cpu", "cuda"}:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
                 f"Got execution_provider='{execution_provider}'."
             )
-        extra_options["kv_cache_quant_type"] = quant_type
+        extra_options["kv_cache_quant_scheme"] = quant_scheme
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
@@ -782,13 +782,13 @@ def get_args():
                     This single option replaces the older per-type flags so new schemes can be added without a new flag.
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
-                kv_cache_quant_type = Quantization scheme for the KV cache. Default is 'none' (no quantization).
+                kv_cache_quant_scheme = Quantization scheme for the KV cache. Default is 'none' (no quantization).
                     Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
                     The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
                     Quantized KV cache is only supported for the CPU and CUDA execution providers.
                     When combined with use_paged_attention=true, only the int8_* and fp8_* schemes are supported
                     (PagedAttention has no sub-byte cache backend, so int4_* is rejected).
-                kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_type is enabled.
+                kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_scheme is enabled.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...optional model layer IDs...]}.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.

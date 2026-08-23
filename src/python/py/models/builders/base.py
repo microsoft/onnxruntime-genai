@@ -362,21 +362,21 @@ class Model:
         self.make_attention_init(config)
 
         # KV-cache specific variables
-        quant_type = extra_options.get("kv_cache_quant_type", "none") or "none"
-        quant_dtype = (
+        quant_scheme = extra_options.get("kv_cache_quant_scheme", "none") or "none"
+        quant_type = (
             ir.DataType.INT8
-            if quant_type.startswith("int8")
+            if quant_scheme.startswith("int8")
             else ir.DataType.INT4
-            if quant_type.startswith("int4")
+            if quant_scheme.startswith("int4")
             else ir.DataType.FLOAT8E4M3FN
-            if quant_type.startswith("fp8")
+            if quant_scheme.startswith("fp8")
             else None
         )
-        bit_width = 4 if quant_dtype == ir.DataType.INT4 else 8 if quant_dtype is not None else 0
-        quant_mode = "PER_CHANNEL" if quant_type.endswith("per_channel") else "PER_TENSOR"
+        bit_width = 4 if quant_type == ir.DataType.INT4 else 8 if quant_type is not None else 0
+        quant_mode = "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
         self.kv_cache_attrs = {
-            "quant_type": quant_type,                                     # Quantization scheme for key-value caches
-            "quant_dtype": quant_dtype,                                   # Quantization type for key-value caches
+            "quant_scheme": quant_scheme,                                 # Quantization scheme for key-value caches
+            "quant_type": quant_type,                                     # Quantization type for key-value caches
             "bit_width": bit_width,                                       # Bit width for key-value caches
             "quant_mode": quant_mode,                                     # Quantization mode for key-value caches
             "scales_path": extra_options.get("kv_cache_scale_file", ""),  # Filepath to where the calibrated scales are stored on disk
@@ -800,7 +800,7 @@ class Model:
             # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
             raise ValueError(
                 "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_type='{self.kv_cache_attrs['quant_type']}'."
+                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_type']}'."
             )
 
         cache_dtype = (

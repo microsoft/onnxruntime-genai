@@ -369,7 +369,7 @@ This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda -c cache_dir_to_store_temp_files
 ```
 
-When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. KV-cache quantization remains explicit and requires calibrated scales supplied through `kv_cache_quant_type` and `kv_cache_scale_file`. CUDA linear-attention gate fusion is enabled automatically.
+When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. KV-cache quantization remains explicit and requires calibrated scales supplied through `kv_cache_quant_scheme` and `kv_cache_scale_file`. CUDA linear-attention gate fusion is enabled automatically.
 
 The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
@@ -617,7 +617,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p in
 
 ##### Quantize the KV Cache
 
-This scenario is for when you want to quantize the KV cache via the `kv_cache_quant_type` option. Quantized KV cache is only supported for the CPU and CUDA execution providers. Supported values are:
+This scenario is for when you want to quantize the KV cache via the `kv_cache_quant_scheme` option. Quantized KV cache is only supported for the CPU and CUDA execution providers. Supported values are:
 
 - `none` (default): no KV cache quantization.
 - `int8_per_tensor` / `int8_per_channel`: 8-bit integer KV cache.
@@ -628,12 +628,12 @@ The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tenso
 
 The scales applied to the KV cache are supplied through a required calibration file:
 
-- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...model layer IDs...]}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). `layer_ids` maps each scale entry to its model layer; it is contiguous for dense models and sparse for hybrid models where only full-attention layers own a KV cache. This option is required when `kv_cache_quant_type` is enabled.
+- `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...model layer IDs...]}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). `layer_ids` maps each scale entry to its model layer; it is contiguous for dense models and sparse for hybrid models where only full-attention layers own a KV cache. This option is required when `kv_cache_quant_scheme` is enabled.
 
 The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
 
 ```bash
-# 1. Build the baseline (no kv_cache_quant_type) used for calibration:
+# 1. Build the baseline (no kv_cache_quant_scheme) used for calibration:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_baseline_folder -p precision -e cuda -c cache_dir_to_store_temp_files
 
 # 2. Calibrate the scales:
@@ -644,15 +644,15 @@ Then rebuild with the quantized KV cache:
 
 ```bash
 # From wheel (int8 per-channel KV cache with calibrated scales):
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_scheme=int8_per_channel kv_cache_scale_file=path_to_scales.json
 
 # From source (int8 per-channel KV cache with calibrated scales):
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options kv_cache_quant_scheme=int8_per_channel kv_cache_scale_file=path_to_scales.json
 ```
 
 ##### Quantize the KV Cache with Paged Attention
 
-`kv_cache_quant_type` can be combined with `use_paged_attention=true`. In that case the paged KV cache blocks
+`kv_cache_quant_scheme` can be combined with `use_paged_attention=true`. In that case the paged KV cache blocks
 (`[num_blocks, block_size, num_kv_heads, head_size]`) are allocated in the quantized element type and the
 `PagedAttention` op receives the `k_scale`/`v_scale` initializers plus the matching `k_quant_type`/`v_quant_type`
 attributes.
@@ -663,10 +663,10 @@ sub-byte cache backend. Per-channel scales are emitted with the `(num_kv_heads, 
 
 ```bash
 # From wheel (paged attention + int8 per-channel KV cache):
-python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=int8_per_channel kv_cache_scale_file=path_to_scales.json
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_scheme=int8_per_channel kv_cache_scale_file=path_to_scales.json
 
 # From source (paged attention + fp8 per-tensor KV cache):
-python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_type=fp8_per_tensor kv_cache_scale_file=path_to_scales.json
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true kv_cache_quant_scheme=fp8_per_tensor kv_cache_scale_file=path_to_scales.json
 ```
 
 #### FP32 I/O for WebGPU EP
