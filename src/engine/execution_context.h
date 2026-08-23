@@ -25,6 +25,9 @@ struct ExecutionContext {
   std::span<const FixedStateSlotHandle> fixed_state_slots;
   std::span<const FixedStateBinding> fixed_state_bindings;
   size_t fixed_state_staging_bytes{};
+  // Optional packed int32 token ids already resident on the model device. VarlenDecoderIO casts
+  // these directly into its int64 input tensor without reading a request's host token mirror.
+  DeviceSpan<int32_t> input_ids;
   // Optional packed [token_count, hidden_size] input supplied by an auxiliary decoder driver.
   // Ordinary decoder steps leave this null.
   OrtValue* hidden_states_input{};
