@@ -361,6 +361,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // never samples from this request; these helpers append decided tokens and advance its processed
   // boundary only after the auxiliary cache transaction commits.
   void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
+  void AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens);
   void RewindAuxiliaryDecoderTo(size_t sequence_length);
   void CommitAuxiliaryDecoderStep() noexcept;
 

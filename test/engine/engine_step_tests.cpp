@@ -111,6 +111,61 @@ class EngineStepTest : public ::testing::Test {
   std::shared_ptr<Model> model_;
 };
 
+MtpDoublesEngine MakeMtpDoublesEngine(
+    std::shared_ptr<Model> model, size_t capacity,
+    int32_t target_token, int32_t draft_token) {
+  auto mtp_model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedModel());
+  if (!mtp_model) {
+    throw std::logic_error("MTP Engine tests require a decoder-only auxiliary model.");
+  }
+  mtp_model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  mtp_model->config_->model.decoder.inputs.hidden_states = "past_key_values.1.key";
+
+  auto device = std::make_unique<CountingCudaDevice>();
+  auto device_state = device->state;
+  mtp_model->p_device_ = device.get();
+  mtp_model->p_device_scoring_ = device.get();
+
+  auto cache = std::make_shared<RecordingCacheManager>(model, capacity);
+  cache->SetMaxDraftTokensPerStep(3);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, target_token);
+  executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+
+  auto mtp_cache = std::make_shared<RecordingCacheManager>(mtp_model, capacity);
+  auto mtp_executor = std::make_unique<RecordingModelExecutor>(
+      mtp_model, mtp_cache, draft_token);
+  mtp_executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+
+  auto* cache_observer = cache.get();
+  auto* executor_observer = executor.get();
+  auto* mtp_cache_observer = mtp_cache.get();
+  auto* mtp_executor_observer = mtp_executor.get();
+
+  EngineDependencies dependencies{
+      std::move(cache), std::move(scheduler), std::move(executor),
+      std::move(mtp_model), std::move(mtp_cache), std::move(mtp_executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+  return MtpDoublesEngine{
+      std::move(device), std::move(engine), cache_observer, executor_observer,
+      mtp_cache_observer, mtp_executor_observer, std::move(device_state)};
+}
+
+void AdvanceUntilTargetDecodeCount(MtpDoublesEngine& engine, int decode_calls) {
+  while (engine.executor->decode_calls < decode_calls) {
+    ASSERT_TRUE(engine.engine->HasPendingRequests());
+    static_cast<void>(engine.engine->Step());
+  }
+}
+
+std::vector<int32_t> DrainTokens(const std::shared_ptr<Request>& request) {
+  std::vector<int32_t> tokens;
+  while (request->HasUnseenTokens()) {
+    tokens.push_back(request->UnseenToken());
+  }
+  return tokens;
+}
+
 // One request: Step decodes the proposed batch exactly once, commits its cache allocation, and
 // returns the request.
 TEST_F(EngineStepTest, SingleRequestSchedulesThenDecodesThenReturns) {
@@ -1389,6 +1444,173 @@ TEST_F(EngineStepTest, CompositeAggregateAdmissionCommitsEveryNewTable) {
 // Speculative decoding: a request proposes drafts, the step runs 1 + drafts rows, and the Engine
 // keeps the prefix the target model would have produced on its own.
 // ---------------------------------------------------------------------------------------------
+
+TEST_F(EngineStepTest, MtpCoordinatorCompactsMixedDraftLengthsWithoutIntermediateReadback) {
+  constexpr int32_t target_token = 5;
+  constexpr int32_t draft_token = 11;
+  auto engine = MakeMtpDoublesEngine(
+      model_, /*capacity=*/8, target_token, draft_token);
+
+  std::vector<std::shared_ptr<Request>> requests;
+  for (size_t draft_count : {size_t{1}, size_t{2}, size_t{3}}) {
+    auto request = MintRequest(*model_, Prompt(static_cast<int32_t>(draft_count * 10)));
+    request->Params()->speculative.max_draft_tokens = static_cast<int>(draft_count);
+    engine.engine->AddRequest(request);
+    requests.push_back(std::move(request));
+  }
+
+  ASSERT_NE(engine.engine->Step(), nullptr);
+
+  ASSERT_EQ(engine.mtp_executor->decoded_batch_sizes,
+            (std::vector<size_t>{3, 2, 1}));
+  ASSERT_EQ(engine.mtp_executor->used_device_input_ids,
+            (std::vector<bool>{false, true, true}));
+  ASSERT_EQ(engine.device_state->argmax_rows,
+            (std::vector<int>{3, 2, 1}));
+  EXPECT_EQ(engine.device_state->device_to_host_copies, 1u);
+  EXPECT_EQ(engine.device_state->synchronize_calls, 0u);
+  for (size_t i = 0; i < requests.size(); ++i) {
+    EXPECT_EQ(requests[i]->PendingDraftTokenCount(), i + 1);
+  }
+}
+
+TEST_F(EngineStepTest, MtpCoordinatorRecordsFullPartialAndZeroAcceptance) {
+  constexpr int32_t draft_token = 11;
+  auto engine = MakeMtpDoublesEngine(
+      model_, /*capacity=*/8, /*target_token=*/5, draft_token);
+
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30}) {
+    auto request = MintRequest(*model_, Prompt(seed));
+    request->Params()->speculative.max_draft_tokens = 3;
+    engine.engine->AddRequest(request);
+    requests.push_back(std::move(request));
+  }
+  ASSERT_NE(engine.engine->Step(), nullptr);
+  for (const auto& request : requests) {
+    ASSERT_EQ(request->PendingDraftTokenCount(), 3u);
+    static_cast<void>(DrainTokens(request));
+  }
+
+  engine.executor->SetVerifyRowTokens({
+      draft_token,
+      draft_token,
+      draft_token,
+      14,
+      draft_token,
+      12,
+      13,
+      14,
+      12,
+      13,
+      14,
+      15,
+  });
+  AdvanceUntilTargetDecodeCount(engine, 2);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 3u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 9u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 6u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 4u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  EXPECT_EQ(stats.partial_accept_rounds, 1u);
+  EXPECT_EQ(stats.zero_accept_rounds, 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[0], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[1], 1u);
+  EXPECT_EQ(stats.acceptance_length_histogram[3], 1u);
+}
+
+TEST_F(EngineStepTest, MtpHeadFailureRollsBackTargetAndAuxiliaryTransactions) {
+  constexpr int32_t draft_token = 11;
+  auto engine = MakeMtpDoublesEngine(
+      model_, /*capacity=*/8, /*target_token=*/5, draft_token);
+  auto request = MintRequest(*model_, Prompt(10));
+  request->Params()->speculative.max_draft_tokens = 3;
+  engine.engine->AddRequest(request);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+  static_cast<void>(DrainTokens(request));
+  const auto before = request->Snapshot();
+  ASSERT_EQ(request->PendingDraftTokenCount(), 3u);
+  const int target_releases_before = engine.cache->reservation_release_calls;
+  const int releases_before = engine.mtp_cache->reservation_release_calls;
+
+  engine.executor->SetVerifyRowTokens(
+      {draft_token, draft_token, draft_token, 14});
+  engine.mtp_executor->SetNextFailure(
+      ScriptedExecutionFailure::RetryableDuringExecution);
+  EXPECT_THROW(static_cast<void>(engine.engine->Step()), EngineStepError);
+
+  const auto after_failure = request->Snapshot();
+  EXPECT_EQ(after_failure.current_sequence_length, before.current_sequence_length);
+  EXPECT_EQ(after_failure.processed_sequence_length, before.processed_sequence_length);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 3u);
+  EXPECT_EQ(engine.cache->reservation_release_calls, target_releases_before + 1);
+  EXPECT_EQ(engine.mtp_cache->reservation_release_calls, releases_before + 1);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().rounds, 0u);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.full_accept_rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 3u);
+}
+
+TEST_F(EngineStepTest, MtpCoordinatorClampsDraftsAtMaxLength) {
+  constexpr int32_t draft_token = 11;
+  const auto prompt = Prompt(10);
+  auto engine = MakeMtpDoublesEngine(
+      model_, /*capacity=*/8, /*target_token=*/5, draft_token);
+  auto request = MintRequest(*model_, prompt);
+  request->Params()->speculative.max_draft_tokens = 3;
+  request->Params()->search.max_length = static_cast<int>(prompt.size() + 4);
+  engine.engine->AddRequest(request);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 2u);
+  EXPECT_EQ(engine.mtp_executor->decoded_batch_sizes,
+            (std::vector<size_t>{1, 1}));
+  static_cast<void>(DrainTokens(request));
+
+  engine.executor->SetVerifyRowTokens({draft_token, draft_token, 12});
+  ASSERT_EQ(engine.engine->Step(), request);
+  EXPECT_TRUE(request->IsTurnComplete());
+  EXPECT_EQ(request->CurrentSequenceLength(), request->Params()->search.max_length);
+  EXPECT_EQ(engine.mtp_executor->decode_calls, 2);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().full_accept_rounds, 1u);
+}
+
+TEST_F(EngineStepTest, MtpCoordinatorReusesCacheAfterDiscardingSpeculativeRows) {
+  constexpr int32_t draft_token = 11;
+  auto engine = MakeMtpDoublesEngine(
+      model_, /*capacity=*/8, /*target_token=*/5, draft_token);
+  auto request = MintRequest(*model_, Prompt(10));
+  request->Params()->speculative.max_draft_tokens = 3;
+  engine.engine->AddRequest(request);
+
+  ASSERT_EQ(engine.engine->Step(), request);
+  static_cast<void>(DrainTokens(request));
+  for (int round = 0; round < 2; ++round) {
+    engine.executor->SetVerifyRowTokens({12, 13, 14, 15});
+    ASSERT_EQ(engine.engine->Step(), request);
+    static_cast<void>(DrainTokens(request));
+  }
+
+  ASSERT_EQ(engine.mtp_cache->reserved_new_request_counts,
+            (std::vector<size_t>{1, 0, 0}));
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.mtp_cache->deallocate_calls, 0);
+  ASSERT_EQ(engine.mtp_executor->decoded_sequence_lengths_before.size(), 9u);
+  EXPECT_EQ(engine.mtp_executor->decoded_sequence_lengths_before[0],
+            (std::vector<int64_t>{1}));
+  EXPECT_EQ(engine.mtp_executor->decoded_sequence_lengths_before[3],
+            (std::vector<int64_t>{2}));
+  EXPECT_EQ(engine.mtp_executor->decoded_sequence_lengths_before[6],
+            (std::vector<int64_t>{3}));
+  EXPECT_EQ(engine.device_state->device_to_host_copies, 3u);
+}
 
 TEST_F(EngineStepTest, SpeculativeStepKeepsTheAcceptedPrefixAndReplacesTheRejectedDraft) {
   const int32_t eos = EosToken(*model_);

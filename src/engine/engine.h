@@ -175,6 +175,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> mtp_cache_manager_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
+  DeviceSpan<int32_t> mtp_device_drafts_;
+  DeviceSpan<int32_t> mtp_device_chain_inputs_;
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};
