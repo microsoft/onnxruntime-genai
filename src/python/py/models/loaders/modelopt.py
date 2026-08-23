@@ -8,6 +8,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import onnx_ir as ir
 import torch
 from safetensors import safe_open
 
@@ -209,6 +210,8 @@ class ModeloptModel(QuantizedModel):
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
         prepared.block_size = 16
+        prepared.scale_dtype = ir.DataType.FLOAT8E4M3FN
+        prepared.scales_raw = True
         prepared.gate_up_qweight = torch.stack(gate_up_weights)
         prepared.gate_up_scales = torch.stack(gate_up_scales)
         prepared.gate_up_global_scales = torch.stack(gate_up_globals)

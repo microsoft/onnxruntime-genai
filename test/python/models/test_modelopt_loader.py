@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import onnx_ir as ir
 import torch
 from safetensors.torch import load_file, save_file
 
@@ -160,6 +161,8 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         # Routed experts are prepacked once by the loader for native QMoE export.
         assert isinstance(l0.mlp.experts, model_opt_module.QuantizedExperts)
         assert l0.mlp.experts.gate_up_qweight.shape[:2] == (1, model.embedding.weight.shape[1])
+        assert l0.mlp.experts.scale_dtype == ir.DataType.FLOAT8E4M3FN
+        assert l0.mlp.experts.scales_raw
         assert l0.mlp.experts.down_qweight.shape == (
             1,
             l0.mlp.experts.gate_up_qweight.shape[2],

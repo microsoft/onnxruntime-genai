@@ -418,6 +418,7 @@ class Model:
             "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
             "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
             "global_scale_names": {},                        # Per-layer QMoE global-scale initializer names, when required.
+            "zero_point_names": {},                          # Per-layer QMoE zero-point initializer names, when required.
         }
         self.make_moe_init()
 
@@ -4436,15 +4437,31 @@ class Model:
                     f"{self.moe_attrs['quant_type']}."
                 )
             self.moe_attrs["block_size"] = experts.block_size
-            gate_up_global_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
-            down_global_name = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+            if experts.weights_prepacked is not None:
+                self.moe_attrs["weights_prepacked"] = experts.weights_prepacked
             self.make_initializer(experts.gate_up_qweight, gate_up_name)
             self.make_initializer(experts.down_qweight, down_name)
-            self.make_initializer(experts.gate_up_scales, gate_up_scales_name, to=ir.DataType.FLOAT8E4M3FN, raw=True)
-            self.make_initializer(experts.down_scales, down_scales_name, to=ir.DataType.FLOAT8E4M3FN, raw=True)
-            self.make_initializer(experts.gate_up_global_scales, gate_up_global_name)
-            self.make_initializer(experts.down_global_scales, down_global_name)
-            self.moe_attrs.setdefault("global_scale_names", {})[layer_id] = (gate_up_global_name, down_global_name)
+            scale_dtype = experts.scale_dtype or self.io_dtype
+            self.make_initializer(
+                experts.gate_up_scales, gate_up_scales_name, to=scale_dtype, raw=experts.scales_raw
+            )
+            self.make_initializer(experts.down_scales, down_scales_name, to=scale_dtype, raw=experts.scales_raw)
+            if experts.gate_up_zero_points is not None or experts.down_zero_points is not None:
+                if experts.gate_up_zero_points is None or experts.down_zero_points is None:
+                    raise ValueError("Packed QMoE experts must provide zero points for both projections.")
+                gate_up_zero_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
+                down_zero_name = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
+                self.make_initializer(experts.gate_up_zero_points, gate_up_zero_name)
+                self.make_initializer(experts.down_zero_points, down_zero_name)
+                self.moe_attrs.setdefault("zero_point_names", {})[layer_id] = (gate_up_zero_name, down_zero_name)
+            if experts.gate_up_global_scales is not None or experts.down_global_scales is not None:
+                if experts.gate_up_global_scales is None or experts.down_global_scales is None:
+                    raise ValueError("Packed QMoE experts must provide global scales for both projections.")
+                gate_up_global_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
+                down_global_name = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+                self.make_initializer(experts.gate_up_global_scales, gate_up_global_name)
+                self.make_initializer(experts.down_global_scales, down_global_name)
+                self.moe_attrs.setdefault("global_scale_names", {})[layer_id] = (gate_up_global_name, down_global_name)
             return
 
         if gate_up_weight is None or down_weight is None:

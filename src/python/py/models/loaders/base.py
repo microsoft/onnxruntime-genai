@@ -106,11 +106,16 @@ class QuantizedExperts:
         """Native QMoE packed attributes"""
         self.quant_type = None
         self.block_size = None
+        self.scale_dtype = None
+        self.scales_raw = False
+        self.weights_prepacked = None
         self.gate_up_qweight = None
         self.gate_up_scales = None
+        self.gate_up_zero_points = None
         self.gate_up_global_scales = None
         self.down_qweight = None
         self.down_scales = None
+        self.down_zero_points = None
         self.down_global_scales = None
 
     def add_expert(self, expert_id: int) -> QuantizedExpert:
