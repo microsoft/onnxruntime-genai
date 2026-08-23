@@ -14,36 +14,6 @@ from models.builders.base import Model
 from models.builders.qwen import Qwen35MoETextModel
 
 
-@pytest.fixture
-def model():
-    return object.__new__(Model)
-
-
-def test_modelopt_e4m3_bytes_accepts_float8_and_preserves_shape(model):
-    scales = torch.ones((4, 2), dtype=torch.float8_e4m3fn)
-
-    raw = model.modelopt_e4m3_bytes(scales, "scales", (4, 2))
-
-    assert raw.dtype == torch.uint8
-    assert raw.shape == scales.shape
-
-
-def test_modelopt_e4m3_bytes_rejects_wrong_dtype(model):
-    with pytest.raises(ValueError, match="must contain E4M3 bytes"):
-        model.modelopt_e4m3_bytes(torch.ones((4, 2)), "scales", (4, 2))
-
-
-def test_modelopt_e4m3_bytes_rejects_wrong_shape(model):
-    with pytest.raises(ValueError, match=r"expected \(4, 2\)"):
-        model.modelopt_e4m3_bytes(torch.ones((2, 4), dtype=torch.uint8), "scales", (4, 2))
-
-
-@pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
-def test_modelopt_positive_scalar_rejects_invalid_values(model, value):
-    with pytest.raises(ValueError, match="finite and positive"):
-        model.modelopt_positive_scalar(torch.tensor(value), "global_scale")
-
-
 def test_native_fp8_rejects_non_fp8_weight():
     model = object.__new__(Model)
 

@@ -129,10 +129,13 @@ class ModeloptModel(QuantizedModel):
                     f"expected {expected_shape}."
                 )
             self.validate_positive_scalar(module.weight_scale_2, f"{base}.weight_scale_2")
+            module.quant_type = "nvfp4"
+            module.weight_scale = module.weight_scale.view(torch.uint8).contiguous()
         elif module.weight.dtype == torch.float8_e4m3fn:
             self.validate_positive_scalar(module.weight_scale, f"{base}.weight_scale")
             if module.input_scale is not None:
                 self.validate_positive_scalar(module.input_scale, f"{base}.input_scale")
+            module.quant_type = "fp8"
 
     def make_linear_module(self, base, module=None):
         weight = self.get_tensor(f"{base}.weight")

@@ -60,6 +60,7 @@ class TensorModule:
     def __init__(self):
         self.weight = None
         self.bias = None
+        self.quant_type = "none"
         self.weight_scale = None
         self.weight_scale_2 = None
         self.input_scale = None

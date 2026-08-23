@@ -1975,44 +1975,31 @@ class Model:
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
-        elif getattr(matmul, "weight_scale_2", None) is not None or matmul.weight.dtype == torch.float8_e4m3fn:
-            # For ModelOpt `MatMul`
-            return self.make_matmul_modelopt(matmul, basename, root_input, **kwargs)
+        elif getattr(matmul, "quant_type", "none") != "none":
+            return self.make_matmul_quantized(matmul, basename, root_input, **kwargs)
         else:
             # For regular `MatMul`
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
-    def make_matmul_modelopt(self, matmul, basename, root_input, **kwargs):
-        if getattr(matmul, "weight_scale_2", None) is not None:
-            return self.make_matmul_modelopt_nvfp4(matmul, basename, root_input, **kwargs)
-        elif matmul.weight.dtype == torch.float8_e4m3fn:
-            return self.make_matmul_modelopt_fp8(matmul, basename, root_input, **kwargs)
+    def make_matmul_quantized(self, matmul, basename, root_input, **kwargs):
+        if matmul.quant_type == "nvfp4":
+            return self.make_matmul_nvfp4(matmul, basename, root_input, **kwargs)
+        elif matmul.quant_type == "fp8":
+            return self.make_matmul_fp8(matmul, basename, root_input, **kwargs)
         else:
-            raise NotImplementedError(f"The {matmul.weight.dtype} precision within ModelOpt is not currently supported.")
+            raise NotImplementedError(f"The {matmul.quant_type} quantized MatMul format is not currently supported.")
 
-    def make_matmul_modelopt_nvfp4(self, matmul, basename, root_input, **kwargs):
-        out_features = int(matmul.weight.shape[0])
-        scale_shape = (out_features, int(matmul.weight.shape[1]) // 8)
-        scale_bytes = self.modelopt_e4m3_bytes(
-            getattr(matmul, "weight_scale", None), f"{basename}.weight_scale", scale_shape
-        )
-        global_scale = self.modelopt_positive_scalar(matmul.weight_scale_2, f"{basename}.weight_scale_2")
+    def make_matmul_nvfp4(self, matmul, basename, root_input, **kwargs):
+        global_scale = float(matmul.weight_scale_2.float().item())
         return self.make_matmul_block_quantized_nvfp4_weight(
-            basename, root_input, matmul.weight, scale_bytes, global_scale, **kwargs
+            basename, root_input, matmul.weight, matmul.weight_scale, global_scale, **kwargs
         )
 
-    def make_matmul_modelopt_fp8(self, matmul, basename, root_input, **kwargs):
-        weight_scale = getattr(matmul, "weight_scale", None)
-        if weight_scale is None:
-            raise ValueError(f"ModelOpt FP8 weight '{basename}' is missing its weight_scale tensor.")
+    def make_matmul_fp8(self, matmul, basename, root_input, **kwargs):
         input_scale_tensor = getattr(matmul, "input_scale", None)
-        input_scale = (
-            self.modelopt_positive_scalar(input_scale_tensor, f"{basename}.input_scale")
-            if input_scale_tensor is not None
-            else None
-        )
+        input_scale = float(input_scale_tensor.float().item()) if input_scale_tensor is not None else None
         return self.make_matmul_block_quantized_fp8_weight(
-            basename, root_input, matmul.weight, weight_scale, input_scale, **kwargs
+            basename, root_input, matmul.weight, matmul.weight_scale, input_scale, **kwargs
         )
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
@@ -2025,26 +2012,6 @@ class Model:
                 return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
-
-    def modelopt_e4m3_bytes(self, tensor, tensor_name, expected_shape):
-        if tensor is None or tensor.dtype not in {torch.uint8, torch.float8_e4m3fn}:
-            dtype = None if tensor is None else tensor.dtype
-            raise ValueError(
-                f"ModelOpt tensor '{tensor_name}' must contain E4M3 bytes as uint8 or float8_e4m3fn, got {dtype}."
-            )
-        if tuple(tensor.shape) != tuple(expected_shape):
-            raise ValueError(
-                f"ModelOpt tensor '{tensor_name}' has shape {tuple(tensor.shape)}, expected {tuple(expected_shape)}."
-            )
-        return tensor.view(torch.uint8).contiguous()
-
-    def modelopt_positive_scalar(self, tensor, tensor_name):
-        if tensor.numel() != 1:
-            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be a scalar, got shape {tuple(tensor.shape)}.")
-        value = float(tensor.float().item())
-        if not np.isfinite(value) or value <= 0:
-            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be finite and positive, got {value}.")
-        return value
 
     def prepare_matmul_block_quantized_scales(self, weight_scale, out_features, block_count):
         scale = weight_scale.float()

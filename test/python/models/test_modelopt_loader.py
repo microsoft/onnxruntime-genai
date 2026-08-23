@@ -145,13 +145,15 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         assert l1.self_attn is not None and l1.linear_attn is None
 
         # FP8 projections retain their weights and scales for native contrib-op export.
+        assert l0.linear_attn.in_proj_qkv.quant_type == "fp8"
         assert l0.linear_attn.in_proj_qkv.weight.dtype == torch.float8_e4m3fn
         assert l0.linear_attn.in_proj_qkv.weight_scale is not None
         assert l0.linear_attn.A_log is not None and l0.linear_attn.conv1d.weight is not None
 
         # NVFP4 modules retain packed E2M1 weights, E4M3 block scales, and global scales.
+        assert l0.mlp.shared_expert.gate_proj.quant_type == "nvfp4"
         assert l0.mlp.shared_expert.gate_proj.weight.dtype == torch.uint8
-        assert l0.mlp.shared_expert.gate_proj.weight_scale.dtype == torch.float8_e4m3fn
+        assert l0.mlp.shared_expert.gate_proj.weight_scale.dtype == torch.uint8
         assert l0.mlp.shared_expert.gate_proj.weight_scale_2.numel() == 1
         assert model.lm_head.weight.dtype == torch.uint8
 

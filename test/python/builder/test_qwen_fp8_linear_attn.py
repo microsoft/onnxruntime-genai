@@ -31,6 +31,7 @@ def test_linear_attention_fp8_is_weight_only():
     }
     module = _make_model(tensors).make_linear_module(LINEAR)
 
+    assert module.quant_type == "fp8"
     assert module.weight.dtype == torch.float8_e4m3fn
     assert module.weight_scale.item() == 0.125
     assert module.input_scale is None
@@ -52,6 +53,7 @@ def test_bf16_linear_attention_projection_stays_unquantized():
     weight = torch.ones((4, 4), dtype=torch.bfloat16)
     module = _make_model({f"{base}.weight": weight}).make_linear_module(base)
 
+    assert module.quant_type == "none"
     assert module.weight is weight
     assert module.weight_scale is None
 
