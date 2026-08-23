@@ -104,6 +104,7 @@ class QuantizedExperts:
         self.fc2_zero_points = None
         """Native QMoE packed attributes"""
         self.quant_type = None
+        self.block_size = None
         self.gate_up_qweight = None
         self.gate_up_scales = None
         self.gate_up_global_scales = None

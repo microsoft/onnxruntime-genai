@@ -545,11 +545,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
     def get_moe_module(self, layer_id, layer):
         return layer.mlp
 
-    def is_native_nvfp4_moe(self, moe):
-        if self.moe_attrs.get("quant_type") != "nvfp4":
-            return False
-        return getattr(moe.experts, "quant_type", None) == "nvfp4"
-
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         op_type = self.moe_attrs["op_type"]
         moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
@@ -561,60 +556,17 @@ class Qwen35MoETextModel(Qwen35TextModel):
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
-        # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...] for swiglu_fusion=1
-        # A ModelOpt checkpoint can contain native NVFP4 expert tensors. Preserve
-        # those when their scale metadata is present; otherwise quantize the
-        # checkpoint's dense expert tensors through the regular QMoE path.
-        is_nvfp4 = self.is_native_nvfp4_moe(moe)
-        gate_up_proj_global_scales = ""
-        down_proj_global_scales = ""
-
-        if is_nvfp4:
-            # Consume the Model Optimizer NVFP4 experts directly (block-16 E2M1 weights,
-            # FP8-E4M3 block scales, per-expert FP32 global scale). No re-quantization.
-            self.moe_attrs["block_size"] = 16
-            gate_up_proj_global_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
-            down_proj_global_scales = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
-            self.make_initializer(moe.experts.gate_up_qweight, gate_up_proj_weight)
-            self.make_initializer(moe.experts.down_qweight, down_proj_weight)
-            self.make_initializer(
-                moe.experts.gate_up_scales,
-                gate_up_proj_scales,
-                to=ir.DataType.FLOAT8E4M3FN,
-                raw=True,
-            )
-            self.make_initializer(
-                moe.experts.down_scales, down_proj_scales, to=ir.DataType.FLOAT8E4M3FN, raw=True
-            )
-            self.make_initializer(moe.experts.gate_up_global_scales, gate_up_proj_global_scales)
-            self.make_initializer(moe.experts.down_global_scales, down_proj_global_scales)
-        elif op_type == "MoE":
+        gate_up_weight = None
+        down_weight = None
+        if getattr(moe.experts, "gate_up_proj", None) is not None:
+            # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...].
             raw_gate_up = moe.experts.gate_up_proj
             half = raw_gate_up.shape[1] // 2
-            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
+            gate_up_weight = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
                 raw_gate_up
             )
-            self.make_initializer(interleaved, gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(moe.experts.down_proj, down_proj_weight, to=self.io_dtype)
-        else:
-            raw_gate_up = moe.experts.gate_up_proj
-            half = raw_gate_up.shape[1] // 2
-            interleaved = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
-                raw_gate_up
-            )
-            gate_up_qw_list, gate_up_sc_list = [], []
-            down_qw_list, down_sc_list = [], []
-            for i in range(self.moe_attrs["num_experts"]):
-                qw1, sc1 = self.make_qmoe_weights(interleaved[i])
-                gate_up_qw_list.append(qw1)
-                gate_up_sc_list.append(sc1)
-                qw2, sc2 = self.make_qmoe_weights(moe.experts.down_proj[i])
-                down_qw_list.append(qw2)
-                down_sc_list.append(sc2)
-            self.make_initializer(torch.stack(gate_up_qw_list, dim=0).to(torch.uint8), gate_up_proj_weight)
-            self.make_initializer(torch.stack(down_qw_list, dim=0).to(torch.uint8), down_proj_weight)
-            self.make_initializer(torch.stack(gate_up_sc_list, dim=0), gate_up_proj_scales, to=self.io_dtype)
-            self.make_initializer(torch.stack(down_sc_list, dim=0), down_proj_scales, to=self.io_dtype)
+            down_weight = moe.experts.down_proj
+        self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_weight, down_weight)
 
         num_e = self.moe_attrs["num_experts"]
         self.make_initializer(torch.zeros(num_e, 2 * self.moe_intermediate_size), gate_up_proj_bias, to=self.io_dtype)
@@ -645,12 +597,8 @@ class Qwen35MoETextModel(Qwen35TextModel):
         down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-        is_nvfp4 = self.is_native_nvfp4_moe(moe)
-        gate_up_proj_global_scales = (
-            f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales" if is_nvfp4 else ""
-        )
-        down_proj_global_scales = (
-            f"model.layers.{layer_id}.moe.experts.down_proj.global_scales" if is_nvfp4 else ""
+        gate_up_proj_global_scales, down_proj_global_scales = self.moe_attrs.get("global_scale_names", {}).get(
+            layer_id, ("", "")
         )
 
         moe_name = f"{basename}/{op_type}"

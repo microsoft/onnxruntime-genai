@@ -208,6 +208,7 @@ class ModeloptModel(QuantizedModel):
 
         prepared = QuantizedExperts()
         prepared.quant_type = "nvfp4"
+        prepared.block_size = 16
         prepared.gate_up_qweight = torch.stack(gate_up_weights)
         prepared.gate_up_scales = torch.stack(gate_up_scales)
         prepared.gate_up_global_scales = torch.stack(gate_up_globals)

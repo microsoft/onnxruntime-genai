@@ -701,6 +701,12 @@ def test_qwen35_native_nvfp4_moe_uses_global_scales(monkeypatch):
     model.moe_attrs = {
         "op_type": "QMoE",
         "quant_type": "nvfp4",
+        "global_scale_names": {
+            1: (
+                "model.layers.1.moe.experts.gate_up_proj.global_scales",
+                "model.layers.1.moe.experts.down_proj.global_scales",
+            )
+        },
     }
     model.layernorm_attrs = {"skip_input": ""}
     moe = types.SimpleNamespace(

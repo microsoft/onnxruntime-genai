@@ -417,6 +417,7 @@ class Model:
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
             "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
+            "global_scale_names": {},                        # Per-layer QMoE global-scale initializer names, when required.
         }
         self.make_moe_init()
 
@@ -4414,6 +4415,54 @@ class Model:
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         raise NotImplementedError("MoE weight preprocessing must be implemented by the model class.")
+
+    def make_moe_expert_initializers(self, layer_id, experts, gate_up_weight=None, down_weight=None):
+        op_type = self.moe_attrs["op_type"]
+        weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
+        gate_up_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{weight_type}"
+        gate_up_scales_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
+        down_name = f"model.layers.{layer_id}.moe.experts.down_proj.{weight_type}"
+        down_scales_name = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
+
+        native_quant_type = getattr(experts, "quant_type", None)
+        if native_quant_type is not None:
+            if native_quant_type != self.moe_attrs["quant_type"]:
+                raise ValueError(
+                    f"Checkpoint experts use {native_quant_type}, but QMoE is configured for "
+                    f"{self.moe_attrs['quant_type']}."
+                )
+            self.moe_attrs["block_size"] = experts.block_size
+            gate_up_global_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.global_scales"
+            down_global_name = f"model.layers.{layer_id}.moe.experts.down_proj.global_scales"
+            self.make_initializer(experts.gate_up_qweight, gate_up_name)
+            self.make_initializer(experts.down_qweight, down_name)
+            self.make_initializer(experts.gate_up_scales, gate_up_scales_name, to=ir.DataType.FLOAT8E4M3FN, raw=True)
+            self.make_initializer(experts.down_scales, down_scales_name, to=ir.DataType.FLOAT8E4M3FN, raw=True)
+            self.make_initializer(experts.gate_up_global_scales, gate_up_global_name)
+            self.make_initializer(experts.down_global_scales, down_global_name)
+            self.moe_attrs.setdefault("global_scale_names", {})[layer_id] = (gate_up_global_name, down_global_name)
+            return
+
+        if gate_up_weight is None or down_weight is None:
+            raise ValueError("MoE experts must provide dense weights or native packed QMoE tensors.")
+        if op_type == "MoE":
+            self.make_initializer(gate_up_weight, gate_up_name, to=self.io_dtype)
+            self.make_initializer(down_weight, down_name, to=self.io_dtype)
+            return
+
+        gate_up_weights, gate_up_scales = [], []
+        down_weights, down_scales = [], []
+        for expert_id in range(self.moe_attrs["num_experts"]):
+            quantized_weight, scales = self.make_qmoe_weights(gate_up_weight[expert_id])
+            gate_up_weights.append(quantized_weight)
+            gate_up_scales.append(scales)
+            quantized_weight, scales = self.make_qmoe_weights(down_weight[expert_id])
+            down_weights.append(quantized_weight)
+            down_scales.append(scales)
+        self.make_initializer(torch.stack(gate_up_weights).to(torch.uint8), gate_up_name)
+        self.make_initializer(torch.stack(down_weights).to(torch.uint8), down_name)
+        self.make_initializer(torch.stack(gate_up_scales), gate_up_scales_name, to=self.io_dtype)
+        self.make_initializer(torch.stack(down_scales), down_scales_name, to=self.io_dtype)
 
     def make_moe_router(self, layer_id, moe, root_input):
         raise NotImplementedError("MoE router construction must be implemented by the model class.")
