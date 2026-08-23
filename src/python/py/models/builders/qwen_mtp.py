@@ -107,10 +107,12 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
         self._preserve_modelopt_mtp = self._should_preserve_modelopt_mtp(self.quant_type, extra_options)
 
         # The MTP head consumes the main model's last hidden state as an extra
-        # input (alongside the standard input_ids / position_ids / KV cache).
+        # input (alongside the standard input_ids / position_ids / KV cache). A paged
+        # head is fed packed token rows, so the shape follows the same convention as
+        # every other hidden state in the graph rather than a dense [B, S, H].
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+        self.input_shapes["hidden_states"] = self.hidden_state_shape()
 
     @staticmethod
     def _should_preserve_modelopt_mtp(quant_type, extra_options):
@@ -158,7 +160,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             outputs=[hs_out],
             name="/model/mtp/hidden_states_out/Identity",
         )
-        hs_val = self.make_value(hs_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        hs_val = self.make_value(hs_out, self.io_dtype, shape=self.hidden_state_shape())
         self.model.graph.outputs.append(hs_val)
 
         self.make_postprocessing_nodes()
@@ -421,7 +423,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             axis=-1,
             stash_type=1,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(output, self.io_dtype, shape=self.hidden_state_shape())
         return output
 
     def _make_mtp_input_projection(self):
@@ -440,7 +442,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             outputs=[embed_out],
             name=embed_gather,
         )
-        self.make_value(embed_out, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(embed_out, self.io_dtype, shape=self.hidden_state_shape())
 
         # pre_fc_norm_embedding(embed) and pre_fc_norm_hidden(hidden_states)
         e_norm = self._make_offset_rmsnorm(
@@ -456,7 +458,7 @@ class Qwen35MtpHead(Qwen35MoeTextModel):
             concat_name,
             [e_norm, h_norm],
             self.io_dtype,
-            ["batch_size", "sequence_length", 2 * self.hidden_size],
+            self.hidden_state_shape(last_dim=2 * self.hidden_size),
             axis=-1,
         )
 
@@ -495,7 +497,7 @@ class Qwen35DenseMtpHead(Qwen35MtpHead):
 
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+        self.input_shapes["hidden_states"] = self.hidden_state_shape()
 
     def make_layer(self, layer_id, layer):
         return Qwen35TextModel.make_layer(self, layer_id, layer)
