@@ -192,7 +192,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       plan_{execution_context ? execution_context->plan : nullptr},
       block_table_columns_{
           execution_context ? execution_context->block_table_columns : 0},
-        hidden_states_input_{
+      input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
+      hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
       position_planes_{position_planes} {
   // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
@@ -309,8 +310,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto sequence_lengths_cpu_span = sequence_lengths_span.CpuSpan();
 
-  DeviceSpan<int32_t> device_input_ids =
-      execution_context_ ? execution_context_->input_ids : DeviceSpan<int32_t>{};
+  DeviceSpan<int32_t> device_input_ids = input_ids_;
   if (!device_input_ids.empty()) {
     if (device_input_ids.size() != num_tokens) {
       throw std::runtime_error("Packed device input IDs do not match the step token count.");

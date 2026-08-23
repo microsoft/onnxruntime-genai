@@ -116,7 +116,8 @@ struct VarlenDecoderIO : DecoderIO {
   VarlenGraphBuffers* graph_buffers_{};
   const StepPlan* plan_{};
   size_t block_table_columns_{};
-  // Borrowed from the MTP coordinator, which owns the tensor through synchronous model execution.
+  // Borrowed spans/pointers whose backing storage is owned through synchronous model execution.
+  DeviceSpan<int32_t> input_ids_;
   OrtValue* hidden_states_input_{};
   size_t position_planes_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
