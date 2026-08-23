@@ -131,6 +131,22 @@ TEST(PagedCacheReservationTest, ProposedBlockTableIncludesReservationsAndPadding
   EXPECT_EQ(block_table[5], -1);
 }
 
+TEST(PagedCacheReservationTest, ProposedBlockTableAllowsRequestSubset) {
+  BlockPool pool{kBlockSize, 4};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 2, true},
+      PagedCacheReservationRequest{kRequestB, 2, true},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+  const std::array request_ids{kRequestB};
+  std::array<int32_t, 1> block_table;
+
+  reservation.FillBlockTable(request_ids, 1, block_table);
+
+  EXPECT_EQ(block_table[0], 1);
+}
+
 TEST(PagedCacheReservationTest, ReleaseIsIdempotentAndBlocksCanBeReused) {
   BlockPool pool{kBlockSize, 1};
   std::vector<PagedCacheBlockTable> tables;

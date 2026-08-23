@@ -70,6 +70,7 @@ struct ScheduledRequests {
   void AddDecoderState(std::unique_ptr<DecoderIO> decoder_state);
 
   std::vector<DeviceSpan<float>> ProcessLogits();
+  Tensor* HiddenStates() const;
 
   void GenerateNextTokens();
   void BeginTransaction();

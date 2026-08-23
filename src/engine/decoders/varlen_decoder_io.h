@@ -52,6 +52,8 @@ struct VarlenGraphBuffers {
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   std::unique_ptr<Tensor> logits;
+  // Null unless the model consumes hidden_states (for example, an MTP head).
+  std::unique_ptr<Tensor> hidden_states_input;
   // Null unless the model was exported with include_hidden_states.
   std::unique_ptr<Tensor> hidden_states;
   size_t max_batch_size{};
@@ -88,12 +90,13 @@ struct VarlenDecoderIO : DecoderIO {
 
   // The step's packed [total_num_tokens, hidden_size] hidden states, or null when the model does
   // not expose them. Row i corresponds to packed token i, in the same order as the logits rows.
-  Tensor* HiddenStates() const { return active_hidden_states_; }
+  Tensor* HiddenStates() const override { return active_hidden_states_; }
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 

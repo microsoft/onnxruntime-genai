@@ -37,6 +37,9 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
+  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  std::shared_ptr<CacheManager> mtp_cache_manager;
+  std::unique_ptr<ModelExecutor> mtp_model_executor;
 };
 
 struct EngineTransactionMetrics {
@@ -125,10 +128,25 @@ struct Engine : std::enable_shared_from_this<Engine>,
   size_t MaxDraftTokensPerStep() const;
 
  private:
+  struct MtpStep {
+    StepPlan plan;
+    std::vector<std::shared_ptr<Request>> target_requests;
+    std::vector<bool> newly_created;
+    std::vector<std::vector<int32_t>> drafts;
+    std::unique_ptr<CacheStepReservation> reservation;
+  };
+
   void ReclaimAbandonedRequests();
   std::shared_ptr<Request> DrainReadyRequest();
   std::shared_ptr<Request> StepDynamic();
   std::shared_ptr<Request> StepStatic();
+  std::unique_ptr<MtpStep> PrepareMtpStep(
+      const StepPlan& target_plan,
+      const std::vector<RequestStepResult>& target_results,
+      ScheduledRequests& target_requests);
+  void RollbackMtpStep(MtpStep& step);
+  void CommitMtpStep(MtpStep& step);
+  void PublishMtpDrafts(MtpStep& step);
   void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
@@ -144,6 +162,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  // Present only when model.mtp names an auxiliary paged draft head. These are constructed with
+  // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
+  std::shared_ptr<DecoderOnly_Model> mtp_model_;
+  std::shared_ptr<CacheManager> mtp_cache_manager_;
+  std::unique_ptr<ModelExecutor> mtp_model_executor_;
+  std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};

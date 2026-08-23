@@ -199,6 +199,10 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
   return logits;
 }
 
+Tensor* ScheduledRequests::HiddenStates() const {
+  return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
+}
+
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows) {
   std::vector<DeviceSpan<float>> sampled_rows;

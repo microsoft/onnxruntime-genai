@@ -131,6 +131,16 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
                                             static_cast<int64_t>(model.config_->model.vocab_size)},
                        /*make_static=*/true);
 
+  const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
+  if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
+    hidden_states_input = std::make_unique<Tensor>(
+        model.p_device_inputs_, model.session_info_.GetInputDataType(hidden_states_input_name));
+    hidden_states_input->CreateTensor(
+        std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
+                             static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
+        /*make_static=*/true);
+  }
+
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
   if (!hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
     hidden_states = std::make_unique<Tensor>(model.p_device_inputs_,
@@ -170,6 +180,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
+  PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
   PrepareHiddenStates(model, scheduled_requests);
 
@@ -183,6 +194,48 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
     output_names_.push_back(cache->output_names_[i]);
     outputs_.push_back(cache->outputs_[i]);
   }
+}
+
+void VarlenDecoderIO::PrepareHiddenStatesInput(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  const auto& hidden_states_name = model->config_->model.decoder.inputs.hidden_states;
+  if (hidden_states_name.empty() || !model->session_info_.HasInput(hidden_states_name)) {
+    return;
+  }
+  if (!execution_context_ || !execution_context_->hidden_states_input) {
+    throw std::runtime_error(
+        "The decoder requires a packed hidden_states input, but the execution context did not provide one.");
+  }
+
+  const auto info = execution_context_->hidden_states_input->GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  const std::vector<int64_t> expected_shape = {
+      static_cast<int64_t>(TokenCount(scheduled_requests)),
+      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+  if (shape != expected_shape) {
+    throw std::runtime_error(
+        "The packed hidden_states input shape does not match the scheduled token rows.");
+  }
+  if (info->GetElementType() != model->session_info_.GetInputDataType(hidden_states_name)) {
+    throw std::runtime_error(
+        "The packed hidden_states input type does not match the decoder input type.");
+  }
+
+  OrtValue* active_hidden_states_input = execution_context_->hidden_states_input;
+  if (graph_buffers_ != nullptr) {
+    if (!graph_buffers_->hidden_states_input) {
+      throw std::runtime_error(
+          "Captured decoder step has no persistent hidden_states input buffer.");
+    }
+    graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
+    graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
+        ByteWrapTensor(*model->p_device_inputs_, *execution_context_->hidden_states_input));
+    active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();
+  }
+
+  input_names_.push_back(hidden_states_name.c_str());
+  inputs_.push_back(active_hidden_states_input);
 }
 
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {

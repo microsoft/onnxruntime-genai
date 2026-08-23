@@ -18,6 +18,7 @@ struct HybridDecoderIO : DecoderIO {
                   const ExecutionContext& execution_context);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
+  Tensor* HiddenStates() const override { return varlen_io_.HiddenStates(); }
 
  private:
   void BindFixedState();

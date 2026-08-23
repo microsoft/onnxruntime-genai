@@ -54,7 +54,8 @@ struct KeyValueCacheState : State {
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model);
+  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
+                                              size_t auxiliary_bytes_per_block = 0);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -146,7 +147,8 @@ struct StaticCacheManager : CacheManager {
 };
 
 struct PagedCacheManager : CacheManager {
-  PagedCacheManager(std::shared_ptr<Model> model);
+  PagedCacheManager(std::shared_ptr<Model> model,
+                    size_t auxiliary_bytes_per_block = 0);
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 

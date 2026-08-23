@@ -169,7 +169,7 @@ void PagedCacheReservation::FillBlockTable(std::span<const void* const> request_
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache block table is only available while the reservation is active.");
   }
-  if (request_ids.size() != deltas_.size() ||
+  if (request_ids.size() > deltas_.size() ||
       columns < RequiredBlockTableColumns() ||
       output.size() != request_ids.size() * columns) {
     throw std::runtime_error("Paged cache block table output has an invalid shape.");
@@ -203,7 +203,7 @@ void PagedCacheReservation::FillWindowBlockTable(
   if (state_ != PagedCacheReservationState::Reserved || !window_block_pool_) {
     throw std::logic_error("Paged cache window block table is unavailable.");
   }
-  if (request_ids.size() != deltas_.size() ||
+  if (request_ids.size() > deltas_.size() ||
       output.size() != request_ids.size() * columns) {
     throw std::runtime_error("Paged cache window block table output has an invalid shape.");
   }
@@ -223,8 +223,8 @@ void PagedCacheReservation::FillWindowBlockTable(
 }
 
 void PagedCacheReservation::CommitPrefix(const void* request_id,
-                                        size_t step_slots,
-                                        size_t kept_slots) {
+                                         size_t step_slots,
+                                         size_t kept_slots) {
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache reservation is no longer accepting prefix commits.");
   }
