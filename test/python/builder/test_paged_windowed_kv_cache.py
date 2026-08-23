@@ -94,7 +94,7 @@ def test_ring_honours_the_windowed_kv_cache_opt_out():
 
 
 # ===========================================================================
-# uses_windowed_paged_cache: which layers read the ring
+# is_windowed_paged_layer: which layers read the ring
 # ===========================================================================
 
 
@@ -112,20 +112,20 @@ def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
 def test_only_sliding_window_layers_use_the_ring():
     model = _make_layer_model(use_ring=True)
 
-    assert [model.uses_windowed_paged_cache(i) for i in range(4)] == [True, False, True, False]
+    assert [model.is_windowed_paged_layer(i) for i in range(4)] == [True, False, True, False]
 
 
 def test_no_layer_uses_the_ring_when_it_is_off():
     model = _make_layer_model(use_ring=False)
 
-    assert [model.uses_windowed_paged_cache(i) for i in range(4)] == [False] * 4
+    assert [model.is_windowed_paged_layer(i) for i in range(4)] == [False] * 4
 
 
 def test_model_without_alternating_attention_uses_no_ring():
     # Models with a uniform attention pattern have no sliding_attention layers.
     model = _make_layer_model(use_ring=True, local_layers=None)
 
-    assert model.uses_windowed_paged_cache(0) is False
+    assert model.is_windowed_paged_layer(0) is False
 
 
 # ===========================================================================
