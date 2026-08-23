@@ -52,6 +52,11 @@ class Model:
             if hasattr(config, "original_max_position_embeddings")
             else self.context_length
         )
+        self.context_length_attrs = {
+            "state_window": 0,
+            "state_window_dims": [],
+            "window_kv_cache_slack": 0,
+        }
         self.make_context_length_init(config)
 
         # Model attributes from config
@@ -145,7 +150,7 @@ class Model:
         # Initialize EP-specific expansions
         self.make_ep_expansions_init()
 
-        # Map input names to their types and shapes
+        # Map all input names, types, and shapes
         self.input_names = {
             "input_ids": "input_ids",                                                                                                # For standard models
             "attention_mask": "attention_mask",                                                                                      # For standard models
@@ -183,8 +188,19 @@ class Model:
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                                    # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],                        # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],                      # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
-            "past.conv": ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1],                                      # For causal convolution models
-            "past.recurrent": ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim],     # For linear attention models
+            "past.conv": [                                                                                                           # For causal convolution models
+                *self.context_length_attrs["state_window_dims"],
+                "batch_size",
+                self.linear_conv_dim,
+                self.linear_conv_kernel_dim - 1
+            ],
+            "past.recurrent": [                                                                                                      # For linear attention models
+                *self.context_length_attrs["state_window_dims"],
+                "batch_size",
+                self.linear_num_value_heads,
+                self.linear_key_head_dim,
+                self.linear_value_head_dim
+            ],
             "block_table": ["batch_size", "max_num_blocks"],                                                                         # For paged attention models
             "block_table_windowed": ["batch_size", "max_num_blocks"],                                                                # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
@@ -193,7 +209,7 @@ class Model:
         }
         self.make_inputs_init()
 
-        # Map output names to their types and shapes
+        # Map all output names, types, and shapes
         self.output_names = {
             "hidden_states": "hidden_states",                                                                                        # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": "logits",                                                                                                      # For standard models
@@ -215,8 +231,19 @@ class Model:
             "logits": ["batch_size", "sequence_length", self.vocab_size],                                                            # For standard models
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],                               # For standard models (note that `present.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", "kv_cache_dim"],                             # For standard models (note that `present.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
-            "present.conv": ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1],                                   # For causal convolution models
-            "present.recurrent": ["batch_size", self.linear_num_value_heads, self.linear_key_head_dim, self.linear_value_head_dim],  # For linear attention models
+            "present.conv": [                                                                                                        # For causal convolution models
+                *self.context_length_attrs["state_window_dims"],
+                "batch_size",
+                self.linear_conv_dim,
+                self.linear_conv_kernel_dim - 1,
+            ],
+            "present.recurrent": [                                                                                                   # For linear attention models
+                *self.context_length_attrs["state_window_dims"],
+                "batch_size",
+                self.linear_num_value_heads,
+                self.linear_key_head_dim,
+                self.linear_value_head_dim,
+            ],
         }
         self.make_outputs_init()
 
@@ -481,8 +508,26 @@ class Model:
             and self.window_size > 0
         )
 
+        # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
+        # states (`state_window=W`): {past,present}.%d.{conv,recurrent} become
+        # [W, B, ...] instead of [B, ...], right-aligned, with slot W-1 holding the state after the
+        # final token of the forward (i.e. the unwindowed state) and being the only slot the op
+        # reads back. This lets a multi-token (num_speculative_tokens>1) MTP self-speculative loop
+        # CROP the recurrent state to the accepted prefix on partial accept -- copying slot `a`
+        # into slot W-1 -- instead of running a full-cost main-model replay forward.
+        #
+        # W must be at least num_speculative_tokens+1 (the length of a verify forward).
+        # 0 (the default) disables the window entirely and produces
+        # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
+        # Requires ORT kernels that understand the `state_window` attribute.
+        state_window = int(self.extra_options.get("state_window", 0))
+        self.context_length_attrs["state_window"] = state_window
+
+        # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
+        self.context_length_attrs["state_window_dims"] = [state_window] if state_window else []
+
         # Zero lets the runtime choose the EP-specific number of positions retained beyond the window.
-        self.window_kv_cache_slack = 0
+        self.context_length_attrs["window_kv_cache_slack"] = 0
 
     def make_ep_expansions_init(self):
         """
@@ -913,7 +958,6 @@ class Model:
     def make_lm_head_init(self, config):
         pass
 
-    # TODO: check this method
     def make_quant_init(self, config):
         # Decouple the int4 quantization *method* (how weights are rounded) from the
         # *mixed-precision placement* (which MatMuls use a different quant type than the
@@ -1155,7 +1199,7 @@ class Model:
                 "layers": layer_idxs,
                 # Positions kept beyond the window so the runtime can size the cache reproducibly.
                 # Unused by trt-rtx, whose EP evicts internally.
-                "cache_slack": self.window_kv_cache_slack,
+                "cache_slack": self.context_length_attrs["window_kv_cache_slack"],
             }
 
         if self.has_windowed_paged_layers():
@@ -1897,7 +1941,7 @@ class Model:
             domain="com.microsoft",
             ndim=kwargs.get("ndim", 1),
             activation=kwargs.get("activation", "silu"),
-            state_window=kwargs.get("state_window", 0),
+            state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
@@ -3636,25 +3680,20 @@ class Model:
         ]
         output = f"{name}/output_0"
 
-        attributes = {
-            "q_num_heads": kwargs["q_num_heads"],
-            "kv_num_heads": kwargs["kv_num_heads"],
-            "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 1.0),
-        }
-        # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
-        # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
-        # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
-        state_window = kwargs.get("state_window", 0)
-        if state_window:
-            attributes["state_window"] = state_window
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=[output, kwargs["present_recurrent_state"]],
             name=name,
             domain="com.microsoft",
-            **attributes,
+            q_num_heads=kwargs["q_num_heads"],
+            kv_num_heads=kwargs["kv_num_heads"],
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+            # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+            # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+            # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+            state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
 
@@ -4651,6 +4690,7 @@ class Model:
                            "for QMoE expert weights quantization. "
                            f"Got qmoe_block_size={self.quant_attrs["qmoe_block_size"]} and ep={self.ep}.")
 
+    # TODO: replace all five CudaQuantizer methods with calls to native ORT APIs
     def _symmetric_per_channel_quantize(self, weights):
         """Quantize a single expert's weights with one scale per output channel.
 

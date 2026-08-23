@@ -50,13 +50,23 @@ base_module = _load_builder_module("base")
 Model = base_module.Model
 
 
+def _new_model():
+    model = Model.__new__(Model)
+    model.context_length_attrs = {
+        "state_window": 0,
+        "state_window_dims": [],
+        "window_kv_cache_slack": 0,
+    }
+    return model
+
+
 # ===========================================================================
 # make_context_length_init: when the ring applies
 # ===========================================================================
 
 
 def _window_model(extra_options, window_size):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.extra_options = extra_options
     model.make_context_length_init(SimpleNamespace(sliding_window=window_size))
     return model
@@ -89,7 +99,7 @@ def test_ring_honours_the_windowed_kv_cache_opt_out():
 
 
 def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.use_windowed_paged_kv_cache = use_ring
     model.num_layers = num_layers
     model.layer_types = [
@@ -191,7 +201,7 @@ def test_all_local_layers_keep_the_shared_block_count():
 
 
 def _make_inputs_model(use_paged_attention, use_ring):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
     model.use_windowed_paged_kv_cache = use_ring
@@ -370,7 +380,7 @@ def _write_genai_config(
     hf_config = SimpleNamespace(eos_token_id=[2])
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
 
-    model = Model.__new__(Model)
+    model = _new_model()
     model.hf_token = None
     model.hf_remote = False
     model.ep = "cuda"
@@ -392,7 +402,7 @@ def _write_genai_config(
     model.window_size = window_size
     # PagedAttention never qualifies for the GQA-style windowed cache.
     model.eps_with_windowed_kv_cache = set()
-    model.window_kv_cache_slack = 0
+    model.context_length_attrs["window_kv_cache_slack"] = 0
     model.layer_types = [
         "sliding_attention" if has_local_layers and (all_local_layers or layer_id % 2 == 0) else "full_attention"
         for layer_id in range(num_layers)

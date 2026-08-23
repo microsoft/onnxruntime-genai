@@ -139,24 +139,6 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
 
-        # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
-        # states (`state_window=W`): past/present_key_values.%d.{conv,recurrent}_state become
-        # [W, B, ...] instead of [B, ...], right-aligned, with slot W-1 holding the state after the
-        # final token of the forward (i.e. the unwindowed state) and being the only slot the op
-        # reads back. This lets a multi-token (num_speculative_tokens>1) MTP self-speculative loop
-        # CROP the recurrent state to the accepted prefix on partial accept -- copying slot `a`
-        # into slot W-1 -- instead of running a full-cost main-model replay forward.
-        #
-        # W must be at least num_speculative_tokens+1 (the length of a verify forward).
-        # 0 (the default) disables the window entirely and produces
-        # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
-        # Requires ORT kernels that understand the `state_window` attribute.
-        self._state_window = int(extra_options.get("state_window", 0))
-        if self._state_window < 0:
-            raise ValueError("state_window must be >= 0")
-        # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
-        self._state_window_dims = [self._state_window] if self._state_window else []
-
     def get_kv_cache_scale_inputs(self, **kwargs):
         # ModelOpt compatibility mode: every layer shares ONE unit PER_TENSOR scale initializer
         # named `kv_cache_scale`, created lazily at the first GroupQueryAttention node. The
@@ -364,7 +346,6 @@ class Qwen35TextModel(Model):
             past_conv_state=self.input_names["past.conv"][layer_id],
             present_conv_state=self.output_names["present.conv"][layer_id],
             channels=self.linear_conv_dim,
-            state_window=self._state_window,
         )
         conv_output = f"{conv_op_name}/output_0"
 

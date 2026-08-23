@@ -313,6 +313,12 @@ def check_extra_options(
         if str(quantization_config.get("kv_cache_quant_algo", "")).upper() == "FP8":
             extra_options.setdefault("kv_cache_quant_type", "fp8_per_tensor")
 
+    state_window = int(extra_options.get("state_window", 0))
+    if state_window >= 0:
+        extra_options["state_window"] = state_window
+    else:
+        raise ValueError("state_window must be >= 0")
+
     # Weight sharing (shared_embeddings=true) reuses a single matrix for both the input
     # embedding and the LM head. This is only valid when the model actually ties them.
     hf_tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))

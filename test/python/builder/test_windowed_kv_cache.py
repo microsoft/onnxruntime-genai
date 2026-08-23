@@ -51,13 +51,23 @@ base_module = _load_builder_module("base")
 Model = base_module.Model
 
 
+def _new_model():
+    model = Model.__new__(Model)
+    model.context_length_attrs = {
+        "state_window": 0,
+        "state_window_dims": [],
+        "window_kv_cache_slack": 0,
+    }
+    return model
+
+
 # ===========================================================================
 # make_context_length_init: the windowed_kv_cache opt-out
 # ===========================================================================
 
 
 def _window_model(extra_options):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.extra_options = extra_options
     model.make_context_length_init(SimpleNamespace(sliding_window=128))
     return model
@@ -87,7 +97,7 @@ def test_windowed_kv_cache_eps_are_not_shared_between_models():
 
 
 def _make_gqa_model(ep, window_size):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.ep = ep
     model.extra_options = {}
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
@@ -184,7 +194,7 @@ _CACHE_SHAPE = ["batch_size", 2, "past_sequence_length", 16]
 
 
 def _make_shape_model(ep, local_layers=()):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.ep = ep
     model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
     model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
@@ -250,7 +260,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     hf_config = SimpleNamespace(bos_token_id=None, eos_token_id=[2], pad_token_id=None)
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
 
-    model = Model.__new__(Model)
+    model = _new_model()
     model.hf_token = None
     model.hf_remote = False
     model.ep = ep
@@ -272,7 +282,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     model.eps_with_windowed_kv_cache = (
         {"trt-rtx", "cuda", "cpu"} if eps_with_windowed_kv_cache is None else eps_with_windowed_kv_cache
     )
-    model.window_kv_cache_slack = 0  # let runtime apply EP defaults
+    model.context_length_attrs["window_kv_cache_slack"] = 0  # let runtime apply EP defaults
     # Alternating attention: even layers are sliding-window layers.
     model.is_local = lambda layer_id: layer_id % 2 == 0
     model.input_names = {"input_ids": "input_ids", "past_key_values.key": [], "past_key_values.value": []}
