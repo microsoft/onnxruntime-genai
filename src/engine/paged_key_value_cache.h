@@ -41,7 +41,10 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
                                  size_t num_key_value_heads,
                                  size_t head_size,
                                  size_t full_layer_count,
-                                 size_t element_size);
+                                 size_t element_size,
+                                 size_t auxiliary_bytes_per_block = 0);
+
+size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -55,7 +58,8 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
  */
 struct PagedKeyValueCache {
  public:
-  explicit PagedKeyValueCache(std::shared_ptr<Model> model);
+  explicit PagedKeyValueCache(std::shared_ptr<Model> model,
+                              size_t auxiliary_bytes_per_block = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 

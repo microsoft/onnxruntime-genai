@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "../search.h"
 
 #include <limits>
 
@@ -40,6 +41,37 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   return message;
 }
 
+std::vector<int32_t> GreedyTokens(
+    const std::shared_ptr<DecoderOnly_Model>& model,
+    std::vector<DeviceSpan<float>>& logits) {
+  std::vector<int32_t> tokens(logits.size());
+  auto device_tokens = model->p_device_->Allocate<int32_t>(logits.size());
+  (void)device_tokens.CpuSpan();
+  bool device_argmax = true;
+  for (size_t i = 0; i < logits.size(); ++i) {
+    device_argmax &= model->p_device_->ArgMaxDevice(
+        logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+        model->config_->model.vocab_size, device_tokens.subspan(i, 1));
+  }
+  if (device_argmax) {
+    device_tokens.CopyDeviceToCpu();
+    std::copy(device_tokens.CpuSpan().begin(), device_tokens.CpuSpan().end(),
+              tokens.begin());
+    return tokens;
+  }
+
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (!model->p_device_->ArgMax(
+            logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+            model->config_->model.vocab_size, &tokens[i])) {
+      const auto values = logits[i].CopyDeviceToCpu();
+      tokens[i] = static_cast<int32_t>(
+          std::max_element(values.begin(), values.end()) - values.begin());
+    }
+  }
+  return tokens;
+}
+
 }  // namespace
 
 Engine::Engine(std::shared_ptr<Model> model)
@@ -49,7 +81,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
       scheduler_{std::move(dependencies.scheduler)},
-      model_executor_{std::move(dependencies.model_executor)} {
+      model_executor_{std::move(dependencies.model_executor)},
+      mtp_model_{std::move(dependencies.mtp_model)},
+      mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
+      mtp_model_executor_{std::move(dependencies.mtp_model_executor)} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
@@ -74,6 +109,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   staged_event_order_.reserve(max_batch_size);
   pending_events_.reserve(max_step_events);
   staged_events_.reserve(max_step_events);
+  mtp_requests_.reserve(max_batch_size);
 }
 
 Engine::~Engine() {
@@ -85,10 +121,382 @@ Engine::~Engine() {
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
-  std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
+  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  size_t mtp_bytes_per_block = 0;
+  if (!model->config_->model.mtp.filename.empty()) {
+    if (!model->config_->engine.dynamic_batching) {
+      throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
+    }
+    mtp_model = std::make_shared<DecoderOnly_Model>(
+        CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
+  }
+
+  std::shared_ptr<CacheManager> cache_manager =
+      CacheManager::Create(model, mtp_bytes_per_block);
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
-  return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
+
+  std::shared_ptr<CacheManager> mtp_cache_manager;
+  std::unique_ptr<ModelExecutor> mtp_model_executor;
+  if (mtp_model) {
+    // Both decoders cover the same resident request set. Fixing the head to the main pool's block
+    // count makes the auxiliary bytes included above exact rather than letting it independently
+    // consume another gpu_utilization_factor share of currently free memory.
+    mtp_model->config_->engine.dynamic_batching->num_blocks =
+        cache_manager->Snapshot().total_blocks;
+    mtp_cache_manager = CacheManager::Create(mtp_model);
+    mtp_model_executor = ModelExecutor::Create(mtp_model, mtp_cache_manager);
+  }
+
+  return EngineDependencies{
+      std::move(cache_manager), std::move(scheduler), std::move(model_executor),
+      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor)};
+}
+
+std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
+    const StepPlan& target_plan,
+    const std::vector<RequestStepResult>& target_results,
+    ScheduledRequests& target_requests) {
+  if (!mtp_model_ || MaxDraftTokensPerStep() == 0) {
+    return nullptr;
+  }
+  if (target_results.size() != target_plan.requests.size()) {
+    throw std::logic_error("MTP preparation requires one target result per planned request.");
+  }
+
+  Tensor* target_hidden_states = target_requests.HiddenStates();
+  if (!target_hidden_states) {
+    throw std::logic_error("The main decoder did not expose hidden states for its MTP head.");
+  }
+  const auto target_hidden_shape = target_hidden_states->GetShape();
+  const int64_t hidden_size = model_->config_->model.decoder.hidden_size;
+  if (target_hidden_shape !=
+      std::vector<int64_t>{static_cast<int64_t>(target_plan.token_count), hidden_size}) {
+    throw std::logic_error("The main decoder hidden-state shape does not match its packed step plan.");
+  }
+  const auto hidden_type = target_hidden_states->GetType();
+  const auto& mtp_hidden_name = mtp_model_->config_->model.decoder.inputs.hidden_states;
+  if (hidden_type != mtp_model_->session_info_.GetInputDataType(mtp_hidden_name)) {
+    throw std::logic_error("The main and MTP hidden-state element types do not match.");
+  }
+
+  struct Feed {
+    std::shared_ptr<Request> target;
+    std::shared_ptr<Request> shadow;
+    std::vector<int32_t> tokens;
+    size_t target_hidden_row{};
+    size_t max_draft_tokens{};
+    bool newly_created{};
+  };
+  std::vector<Feed> feeds;
+  feeds.reserve(target_plan.requests.size());
+  std::vector<std::shared_ptr<Request>> checkpointed_shadows;
+  checkpointed_shadows.reserve(target_plan.requests.size());
+  size_t total_rows = 0;
+  try {
+    for (size_t i = 0; i < target_plan.requests.size(); ++i) {
+      const auto& entry = target_plan.requests[i];
+      const auto& result = target_results[i];
+      const auto& search = entry.request->SearchOptions();
+      const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
+      const int64_t committed_length_after_step =
+          entry.request->CurrentSequenceLength() + (result.token_appended ? 1 : 0);
+      const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
+                                                static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
+                                                committed_length_after_step + 1 < search.max_length
+                                                    ? static_cast<size_t>(search.max_length - committed_length_after_step - 1)
+                                                    : size_t{0}});
+      if (!result.token_appended || result.done || !greedy ||
+          search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
+          search.min_length > entry.request->CurrentSequenceLength() ||
+          max_draft_tokens == 0) {
+        continue;
+      }
+
+      Feed feed;
+      feed.target = entry.request;
+      const size_t accepted = entry.request->AcceptedDraftTokenCount();
+      if (accepted > entry.draft_token_count) {
+        throw std::logic_error("MTP preparation observed more accepted drafts than the target planned.");
+      }
+      const auto staged_drafts = entry.request->StagedDraftTokens();
+      feed.tokens.insert(feed.tokens.end(), staged_drafts.begin(),
+                         staged_drafts.begin() + static_cast<ptrdiff_t>(accepted));
+      feed.tokens.push_back(result.token);
+      feed.target_hidden_row = entry.packed_token_offset +
+                               (entry.draft_token_count == 0
+                                    ? entry.unprocessed_token_count - 1
+                                    : 0);
+      feed.max_draft_tokens = max_draft_tokens;
+
+      const auto existing = mtp_requests_.find(entry.request.get());
+      if (existing != mtp_requests_.end()) {
+        feed.shadow = existing->second;
+        feed.shadow->SaveStateForTransaction();
+        checkpointed_shadows.push_back(feed.shadow);
+        feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
+      } else {
+        auto params = CreateGeneratorParams(*mtp_model_);
+        params->search = search;
+        feed.shadow = std::make_shared<Request>(
+            std::move(params), entry.request->max_total_tokens_, abandonment_pending_);
+        feed.shadow->engine_ = shared_from_this();
+        feed.shadow->status_ = RequestStatus::Active;
+        feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
+        feed.shadow->prompt_sequence_length_ = feed.shadow->CurrentSequenceLength();
+        feed.newly_created = true;
+      }
+      total_rows += feed.tokens.size();
+      feeds.push_back(std::move(feed));
+    }
+  } catch (...) {
+    const auto setup_error = std::current_exception();
+    for (auto it = checkpointed_shadows.rbegin(); it != checkpointed_shadows.rend(); ++it) {
+      try {
+        (*it)->RestoreStateForTransaction();
+      } catch (...) {
+      }
+    }
+    std::rethrow_exception(setup_error);
+  }
+  if (feeds.empty()) {
+    return nullptr;
+  }
+
+  auto step = std::make_unique<MtpStep>();
+  step->plan.transaction_id = target_plan.transaction_id;
+  step->plan.scheduled_request_limit = feeds.size();
+  step->plan.token_count = total_rows;
+  step->target_requests.reserve(feeds.size());
+  step->newly_created.reserve(feeds.size());
+  step->drafts.resize(feeds.size());
+
+  size_t packed_offset = 0;
+  for (const auto& feed : feeds) {
+    const size_t token_count = feed.tokens.size();
+    const size_t processed = static_cast<size_t>(feed.shadow->ProcessedSequenceLength());
+    step->plan.requests.push_back(RequestStepPlan{
+        feed.shadow,
+        feed.shadow.get(),
+        feed.shadow->CurrentSequenceLength(),
+        token_count,
+        0,
+        packed_offset,
+        packed_offset + token_count - 1,
+        processed + token_count,
+        static_cast<size_t>(feed.shadow->CurrentSequenceLength()) +
+            feed.max_draft_tokens - 1,
+        feed.shadow->IsPrefill(),
+        feed.newly_created,
+    });
+    step->target_requests.push_back(feed.target);
+    step->newly_created.push_back(feed.newly_created);
+    packed_offset += token_count;
+  }
+  step->plan.graph_capture_eligible = std::all_of(
+      step->plan.requests.begin(), step->plan.requests.end(),
+      [](const RequestStepPlan& entry) {
+        return !entry.is_prefill && entry.unprocessed_token_count == 1;
+      });
+
+  try {
+    const auto planning = mtp_cache_manager_->PlanStepResources(step->plan);
+    if (!planning.executable || step->plan.requests.size() != feeds.size()) {
+      throw std::runtime_error("The MTP cache could not reserve every target-committed suffix.");
+    }
+    step->reservation = mtp_cache_manager_->ReserveStep(step->plan);
+
+    Tensor packed_hidden_states{mtp_model_->p_device_inputs_, hidden_type};
+    const std::array<int64_t, 2> packed_hidden_shape{
+        static_cast<int64_t>(total_rows), hidden_size};
+    packed_hidden_states.CreateTensor(packed_hidden_shape);
+    const size_t row_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(hidden_type);
+    auto source_bytes = target_hidden_states->GetByteSpan();
+    auto destination_bytes = packed_hidden_states.GetByteSpan();
+    size_t destination_row = 0;
+    for (const auto& feed : feeds) {
+      const size_t row_count = feed.tokens.size();
+      destination_bytes.subspan(destination_row * row_bytes, row_count * row_bytes)
+          .CopyFrom(source_bytes.subspan(feed.target_hidden_row * row_bytes,
+                                         row_count * row_bytes));
+      destination_row += row_count;
+    }
+
+    ScheduledRequests mtp_requests{step->plan, mtp_model_, nullptr, nullptr};
+    ExecutionContext context{&step->plan};
+    context.cache_reservation = step->reservation->PagedReservation();
+    context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    mtp_model_executor_->Decode(mtp_requests, context);
+    auto logits = mtp_requests.ProcessLogits();
+    const auto first_drafts = GreedyTokens(mtp_model_, logits);
+    for (size_t i = 0; i < first_drafts.size(); ++i) {
+      step->drafts[i].reserve(feeds[i].max_draft_tokens);
+      step->drafts[i].push_back(first_drafts[i]);
+      step->plan.requests[i].request->CommitAuxiliaryDecoderStep();
+    }
+
+    const auto copy_hidden_rows = [&](Tensor& source,
+                                      std::span<const size_t> source_rows) {
+      auto destination = std::make_unique<Tensor>(mtp_model_->p_device_inputs_, hidden_type);
+      const std::array<int64_t, 2> shape{
+          static_cast<int64_t>(source_rows.size()), hidden_size};
+      destination->CreateTensor(shape);
+      const size_t row_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(hidden_type);
+      auto source_bytes = source.GetByteSpan();
+      auto destination_bytes = destination->GetByteSpan();
+      for (size_t row = 0; row < source_rows.size(); ++row) {
+        destination_bytes.subspan(row * row_bytes, row_bytes)
+            .CopyFrom(source_bytes.subspan(source_rows[row] * row_bytes, row_bytes));
+      }
+      return destination;
+    };
+
+    std::vector<size_t> active_feed_indices;
+    std::vector<size_t> feedback_rows;
+    for (size_t i = 0; i < feeds.size(); ++i) {
+      if (feeds[i].max_draft_tokens > 1) {
+        active_feed_indices.push_back(i);
+        feedback_rows.push_back(step->plan.requests[i].logits_row_index);
+      }
+    }
+    std::unique_ptr<Tensor> feedback_hidden;
+    if (!active_feed_indices.empty()) {
+      Tensor* head_hidden = mtp_requests.HiddenStates();
+      if (!head_hidden ||
+          head_hidden->GetShape() !=
+              std::vector<int64_t>{static_cast<int64_t>(total_rows), hidden_size}) {
+        throw std::runtime_error(
+            "Chained MTP drafts require one configured head hidden-state output row per input token.");
+      }
+      feedback_hidden = copy_hidden_rows(*head_hidden, feedback_rows);
+    }
+
+    for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
+      StepPlan chain_plan;
+      chain_plan.transaction_id = target_plan.transaction_id;
+      chain_plan.scheduled_request_limit = active_feed_indices.size();
+      chain_plan.token_count = active_feed_indices.size();
+      chain_plan.proposed_block_table_columns = step->plan.proposed_block_table_columns;
+      chain_plan.graph_capture_eligible = true;
+      chain_plan.requests.reserve(active_feed_indices.size());
+      for (size_t feed_index : active_feed_indices) {
+        auto& shadow = feeds[feed_index].shadow;
+        const std::array<int32_t, 1> token{step->drafts[feed_index].back()};
+        shadow->AppendTokensForAuxiliaryDecoder(token);
+        const size_t processed = static_cast<size_t>(shadow->ProcessedSequenceLength());
+        chain_plan.requests.push_back(RequestStepPlan{
+            shadow,
+            shadow.get(),
+            shadow->CurrentSequenceLength(),
+            1,
+            0,
+            chain_plan.requests.size(),
+            chain_plan.requests.size(),
+            processed + 1,
+            step->plan.requests[feed_index].whole_sequence_cache_slots,
+            false,
+            false,
+        });
+      }
+
+      ScheduledRequests chain_requests{chain_plan, mtp_model_, nullptr, nullptr};
+      ExecutionContext chain_context{&chain_plan};
+      chain_context.cache_reservation = step->reservation->PagedReservation();
+      chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
+      mtp_model_executor_->Decode(chain_requests, chain_context);
+      auto chain_logits = chain_requests.ProcessLogits();
+      const auto chain_drafts = GreedyTokens(mtp_model_, chain_logits);
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        const size_t feed_index = active_feed_indices[row];
+        step->drafts[feed_index].push_back(chain_drafts[row]);
+        feeds[feed_index].shadow->CommitAuxiliaryDecoderStep();
+      }
+
+      std::vector<size_t> next_active_feed_indices;
+      std::vector<size_t> next_feedback_rows;
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        if (feeds[active_feed_indices[row]].max_draft_tokens > draft_index + 1) {
+          next_active_feed_indices.push_back(active_feed_indices[row]);
+          next_feedback_rows.push_back(row);
+        }
+      }
+      if (!next_active_feed_indices.empty()) {
+        Tensor* head_hidden = chain_requests.HiddenStates();
+        if (!head_hidden ||
+            head_hidden->GetShape() !=
+                std::vector<int64_t>{static_cast<int64_t>(active_feed_indices.size()),
+                                     hidden_size}) {
+          throw std::runtime_error(
+              "Chained MTP hidden-state output does not match the active request batch.");
+        }
+        feedback_hidden = copy_hidden_rows(*head_hidden, next_feedback_rows);
+      }
+      active_feed_indices = std::move(next_active_feed_indices);
+    }
+
+    for (size_t i = 0; i < feeds.size(); ++i) {
+      feeds[i].shadow->RewindAuxiliaryDecoderTo(
+          static_cast<size_t>(step->plan.requests[i].target_cache_slots));
+    }
+    for (size_t i = 0; i < step->plan.requests.size(); ++i) {
+      if (step->newly_created[i]) {
+        mtp_requests_.emplace(step->target_requests[i].get(),
+                              step->plan.requests[i].request);
+      }
+    }
+  } catch (...) {
+    RollbackMtpStep(*step);
+    throw;
+  }
+  return step;
+}
+
+void Engine::RollbackMtpStep(MtpStep& step) {
+  std::exception_ptr rollback_error;
+  if (step.reservation) {
+    try {
+      step.reservation->Release();
+    } catch (...) {
+      rollback_error = std::current_exception();
+    }
+    step.reservation.reset();
+  }
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    if (step.newly_created[i]) {
+      mtp_requests_.erase(step.target_requests[i].get());
+      continue;
+    }
+    try {
+      step.plan.requests[i].request->RestoreStateForTransaction();
+    } catch (...) {
+      if (!rollback_error) {
+        rollback_error = std::current_exception();
+      }
+    }
+  }
+  if (rollback_error) {
+    std::rethrow_exception(rollback_error);
+  }
+}
+
+void Engine::CommitMtpStep(MtpStep& step) {
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    if (!step.newly_created[i]) {
+      step.plan.requests[i].request->CommitStateForTransaction();
+    }
+  }
+  step.reservation->Commit();
+  step.reservation.reset();
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    step.plan.requests[i].request->CommitAuxiliaryDecoderStep();
+  }
+}
+
+void Engine::PublishMtpDrafts(MtpStep& step) {
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    step.target_requests[i]->SetDraftTokens(step.drafts[i]);
+  }
 }
 
 void Engine::ValidateOwnerThread() const {
@@ -252,6 +660,14 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
 
+  if (const auto mtp_it = mtp_requests_.find(request.get());
+      mtp_it != mtp_requests_.end()) {
+    std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
+    mtp_cache_manager_->Deallocate(mtp_requests);
+    mtp_it->second->CompleteClose();
+    mtp_requests_.erase(mtp_it);
+  }
+
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -288,6 +704,16 @@ void Engine::DetachRequestForTeardown(
   }
 
   scheduler_->DetachRequestForTeardown(request);
+  if (const auto mtp_it = mtp_requests_.find(request.get());
+      mtp_it != mtp_requests_.end()) {
+    try {
+      std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
+      mtp_cache_manager_->Deallocate(mtp_requests);
+    } catch (...) {
+    }
+    mtp_it->second->CompleteClose();
+    mtp_requests_.erase(mtp_it);
+  }
   pending_events_.erase(
       std::remove_if(
           pending_events_.begin(), pending_events_.end(),
@@ -614,12 +1040,21 @@ void Engine::RunDynamic() {
     context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
 
     bool request_transaction_active = false;
+    std::unique_ptr<MtpStep> mtp_step;
     const auto rollback_transaction = [&]() {
       // Request/search state and composite cache state are checkpointed separately. Both must be
       // restored so a retry observes exactly the state that existed before this Run() call. The
       // reservation's Release() discards fixed provisional slots and staged banks as well as the
       // reserved paged blocks.
       std::exception_ptr rollback_error;
+      if (mtp_step) {
+        try {
+          RollbackMtpStep(*mtp_step);
+        } catch (...) {
+          rollback_error = std::current_exception();
+        }
+        mtp_step.reset();
+      }
       if (request_transaction_active) {
         try {
           scheduled_requests.RestoreStateForTransaction();
@@ -721,6 +1156,7 @@ void Engine::RunDynamic() {
             entry.unprocessed_token_count - entry.draft_token_count +
                 entry.request->AcceptedDraftTokenCount());
       }
+      mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
             step_results_[i].done) {
@@ -762,6 +1198,9 @@ void Engine::RunDynamic() {
     // work into inactive banks without publishing anything.
     try {
       reservation->PrepareCommit();
+      if (mtp_step) {
+        mtp_step->reservation->PrepareCommit();
+      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -781,9 +1220,15 @@ void Engine::RunDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
+      if (mtp_step) {
+        CommitMtpStep(*mtp_step);
+      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
+      }
+      if (mtp_step) {
+        PublishMtpDrafts(*mtp_step);
       }
     } catch (...) {
       MarkUnhealthyAndThrow(

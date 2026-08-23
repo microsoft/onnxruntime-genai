@@ -68,6 +68,7 @@ Request::Request(
       params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
       search_{CreateSearch(*params)} {
+  draft_tokens_.reserve(kMaxDraftTokensPerStep);
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -522,6 +523,36 @@ void Request::AdvanceChunk() {
   processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
 }
 
+void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  auto device_tokens = AllocateOnDevice(*params_, tokens);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+}
+
+void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
+  if (status_ != RequestStatus::Active ||
+      processed_sequence_length_ != CurrentSequenceLength() ||
+      sequence_length > static_cast<size_t>(processed_sequence_length_)) {
+    throw std::logic_error(
+        "Auxiliary decoder rewind requires an active request at a processed sequence boundary.");
+  }
+  search_->RewindTo(sequence_length);
+  tokens_host_.resize(sequence_length);
+  processed_sequence_length_ = static_cast<int64_t>(sequence_length);
+  scheduled_token_count_ = 0;
+}
+
+void Request::CommitAuxiliaryDecoderStep() noexcept {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+  scheduled_token_count_ = 0;
+}
+
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
   return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
@@ -603,6 +634,8 @@ void Request::SaveStateForTransaction() {
   search_->SaveStateForTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
@@ -612,6 +645,8 @@ void Request::SaveStateForExternalSamplingTransaction() {
   search_->SaveStateForExternalSamplingTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
@@ -669,7 +704,11 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
-  DiscardStagedDrafts();
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  scheduled_token_count_ = 0;
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -678,7 +717,11 @@ void Request::RestoreStateForTransaction() {
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
   rng_ = transaction_rng_;
-  DiscardStagedDrafts();
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  scheduled_token_count_ = 0;
 }
 
 void Request::CompleteStateRestoreForTransaction() {

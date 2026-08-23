@@ -389,6 +389,21 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
           /*element_size=*/2),
       48u);
 
+  // One auxiliary layer with the same geometry adds 32 bytes to the primary model's 64 bytes per
+  // block, so both pools together fit 96 blocks in the same 90%-adjusted memory budget.
+  EXPECT_EQ(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2,
+          /*auxiliary_bytes_per_block=*/32),
+      96u);
+
   EXPECT_EQ(
       ComputePagedBlockCapacity(
           /*available_memory_bytes=*/10240,
