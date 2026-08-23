@@ -74,6 +74,41 @@ std::vector<int32_t> GreedyTokens(
   return tokens;
 }
 
+bool TryGreedyTokensToDevice(
+    const std::shared_ptr<DecoderOnly_Model>& model,
+    std::vector<DeviceSpan<float>>& logits,
+    DeviceSpan<int32_t> tokens) {
+  if (tokens.size() != logits.size()) {
+    return false;
+  }
+
+  const size_t vocab_size = static_cast<size_t>(model->config_->model.vocab_size);
+  const bool contiguous = !logits.empty() && std::all_of(
+                                                 logits.begin(), logits.end(),
+                                                 [&](DeviceSpan<float>& row) {
+                                                   const size_t index = &row - logits.data();
+                                                   return row.size() == vocab_size &&
+                                                          row.SameBufferAs(logits.front()) &&
+                                                          row.Span().data() ==
+                                                              logits.front().Span().data() +
+                                                                  index * vocab_size;
+                                                 });
+  if (contiguous) {
+    return model->p_device_->ArgMaxDevice(
+        logits.front().Span().data(), Ort::TypeToTensorType<float>,
+        static_cast<int>(logits.size()), model->config_->model.vocab_size, tokens);
+  }
+
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (!model->p_device_->ArgMaxDevice(
+            logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+            model->config_->model.vocab_size, tokens.subspan(i, 1))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 Engine::Engine(std::shared_ptr<Model> model)
@@ -201,9 +236,10 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       const auto& entry = target_plan.requests[i];
       const auto& result = target_results[i];
       const auto& search = entry.request->SearchOptions();
-      const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
+      const bool greedy =
+          !search.do_sample || search.top_k == 1 || search.temperature == 0;
       const int64_t committed_length_after_step =
-          entry.request->CurrentSequenceLength() + (result.token_appended ? 1 : 0);
+          entry.request->CurrentSequenceLength();
       const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
                                                 static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
                                                 committed_length_after_step + 1 < search.max_length
@@ -309,6 +345,41 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     }
     step->reservation = mtp_cache_manager_->ReserveStep(step->plan);
 
+    const size_t max_draft_tokens = std::max_element(
+                                        feeds.begin(), feeds.end(),
+                                        [](const Feed& left, const Feed& right) {
+                                          return left.max_draft_tokens < right.max_draft_tokens;
+                                        })
+                                        ->max_draft_tokens;
+    bool device_draft_chain =
+        max_draft_tokens > 1 && mtp_model_->p_device_->GetType() == DeviceType::CUDA;
+    DeviceSpan<int32_t> device_drafts;
+    DeviceSpan<int32_t> device_chain_inputs;
+    if (device_draft_chain) {
+      const size_t draft_capacity = feeds.size() * max_draft_tokens;
+      if (mtp_device_drafts_.size() < draft_capacity) {
+        mtp_device_drafts_ = mtp_model_->p_device_->Allocate<int32_t>(draft_capacity);
+      }
+      if (mtp_device_chain_inputs_.size() < feeds.size()) {
+        mtp_device_chain_inputs_ = mtp_model_->p_device_->Allocate<int32_t>(feeds.size());
+      }
+      device_drafts = mtp_device_drafts_.subspan(0, draft_capacity);
+      device_chain_inputs = mtp_device_chain_inputs_.subspan(0, feeds.size());
+    }
+    std::vector<std::vector<size_t>> device_stage_feed_indices;
+    device_stage_feed_indices.reserve(max_draft_tokens);
+
+    const auto materialize_device_drafts = [&]() {
+      auto draft_ids = device_drafts.CopyDeviceToCpu();
+      for (size_t stage = 0; stage < device_stage_feed_indices.size(); ++stage) {
+        const auto& feed_indices = device_stage_feed_indices[stage];
+        for (size_t row = 0; row < feed_indices.size(); ++row) {
+          step->drafts[feed_indices[row]].push_back(
+              draft_ids[stage * feeds.size() + row]);
+        }
+      }
+    };
+
     Tensor packed_hidden_states{mtp_model_->p_device_inputs_, hidden_type};
     const std::array<int64_t, 2> packed_hidden_shape{
         static_cast<int64_t>(total_rows), hidden_size};
@@ -329,13 +400,32 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     ExecutionContext context{&step->plan};
     context.cache_reservation = step->reservation->PagedReservation();
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    if (device_draft_chain) {
+      context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    }
     mtp_model_executor_->Decode(mtp_requests, context);
     ++speculative_stats_.draft_forward_passes;
     auto logits = mtp_requests.ProcessLogits();
-    const auto first_drafts = GreedyTokens(mtp_model_, logits);
-    for (size_t i = 0; i < first_drafts.size(); ++i) {
+    device_draft_chain =
+        device_draft_chain &&
+        TryGreedyTokensToDevice(
+            mtp_model_, logits, device_drafts.subspan(0, feeds.size()));
+    std::vector<int32_t> first_drafts;
+    if (device_draft_chain) {
+      std::vector<size_t> first_stage_feed_indices;
+      first_stage_feed_indices.reserve(feeds.size());
+      for (size_t i = 0; i < feeds.size(); ++i) {
+        first_stage_feed_indices.push_back(i);
+      }
+      device_stage_feed_indices.push_back(std::move(first_stage_feed_indices));
+    } else {
+      first_drafts = GreedyTokens(mtp_model_, logits);
+    }
+    for (size_t i = 0; i < feeds.size(); ++i) {
       step->drafts[i].reserve(feeds[i].max_draft_tokens);
-      step->drafts[i].push_back(first_drafts[i]);
+      if (!device_draft_chain) {
+        step->drafts[i].push_back(first_drafts[i]);
+      }
       step->plan.requests[i].request->CommitAuxiliaryDecoderStep();
     }
 
@@ -356,8 +446,10 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     };
 
     std::vector<size_t> active_feed_indices;
+    std::vector<size_t> previous_stage_rows(feeds.size());
     std::vector<size_t> feedback_rows;
     for (size_t i = 0; i < feeds.size(); ++i) {
+      previous_stage_rows[i] = i;
       if (feeds[i].max_draft_tokens > 1) {
         active_feed_indices.push_back(i);
         feedback_rows.push_back(step->plan.requests[i].logits_row_index);
@@ -375,6 +467,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       feedback_hidden = copy_hidden_rows(*head_hidden, feedback_rows);
     }
 
+    std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
+    pending_device_requests.reserve(max_draft_tokens - 1);
+
     for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
       StepPlan chain_plan;
       chain_plan.transaction_id = target_plan.transaction_id;
@@ -383,10 +478,22 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       chain_plan.proposed_block_table_columns = step->plan.proposed_block_table_columns;
       chain_plan.graph_capture_eligible = true;
       chain_plan.requests.reserve(active_feed_indices.size());
-      for (size_t feed_index : active_feed_indices) {
+      DeviceSpan<int32_t> packed_device_inputs;
+      if (device_draft_chain) {
+        packed_device_inputs = device_chain_inputs.subspan(0, active_feed_indices.size());
+      }
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        const size_t feed_index = active_feed_indices[row];
         auto& shadow = feeds[feed_index].shadow;
-        const std::array<int32_t, 1> token{step->drafts[feed_index].back()};
-        shadow->AppendTokensForAuxiliaryDecoder(token);
+        if (device_draft_chain) {
+          auto token = packed_device_inputs.subspan(row, 1);
+          token.CopyFrom(device_drafts.subspan(
+              (draft_index - 1) * feeds.size() + previous_stage_rows[feed_index], 1));
+          shadow->AppendTokensForAuxiliaryDecoder(token);
+        } else {
+          const std::array<int32_t, 1> token{step->drafts[feed_index].back()};
+          shadow->AppendTokensForAuxiliaryDecoder(token);
+        }
         const size_t processed = static_cast<size_t>(shadow->ProcessedSequenceLength());
         chain_plan.requests.push_back(RequestStepPlan{
             shadow,
@@ -403,18 +510,44 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         });
       }
 
-      ScheduledRequests chain_requests{chain_plan, mtp_model_, nullptr, nullptr};
+      auto chain_requests = std::make_unique<ScheduledRequests>(
+          chain_plan, mtp_model_, nullptr, nullptr);
       ExecutionContext chain_context{&chain_plan};
       chain_context.cache_reservation = step->reservation->PagedReservation();
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
-      mtp_model_executor_->Decode(chain_requests, chain_context);
+      if (device_draft_chain) {
+        chain_context.input_ids = packed_device_inputs;
+        chain_context.run_options->AddConfigEntry(
+            "disable_synchronize_execution_providers", "1");
+      }
+      mtp_model_executor_->Decode(*chain_requests, chain_context);
       ++speculative_stats_.draft_forward_passes;
-      auto chain_logits = chain_requests.ProcessLogits();
-      const auto chain_drafts = GreedyTokens(mtp_model_, chain_logits);
+      auto chain_logits = chain_requests->ProcessLogits();
+      bool stage_on_device = false;
+      if (device_draft_chain) {
+        stage_on_device = TryGreedyTokensToDevice(
+            mtp_model_, chain_logits,
+            device_drafts.subspan(
+                draft_index * feeds.size(), active_feed_indices.size()));
+      }
+      std::vector<int32_t> chain_drafts;
+      if (stage_on_device) {
+        device_stage_feed_indices.push_back(active_feed_indices);
+      } else {
+        if (device_draft_chain) {
+          materialize_device_drafts();
+          pending_device_requests.clear();
+          device_draft_chain = false;
+        }
+        chain_drafts = GreedyTokens(mtp_model_, chain_logits);
+      }
       for (size_t row = 0; row < active_feed_indices.size(); ++row) {
         const size_t feed_index = active_feed_indices[row];
-        step->drafts[feed_index].push_back(chain_drafts[row]);
+        if (!device_draft_chain) {
+          step->drafts[feed_index].push_back(chain_drafts[row]);
+        }
         feeds[feed_index].shadow->CommitAuxiliaryDecoderStep();
+        previous_stage_rows[feed_index] = row;
       }
 
       std::vector<size_t> next_active_feed_indices;
@@ -426,7 +559,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         }
       }
       if (!next_active_feed_indices.empty()) {
-        Tensor* head_hidden = chain_requests.HiddenStates();
+        Tensor* head_hidden = chain_requests->HiddenStates();
         if (!head_hidden ||
             head_hidden->GetShape() !=
                 std::vector<int64_t>{static_cast<int64_t>(active_feed_indices.size()),
@@ -436,7 +569,14 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         }
         feedback_hidden = copy_hidden_rows(*head_hidden, next_feedback_rows);
       }
+      if (device_draft_chain) {
+        pending_device_requests.push_back(std::move(chain_requests));
+      }
       active_feed_indices = std::move(next_active_feed_indices);
+    }
+
+    if (device_draft_chain) {
+      materialize_device_drafts();
     }
 
     for (size_t i = 0; i < feeds.size(); ++i) {

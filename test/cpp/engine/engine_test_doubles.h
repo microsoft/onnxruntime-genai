@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "generator/generators.h"
+#include "search.h"
 #include "engine/cache_manager.h"
 #include "engine/model_executor.h"
 #include "engine/scheduler.h"
@@ -188,6 +190,7 @@ struct RecordingCacheManager : CacheManager {
   }
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override {
+    reserve_calls++;
     struct Reservation final : CacheStepReservation {
       Reservation(RecordingCacheManager& cache, const StepPlan& plan)
           : cache_{cache} {
@@ -238,6 +241,7 @@ struct RecordingCacheManager : CacheManager {
           throw std::logic_error("Recording cache reservation can only commit once.");
         }
         cache_.Allocate(newly_admitted_);
+        cache_.reservation_commit_calls++;
         committed_ = true;
       }
 
@@ -245,6 +249,7 @@ struct RecordingCacheManager : CacheManager {
         if (committed_) {
           throw std::logic_error("Cannot release a committed recording cache reservation.");
         }
+        cache_.reservation_release_calls++;
         released_ = true;
       }
 
@@ -258,6 +263,11 @@ struct RecordingCacheManager : CacheManager {
       bool released_{};
     };
 
+    size_t newly_admitted = 0;
+    for (const auto& entry : plan.requests) {
+      newly_admitted += entry.newly_admitted ? 1 : 0;
+    }
+    reserved_new_request_counts.push_back(newly_admitted);
     return std::make_unique<Reservation>(*this, plan);
   }
 
@@ -312,6 +322,10 @@ struct RecordingCacheManager : CacheManager {
   int allocate_calls{0};
   int deallocate_calls{0};
   int step_calls{0};
+  int reserve_calls{0};
+  int reservation_commit_calls{0};
+  int reservation_release_calls{0};
+  std::vector<size_t> reserved_new_request_counts;
 
  private:
   size_t capacity_;
@@ -343,7 +357,9 @@ struct ScriptedDecoderIO : DecoderIO {
                     std::shared_ptr<CacheManager> cache_manager, int32_t forced_token,
                     bool fail_process_logits = false,
                     const StepPlan* plan = nullptr,
-                    std::span<const int32_t> row_tokens = {})
+                    std::span<const int32_t> row_tokens = {},
+                    int64_t hidden_size = 0,
+                    ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>)
       : DecoderIO(model, scheduled_requests, cache_manager),
         vocab_size_{static_cast<int64_t>(model->config_->model.vocab_size)},
         fail_process_logits_{fail_process_logits} {
@@ -374,6 +390,15 @@ struct ScriptedDecoderIO : DecoderIO {
       cpu_span[static_cast<int64_t>(row) * vocab_size_ + token] = 100.0f;
     }
     device_span.CopyCpuToDevice();
+
+    if (hidden_size > 0) {
+      hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_, hidden_type);
+      const size_t hidden_rows = plan ? plan->token_count : scheduled_requests.size();
+      const std::array<int64_t, 2> hidden_shape{
+          static_cast<int64_t>(hidden_rows), hidden_size};
+      hidden_states_->CreateTensor(hidden_shape);
+      hidden_states_->GetByteSpan().Zero();
+    }
   }
 
   std::vector<DeviceSpan<float>> ProcessLogits() override {
@@ -388,10 +413,13 @@ struct ScriptedDecoderIO : DecoderIO {
     return rows;
   }
 
+  Tensor* HiddenStates() const override { return hidden_states_.get(); }
+
  private:
   int64_t vocab_size_;
   size_t row_count_{};
   bool fail_process_logits_{};
+  std::unique_ptr<Tensor> hidden_states_;
 };
 
 enum class ScriptedExecutionFailure {
@@ -425,7 +453,13 @@ struct RecordingModelExecutor : ModelExecutor {
       for (const auto& entry : context.plan->requests)
         request_ids.push_back(entry.request_id);
       decoded_request_ids.push_back(std::move(request_ids));
+      std::vector<int64_t> sequence_lengths;
+      sequence_lengths.reserve(context.plan->requests.size());
+      for (const auto& entry : context.plan->requests)
+        sequence_lengths.push_back(entry.sequence_length_before);
+      decoded_sequence_lengths_before.push_back(std::move(sequence_lengths));
     }
+    used_device_input_ids.push_back(!context.input_ids.empty());
     if (trace_) trace_->Record("Decode");
     const auto failure = std::exchange(next_failure_, ScriptedExecutionFailure::None);
     if (failure == ScriptedExecutionFailure::RetryableBeforeExecution) {
@@ -453,7 +487,7 @@ struct RecordingModelExecutor : ModelExecutor {
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
-            context.plan, verify_row_tokens_));
+        context.plan, verify_row_tokens_, hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
 
@@ -471,11 +505,19 @@ struct RecordingModelExecutor : ModelExecutor {
   void SetSupportsDraftVerification(bool supported) {
     supports_draft_verification_ = supported;
   }
+  void EnableHiddenStatesOutput(
+      int64_t hidden_size,
+      ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>) {
+    hidden_size_ = hidden_size;
+    hidden_type_ = hidden_type;
+  }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
   std::vector<size_t> decoded_token_counts;
   std::vector<std::vector<const void*>> decoded_request_ids;
+  std::vector<std::vector<int64_t>> decoded_sequence_lengths_before;
+  std::vector<bool> used_device_input_ids;
 
  private:
   std::shared_ptr<Model> model_;
@@ -486,6 +528,90 @@ struct RecordingModelExecutor : ModelExecutor {
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
   bool supports_draft_verification_{true};
+  int64_t hidden_size_{};
+  ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};
+};
+
+struct CountingCudaDeviceState {
+  size_t device_to_host_copies{};
+  size_t synchronize_calls{};
+  std::vector<int> argmax_rows;
+};
+
+struct CountingCudaMemory final : DeviceBuffer {
+  CountingCudaMemory(size_t size, std::shared_ptr<CountingCudaDeviceState> state)
+      : storage_{std::make_unique<uint8_t[]>(size)}, state_{std::move(state)} {
+    size_in_bytes_ = size;
+    p_cpu_ = p_device_ = storage_.get();
+  }
+
+  CountingCudaMemory(void* memory, size_t size,
+                     std::shared_ptr<CountingCudaDeviceState> state)
+      : state_{std::move(state)} {
+    size_in_bytes_ = size;
+    p_cpu_ = p_device_ = static_cast<uint8_t*>(memory);
+  }
+
+  const char* GetType() const override { return "test_cuda"; }
+  void AllocateCpu() override {}
+  void CopyDeviceToCpu() override { ++state_->device_to_host_copies; }
+  void CopyCpuToDevice() override {}
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source,
+                size_t begin_source, size_t size_in_bytes) override {
+    std::memmove(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
+  }
+  void Zero() override { std::memset(p_device_, 0, size_in_bytes_); }
+
+ private:
+  std::unique_ptr<uint8_t[]> storage_;
+  std::shared_ptr<CountingCudaDeviceState> state_;
+};
+
+struct CountingCudaDevice final : DeviceInterface {
+  CountingCudaDevice()
+      : state{std::make_shared<CountingCudaDeviceState>()} {}
+
+  DeviceType GetType() const override { return DeviceType::CUDA; }
+  void InitOrt(const OrtApi&, Ort::Allocator&) override {}
+  Ort::Allocator& GetAllocator() override {
+    return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
+  }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return {}; }
+  std::string GetExecutionProviderName() const override { return "test_cuda"; }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return std::make_shared<CountingCudaMemory>(size, state);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return std::make_shared<CountingCudaMemory>(memory, size, state);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<GreedySearch_Cpu>(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return std::make_unique<BeamSearch_Cpu>(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
+  void Synchronize() override { ++state->synchronize_calls; }
+
+  bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,
+                    int num_rows, int vocab_size,
+                    DeviceSpan<int32_t> out_tokens) override {
+    if (logits_type != Ort::TypeToTensorType<float> ||
+        out_tokens.size() < static_cast<size_t>(num_rows)) {
+      return false;
+    }
+    state->argmax_rows.push_back(num_rows);
+    const auto* values = static_cast<const float*>(logits);
+    auto output = out_tokens.Span();
+    for (int row = 0; row < num_rows; ++row) {
+      const auto* begin = values + static_cast<size_t>(row) * vocab_size;
+      output[row] = static_cast<int32_t>(
+          std::max_element(begin, begin + vocab_size) - begin);
+    }
+    return true;
+  }
+
+  std::shared_ptr<CountingCudaDeviceState> state;
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those
@@ -508,6 +634,16 @@ struct CompositeDoublesEngine {
   std::shared_ptr<Engine> engine;
   PagedCacheManager* cache;
   RecordingModelExecutor* executor;
+};
+
+struct MtpDoublesEngine {
+  std::unique_ptr<CountingCudaDevice> device;
+  std::shared_ptr<Engine> engine;
+  RecordingCacheManager* cache;
+  RecordingModelExecutor* executor;
+  RecordingCacheManager* mtp_cache;
+  RecordingModelExecutor* mtp_executor;
+  std::shared_ptr<CountingCudaDeviceState> device_state;
 };
 
 inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capacity, int32_t forced_token) {
