@@ -20,6 +20,46 @@ namespace Generators {
 
 int64_t SafeDoubleToInt64(double x, std::string_view name);
 
+std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
+  const auto& mtp = config.model.mtp;
+  if (mtp.filename.empty()) {
+    throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
+  }
+  if (mtp.num_hidden_layers <= 0 || mtp.num_key_value_heads <= 0 || mtp.head_size <= 0) {
+    throw std::runtime_error("model.mtp layer count, KV head count, and head size must be positive.");
+  }
+
+  auto projected = std::make_unique<Config>(config);
+  auto& decoder = projected->model.decoder;
+  decoder.filename = mtp.filename;
+  if (mtp.session_options) {
+    decoder.session_options = *mtp.session_options;
+  }
+  decoder.run_options = mtp.run_options;
+  decoder.shared_initializers = mtp.shared_initializers;
+  decoder.num_hidden_layers = mtp.num_hidden_layers;
+  decoder.num_key_value_heads = mtp.num_key_value_heads;
+  decoder.head_size = mtp.head_size;
+
+  decoder.inputs.input_ids = mtp.inputs.input_ids;
+  decoder.inputs.hidden_states = mtp.inputs.hidden_states;
+  decoder.inputs.position_ids = mtp.inputs.position_ids;
+  decoder.inputs.past_key_names = mtp.inputs.past_key_names;
+  decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  decoder.outputs.logits = mtp.outputs.logits;
+  decoder.outputs.hidden_states = mtp.outputs.hidden_states;
+  decoder.outputs.present_key_names = mtp.outputs.present_key_names;
+  decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+
+  // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
+  // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
+  decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
+  decoder.conv_cache_size = 0;
+  decoder.sliding_window.reset();
+  decoder.state_groups.reset();
+  return projected;
+}
+
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {
