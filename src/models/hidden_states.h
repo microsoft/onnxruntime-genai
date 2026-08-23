@@ -71,6 +71,7 @@ struct HiddenStatesOutputs {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
+  int fixed_sequence_length_{};
   // Dedicated stable buffers only for graph-captured lengths (1, 2, ..., N+1).
   std::unordered_map<int, std::unique_ptr<Tensor>> buffers_by_len_;
   std::unique_ptr<Tensor> dynamic_buffer_;

@@ -194,6 +194,54 @@ See [examples/python/qwen-3.6-mtp.md](../examples/python/qwen-3.6-mtp.md) for th
 recipe and [examples/python/qwen-3.6-mtp.py](../examples/python/qwen-3.6-mtp.py) for a runnable
 example.
 
+### Gemma4 assistant heads
+
+`OgaCreateMtpGenerator` also accepts a Gemma4 *assistant* head (`model.type` =
+`"gemma4_assistant"`). It differs from the Qwen-style head in two ways: it consumes the target's
+token embedding concatenated with the carried hidden state, and it reads the target's present KV
+for a few layers instead of owning a cache. Both are declared in the target's `mtp` block:
+
+```jsonc
+"mtp": {
+  "filename": "assistant.onnx",
+  "main_hidden_states": "final_hidden_state",   // target output: final hidden state
+  "main_inputs_embeds": "inputs_embeds",        // target output: token embeddings
+  "shared_kv_layers": [22, 23],                 // target layers whose present KV the head reads
+  "inputs": {
+    "hidden_states": "inputs_embeds",           // head input: embedding ++ hidden, [1, 1, 2H]
+    "attention_mask": "attention_mask",
+    "shared_key_names": ["shared_kv.sliding_attention.key", "shared_kv.full_attention.key"],
+    "shared_value_names": ["shared_kv.sliding_attention.value", "shared_kv.full_attention.value"]
+  },
+  "outputs": {
+    "logits": "logits",
+    "hidden_states": "projected_state"          // head output fed back into the next draft
+  }
+}
+```
+
+`shared_key_names[i]` / `shared_value_names[i]` are bound to the target's present key/value for
+`shared_kv_layers[i]`, composed from `model.decoder.outputs.present_key_names` and
+`present_value_names`. Buffer widths come from `model.decoder.hidden_size`.
+
+`main_inputs_embeds` must name an output the runtime *binds*, not merely one the ONNX graph
+declares — for a multi-modal package that is the embedding stage's
+`model.embedding.outputs.embeddings`.
+
+A target whose logits output has a bounded sequence dimension (it emits one row per input token
+only while the input fits that bound, and last-token logits for longer prefill forwards) must
+declare `model.decoder.max_logits_sequence_length`.
+
+`builder.py` has no Gemma 4 support, so both graphs come from an external exporter
+([mobius](https://github.com/onnxruntime/mobius)) plus a post-processing pass that adds the two
+extra target outputs and writes the `mtp` block;
+[examples/python/gemma-4-mtp-build.py](../examples/python/gemma-4-mtp-build.py) drives the whole
+pipeline.
+
+See [examples/python/gemma-4-mtp.md](../examples/python/gemma-4-mtp.md) for the full contract and
+build recipe, and [examples/python/gemma-4-mtp.py](../examples/python/gemma-4-mtp.py) for a
+runnable example.
+
 ### Runtime
 
 `MtpGenerator` ([src/mtp_generator.h](../src/mtp_generator.h),

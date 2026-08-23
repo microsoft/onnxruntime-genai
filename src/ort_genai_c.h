@@ -563,17 +563,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 
-/* Multi-Token-Prediction (MTP) self-speculative decoding (e.g. Qwen3.6). The MtpGenerator
- * composes a main decoder and an MTP draft head and runs the draft/verify loop in-engine,
- * keeping the hidden-state handoff on-device. Greedy, batch size 1; the output is identical to
- * plain greedy decoding (lossless). */
+/* Multi-Token-Prediction (MTP) self-speculative decoding. The MtpGenerator composes a target
+ * decoder and a compatible draft model and runs the architecture-specific draft/verify loop
+ * in-engine. */
 typedef struct OgaMtpGenerator OgaMtpGenerator;
 
 /**
- * \brief Creates an MTP self-speculative generator from a main model and an MTP-head model.
- * \param[in] main_model The main decoder (exported with include_hidden_states).
- * \param[in] mtp_model The MTP head (mtp.onnx, with a hidden_states input).
- * \param[in] params The generation parameters (greedy, batch size 1).
+ * \brief Creates an MTP self-speculative generator from a target model and compatible draft model.
+ * \param[in] main_model The target decoder.
+ * \param[in] mtp_model The architecture-compatible draft model.
+ * \param[in] params The generation parameters.
  * \param[out] out The created MTP generator.
  * \return OgaResult containing the error message on failure.
  */

@@ -693,6 +693,9 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "head_size") {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_logits_sequence_length") {
+      v_.max_logits_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.max_logits_sequence_length < 0) throw std::runtime_error("max_logits_sequence_length must be >= 0");
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
@@ -775,8 +778,20 @@ struct MtpInputs_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_key_names") {
+      return shared_key_names_;
+    }
+    if (name == "shared_value_names") {
+      return shared_value_names_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Mtp::Inputs& v_;
+  StringArray_Element shared_key_names_{v_.shared_key_names};
+  StringArray_Element shared_value_names_{v_.shared_value_names};
 };
 
 struct MtpOutputs_Element : JSON::Element {
@@ -817,9 +832,21 @@ struct Mtp_Element : JSON::Element {
       if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
     } else if (name == "main_hidden_states") {
       v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "main_inputs_embeds") {
+      v_.main_inputs_embeds = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_kv_layers") {
+      return shared_kv_layers_;
+    }
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
   Element& OnObject(std::string_view name) override {
@@ -842,17 +869,11 @@ struct Mtp_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
-  Element& OnArray(std::string_view name) override {
-    if (name == "shared_initializers") {
-      return shared_initializers_;
-    }
-    throw JSON::unknown_value_error{};
-  }
-
  private:
   Config::Model::Mtp& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  IntArray_Element shared_kv_layers_{v_.shared_kv_layers};
   MtpInputs_Element inputs_{v_.inputs};
   MtpOutputs_Element outputs_{v_.outputs};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};

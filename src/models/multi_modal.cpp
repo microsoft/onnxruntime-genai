@@ -688,6 +688,12 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 
   position_inputs_->Add();
   logits_.Add();
+  // Same as DecoderOnly_State: a decoder exported with include_hidden_states registers that output
+  // as a managed one so it survives CUDA-graph capture.
+  if (!model_.config_->model.decoder.outputs.hidden_states.empty()) {
+    hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
+    hidden_states_output_->Add();
+  }
   kv_cache_.Add();
   if (recurrent_state_)
     recurrent_state_->Add();
@@ -703,6 +709,18 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
+void DecoderState::RewindTo(size_t index) {
+  position_inputs_->RewindTo(index);
+  kv_cache_.RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
+void DecoderState::SnapshotState(size_t position) {
+  if (recurrent_state_)
+    recurrent_state_->Snapshot(position);
+}
+
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
@@ -712,6 +730,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
@@ -723,6 +743,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
+  if (hidden_states_output_)
+    hidden_states_output_->Update(static_cast<int>(new_length));
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
@@ -841,6 +863,14 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  decoder_state_->RewindTo(index);
+}
+
+void MultiModalPipelineState::SnapshotState(size_t position) {
+  decoder_state_->SnapshotState(position);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
