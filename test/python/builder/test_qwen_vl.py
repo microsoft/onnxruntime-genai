@@ -38,6 +38,18 @@ Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
 
 
+def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
+    model = Model.__new__(Model)
+    model.quant_attrs = {"nodes_to_exclude": []}
+    module = types.SimpleNamespace(exclude_from_quantization=True)
+    monkeypatch.setattr(model, "make_matmul_op", lambda *_args, **_kwargs: "matmul")
+
+    assert model.make_matmul(module, "/model/layers.0/moe/router/MatMul", "hidden_states") == "matmul"
+    model.make_matmul(module, "/model/layers.0/moe/router/MatMul", "hidden_states")
+
+    assert model.quant_attrs["nodes_to_exclude"] == ["/model/layers.0/moe/router/MatMul"]
+
+
 def test_base_mlp_assigns_published_output_to_skip_input(monkeypatch):
     model = Model.__new__(Model)
     model.mlp_attrs = {"use_proj": True, "use_fc": False, "output_0": ""}

@@ -1973,6 +1973,10 @@ class Model:
         self.make_value(output, self.io_dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
+        if getattr(matmul, "exclude_from_quantization", False):
+            nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
+            if basename not in nodes_to_exclude:
+                nodes_to_exclude.append(basename)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)

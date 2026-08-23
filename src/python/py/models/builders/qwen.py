@@ -507,41 +507,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
             config, "shared_expert_intermediate_size", self.moe_intermediate_size
         )
 
-        # MoE layers use MoE/QMoE ops instead of individual MatMul nodes,
-        # so remove any /mlp/ MatMul overrides that don't apply.
-        algo_config = self.quant_attrs.get("algo_config")
-        if algo_config is not None and hasattr(algo_config, "customized_weight_config"):
-            keys_to_remove = [k for k in algo_config.customized_weight_config if "/mlp/" in k]
-            for k in keys_to_remove:
-                del algo_config.customized_weight_config[k]
-
-        # Keep the routing-critical projections out of INT4 quantization.
-        # The MoE router selects the top-k experts and the shared-expert gate
-        # scales the always-on expert. Both are tiny matmuls, but 4-bit rounding
-        # of their weights perturbs the routing logits enough to flip top-k
-        # expert selection (measured ~1.4 of 8 experts change per token), which
-        # injects a large error into every MoE layer. Excluding them costs only
-        # a few MB but materially improves quantized-model accuracy.
-        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.INT8}:
-            nodes_to_exclude = self.quant_attrs.setdefault("nodes_to_exclude", [])
-            for i in range(self.num_layers):
-                router_node = f"/model/layers.{i}/moe/router/MatMul"
-                shared_gate_node = f"/model/layers.{i}/shared_expert_gate/MatMul"
-                if router_node not in nodes_to_exclude:
-                    nodes_to_exclude.append(router_node)
-                if shared_gate_node not in nodes_to_exclude:
-                    nodes_to_exclude.append(shared_gate_node)
-                # When keeping original FP8 weights, keep the GatedDeltaNet (linear-attention)
-                # projections out of int4/int8 quantization. ``in_proj_a`` / ``in_proj_b`` are
-                # BF16 in the checkpoint (and only 32 elements wide), so they stay fp16. The
-                # remaining projections are replaced by ``MatMulBlockQuantizedFp8Weight`` and
-                # never reach the int4/int8 quantizer.
-                if self.quant_type == "modelopt":
-                    for proj in ("in_proj_a", "in_proj_b"):
-                        linear_node = f"/model/layers.{i}/linear_attn/{proj}/MatMul"
-                        if linear_node not in nodes_to_exclude:
-                            nodes_to_exclude.append(linear_node)
-
     def get_moe_module(self, layer_id, layer):
         return layer.mlp
 

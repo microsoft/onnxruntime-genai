@@ -169,6 +169,10 @@ def test_modelopt_loader_tree_preserves_quantized_tensors():
         assert l0.mlp.experts.gate_up_global_scales.shape == (1,)
         # Router / shared-expert-gate are present as plain tensors.
         assert l0.mlp.gate.weight is not None and l0.mlp.shared_expert_gate.weight is not None
+        assert l0.mlp.gate.exclude_from_quantization
+        assert l0.mlp.shared_expert_gate.exclude_from_quantization
+        assert l0.linear_attn.in_proj_a.exclude_from_quantization
+        assert l0.linear_attn.in_proj_b.exclude_from_quantization
         # All safetensors handles are released once loading finishes.
         assert not model.handles
     print("OK: ModeloptModel builds the tree and preserves FP8/NVFP4 tensors.")

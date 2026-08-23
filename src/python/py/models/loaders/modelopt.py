@@ -231,6 +231,8 @@ class ModeloptModel(QuantizedModel):
             la.in_proj_z = self.make_linear_module(f"{prefix}.linear_attn.in_proj_z")
             la.in_proj_a = self.make_linear_module(f"{prefix}.linear_attn.in_proj_a")
             la.in_proj_b = self.make_linear_module(f"{prefix}.linear_attn.in_proj_b")
+            la.in_proj_a.exclude_from_quantization = True
+            la.in_proj_b.exclude_from_quantization = True
             la.out_proj = self.make_linear_module(f"{prefix}.linear_attn.out_proj")
             la.conv1d = self.make_tensor_module(f"{prefix}.linear_attn.conv1d.weight")
             la.A_log = self.get_tensor(f"{prefix}.linear_attn.A_log")
@@ -255,12 +257,14 @@ class ModeloptModel(QuantizedModel):
 
         mlp = SimpleNamespace()
         mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
+        mlp.gate.exclude_from_quantization = True
         shared = SimpleNamespace()
         shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
         shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
         shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
         mlp.shared_expert = shared
         mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
+        mlp.shared_expert_gate.exclude_from_quantization = True
         mlp.experts = []
         for expert_id in range(self.num_experts):
             expert_prefix = f"{prefix}.mlp.experts.{expert_id}"

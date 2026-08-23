@@ -61,6 +61,7 @@ class TensorModule:
         self.weight = None
         self.bias = None
         self.quant_type = "none"
+        self.exclude_from_quantization = False
         self.weight_scale = None
         self.weight_scale_2 = None
         self.input_scale = None
