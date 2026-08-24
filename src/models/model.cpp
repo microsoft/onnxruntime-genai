@@ -23,7 +23,7 @@
 #include <sys/stat.h>
 #endif
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"

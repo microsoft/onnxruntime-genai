@@ -3,7 +3,7 @@
 
 #include "windowed_kv_cache.h"
 
-#include "../../generators.h"
+#include "generator/generators.h"
 #include "../../logging.h"
 #include "../../make_string.h"
 #include "../../narrow.h"

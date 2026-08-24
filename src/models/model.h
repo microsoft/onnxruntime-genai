@@ -7,7 +7,7 @@
 #include "model_state_manifest.h"
 #include "model_type.h"
 #include "ortx_tokenizer.h"
-#include "../generators.h"
+#include "generator/generators.h"
 #include "utils.h"
 #include <optional>
 #include "models/preprocessing/phi_image_processor.h"

@@ -1,4 +1,4 @@
-#include "../generators.h"
+#include "generator/generators.h"
 #include "decoder_only.h"
 
 namespace Generators {

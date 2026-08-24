@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <algorithm>
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../softmax.h"
 #include "decoding/speculative_sampling.h"
 #include "speculative_decoding.h"

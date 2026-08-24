@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../search.h"
 #include "nemo_mel_spectrogram.h"
 #include "nemotron_speech.h"
