@@ -93,8 +93,8 @@ child benchmark output is opt-in with `--verbose`.
 ## Configuration
 
 The `configs/` directory contains the complete matrix in `config.json`, individual scenario
-matrices in `decode-baseline.json`, `long-prefill.json`, and `mixed-workload.json`, and a
-three-entry smoke test in `smoke-test.json`.
+matrices in `decode-baseline.json`, `long-prefill.json`, `mixed-workload.json`, and
+`continuation.json`, and a smoke test in `smoke-test.json`.
 
 Each config is a list of scenario entries:
 
@@ -114,7 +114,7 @@ Each config is a list of scenario entries:
 
 | Field | Notes |
 | --- | --- |
-| `scenario` | `decode_baseline`, `long_prefill`, or `mixed_workload`. |
+| `scenario` | `decode_baseline`, `long_prefill`, `mixed_workload`, or `continuation`. |
 | `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
 | `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
@@ -128,6 +128,10 @@ smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request i
 capped to one generated token while decode requests keep `generation_tokens`; this keeps the
 prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
 while still measuring prefill-vs-decode interference.
+
+`continuation` runs three appended turns for each logical request. Each turn submits the previous
+turn's generated tokens as part of the next prompt, so the benchmark measures session-cache reuse
+under concurrency 4 and 8.
 
 ## Adding a scenario
 
