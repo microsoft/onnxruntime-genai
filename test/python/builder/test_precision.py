@@ -583,6 +583,9 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     [
         ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
         ({"use_paged_attention": "true", "paged_block_size": "128"}, "paged_block_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "paged_chunk_size": "abc"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
         ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
@@ -598,11 +601,13 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",
         "paged_block_size": "512",
+        "paged_chunk_size": "64",
         "gpu_utilization_factor": "0.75",
         "max_batch_size": "32",
     }
     _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
     assert extra_options["paged_block_size"] == 512
+    assert extra_options["paged_chunk_size"] == 64
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
 

@@ -5,6 +5,7 @@
 
 #include "engine.h"
 #include "sequence_positions.h"
+#include "../constrained_logits_processor.h"
 #include "../search.h"
 
 namespace Generators {
@@ -56,11 +57,32 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   if (params->search.num_beams != 1) {
     throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
   }
+  if (params->guidance_ff_tokens_enabled) {
+    throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
+  }
+
+  const bool has_guidance_type = !params->guidance_type.empty();
+  const bool has_guidance_data = !params->guidance_data.empty();
+  if (has_guidance_type != has_guidance_data) {
+    throw std::runtime_error("Guidance type and data must be provided together.");
+  }
+  const bool guidance_requested = has_guidance_type && has_guidance_data;
+  if (guidance_requested && !params->model_) {
+    throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
+  }
+  if (guidance_requested) {
+    guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
+  }
+  if (guidance_requested && !guidance_logits_processor_) {
+    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true.");
+  }
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
 }
+
+Request::~Request() = default;
 
 bool Request::BelongsTo(const Engine& engine) const noexcept {
   return engine_.lock().get() == &engine;
@@ -384,11 +406,17 @@ void Request::ValidateEngineCompatibility() const {
 }
 
 void Request::SaveStateForTransaction() {
+  if (guidance_logits_processor_) {
+    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
+  }
   search_->SaveStateForTransaction();
   transaction_rng_ = rng_;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
+  if (guidance_logits_processor_) {
+    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
+  }
   search_->SaveStateForExternalSamplingTransaction();
   transaction_rng_ = rng_;
 }
@@ -412,6 +440,9 @@ RequestStepResult Request::StageGenerationForTransaction(
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
 }
 
 void Request::QueueStateRestoreForTransaction() {
@@ -421,10 +452,14 @@ void Request::QueueStateRestoreForTransaction() {
 
 void Request::CompleteStateRestoreForTransaction() {
   search_->CompleteStateRestoreForTransaction();
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
 }
 
 void Request::CommitStateForTransaction() {
   search_->CommitStateForTransaction();
+  guidance_transaction_checkpoint_.reset();
 }
 
 void Request::CommitStep(const RequestStepPlan& plan,
@@ -442,6 +477,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->SetLogits(logits);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->ProcessLogits(logits);
+  }
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
@@ -471,11 +509,23 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   if (token_appended) {
     token = search_->GetNextTokens().CpuSpan().back();
   }
-  return RequestStepResult{
+  RequestStepResult result{
       token,
       token_appended,
       done,
   };
+  CommitGuidanceToken(result);
+  if (done && guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
+  return result;
+}
+
+void Request::CommitGuidanceToken(const RequestStepResult& result) {
+  if (guidance_logits_processor_ && result.token_appended) {
+    int32_t token = result.token;
+    guidance_logits_processor_->CommitTokens(std::span<int32_t>{&token, 1});
+  }
 }
 
 void Request::PrepareGeneration(DeviceSpan<float> logits) {
@@ -520,16 +570,23 @@ void Request::CompleteGeneration() {
     auto next_tokens = search_->GetNextTokens().CpuSpan();
     if (new_token_count > next_tokens.size())
       throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
+    auto new_tokens = next_tokens.last(new_token_count);
 
     const size_t first_new_token = tokens_host_.size();
-    tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
+    tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
     for (size_t token_index = first_new_token; token_index < tokens_host_.size(); ++token_index) {
       unseen_token_indices_.push_back(token_index);
+    }
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->CommitTokens(new_tokens);
     }
   }
 
   if (search_->IsDone()) {
     status_ = RequestStatus::TurnComplete;
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+    }
   }
 }
 

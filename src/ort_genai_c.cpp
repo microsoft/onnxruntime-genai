@@ -519,6 +519,13 @@ OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* gener
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaMtpGenerator_Reset(OgaMtpGenerator* generator) {
+  OGA_TRY
+  generator->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
 bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator) {
   return generator->IsDone();
 }
@@ -1037,6 +1044,17 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer* tokenizer, const char* template_str,
+                                                                 const char* messages, const char* tools,
+                                                                 const char* template_kwargs, bool add_generation_prompt,
+                                                                 const char** out_string) {
+  OGA_TRY
+  *out_string = AllocOgaString(tokenizer->ApplyChatTemplateWithOptions(template_str, messages, tools,
+                                                                       template_kwargs, add_generation_prompt));
   return nullptr;
   OGA_CATCH
 }

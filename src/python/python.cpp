@@ -375,6 +375,7 @@ struct PyMtpGenerator {
   }
 
   void GenerateNextToken() { generator_->GenerateNextToken(); }
+  void Reset() { generator_->Reset(); }
   bool IsDone() const { return generator_->IsDone(); }
 
   pybind11::array_t<int32_t> GetSequence() {
@@ -621,6 +622,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<const OgaModel&, const OgaModel&, PyGeneratorParams&>())
       .def("append_tokens", &PyMtpGenerator::AppendTokens)
       .def("generate_next_token", &PyMtpGenerator::GenerateNextToken)
+      .def("reset", &PyMtpGenerator::Reset)
       .def("is_done", &PyMtpGenerator::IsDone)
       .def("get_sequence", &PyMtpGenerator::GetSequence)
       .def("get_stats", &PyMtpGenerator::GetStats);

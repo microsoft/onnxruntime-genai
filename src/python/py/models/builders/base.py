@@ -37,6 +37,39 @@ from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
 PAGED_ATTENTION_METADATA_SHAPE = [3]
 
+# EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx evicts
+# inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
+EPS_WITH_WINDOWED_KV_CACHE = {"trt-rtx", "cuda", "cpu"}
+
+
+def resolve_windowed_kv_cache_eps(extra_options):
+    """EPs allowed to give the sliding-window layers a cache shorter than max_length.
+
+    Empty means every layer keeps a full-length KV cache. PagedAttention has no windowed-cache
+    mode, so it never qualifies, and ``windowed_kv_cache=false`` opts out explicitly to build a
+    full-length-KV baseline from the same builder.
+    """
+    if not extra_options.get("windowed_kv_cache", True) or extra_options.get("use_paged_attention", False):
+        return set()
+    return set(EPS_WITH_WINDOWED_KV_CACHE)
+
+
+def resolve_windowed_paged_kv_cache(extra_options, window_size):
+    """Whether the sliding-window layers get a ring of paged blocks instead of one block per token.
+
+    PagedAttention has its own flavour of windowed cache. A sliding-window layer only ever reads the
+    last ``window_size`` positions, so instead of one block per position it is given a short ring of
+    blocks that the runtime repeats across the block table. Position p then lands in slot
+    ``p mod (ring_blocks * block_size)`` and old positions are overwritten in place. The operator
+    needs no change: it already masks reads to ``[kv_end - window_size, kv_end]``.
+    """
+    return bool(
+        extra_options.get("windowed_kv_cache", True)
+        and extra_options.get("use_paged_attention", False)
+        and window_size is not None
+        and window_size > 0
+    )
+
 
 class Model:
     def _get_model_type(self, config):
@@ -58,9 +91,8 @@ class Model:
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
-        # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
-        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+        self.eps_with_windowed_kv_cache = resolve_windowed_kv_cache_eps(extra_options)
+        self.use_windowed_paged_kv_cache = resolve_windowed_paged_kv_cache(extra_options, self.window_size)
         # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
         # 0 means "use the EP default at runtime"; set explicitly to override.
         # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
@@ -156,6 +188,7 @@ class Model:
             "past_key_values.key": [f"past_key_values.{i}.key" for i in range(self.num_layers)],
             "past_key_values.value": [f"past_key_values.{i}.value" for i in range(self.num_layers)],
             "block_table": "block_table",                                                                        # For paged attention models
+            "block_table_windowed": "block_table_windowed",                                                      # For paged attention models with sliding-window layers
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
             "attention_metadata": "attention_metadata",                                                          # For paged attention models
@@ -168,6 +201,7 @@ class Model:
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "block_table": ir.DataType.INT32,                                                                    # For paged attention models
+            "block_table_windowed": ir.DataType.INT32,                                                           # For paged attention models with sliding-window layers
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
             "attention_metadata": ir.DataType.INT32,                                                              # For paged attention models
@@ -180,6 +214,7 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
+            "block_table_windowed": ["batch_size", "max_num_blocks"],                                            # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
             "attention_metadata": PAGED_ATTENTION_METADATA_SHAPE.copy(),                                         # For paged attention models. Static upper query/KV bounds plus a replay-safe lower KV bound.
@@ -459,8 +494,16 @@ class Model:
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
+            if not self.use_windowed_paged_kv_cache:
+                del self.input_names["block_table_windowed"]
         else:
-            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths", "attention_metadata"]:
+            for name in [
+                "block_table",
+                "block_table_windowed",
+                "cumulative_sequence_lengths",
+                "past_sequence_lengths",
+                "attention_metadata",
+            ]:
                 del self.input_names[name]
 
     def make_outputs_init(self):
@@ -959,6 +1002,8 @@ class Model:
             inputs["position_ids"] = self.input_names["position_ids"]
         if self.use_paged_attention:
             inputs["block_table"] = self.input_names["block_table"]
+            if self.has_windowed_paged_layers():
+                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
             inputs["attention_metadata"] = self.input_names["attention_metadata"]
@@ -1042,6 +1087,26 @@ class Model:
                 "cache_slack": self.window_kv_cache_slack,
             }
 
+        if self.has_windowed_paged_layers():
+            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
+            # builds `block_table_windowed` by repeating each request's ring across the columns.
+            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": [
+                    layer_id for layer_id in range(self.num_layers) if self.uses_windowed_paged_cache(layer_id)
+                ],
+                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
+            }
+            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
+            # ran in one shot would overwrite positions it still had to attend to. Chunking is
+            # not optional for this model, hence a default rather than an opt-in.
+            genai_config["search"]["chunk_size"] = int(
+                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
+            )
+
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
@@ -1056,6 +1121,10 @@ class Model:
                 },
             }
 
+        state_groups = self.make_decoder_state_groups(inputs, outputs)
+        if state_groups:
+            genai_config["model"]["decoder"]["state_groups"] = state_groups
+
         self.update_genai_config(genai_config)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -1068,6 +1137,25 @@ class Model:
         """
         pass
 
+    def make_decoder_state_groups(self, inputs, outputs):
+        return []
+
+    def make_paged_key_value_state_group(self, layer_ids, inputs, outputs):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": list(layer_ids),
+            "bindings": {
+                "key": {
+                    "input": inputs["past_key_names"],
+                    "output": outputs["present_key_names"],
+                },
+                "value": {
+                    "input": inputs["past_value_names"],
+                    "output": outputs["present_value_names"],
+                },
+            },
+        }
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
@@ -1078,12 +1166,34 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
+    def uses_windowed_paged_cache(self, layer_id):
+        """True when this layer's paged KV cache is a ring sized to the window rather than to the
+        full context. Such layers read a different block table and a differently sized cache."""
+        return self.has_windowed_paged_layers() and self.is_local(layer_id)
+
+    def has_windowed_paged_layers(self):
+        """True when at least one layer is actually served from the ring.
+
+        A model can carry `sliding_window` in its config without the builder knowing which layers
+        it applies to, in which case no layer reads the ring and nothing extra must be emitted.
+        The runtime also needs at least one full-context layer to size the shared paged cache, so
+        an all-local export falls back to full paged caches. `is_local` is assigned by the subclass
+        after `Model.__init__`, so this cannot be asked from `make_inputs_init`, which runs during it.
+        """
+        if not self.use_windowed_paged_kv_cache or not hasattr(self, "is_local"):
+            return False
+        local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
+        return any(local_layers) and not all(local_layers)
+
     def make_key_value_cache_shape(self, layer_id, shape):
         """
         Modifies KV cache shape dimension names for models with alternating attention patterns.
         Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
         unify them with the full-attention layers, whose cache is allocated at max_length.
         """
+        if self.uses_windowed_paged_cache(layer_id):
+            # Paged layout is [num_blocks, block_size, heads, head_size]; only the block count shrinks.
+            return ["num_blocks_windowed", shape[1], shape[2], shape[3]]
         if (
             self.ep in self.eps_with_windowed_kv_cache
             and hasattr(self, "is_local")
@@ -1445,6 +1555,11 @@ class Model:
         return value
 
     def make_inputs_and_outputs(self):
+        # Only now, once the subclass has declared `is_local`, can we tell whether any layer reads
+        # the ring. Without one, `block_table_windowed` would be a graph input nothing consumes.
+        if "block_table_windowed" in self.input_names and not self.has_windowed_paged_layers():
+            del self.input_names["block_table_windowed"]
+
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for key in self.input_names:
@@ -3116,11 +3231,19 @@ class Model:
                 **kwargs,
             )
         elif op_type == "PagedAttention":
+            # A sliding-window layer is served from a ring of blocks, so it reads the repeating
+            # block table instead of the growing one. Both tables have the same column count,
+            # because the op indexes them with the token's true position.
+            block_table = (
+                self.input_names["block_table_windowed"]
+                if self.uses_windowed_paged_cache(kwargs["layer_id"])
+                else self.input_names["block_table"]
+            )
             self.make_paged_attention(
                 name,
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
-                block_table=self.input_names["block_table"],
+                block_table=block_table,
                 attention_metadata=self.input_names["attention_metadata"],
                 **kwargs,
             )
@@ -3231,7 +3354,7 @@ class Model:
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
+        if self.window_size is not None and self.window_size > 0 and self.ep in self.eps_with_windowed_kv_cache and self.ep != "trt-rtx":
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
             attributes["sliding_window_cache"] = 1

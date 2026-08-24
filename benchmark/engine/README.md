@@ -55,14 +55,40 @@ ONNX Runtime rather than the one baked into their build-time RPATH.
 ```bash
 export LD_LIBRARY_PATH=<cuda_home>/lib64:$PWD/build/Linux/RelWithDebInfo/benchmark/engine
 
-./build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+python benchmark/engine/run.py \
+  --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+  --config benchmark/engine/config.json \
+  --out benchmark/engine/out \
+  --cuda_visible_devices 0,1,2,3
+```
+
+Use `run.py` for configs containing multiple scenarios. It runs each entry in a separate
+`engine_benchmark` process, so CUDA, ONNX Runtime allocators, and the paged-cache capacity check
+start cleanly for every scenario. The wrapper preserves numbered result files such as
+`decode_baseline_results_001.json` and `long_prefill_results_002.json`.
+
+For a single scenario, the executable can still be run directly:
+
+```bash
+build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --config benchmark/engine/config.json \
   --out benchmark/engine/out
 ```
 
-`--config` defaults to `config.json` and `--out` to `out`, both relative to the working directory.
+To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario
+waits for an available GPU, acquires its per-GPU slot, and receives that GPU through
+`CUDA_VISIBLE_DEVICES`, so no scenario uses more than one GPU:
 
-Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
+```bash
+python benchmark/engine/run.py \
+  --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
+  --config benchmark/engine/config.json \
+  --out benchmark/engine/out \
+  --cuda_visible_devices 0,1,2,3
+```
+
+The runner requires `--executable`, `--config`, `--out`, and `--cuda_visible_devices`. Verbose
+child benchmark output is opt-in with `--verbose`.
 
 ## Configuration
 
@@ -74,7 +100,6 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
     "scenario": "decode_baseline",
     "concurrency": 1,
     "prompt_length_k": 4,
-    "synthetic": true,
     "model_path": "/models/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
     "execution_provider_library": "build/Linux/RelWithDebInfo/libonnxruntime_providers_cuda.so",
@@ -85,10 +110,9 @@ Use `CUDA_VISIBLE_DEVICES=<n>` to pin the run to a specific GPU.
 
 | Field | Notes |
 | --- | --- |
-| `scenario` | Currently only `decode_baseline`. |
-| `concurrency` | Requests issued per run. One of 1, 2, 4, 8. |
-| `prompt_length_k` | Approximate prompt length in thousands of tokens. |
-| `synthetic` | Must be `true`; the prompt is generated rather than read from a dataset. |
+| `scenario` | `decode_baseline` or `long_prefill`. |
+| `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
+| `prompt_length_k` | RULER prompt length in thousands of tokens; `long_prefill` supports 32, 64, and 128. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
