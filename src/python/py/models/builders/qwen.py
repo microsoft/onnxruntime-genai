@@ -2690,6 +2690,34 @@ class Qwen35TextModel(Model):
             self._add_mtp_to_genai_config(out_dir)
         if getattr(self, "dflash2_head", None) is not None:
             self._add_dflash2_to_genai_config(out_dir)
+        if getattr(self, "dspark_head", None) is not None:
+            self._add_dspark_to_genai_config(out_dir)
+
+    def _add_dspark_to_genai_config(self, out_dir):
+        """DSpark reuses the DFlash 2 block-drafter runtime, so it lands in the same section."""
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
+        decoder_outputs.setdefault("aux_hidden_states", "aux_hidden_states")
+
+        section = self.dspark_head.genai_config_section()
+        section["aux_hidden_state_layers"] = list(self.aux_hidden_state_layers)
+        if self.dspark_shared_initializers:
+            decoder = genai_config["model"]["decoder"]
+            existing = decoder.get("shared_initializers", [])
+            known = {json.dumps(entry, sort_keys=True) for entry in existing}
+            for entry in self.dspark_shared_initializers:
+                if json.dumps(entry, sort_keys=True) not in known:
+                    existing.append(entry)
+            decoder["shared_initializers"] = existing
+            section["shared_initializers"] = self.dspark_shared_initializers
+        genai_config["model"]["dspark"] = section
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)
+        print("Added 'dspark' section to genai_config.json")
 
     def _add_dflash2_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -2849,6 +2877,38 @@ class Qwen35MoeTextModel(Qwen35TextModel):
 
         self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self._init_dflash2(io_dtype, extra_options)
+        self._init_dspark(io_dtype, extra_options)
+
+    def _init_dspark(self, io_dtype, extra_options):
+        """DSpark block drafter, exported as an auxiliary ``dspark.onnx``.
+
+        ``dspark_path`` points at the draft checkpoint. SpecForge taps the *output* of each
+        ``target_layer_ids`` entry (``hidden_states[layer_id + 1]``), which is the residual stream
+        entering layer ``layer_id + 1`` -- the tensor this builder's ``aux_hidden_state_layers``
+        names. Getting that off by one leaves acceptance at exactly 1.0.
+        """
+        self.dspark_head = None
+        self.dspark_shared_initializers = []
+        self.dspark_path = extra_options.get("dspark_path") if not getattr(self, "is_mtp_head", False) else None
+        if not self.dspark_path:
+            return
+        if self.dflash2_path:
+            raise ValueError("dspark_path and dflash2_path are mutually exclusive.")
+        if not self.use_paged_attention:
+            raise ValueError("dspark_path requires use_paged_attention=true.")
+        self._dspark_io_dtype = io_dtype
+        self._dspark_num_draft_tokens = (
+            int(extra_options["dspark_num_draft_tokens"]) if "dspark_num_draft_tokens" in extra_options else None
+        )
+        self._dspark_top_k = int(extra_options.get("dspark_top_k", 16))
+        with open(os.path.join(self.dspark_path, "config.json"), encoding="utf-8") as handle:
+            target_layer_ids = json.load(handle)["dflash_config"]["target_layer_ids"]
+        expected = ",".join(str(i + 1) for i in target_layer_ids)
+        actual = ",".join(str(i) for i in self.aux_hidden_state_layers)
+        if actual != expected:
+            raise ValueError(
+                f"The DSpark drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
+            )
 
     def _init_dflash2(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
@@ -2955,6 +3015,25 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         super().make_model(input_path)
         self._make_mtp_head(input_path)
         self._make_dflash2_head(input_path)
+        self._make_dspark_head(input_path)
+
+    def _make_dspark_head(self, input_path):
+        if not self.dspark_path:
+            return
+        from .dspark import DSparkBuilder  # noqa: PLC0415
+
+        print("Building DSpark draft model -> dspark.onnx")
+        target_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
+        self.dspark_head = DSparkBuilder(
+            self.dspark_path,
+            target_dir,
+            self._dspark_io_dtype,
+            self.attention_attrs["paged_block_size"],
+            self.context_length,
+            num_draft_tokens=self._dspark_num_draft_tokens,
+            top_k=self._dspark_top_k,
+        )
+        self.dspark_head.make_model()
 
     def _make_dflash2_head(self, input_path):
         if not self.dflash2_path:
@@ -3007,6 +3086,15 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         super().save_model(out_dir)
         self._save_mtp_head(out_dir)
         self._save_dflash2_head(out_dir)
+        self._save_dspark_head(out_dir)
+
+    def _save_dspark_head(self, out_dir):
+        if self.dspark_head is None:
+            return
+        self.dspark_head.save_model(out_dir)
+        self.dspark_shared_initializers = self._share_mtp_embedding_lm_head(
+            out_dir, self.filename, self.dspark_head.filename
+        )
 
     def _save_dflash2_head(self, out_dir):
         if self.dflash2_head is None:
@@ -3486,6 +3574,7 @@ class Qwen35DenseTextModel(Qwen35MoeTextModel):
         Qwen35TextModel.__init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self._init_mtp(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self._init_dflash2(io_dtype, extra_options)
+        self._init_dspark(io_dtype, extra_options)
 
     def make_layer(self, layer_id, layer):
         return Qwen35TextModel.make_layer(self, layer_id, layer)

@@ -39,8 +39,10 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
       dflash2.block_size <= 1 || dflash2.num_draft_tokens <= 0) {
     throw std::runtime_error("model.dflash2 geometry must be positive and describe a block of >1 token.");
   }
-  if (dflash2.num_draft_tokens != dflash2.block_size - 1) {
-    throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size - 1.");
+  if (dflash2.num_draft_tokens > dflash2.block_size || dflash2.num_draft_tokens < dflash2.block_size - 1) {
+    // DFlash 2's row 0 carries the anchor and predicts nothing, so its block is one row wider
+    // than its draft count; every DSpark row predicts, so the two are equal.
+    throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size or block_size - 1.");
   }
 
   auto projected = std::make_unique<Config>(config);
@@ -84,13 +86,10 @@ size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_si
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
                                  size_t max_batch_size) {
   const auto& dflash2 = config.model.dflash2;
-  if (dflash2.filename.empty()) {
+  if (dflash2.filename.empty() || dflash2.sliding_window <= 0) {
+    // A full-attention drafter keeps the whole sequence, so its pool is sized against the main
+    // cache's block count instead (engine.cpp budgets it through auxiliary_bytes_per_block).
     return 0;
-  }
-  if (dflash2.sliding_window <= 0) {
-    throw std::runtime_error(
-        "The Engine-hosted DFlash 2 drafter requires a sliding window; a full-attention drafter "
-        "would need a cache as large as the target's.");
   }
   // The window bounds what a query block can ever read, so a request only needs a ring long enough
   // to hold that window plus the block itself, whatever its context length.
@@ -153,7 +152,18 @@ void Dflash2Drafter::AllocateCache() {
     for (const auto* pattern : {&config_.inputs.past_key_names, &config_.inputs.past_value_names}) {
       cache_input_names_.push_back(ComposeKeyValueName(*pattern, static_cast<int>(layer)));
       auto cache = std::make_unique<Tensor>(model_->p_device_kvcache_, cache_type_);
-      cache->CreateTensor(shape);
+      try {
+        cache->CreateTensor(shape);
+      } catch (const std::exception& error) {
+        // A full-attention drafter mirrors the main pool block for block, so this is the usual
+        // symptom of a gpu_utilization_factor that leaves no room for the second cache.
+        throw std::runtime_error(
+            std::string("The block drafter could not allocate its paged cache (") +
+            std::to_string(num_blocks_) + " blocks x " +
+            std::to_string(BytesPerBlock(*model_->config_, paged_block_size_) / config_.num_hidden_layers / 2) +
+            " bytes per layer-cache): " + error.what() +
+            ". Lower engine.dynamic_batching.gpu_utilization_factor.");
+      }
       cache->GetByteSpan().Zero();
       caches_.push_back(std::move(cache));
     }
