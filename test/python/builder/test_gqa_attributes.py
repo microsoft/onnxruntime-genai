@@ -42,7 +42,7 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
-        self.context_length_attrs = {"windowed_kv_cache_enabled": True}
+        self.context_length_attrs = {"window_kv_cache": True}
         self.use_paged_attention = False
         self.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
         self.num_attn_heads = 8

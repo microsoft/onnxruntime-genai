@@ -289,7 +289,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
     model.hf_token = None
     model.hf_remote = False
     model.use_paged_attention = False
-    model.context_length_attrs = {"windowed_kv_cache_enabled": True}
+    model.context_length_attrs = {"window_kv_cache": True}
     model.input_names = {
         "input_ids": "input_ids",
         "past_key_values.key": {1: "past_key_values.1.key"},

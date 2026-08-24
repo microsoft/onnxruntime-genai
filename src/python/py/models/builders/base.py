@@ -55,7 +55,7 @@ class Model:
         self.context_length_attrs = {
             "state_window": 0,
             "state_window_dims": [],
-            "windowed_kv_cache_enabled": True,
+            "window_kv_cache": True,
             "window_kv_cache_slack": 0,
         }
         self.make_context_length_init(config)
@@ -496,9 +496,7 @@ class Model:
 
         # Build packed, variable-length inputs for the continuous-batching engine.
         self.use_paged_attention = self.extra_options.get("use_paged_attention", False)
-        self.context_length_attrs["windowed_kv_cache_enabled"] = self.extra_options.get(
-            "windowed_kv_cache", True
-        )
+        self.context_length_attrs["window_kv_cache"] = self.extra_options.get("windowed_kv_cache", True)
 
         # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
         # states (`state_window=W`): {past,present}.%d.{conv,recurrent} become
@@ -1263,7 +1261,7 @@ class Model:
     def uses_windowed_kv_cache(self):
         """Return whether local layers use bounded contiguous KV caches on this EP."""
         return (
-            self.context_length_attrs["windowed_kv_cache_enabled"]
+            self.context_length_attrs["window_kv_cache"]
             and not self.use_paged_attention
             and self.ep in {"cpu", "cuda", "trt-rtx"}
         )
@@ -1292,7 +1290,7 @@ class Model:
         an all-local export falls back to full paged caches.
         """
         if (
-            not self.context_length_attrs["windowed_kv_cache_enabled"]
+            not self.context_length_attrs["window_kv_cache"]
             or not self.use_paged_attention
             or self.window_size is None
             or self.window_size <= 0
