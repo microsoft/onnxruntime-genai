@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-#include "models/streaming_processor.h"
+#include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "sequences.h"
@@ -15,19 +15,20 @@
 #include "models/model.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
-#include "decoding_strategy.h"
-#include "n_gram_decoding_strategy.h"
+#include "models/io/kv_cache.h"
+#include "decoding/decoding_strategy.h"
+#include "decoding/n_gram_decoding_strategy.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
 #include "tracing.h"
-#include "cpu/interface.h"
-#include "cuda/interface.h"
-#include "dml/interface.h"
-#include "qnn/interface.h"
-#include "webgpu/interface.h"
-#include "openvino/interface.h"
-#include "ryzenai/interface.h"
-#include "amdgpu/interface.h"
+#include "ep/cpu/interface.h"
+#include "ep/cuda/interface.h"
+#include "ep/dml/interface.h"
+#include "ep/qnn/interface.h"
+#include "ep/webgpu/interface.h"
+#include "ep/openvino/interface.h"
+#include "ep/ryzenai/interface.h"
+#include "ep/amdgpu/interface.h"
 #include "engine/engine.h"
 
 #if defined(_WIN32)
@@ -234,6 +235,9 @@ struct GenaiInterfaceImpl : GenaiInterface {
 
   void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
   void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
+  std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) override {
+    return Generators::CreateStandardKeyValueCache(state);
+  }
 } g_genai;
 
 #if defined(_WIN32)

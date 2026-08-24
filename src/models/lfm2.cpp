@@ -18,7 +18,7 @@ std::unique_ptr<State> LFM2_Model::CreateState(DeviceSpan<int32_t> sequence_leng
 LFM2_State::LFM2_State(const LFM2_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      cache_(CreateKeyValueCache(*this)),
+      cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();

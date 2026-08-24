@@ -4,7 +4,7 @@
 #pragma once
 
 #include "request.h"
-#include "../models/kv_cache.h"
+#include "../models/io/kv_cache.h"
 #include "paged_key_value_cache.h"
 #include "execution_context.h"
 #include "step_plan.h"

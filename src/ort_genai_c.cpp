@@ -16,7 +16,7 @@
 #include "smartptrs.h"
 #include "mtp_generator.h"
 #include "engine/engine.h"
-#include "models/streaming_processor.h"
+#include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/silero_vad.h"

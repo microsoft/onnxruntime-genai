@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "model.h"
-#include "audio_features.h"
+#include "models/io/audio_features.h"
 #include "transducer_state.h"
 
 namespace Generators {

@@ -661,6 +661,7 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     : State{params, model},
       model_{model},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
@@ -688,7 +689,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 
   position_inputs_->Add();
   logits_.Add();
-  kv_cache_.Add();
+  if (kv_cache_)
+    kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
 }
@@ -708,7 +710,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   size_t new_length = next_tokens.size() / batch_size;
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
@@ -719,7 +722,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);

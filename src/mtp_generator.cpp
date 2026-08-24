@@ -6,7 +6,7 @@
 #include "constrained_logits_processor.h"
 #include "models/model.h"
 #include "mtp_generator.h"
-#include "speculative_sampling.h"
+#include "decoding/speculative_sampling.h"
 
 #include <cstdlib>
 #include <cstring>

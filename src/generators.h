@@ -33,10 +33,10 @@
 #include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
-#include "decoding_strategy.h"
+#include "decoding/decoding_strategy.h"
 #include "logging.h"
 #include "runtime_settings.h"
-#include "speculative_stats.h"
+#include "decoding/speculative_stats.h"
 #include "telemetry/generation_telemetry.h"
 #include "tensor.h"
 

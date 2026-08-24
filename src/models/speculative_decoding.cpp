@@ -3,9 +3,9 @@
 #include <algorithm>
 #include "../generators.h"
 #include "../softmax.h"
-#include "../speculative_sampling.h"
+#include "decoding/speculative_sampling.h"
 #include "speculative_decoding.h"
-#include "kv_cache.h"
+#include "io/kv_cache.h"
 #include "model_type.h"
 
 namespace Generators {

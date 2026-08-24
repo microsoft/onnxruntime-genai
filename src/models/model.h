@@ -10,14 +10,14 @@
 #include "../generators.h"
 #include "utils.h"
 #include <optional>
-#include "phi_image_processor.h"
-#include "whisper_processor.h"
-#include "parakeet_processor.h"
-#include "phi_multimodal_processor.h"
-#include "gemma_image_processor.h"
-#include "gemma4_multimodal_processor.h"
-#include "adapters.h"
-#include "extra_outputs.h"
+#include "models/preprocessing/phi_image_processor.h"
+#include "models/preprocessing/whisper_processor.h"
+#include "models/preprocessing/parakeet_processor.h"
+#include "models/preprocessing/phi_multimodal_processor.h"
+#include "models/preprocessing/gemma_image_processor.h"
+#include "models/preprocessing/gemma4_multimodal_processor.h"
+#include "models/io/adapters.h"
+#include "models/io/extra_outputs.h"
 
 namespace Generators {
 

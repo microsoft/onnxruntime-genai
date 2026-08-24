@@ -22,6 +22,8 @@ struct Search;
 struct Sequences;
 struct GeneratorParams;
 struct Config;
+struct State;
+struct KeyValueCache;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -168,7 +170,7 @@ struct StateSlotDesc {
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 1;
+inline constexpr uint32_t kDeviceInterfaceVersion = 2;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -265,6 +267,10 @@ struct DeviceInterface {
   // Keep last for vtable/ABI stability.
   virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
                               int /*dst_slot*/) { return false; }
+  // Creates the conventional (non-paged) model state cache. The selected EP owns cache policy so
+  // providers can replace the standard exposed past/present tensor implementation. Keep last for
+  // vtable/ABI stability.
+  virtual std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) = 0;
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

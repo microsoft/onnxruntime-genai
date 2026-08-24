@@ -123,7 +123,9 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
     params_->search.batch_size = static_cast<int>(cache_allocated_requests_.size());
 
     key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
-    key_value_cache_ = std::make_unique<DefaultKeyValueCache>(*key_value_cache_state_);
+    key_value_cache_ = model_->p_device_kvcache_->CreateKeyValueCache(*key_value_cache_state_);
+    if (!key_value_cache_)
+      throw std::runtime_error("The selected execution provider did not create a KV cache for the static Engine.");
 
     key_value_cache_->Add();
   }

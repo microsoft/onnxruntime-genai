@@ -10,15 +10,15 @@
 #include <vector>
 
 #include "model.h"
-#include "input_ids.h"
-#include "multi_modal_features.h"
-#include "embeddings.h"
-#include "extra_inputs.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "position_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/multi_modal_features.h"
+#include "models/io/embeddings.h"
+#include "models/io/extra_inputs.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "models/io/position_inputs.h"
 #include "model_type.h"
-#include "recurrent_state.h"
+#include "models/io/recurrent_state.h"
 
 namespace Generators {
 
@@ -190,7 +190,7 @@ struct DecoderState : State {
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  DefaultKeyValueCache kv_cache_{*this};                // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;              // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
 };

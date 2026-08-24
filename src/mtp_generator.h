@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "sampling_distribution.h"
-#include "speculative_stats.h"
+#include "decoding/speculative_stats.h"
 
 namespace Generators {
 

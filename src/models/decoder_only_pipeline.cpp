@@ -5,7 +5,7 @@
 #include "../logging.h"
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
-#include "windowed_kv_cache.h"
+#include "io/windowed_kv_cache.h"
 
 namespace Generators {
 
@@ -119,7 +119,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     : State{params, model},
       input_ids_{CreateInputIDs(*this)},
       model_{model},
-      key_value_cache_{CreateKeyValueCache(*this)},
+      key_value_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
       recurrent_state_{CreateRecurrentState(*this)},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
