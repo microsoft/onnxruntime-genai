@@ -7,7 +7,7 @@
 #include <span>
 #include <vector>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "search.h"
 #include "engine/engine.h"
 #include "engine/request.h"

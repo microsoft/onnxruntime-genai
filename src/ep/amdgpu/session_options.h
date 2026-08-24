@@ -4,7 +4,7 @@
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
-#include "generators.h"
+#include "generator/generators.h"
 
 namespace Generators::AMDGPUExecutionProvider {
 

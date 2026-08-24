@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "search.h"
 #include "models/utils.h"
 #include "models/io/kv_cache.h"

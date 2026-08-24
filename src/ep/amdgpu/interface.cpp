@@ -9,7 +9,7 @@
 // dereference. All copies go through ORT's CopyTensors. Offset copies fall
 // back to CPU staging via CopyThroughCpu.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "search.h"
 #include "models/session_options.h"
 #include "models/io/kv_cache.h"

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #include "decoding/standard_decoding_strategy.h"
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "logging.h"
 #include "search.h"
 #include "constrained_logits_processor.h"

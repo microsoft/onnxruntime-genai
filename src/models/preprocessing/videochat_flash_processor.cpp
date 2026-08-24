@@ -6,7 +6,7 @@
 // Licensed under the MIT License. See License.txt in the project root for
 // license information.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include <regex>

@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "search.h"
 #include "softmax.h"
 #include "decoding/speculative_sampling.h"

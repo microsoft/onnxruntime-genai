@@ -30,6 +30,7 @@ list(GET VERSION_LIST 2 VERSION_PATCH)
 set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
+set(GENERATOR_ROOT ${SRC_ROOT}/generator)
 set(MODELS_ROOT ${SRC_ROOT}/models)
 set(ENGINE_ROOT ${SRC_ROOT}/engine)
 
@@ -67,6 +68,8 @@ endif()
 file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.h"
   "${GENERATORS_ROOT}/*.cpp"
+  "${GENERATOR_ROOT}/*.h"
+  "${GENERATOR_ROOT}/*.cpp"
   "${GENERATORS_ROOT}/decoding/*.h"
   "${GENERATORS_ROOT}/decoding/*.cpp"
   "${GENERATORS_ROOT}/ep/cpu/*.h"

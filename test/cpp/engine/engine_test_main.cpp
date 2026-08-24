@@ -18,7 +18,7 @@
 
 #include <gtest/gtest.h>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "telemetry_test_environment.h"
 
 int main(int argc, char** argv) {

@@ -6,7 +6,7 @@
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
 #include "models/utils.h"
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 
 namespace Generators {

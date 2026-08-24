@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "search.h"
 

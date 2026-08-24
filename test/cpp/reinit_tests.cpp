@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "ort_genai.h"
-#include "generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
+#include "generator/generators.h"  // Generators::GetDeviceInterface / DeviceType (from the genai object library)
 #include "telemetry/telemetry.h"
 #if USE_DML
 #include "ep/dml/interface.h"  // Generators::InitDmlInterface / CloseDmlInterface / GetDmlInterface

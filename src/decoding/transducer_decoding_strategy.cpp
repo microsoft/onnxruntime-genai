@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #include "decoding/transducer_decoding_strategy.h"
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/transducer_state.h"
 
 namespace Generators {

@@ -9,7 +9,7 @@
 
 #include <gtest/gtest.h>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "ort_genai.h"
 #include "telemetry_test_environment.h"
 

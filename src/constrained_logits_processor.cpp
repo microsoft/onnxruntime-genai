@@ -8,7 +8,7 @@
 #include <string>
 #include <sys/types.h>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #if USE_GUIDANCE
 #include "llguidance.h"

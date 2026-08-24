@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "engine/cache_manager.h"
 #include "engine/model_executor.h"
 #include "engine/scheduler.h"

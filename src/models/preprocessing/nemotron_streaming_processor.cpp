@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <cstring>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
 
 namespace Generators {

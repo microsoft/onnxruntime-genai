@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "constrained_logits_processor.h"
 #include "models/model_type.h"

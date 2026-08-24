@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/logits.h"
 #include "ep/openvino/interface.h"

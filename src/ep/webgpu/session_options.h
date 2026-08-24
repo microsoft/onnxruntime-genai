@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "generators.h"
+#include "generator/generators.h"
 
 namespace Generators::WebGPUExecutionProvider {
 

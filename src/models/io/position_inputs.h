@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 
 namespace Generators {

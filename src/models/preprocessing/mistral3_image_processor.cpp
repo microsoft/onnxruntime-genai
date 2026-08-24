@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "models/preprocessing/mistral3_image_processor.h"
 

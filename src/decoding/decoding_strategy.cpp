@@ -4,7 +4,7 @@
 
 #include <memory>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "search.h"
 #include "decoding/standard_decoding_strategy.h"
 #include "decoding/transducer_decoding_strategy.h"

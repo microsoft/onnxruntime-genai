@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/preprocessing/streaming_processor.h"
 
 namespace Generators {

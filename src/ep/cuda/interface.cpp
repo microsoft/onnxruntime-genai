@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "ort_genai_c.h"  // For OGA_EXPORT
 #include "interface.h"
 #include "search.h"
