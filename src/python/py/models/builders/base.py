@@ -515,6 +515,16 @@ class Model:
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
+        # Auxiliary hidden states for an EAGLE3/DFlash-style drafter. Following the reference
+        # convention, entry `i` is the residual stream *entering* decoder layer i (i.e. after
+        # layers 0..i-1), which only becomes a tensor inside layer i's skip layer norm.
+        self.aux_hidden_state_layers = [
+            int(layer_id)
+            for layer_id in str(self.extra_options.get("aux_hidden_state_layers", "")).replace(" ", "").split(",")
+            if layer_id
+        ]
+        self.aux_hidden_state_taps = {}
+
         if self.prune_lm_head and self.exclude_lm_head:
             if "prune_lm_head" in self.extra_options:
                 print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
@@ -526,6 +536,19 @@ class Model:
             self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
             logits_first_dim = "batch_size" if self.prune_lm_head else "num_tokens"
             self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
+
+        if self.aux_hidden_state_layers:
+            invalid = [i for i in self.aux_hidden_state_layers if not 1 <= i < self.num_layers]
+            if invalid:
+                raise ValueError(
+                    f"aux_hidden_state_layers {invalid} are outside [1, {self.num_layers}); entry i is the "
+                    "residual stream entering layer i."
+                )
+            self.output_names["aux_hidden_states"] = "aux_hidden_states"
+            self.output_types["aux_hidden_states"] = self.io_dtype
+            self.output_shapes["aux_hidden_states"] = self.hidden_state_shape(
+                last_dim=self.hidden_size * len(self.aux_hidden_state_layers)
+            )
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -2441,6 +2464,9 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+            if location == "input" and layer_id in self.aux_hidden_state_layers:
+                self.aux_hidden_state_taps[layer_id] = (output_3, new_io_dtype)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
@@ -5248,6 +5274,7 @@ class Model:
 
         # Make post-processing nodes
         self.make_postprocessing_nodes()
+        self.make_aux_hidden_states()
 
         del self.weights
 
@@ -5730,3 +5757,26 @@ class Model:
     def make_postprocessing_nodes(self):
         # For most models, no postprocessing subgraph is needed
         return
+
+    def make_aux_hidden_states(self):
+        """Concatenate the tapped residual streams into the ``aux_hidden_states`` output."""
+        if not self.aux_hidden_state_layers:
+            return
+        missing = [i for i in self.aux_hidden_state_layers if i not in self.aux_hidden_state_taps]
+        if missing:
+            raise ValueError(f"No residual-stream tap was emitted for aux_hidden_state_layers {missing}.")
+
+        inputs = []
+        for layer_id in self.aux_hidden_state_layers:
+            name, dtype = self.aux_hidden_state_taps[layer_id]
+            if dtype != self.io_dtype:
+                cast_name = f"/model/aux_hidden_states/{layer_id}/Cast"
+                self.make_cast(cast_name, name, self.io_dtype, shape=self.hidden_state_shape())
+                name = f"{cast_name}/output_0"
+            inputs.append(name)
+
+        output = self.output_names["aux_hidden_states"]
+        self.make_node(
+            "Concat", inputs=inputs, outputs=[output], name="/model/aux_hidden_states/Concat", axis=-1
+        )
+        self.make_value(output, self.io_dtype, shape=self.output_shapes["aux_hidden_states"])
