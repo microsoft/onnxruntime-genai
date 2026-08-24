@@ -48,6 +48,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.ep_attrs = {"cuda": {}}
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
+    model.use_windowed_paged_kv_cache = False
     model.past_present_share_buffer = False
     model.context_length = 262144
     model.filename = "model.onnx"
