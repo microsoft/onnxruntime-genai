@@ -120,10 +120,10 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Proposes speculative draft tokens for this request's next step.
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
-   * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
-   * each draft against the target model's own prediction, and keeps the accepted prefix. Only
-   * greedy requests may propose drafts, because verification compares argmax tokens rather than
-   * sampling probabilities.
+  * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
+  * each draft against the target model's own prediction, and keeps the accepted prefix. Greedy
+  * requests compare argmax tokens; sampled requests draw from each target row's bounded
+  * top-k/top-p distribution.
    *
    * The proposal applies to the current turn's next committed decode step. A rolled back step
    * leaves it pending, while canceling the turn discards it.
@@ -151,6 +151,9 @@ struct Request : std::enable_shared_from_this<Request>,
   bool DraftVerificationCompletedGeneration() const noexcept {
     return draft_verification_completed_generation_;
   }
+  bool IsStopToken(int32_t token) const;
+  void RewindDraftsForTransaction(size_t accepted_count);
+  void RecordSampledDraftAcceptance(size_t accepted_count);
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
