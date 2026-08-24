@@ -103,7 +103,7 @@ def test_ring_honours_the_windowed_kv_cache_opt_out():
 
 def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
     model = _new_model()
-    model.windowed_kv_cache_enabled = use_ring
+    model.context_length_attrs["windowed_kv_cache_enabled"] = use_ring
     model.use_paged_attention = True
     model.window_size = 128
     model.num_layers = num_layers
@@ -207,7 +207,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
     model = _new_model()
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
-    model.windowed_kv_cache_enabled = use_ring
+    model.context_length_attrs["windowed_kv_cache_enabled"] = use_ring
     model.window_size = 128
     model.num_layers = 2
     model.layer_types = ["sliding_attention", "full_attention"]
@@ -392,7 +392,7 @@ def _write_genai_config(
     model.extra_options = dict(extra_options or {})
     model.attention_attrs = {"paged_block_size": 256}
     model.use_paged_attention = True
-    model.windowed_kv_cache_enabled = use_ring
+    model.context_length_attrs["windowed_kv_cache_enabled"] = use_ring
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"

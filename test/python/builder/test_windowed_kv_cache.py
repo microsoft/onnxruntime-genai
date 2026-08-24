@@ -86,8 +86,9 @@ def test_windowed_kv_cache_can_be_turned_off(extra_options):
 
 
 def test_windowed_kv_cache_policy_is_model_local():
-    assert _window_model({"windowed_kv_cache": False}).windowed_kv_cache_enabled is False
-    assert _window_model({}).windowed_kv_cache_enabled is True
+    disabled_model = _window_model({"windowed_kv_cache": False})
+    assert disabled_model.context_length_attrs["windowed_kv_cache_enabled"] is False
+    assert _window_model({}).context_length_attrs["windowed_kv_cache_enabled"] is True
 
 
 # ===========================================================================
@@ -99,7 +100,7 @@ def _make_gqa_model(ep, window_size):
     model = _new_model()
     model.ep = ep
     model.extra_options = {}
-    model.windowed_kv_cache_enabled = True
+    model.context_length_attrs["windowed_kv_cache_enabled"] = True
     model.use_paged_attention = False
     model.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
     model.num_attn_heads = 8
@@ -175,7 +176,7 @@ def test_windowed_kv_cache_opt_out_omits_sliding_window_cache(ep):
     # With the opt-out the layer's cache is max_length-sized, so the kernel must index it in
     # absolute coordinates like a global layer does.
     model = _make_gqa_model(ep, window_size=128)
-    model.windowed_kv_cache_enabled = False
+    model.context_length_attrs["windowed_kv_cache_enabled"] = False
 
     model.make_group_query_attention("/gqa", layer_id=0, q_path="q", k_path="k", v_path="v")
 
@@ -196,7 +197,7 @@ _CACHE_SHAPE = ["batch_size", 2, "past_sequence_length", 16]
 def _make_shape_model(ep, local_layers=()):
     model = _new_model()
     model.ep = ep
-    model.windowed_kv_cache_enabled = True
+    model.context_length_attrs["windowed_kv_cache_enabled"] = True
     model.use_paged_attention = False
     model.window_size = 128
     model.layer_types = ["sliding_attention" if local_layers and layer_id in local_layers else "full_attention" for layer_id in range(2)]
@@ -241,7 +242,7 @@ def test_model_without_alternating_attention_keeps_sequence_dim():
 def test_windowed_kv_cache_opt_out_keeps_sequence_dim(ep):
     # With the opt-out every layer's cache is allocated at max_length, so they share one dim.
     model = _make_shape_model(ep, local_layers=(0,))
-    model.windowed_kv_cache_enabled = False
+    model.context_length_attrs["windowed_kv_cache_enabled"] = False
 
     assert model.make_key_value_cache_shape(0, list(_CACHE_SHAPE)) == _CACHE_SHAPE
 
@@ -268,7 +269,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, win
     model.ep_attrs = {ep: {}}
     model.extra_options = {}
     model.use_paged_attention = False
-    model.windowed_kv_cache_enabled = windowed_kv_cache_enabled
+    model.context_length_attrs["windowed_kv_cache_enabled"] = windowed_kv_cache_enabled
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"
