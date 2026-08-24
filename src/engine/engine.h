@@ -7,6 +7,7 @@
 #include "model_executor.h"
 #include "scheduler.h"
 #include "../speculative_stats.h"
+#include "../dflash2_drafter.h"
 
 /**
  * @file engine.h
@@ -41,6 +42,7 @@ struct EngineDependencies {
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
+  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
 };
 
 struct EngineTransactionMetrics {
@@ -153,6 +155,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RollbackMtpStep(MtpStep& step);
   void CommitMtpStep(MtpStep& step);
   void PublishMtpDrafts(MtpStep& step);
+  // Runs the DFlash 2 drafter on a committed step and attaches its block to each request. The
+  // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
+  void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
+  void PublishDflash2Drafts(const StepPlan& plan, ScheduledRequests& scheduled_requests);
   void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
   void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
@@ -175,6 +181,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> mtp_cache_manager_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
+  // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
+  std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
+  std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
+  std::vector<std::vector<int32_t>> dflash2_drafts_;
+  std::vector<size_t> dflash2_draft_widths_;
   DeviceSpan<int32_t> mtp_device_drafts_;
   DeviceSpan<int32_t> mtp_device_chain_inputs_;
   EngineHealth health_{EngineHealth::Healthy};

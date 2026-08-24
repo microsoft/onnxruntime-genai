@@ -100,7 +100,8 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       model_executor_{std::move(dependencies.model_executor)},
       mtp_model_{std::move(dependencies.mtp_model)},
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
-      mtp_model_executor_{std::move(dependencies.mtp_model_executor)} {
+      mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
+      dflash2_drafter_{std::move(dependencies.dflash2_drafter)} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
@@ -132,6 +133,23 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
   }
 
+  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  if (!model->config_->model.dflash2.filename.empty()) {
+    if (!model->config_->engine.dynamic_batching) {
+      throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
+    }
+    const auto& batching = *model->config_->engine.dynamic_batching;
+    const size_t paged_block_size = static_cast<size_t>(batching.block_size);
+    auto dflash2_model = std::make_shared<Dflash2Model>(
+        CreateDflash2Config(*model->config_), GetOrtEnv());
+    // Built before the main pool so the pool's free-memory measurement already excludes it. The
+    // drafter is windowed, so its footprint depends on the batch size, not the context length.
+    dflash2_drafter = std::make_unique<Dflash2Drafter>(
+        dflash2_model, paged_block_size,
+        Dflash2Drafter::PoolBlocks(*model->config_, paged_block_size,
+                                   static_cast<size_t>(batching.max_batch_size)));
+  }
+
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block);
   auto scheduler = Scheduler::Create(model, cache_manager);
@@ -151,7 +169,77 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
-      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor)};
+      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
+      std::move(dflash2_drafter)};
+}
+
+void Engine::PrepareDflash2Feeds(const StepPlan& plan,
+                                 const std::vector<RequestStepResult>& results) {
+  const size_t max_drafts = std::min(MaxDraftTokensPerStep(), dflash2_drafter_->NumDraftTokens());
+  dflash2_feeds_.clear();
+  dflash2_feeds_.reserve(plan.requests.size());
+  dflash2_draft_widths_.clear();
+  dflash2_draft_widths_.reserve(plan.requests.size());
+  for (size_t i = 0; i < plan.requests.size(); ++i) {
+    const auto& entry = plan.requests[i];
+    const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    if (accepted > entry.draft_token_count) {
+      throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
+    }
+    // Rejected draft rows carry hidden states for tokens that were never committed; drop them.
+    const size_t valid_rows =
+        entry.unprocessed_token_count - (entry.draft_token_count - accepted);
+    // The step's rows start at the processed cursor, which is also what the decoder passes as
+    // past_sequence_lengths. Deriving it from sequence_length_before instead would be wrong for a
+    // prefill chunk, whose unprocessed count is the chunk rather than the whole pending suffix.
+    const size_t first_position = static_cast<size_t>(entry.request->ProcessedSequenceLength());
+
+    Dflash2Drafter::Feed feed;
+    feed.request = entry.request.get();
+    feed.aux_row_begin = entry.packed_token_offset;
+    feed.aux_row_count = valid_rows;
+    feed.first_position = first_position;
+
+    const auto& search = entry.request->SearchOptions();
+    const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
+    // The committed length this step ends at: the accepted prefix plus the token just sampled.
+    const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
+                                      (results[i].token_appended ? 1 : 0);
+    const size_t width = std::min(
+        {max_drafts, static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
+         length_after_step + 1 < search.max_length
+             ? static_cast<size_t>(search.max_length - length_after_step - 1)
+             : size_t{0}});
+    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done && greedy &&
+                        search.repetition_penalty == 1.0f && search.no_repeat_ngram_size == 0 &&
+                        search.min_length <= length_after_step;
+    feed.anchor_token = results[i].token;
+    dflash2_feeds_.push_back(feed);
+    dflash2_draft_widths_.push_back(width);
+  }
+}
+
+void Engine::PublishDflash2Drafts(const StepPlan& plan, ScheduledRequests& scheduled_requests) {
+  if (dflash2_feeds_.empty()) {
+    return;
+  }
+  Tensor* aux_hidden_states = scheduled_requests.AuxHiddenStates();
+  if (!aux_hidden_states) {
+    throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
+  }
+
+  dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
+  ++speculative_stats_.draft_forward_passes;
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    auto& drafts = dflash2_drafts_[i];
+    if (drafts.empty()) {
+      continue;
+    }
+    // The drafter always emits its full block; a request with a narrower budget takes the prefix
+    // of the same greedy path.
+    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+    plan.requests[i].request->SetDraftTokens(drafts);
+  }
 }
 
 std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
@@ -663,6 +751,10 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
     mtp_requests_.erase(mtp_it);
   }
 
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
+
   ready_requests_.erase(
       ready_requests_.begin(),
       ready_requests_.begin() + static_cast<ptrdiff_t>(ready_request_index_));
@@ -1088,12 +1180,19 @@ std::shared_ptr<Request> Engine::StepDynamic() {
         CommitMtpStep(*mtp_step);
       }
       RecordSpeculativeCommit(step_plan_);
+      if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
+        // Reads the accepted-draft counts, which CommitStep clears below.
+        PrepareDflash2Feeds(step_plan_, step_results_);
+      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
+      }
+      if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
+        PublishDflash2Drafts(step_plan_, scheduled_requests);
       }
     } catch (...) {
       MarkUnhealthyAndThrow(
