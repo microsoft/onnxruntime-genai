@@ -1234,6 +1234,10 @@ class Model:
                 },
             }
 
+        state_groups = self.make_decoder_state_groups(inputs, outputs)
+        if state_groups:
+            genai_config["model"]["decoder"]["state_groups"] = state_groups
+
         self.update_genai_config(genai_config)
 
         print(f"Saving GenAI config in {out_dir}")

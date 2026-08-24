@@ -381,6 +381,28 @@ struct Config {
       };
       std::optional<SlidingWindow> sliding_window;
 
+      enum class StateGroupKind {
+        Invalid,
+        PagedKeyValue,
+        Fixed,
+      };
+
+      struct StateBinding {
+        std::string input;
+        std::string output;
+      };
+
+      struct StateGroup {
+        StateGroupKind kind{StateGroupKind::Invalid};
+        std::vector<int> layer_ids;
+        std::optional<StateBinding> key;
+        std::optional<StateBinding> value;
+        std::optional<StateBinding> state;
+      };
+
+      // Absence preserves the legacy dense, sequential paged-KV contract.
+      std::optional<std::vector<StateGroup>> state_groups;
+
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};

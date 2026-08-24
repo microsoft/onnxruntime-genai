@@ -47,6 +47,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
+  GuidanceLogitsProcessor(const Model& model, const GeneratorParams& params);
 
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
@@ -55,7 +56,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
 
   // GetMask is used to get the logits mask
-  std::vector<std::vector<uint32_t>> GetMask();
+  const std::vector<std::vector<uint32_t>>& GetMask() const;
 
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
   // token ids.
@@ -100,10 +101,12 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
     Tokenizer* tokenizer;
     size_t prefix_len;
   };
-  TokenizeData tokenize_data_;
+  std::shared_ptr<TokenizeData> tokenize_data_;
 };
 #endif
 
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const State& state);
+std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
+    const Model& model, std::shared_ptr<const GeneratorParams> params);
 
 }  // namespace Generators

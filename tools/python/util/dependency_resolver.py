@@ -193,12 +193,13 @@ def _download_and_unpack_nupkg(package_name: str, version: str, package_url: str
         return unpacked_dir
 
     _log.info(f"Downloading {package_name} {version}...")
-    response = requests.get(package_url)
-    response.raise_for_status() # raises a 4xx or 5xx (client/server error) if encountered
-    package_path = destination_dir / f"{package_name}.zip"
-    with open(package_path, "wb") as f:
-        f.write(response.content)
-
+    with requests.get(package_url, stream=True, timeout=60) as response:
+        response.raise_for_status()  # raises a 4xx or 5xx (client/server error) if encountered
+        package_path = destination_dir / f"{package_name}.zip"
+        with open(package_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
     shutil.unpack_archive(package_path, unpacked_dir, format="zip")
     return unpacked_dir
 
@@ -226,7 +227,7 @@ def setup_engine_benchmark_dependencies(genai_lib_dir: PathLike, destination_dir
     # ORT is loaded by soname, which the nuget package only ships as the unversioned file.
     unversioned_ort = destination_dir / "libonnxruntime.so"
     symlink_ort = destination_dir / "libonnxruntime.so.1"
-    _log.info(f"Creating symlink {unversioned_ort.name} --> {symlink_ort.name}")
+    _log.info(f"Creating symlink {symlink_ort.name} -> {unversioned_ort.name}")
     symlink_ort.unlink(missing_ok=True)
     symlink_ort.symlink_to(unversioned_ort.name)
 

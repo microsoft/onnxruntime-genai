@@ -236,14 +236,14 @@ stream costs one main forward and one head forward per two tokens.
 
 The single head module is chained `N` times, feeding its own post-norm hidden forward
 (`head_out_hidden_`), the way vLLM's `AutoRegressiveSpeculator` does. Then `[t, d_0 .. d_{N-1}]` is
-verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of four
+verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of three
 finalize branches runs:
 
 | Branch | Condition | Cost |
 |---|---|---|
 | All accepted | `a == N` | No extra forward; bonus is verify row `N` |
-| Lossless crop + `M=1` replay | `a >= 1` and windowed recurrent state | Crop to `L+a`, replay the last committed token (1-wide, decode-consistent bonus) |
-| Snapshot rewind + replay | otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
+| Windowed direct commit | `a < N` and windowed recurrent state | Crop to `L+a+1`; bonus is verify row `a` |
+| Snapshot rewind + replay | `a < N` otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
 
 Re-materializing the `a` accepted drafts in the head's KV and drafting the next round's first token
 both consume *main-model* hidden states over consecutive positions, so they are **deferred and
@@ -263,9 +263,10 @@ forward, the reject path can crop instead of replaying whenever the recurrent st
 
 A wide (`M = N+1`) verify forward is numerically close to, but not bit-identical to, `M = 1` decode
 (different GEMM tiling; XQA vs. Flash attention). Only the **last** row of a forward matches a
-1-token decode. Greedy MTP is therefore "lossless modulo near-ties": the finalize branches are
-ordered so that the bonus token comes from a decode-consistent row wherever that is affordable.
-Under sampling this is a non-issue by construction.
+1-token decode. Greedy MTP is therefore "lossless modulo near-ties." On a partial accept, a
+windowed model commits verify row `a` directly because replaying from recurrent state produced by
+the same wide verify is not more decode-consistent; a non-windowed model restores its pre-verify
+snapshot and replays the committed prefix. Under sampling this is a non-issue by construction.
 
 ### Device offloads
 

@@ -9,12 +9,16 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "ort_genai.h"
 
 namespace engine_benchmark {
 
@@ -26,7 +30,6 @@ struct ScenarioConfig {
   std::string scenario{"decode_baseline"};
   int concurrency{1};
   int prompt_length_k{4};
-  bool synthetic{true};
   std::string model_path;
   std::string execution_provider{"cuda"};
   std::string execution_provider_library;
@@ -77,6 +80,10 @@ inline double Percentile(std::vector<double> values, double p) {
   const double t = rank - static_cast<double>(lo);
   return values[lo] + (values[hi] - values[lo]) * t;
 }
+
+std::string ResolveModelPath(const std::string& model_path);
+std::unique_ptr<OgaSequences> BuildRulerPromptTokens(
+    int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random);
 
 /// Polls device and host memory usage on a background thread.
 ///
