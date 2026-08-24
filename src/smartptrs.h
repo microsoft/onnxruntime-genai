@@ -10,6 +10,7 @@
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
 #include <utility>
+#include "config.h"
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
@@ -271,6 +272,12 @@ struct DeviceInterface {
   // providers can replace the standard exposed past/present tensor implementation. Keep last for
   // vtable/ABI stability.
   virtual std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) = 0;
+  virtual bool ShouldClampZeroLengthKeyValueCacheTensors() const { return false; }
+  virtual bool ShouldZeroKeyValueCacheTensors() const { return true; }
+  virtual int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& /*decoder*/,
+                                           const Config::Search& /*search*/,
+                                           int /*max_length*/) const { return 0; }
+  virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

@@ -215,6 +215,8 @@ struct InterfaceImpl : DeviceInterface {
     return CreateStandardKeyValueCache(state);
   }
 
+  bool ShouldZeroKeyValueCacheTensors() const override { return false; }
+
   void Synchronize() override {}  // Nothing to do?
 
   bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {

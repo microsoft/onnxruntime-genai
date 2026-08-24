@@ -173,6 +173,30 @@ struct CpuInterface : DeviceInterface {
     return CreateStandardKeyValueCache(state);
   }
 
+  int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
+                                   const Config::Search& search,
+                                   int max_length) const override {
+    if (!decoder.sliding_window.has_value() ||
+        decoder.sliding_window->window_size <= 0) {
+      return 0;
+    }
+
+    const int window_size = decoder.sliding_window->window_size;
+    const auto& chunk_size_opt = search.chunk_size;
+    const size_t chunk_slack =
+        (chunk_size_opt.has_value() && *chunk_size_opt > 0) ? *chunk_size_opt - 1 : 0;
+    const int raw_config_slack = decoder.sliding_window->cache_slack;
+    const size_t config_slack = static_cast<size_t>(
+        std::max(0, raw_config_slack > 0 ? raw_config_slack : 16));
+    const size_t desired = static_cast<size_t>(window_size) + std::max(chunk_slack, config_slack);
+    return desired >= static_cast<size_t>(max_length) ? max_length : static_cast<int>(desired);
+  }
+
+  bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const override {
+    return decoder.sliding_window &&
+           decoder.sliding_window->slide_key_value_cache;
+  }
+
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
 };
 

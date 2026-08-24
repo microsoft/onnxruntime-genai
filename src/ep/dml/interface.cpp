@@ -167,6 +167,8 @@ struct InterfaceImpl : DeviceInterface {
     return CreateStandardKeyValueCache(state);
   }
 
+  bool ShouldClampZeroLengthKeyValueCacheTensors() const override { return true; }
+
 #if 0
   void UpdatePositionIDs() {
     ComPtr<ID3D12Resource> target_resource;
