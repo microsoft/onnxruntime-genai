@@ -37,7 +37,7 @@ class PagedKeyValueCacheTest : public ::testing::Test {
   std::shared_ptr<Request> AddCommittedRequest(
       std::array<int32_t, 4> prompt) {
     auto request =
-        MintAssignedRequest(assign_target_, *model_, prompt);
+        CreateRequestWithPrompt(assign_target_, *model_, prompt);
     cache_->Add(request);
     cache_->AppendTokens(request);
     return request;
@@ -125,7 +125,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestRunsAfterCapacityIsReleased)
 TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapacity) {
   auto unserviceable = AddCommittedRequest({2, 3, 4, 5});
   auto fitting = AddCommittedRequest({6, 7, 8, 9});
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
@@ -147,7 +147,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapaci
 // prompt: the pool is three blocks of four slots, so a prompt of thirteen slots can never fit even
 // though its first chunk would.
 TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenItsChunkFits) {
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
@@ -165,7 +165,7 @@ TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenIt
 // starts a chunked prefill it cannot finish.
 TEST_F(PagedKeyValueCacheTest, AdmissionWaitsUntilTheWholePromptFits) {
   auto committed = AddCommittedRequest({2, 3, 4, 5});
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
@@ -215,7 +215,7 @@ TEST_F(PagedKeyValueCacheTest, OmittedResidentKeepsItsCommittedBlockTable) {
 TEST_F(PagedKeyValueCacheTest, OmittedResidentsStillLimitNewAdmissions) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
@@ -231,9 +231,9 @@ TEST_F(PagedKeyValueCacheTest, OmittedResidentsStillLimitNewAdmissions) {
 
 TEST_F(PagedKeyValueCacheTest, BlockedPrefillDoesNotPreventLaterAdmission) {
   auto resident = AddCommittedRequest({2, 3, 4, 5});
-  auto blocked = MintAssignedRequest(
+  auto blocked = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
-  auto fitting = MintAssignedRequest(
+  auto fitting = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{11});
 
   StepPlan plan;
@@ -256,7 +256,7 @@ TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedB
 
   auto omitted = AddCommittedRequest({2, 3, 4, 5});
   auto resident = AddCommittedRequest({6, 7, 8, 9});
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
@@ -280,7 +280,7 @@ TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedB
 }
 
 TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
-  auto pending = MintAssignedRequest(
+  auto pending = CreateRequestWithPrompt(
       assign_target_, *model_,
       std::array<int32_t, 9>{2, 3, 4, 5, 6, 7, 8, 9, 10});
 

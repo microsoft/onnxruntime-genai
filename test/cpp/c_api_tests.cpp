@@ -10,6 +10,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <regex>
 #include "span.h"
@@ -927,8 +928,13 @@ struct Phi2Test {
     constexpr size_t per_request_batch_size = 1;
     params_->SetSearchOption("batch_size", static_cast<int>(per_request_batch_size));
 
-    std::vector<std::unique_ptr<OgaRequest>> requests_;
-    std::array<std::vector<int32_t>, 3> generated_tokens;
+    struct OwnedRequest {
+      std::unique_ptr<OgaRequest> request;
+      std::vector<int32_t> generated_tokens;
+    };
+    std::vector<OwnedRequest> requests;
+    requests.reserve(batch_size_);
+    std::unordered_map<OgaRequest*, OwnedRequest*> requests_by_handle;
 
     const char* input_strings[] = {
         "This is a test.",
@@ -939,29 +945,37 @@ struct Phi2Test {
     for (size_t i = 0; i < batch_size_; i++) {
       auto input_sequence = OgaSequences::Create();
       tokenizer_->Encode(input_strings[i], *input_sequence);
-      generated_tokens[i] = std::vector<int32_t>(input_sequence->SequenceData(0),
-                                                 input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
-      requests_.emplace_back(OgaRequest::Create(*params_));
-      requests_.back()->AddTokens(*input_sequence);
-      requests_.back()->SetOpaqueData(&generated_tokens[i]);
-
-      engine->Add(*requests_.back());
+      auto input_tokens = std::span<const int32_t>{
+          input_sequence->SequenceData(0), input_sequence->SequenceCount(0)};
+      requests.push_back({
+          engine->CreateRequest(*params_),
+          std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
+      auto& owned_request = requests.back();
+      requests_by_handle.emplace(owned_request.request.get(), &owned_request);
+      owned_request.request->BeginTurn(input_tokens);
     }
 
-    while (auto request = engine->Step()) {
-      while (request->HasUnseenTokens()) {
-        auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
-        tokens->push_back(request->GetUnseenToken());
+    EXPECT_TRUE(engine->HasPendingRequests());
+    while (engine->HasPendingRequests()) {
+      auto* ready_request = engine->Run();
+      ASSERT_NE(ready_request, nullptr);
+      auto it = requests_by_handle.find(ready_request);
+      ASSERT_NE(it, requests_by_handle.end());
+      EXPECT_EQ(ready_request, it->second->request.get());
+      while (ready_request->HasUnseenTokens()) {
+        it->second->generated_tokens.push_back(ready_request->GetUnseenToken());
       }
     }
+    EXPECT_EQ(engine->Run(), nullptr);
 
-    for (size_t i = 0; i < batch_size_; i++) {
-      EXPECT_TRUE(requests_[i]->IsTurnComplete());
-      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
-      EXPECT_FALSE(requests_[i]->IsTurnComplete());
-      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+    for (auto& owned_request : requests) {
+      EXPECT_TRUE(owned_request.request->IsTurnComplete());
+      EXPECT_NO_THROW(owned_request.request->Close());
+      EXPECT_FALSE(owned_request.request->IsTurnComplete());
+      EXPECT_NO_THROW(owned_request.request->Close());
 
-      auto out_string = tokenizer_->Decode(generated_tokens[i].data(), generated_tokens[i].size());
+      auto out_string = tokenizer_->Decode(owned_request.generated_tokens.data(),
+                                           owned_request.generated_tokens.size());
       std::cout << "Decoded string:" << out_string << std::endl;
     }
   }
@@ -972,6 +986,72 @@ struct Phi2Test {
   std::unique_ptr<OgaGeneratorParams> params_;
   const size_t batch_size_ = 3;
 };
+
+TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
+  if (!test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto engine = OgaEngine::Create(*model);
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode("This is a test.", *input_sequences);
+  auto input_tokens = std::span<const int32_t>{
+      input_sequences->SequenceData(0), input_sequences->SequenceCount(0)};
+  params->SetSearchOption(
+      "max_length", static_cast<int>(input_tokens.size() + 1));
+
+  auto expect_options_accepted = [&](const OgaTurnOptions* options) {
+    auto request = engine->CreateRequest(*params);
+    EXPECT_NO_THROW(OgaCheckResult(OgaRequestBeginTurn(
+        request.get(), options, input_tokens.data(), input_tokens.size())));
+    EXPECT_NO_THROW(request->Close());
+  };
+
+  expect_options_accepted(nullptr);
+
+  OgaTurnOptions exact_options{sizeof(OgaTurnOptions)};
+  expect_options_accepted(&exact_options);
+
+  struct LargerTurnOptions {
+    OgaTurnOptions v1;
+    size_t reserved;
+  };
+  LargerTurnOptions larger_options{{sizeof(LargerTurnOptions)}, 0};
+  expect_options_accepted(&larger_options.v1);
+
+  auto undersized_request = engine->CreateRequest(*params);
+  OgaTurnOptions undersized_options{sizeof(OgaTurnOptions) - 1};
+  std::unique_ptr<OgaResult> undersized_result{OgaRequestBeginTurn(
+      undersized_request.get(), &undersized_options,
+      input_tokens.data(), input_tokens.size())};
+  ASSERT_NE(undersized_result, nullptr);
+  EXPECT_NE(std::string(undersized_result->GetError()).find("smaller"),
+            std::string::npos);
+  EXPECT_NO_THROW(undersized_request->Close());
+
+  auto owned_request = engine->CreateRequest(*params);
+  owned_request->BeginTurn(input_tokens);
+  ASSERT_TRUE(engine->HasPendingRequests());
+
+  OgaRequest* borrowed_request = engine->Run();
+  ASSERT_EQ(borrowed_request, owned_request.get());
+  ASSERT_TRUE(borrowed_request->IsTurnComplete());
+  ASSERT_TRUE(borrowed_request->HasUnseenTokens());
+
+  EXPECT_NO_THROW(borrowed_request->Close());
+  EXPECT_NO_THROW(borrowed_request->Close());
+  EXPECT_TRUE(owned_request->HasUnseenTokens());
+  static_cast<void>(owned_request->GetUnseenToken());
+  EXPECT_FALSE(owned_request->HasUnseenTokens());
+  EXPECT_FALSE(engine->HasPendingRequests());
+  EXPECT_EQ(engine->Run(), nullptr);
+
+  // Run returns a borrowed alias. owned_request remains its only RAII owner and
+  // is therefore the only handle destroyed when this scope exits.
+}
 
 class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };

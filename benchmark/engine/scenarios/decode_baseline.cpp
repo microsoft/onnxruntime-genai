@@ -103,33 +103,31 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       request_tokens[static_cast<size_t>(i)].assign(
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
-      requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*prompt_tokens);
-      requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
-      engineResources.engine->Add(*requests.back());
+      requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
+      requests.back()->BeginTurn(std::span<const int32_t>{
+          prompt_tokens->SequenceData(0), prompt_token_count});
     }
 
-    while (auto ready_request = engineResources.engine->Step()) {
+    while (engineResources.engine->HasPendingRequests()) {
+      auto* ready_request = engineResources.engine->Run();
+      if (!ready_request) {
+        throw std::runtime_error(log_tag + ": Engine returned no ready request while work remained");
+      }
       const auto now = std::chrono::steady_clock::now();
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-      if (tokens == nullptr) {
-        throw std::runtime_error(log_tag + ": null opaque data from request");
+      const auto owned_request = std::find_if(
+          requests.begin(), requests.end(),
+          [ready_request](const auto& request) {
+            return request.get() == ready_request;
+          });
+      if (owned_request == requests.end()) {
+        throw std::runtime_error(log_tag + ": ready request is not owned by this run");
       }
-
-      const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
-      const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
-      const auto end_addr =
-          reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
-
-      if (ptr_addr < base_addr || ptr_addr >= end_addr) {
-        throw std::runtime_error(log_tag + ": opaque data pointer not in request_tokens");
-      }
-
       const auto request_index =
-          static_cast<size_t>((ptr_addr - base_addr) / sizeof(std::vector<int32_t>));
+          static_cast<size_t>(std::distance(requests.begin(), owned_request));
+      auto& tokens = request_tokens[request_index];
 
       while (ready_request->HasUnseenTokens()) {
-        tokens->push_back(ready_request->GetUnseenToken());
+        tokens.push_back(ready_request->GetUnseenToken());
         ++generated_tokens;
 
         const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
@@ -142,6 +140,9 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
 
         last_token_time[request_index] = now;
       }
+    }
+    for (const auto& request : requests) {
+      request->Close();
     }
 
     const auto run_end = std::chrono::steady_clock::now();

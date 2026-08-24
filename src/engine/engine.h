@@ -71,6 +71,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
+  ~Engine();
 
   /**
    * @brief Dependency-injecting constructor.
@@ -88,17 +89,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
-  /**
-   * @brief Adds a request to the Engine for processing.
-   * @param request A shared pointer to the Request object to be added.
-   */
-  void AddRequest(std::shared_ptr<Request> request);
-
-  /**
-   * @brief Removes a previously added request from the Engine.
-   * @param request A shared pointer to the Request object to be removed.
-   */
-  void RemoveRequest(std::shared_ptr<Request> request);
+  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params);
 
   /**
    * @brief Advances the state of a subset of the Requests the Engine is currently
@@ -110,7 +101,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * model executor and updates the requests' states with the newly generated
    * tokens.
    */
-  std::shared_ptr<Request> Step();
+  std::shared_ptr<Request> Run();
 
   /**
    * @brief Checks if there are any pending requests in the Engine.
@@ -119,10 +110,13 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool HasPendingRequests() const;
 
  private:
+  void BeginTurn(const std::shared_ptr<Request>& request,
+                 std::span<const int32_t> tokens);
+  void CloseRequest(const std::shared_ptr<Request>& request);
   void ReclaimAbandonedRequests();
   std::shared_ptr<Request> DrainReadyRequest();
-  std::shared_ptr<Request> StepDynamic();
-  std::shared_ptr<Request> StepStatic();
+  std::shared_ptr<Request> RunDynamic();
+  std::shared_ptr<Request> RunStatic();
   void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,

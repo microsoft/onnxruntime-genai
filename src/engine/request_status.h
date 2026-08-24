@@ -15,11 +15,11 @@
 namespace Generators {
 
 enum class RequestStatus {
-  Unassigned,    // Created: initial input may be added before submission to an Engine.
-  Assigned,      // Queued: submitted initial work or a resident continuation awaits execution.
+  Unassigned,    // Created and Engine-bound, with no turn queued.
+  Assigned,      // Queued: initial work or a resident continuation awaits execution.
   Active,        // The current generation turn is executable and owned by the Engine.
   TurnComplete,  // The current turn stopped; output and resident model state remain available.
-  Closed,        // Permanently terminal; no scheduler or cache resources remain owned.
+  Closed,        // Permanently terminal; never scheduled again. Static batch storage may linger.
 };
 
 constexpr bool IsQueued(RequestStatus status) noexcept {

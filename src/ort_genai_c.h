@@ -82,6 +82,10 @@ typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
+typedef struct OgaTurnOptions {
+  size_t struct_size;
+} OgaTurnOptions;
+
 //! @}
 
 /** \addtogroup Global
@@ -1185,13 +1189,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
 /**
  * \brief Destroys the given engine.
  *
- * Remove every submitted request with OgaEngineRemoveRequest before destroying the engine.
+ * Destroying an engine closes every request bound to it. Surviving request handles remain valid
+ * closed handles and must still be released with OgaDestroyRequest.
  * \param[in] engine The engine to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
 
 /**
- * \brief Returns a ready request of runs one step of the OgaEngine if there are pending requests.
+ * \brief Runs synchronous Engine progress and returns one ready request.
  *
  * This function advances the state of the engine by processing a subset of the currently pending requests.
  * It schedules and executes model inference for requests that are ready, updates their state with the generated results,
@@ -1201,14 +1206,15 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
  * If there are no ready requests, a new subset of requests will be scheduled for processing and the request parameter
  * will be set to the first request from this subset that is ready to be queried for results.
  *
- * \param[in] engine The engine instance to run a processing step on.
+ * \param[in] engine The engine instance to run.
  * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
- *                     If the engine has no ready requests, this will be set to a nullptr. Each non-null handle
- *                     returned by this function must be released with OgaDestroyRequest. Releasing this handle
- *                     does not remove the request from the engine.
+ *                     This is a borrowed alias of the handle returned by OgaEngineCreateRequest.
+ *                     Do not release it with OgaDestroyRequest. The alias remains valid only while
+ *                     that owned handle remains alive, including across Close or Engine destruction.
+ *                     It is nullptr only when no work remains.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(OgaEngine* engine, OgaRequest** request);
 
 /**
  * \brief Checks if the engine has any pending requests to process.
@@ -1224,112 +1230,57 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest**
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine, bool* out);
 
 /**
- * \brief Adds a request to the OgaEngine for processing.
+ * \brief Creates a Request permanently bound to an Engine.
  *
- * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
- * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
- * On success, the engine retains ownership after the current generation turn completes. OgaEngineRemoveRequest
- * releases that ownership immediately. If the caller instead
- * releases every external handle, the request is marked abandoned and reclaimed before the engine's next
- * OgaEngineAddRequest or OgaEngineStep boundary.
+ * Generation parameters are snapshotted and remain fixed for every turn. The parameters must belong
+ * to the same model as the Engine. Creation does not queue work; call OgaRequestBeginTurn.
  *
- * \param[in] engine The engine instance to which the request is being added.
- * \param[in] request The request to add to the engine.
+ * \param[in] engine The owning Engine.
+ * \param[in] params The fixed request-level generation parameters.
+ * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
+    OgaEngine* engine, const OgaGeneratorParams* params, OgaRequest** out);
 
 /**
- * \brief Removes a request from the OgaEngine.
+ * \brief Begins the initial or a subsequent generation turn.
  *
- * This function logically closes a request, after which it will no longer be processed and cannot be reused.
- * A nonterminal request must belong to this engine. Removing an already closed request is an engine-agnostic successful
- * no-op because the request no longer has an owner. Dynamic removal releases cache ownership immediately; a resident
- * static-batch row may remain physically retained until its shared batch is recycled.
- * The caller remains responsible for releasing every request handle with OgaDestroyRequest.
+ * The request must be newly created or turn-complete. A completed turn's ready notification must
+ * already have been returned by OgaEngineRun. Input is copied before return. Unread generated output
+ * from earlier turns remains available in FIFO order. Static-batch continuation is supported only
+ * while the resident static batch contains one request.
  *
- * \param[in] engine The engine instance from which the request is being removed.
- * \param[in] request The request to remove. A nonterminal request must have been previously added to this engine.
- * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ * \param[in] request The Request to queue.
+ * \param[in] options Nullable turn-scoped options. V1 accepts nullptr or a structure whose
+ *                    struct_size is at least sizeof(OgaTurnOptions).
+ * \param[in] input_ids A non-empty token array.
+ * \param[in] input_ids_count Number of tokens in input_ids.
+ * \return OgaResult containing the error message if the turn could not be queued, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
+    OgaRequest* request, const OgaTurnOptions* options,
+    const int32_t* input_ids, size_t input_ids_count);
 
 /**
- * \brief Creates a new request for the OgaEngine.
+ * \brief Permanently closes a Request and releases its Engine resources.
  *
- * This function initializes a new request object that can be used to submit input sequences for model inference.
- * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
- * The returned handle is owned by the caller. Explicit removal is recommended for deterministic resource release;
- * otherwise releasing the final external handle marks a submitted request for deferred Engine reclamation.
- *
- * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
- * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
- * \return OgaResult containing the error message if the request creation failed, or nullptr on success.
+ * Close is valid from every lifecycle state and is idempotent. Dynamic cache ownership is released
+ * immediately; a resident static-batch row may remain physically retained until its shared batch is
+ * recycled. Already committed unseen output remains readable until the owned Request handle is destroyed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
-
-/**
- * \brief Adds initial input sequences to a created request.
- *
- * This function is valid only before the request is submitted to an Engine. Use OgaRequestContinue to begin another
- * generation turn after OgaRequestIsTurnComplete returns true.
- * Input must leave room for at least one generated token below max_length.
- *
- * \param[in] request The request to set the input sequences on.
- * \param[in] tokens The input sequences to set on the request.
- * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
-
-/**
- * \brief Queues another generation turn using the request's resident model state.
- *
- * This function is valid only after OgaRequestIsTurnComplete returns true. Subsequent OgaEngineStep calls process
- * the appended input.
- *
- * \param[in] request The request to continue.
- * \param[in] tokens The new input sequence for the next turn.
- * \return OgaResult containing the error message if continuation failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 
 /**
  * \brief Destroys the given request.
  *
- * This function releases one external request handle. Releasing the final handle marks a submitted request abandoned;
- * its Engine reclaims it before the next OgaEngineAddRequest or OgaEngineStep call. Call OgaEngineRemoveRequest first
- * when resources must be released immediately. Every handle returned by OgaCreateRequest or OgaEngineStep must be
- * released once.
+ * This function releases the owned handle returned by OgaEngineCreateRequest. A borrowed handle
+ * returned by OgaEngineRun must not be released. Releasing the final owned handle without first
+ * calling OgaRequestClose marks the Request abandoned for deferred Engine reclamation.
  *
- * \param[in] request A request handle returned by OgaCreateRequest or OgaEngineStep.
+ * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
-
-/**
- * \brief Sets custom user data on the request.
- *
- * This function sets custom user data on the request that is opaque to the request. It can be queried
- * later using OgaRequestGetOpaqueData. This is useful for associating additional information with the
- * request that may be actionable by the user or application logic.
- *
- * \param[in] request The request to set the input sequences on.
- * \param[in] tokens The input sequences to set on the request.
- * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetOpaqueData(OgaRequest* request, void* opaque_data);
-
-/**
- * \brief Gets the custom user data from the request.
- *
- * This function retrieves the custom user data that was set on the request using OgaRequestSetOpaqueData.
- * The user data is opaque to the request and can be used to store additional information that may be
- * useful for the application logic.
- *
- * \param[in] request The request to get the opaque data from.
- * \param[out] opaque_data Pointer to where the opaque data will be stored.
- * \return OgaResult containing the error message if the getting of the opaque data failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** opaque_data);
 
 /**
  * \brief Checks if the request has any unseen tokens.
@@ -1361,7 +1312,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request,
  * \brief Checks if the current generation turn is complete.
  *
  * This function reports completion of the current turn. It does not mean that the request is permanently closed;
- * OgaRequestContinue may queue another turn while state remains resident.
+ * OgaRequestBeginTurn may queue another turn while state remains resident.
  *
  * \param[in] request The request whose current turn should be checked.
  * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.

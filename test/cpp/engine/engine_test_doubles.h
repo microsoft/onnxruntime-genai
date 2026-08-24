@@ -21,7 +21,7 @@ namespace Generators {
 namespace test {
 
 // A single ordered log the recording doubles append to, so a test can assert the sequence of
-// collaborator calls the engine and scheduler make within a step (for example that a batch is
+// collaborator calls the engine and scheduler make within a run (for example that a batch is
 // allocated before it is decoded). Shared by the cache manager and executor doubles.
 struct CallTrace {
   std::vector<std::string> entries;
@@ -227,7 +227,7 @@ struct RecordingCacheManager : CacheManager {
 // A DecoderIO that fabricates logits instead of running the model: for each scheduled request it
 // returns a vocab-sized logits row whose maximum is at `forced_token`, so the request's real greedy
 // search deterministically selects that token. Using the model's end-of-stream token drives requests
-// to completion in one step.
+// to completion in one run.
 struct ScriptedDecoderIO : DecoderIO {
   ScriptedDecoderIO(std::shared_ptr<Model> model, ScheduledRequests& scheduled_requests,
                     std::shared_ptr<CacheManager> cache_manager, int32_t forced_token,
@@ -341,7 +341,7 @@ struct RecordingModelExecutor : ModelExecutor {
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those
-// doubles and the shared call trace so a test can drive Engine::Step and then inspect how the engine
+// doubles and the shared call trace so a test can drive Engine::Run and then inspect how the engine
 // scheduled and decoded. The engine owns the doubles; the raw pointers stay valid for its lifetime.
 struct DoublesEngine {
   std::shared_ptr<Engine> engine;

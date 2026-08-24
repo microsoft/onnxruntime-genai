@@ -731,42 +731,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("load", &OgaAdapters::LoadAdapter);
 
   pybind11::class_<OgaRequest>(m, "Request")
-      .def(pybind11::init(
-          [](PyGeneratorParams& params) {
-            return OgaRequest::Create(*params.params_);
-          }))
-      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
-        auto sequences = OgaSequences::Create();
-        auto tokens_span = ToSpan(tokens);
-        sequences->Append(tokens_span.data(), tokens_span.size());
-        request.AddTokens(*sequences);
-      })
-      .def("continue_with", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
-        auto sequences = OgaSequences::Create();
-        auto tokens_span = ToSpan(tokens);
-        sequences->Append(tokens_span.data(), tokens_span.size());
-        request.Continue(*sequences);
+      .def("begin_turn", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+        request.BeginTurn(ToSpan(tokens));
       })
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
-      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
-        request.SetOpaqueData(opaque_data.ptr());
-      })
-      .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
-        auto opaque_data = request.GetOpaqueData();
-        if (!opaque_data)
-          return pybind11::none();
-        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
-      });
+      .def("close", &OgaRequest::Close);
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
-      .def("add_request", &OgaEngine::Add,
-           "Submit a request. The engine owns it until remove_request() is called, including after turn completion.")
-      .def("step", &OgaEngine::Step)
-      .def("remove_request", &OgaEngine::Remove,
-           "Remove a request. Repeated calls after it is closed are successful no-ops.")
+      .def("create_request", [](OgaEngine& engine, PyGeneratorParams& params) {
+        return engine.CreateRequest(*params.params_);
+      })
+      .def("run", &OgaEngine::Run, pybind11::return_value_policy::reference)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")

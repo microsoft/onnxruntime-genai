@@ -98,6 +98,11 @@ T* ReturnShared(std::shared_ptr<U>& p) {
   return static_cast<T*>(p.get());
 }
 
+template <typename T, typename U>
+T* ReturnBorrowed(const std::shared_ptr<U>& p) {
+  return static_cast<T*>(p.get());
+}
+
 // Helper function to return a unique pointer as a raw pointer. It won't compile if the types are wrong.
 template <typename T, typename U>
 T* ReturnUnique(std::unique_ptr<U> p) {
@@ -1368,10 +1373,11 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_CATCH
 }
 
-OgaResult* OgaEngineStep(OgaEngine* engine, OgaRequest** request) {
+OgaResult* OgaEngineRun(OgaEngine* engine, OgaRequest** request) {
   OGA_TRY
-  auto ready_request = engine->Step();
-  *request = ready_request ? ReturnShared<OgaRequest>(ready_request) : nullptr;
+  *request = nullptr;
+  auto ready_request = engine->Run();
+  *request = ready_request ? ReturnBorrowed<OgaRequest>(ready_request) : nullptr;
   return nullptr;
   OGA_CATCH
 }
@@ -1383,44 +1389,40 @@ OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
   OGA_CATCH
 }
 
-OgaResult* OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request) {
+OgaResult* OgaEngineCreateRequest(
+    OgaEngine* engine,
+    const OgaGeneratorParams* params,
+    OgaRequest** out) {
   OGA_TRY
-  engine->AddRequest(request->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request) {
-  OGA_TRY
-  engine->RemoveRequest(request->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
-  OGA_TRY
-  auto request = std::make_shared<Generators::Request>(params->shared_from_this());
+  auto request = engine->CreateRequest(*params);
   *out = ReturnShared<OgaRequest>(request);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
+OgaResult* OgaRequestBeginTurn(
+    OgaRequest* request,
+    const OgaTurnOptions* options,
+    const int32_t* input_ids,
+    size_t input_ids_count) {
   OGA_TRY
-  if (tokens->size() != 1) {
-    throw std::runtime_error("Request input must contain exactly one sequence.");
+  if (options && options->struct_size < sizeof(OgaTurnOptions)) {
+    throw std::runtime_error(
+        "OgaTurnOptions.struct_size is smaller than the V1 structure.");
   }
-  request->AddTokens((*tokens)[0]);
+  if (!input_ids && input_ids_count != 0) {
+    throw std::runtime_error(
+        "input_ids must not be null when input_ids_count is nonzero.");
+  }
+  request->BeginTurn(
+      std::span<const int32_t>{input_ids, input_ids_count});
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
+OgaResult* OgaRequestClose(OgaRequest* request) {
   OGA_TRY
-  if (tokens->size() != 1) {
-    throw std::runtime_error("Request continuation must contain exactly one sequence.");
-  }
-  request->Continue((*tokens)[0]);
+  request->Close();
   return nullptr;
   OGA_CATCH
 }
@@ -1442,20 +1444,6 @@ OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
 OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
   OGA_TRY
   *out = request->IsTurnComplete();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaRequestSetOpaqueData(OgaRequest* request, void* data) {
-  OGA_TRY
-  request->SetOpaqueData(data);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data) {
-  OGA_TRY
-  *data = request->GetOpaqueData();
   return nullptr;
   OGA_CATCH
 }

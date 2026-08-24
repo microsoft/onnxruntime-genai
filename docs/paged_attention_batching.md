@@ -392,9 +392,9 @@ Generator design" option in its strongest form. It was rejected because it requi
 `Sequences` to carry a per-row length cursor (today: one `current_length_`, and `GetSequence(i)`
 depends on it), reworking every kernel that writes at a shared `past_length` offset, moving
 per-request `GeneratorParams` into per-row arrays, and adding row allocation/eviction to `Search`.
-It also collides with `Request`'s public lifecycle — `Assign`, `Remove`, `AddTokens`, and `Continue` can all be
-called outside the engine. It is a plausible long-term direction, but it is a rewrite of the search
-layer, and Phase 2 gets most of the benefit without touching any of it.
+It also collides with the Engine-owned Request lifecycle and its externally serialized
+`BeginTurn`/`Run`/`Close` contract. It is a plausible long-term direction, but it is a rewrite of the
+search layer, and Phase 2 gets most of the benefit without touching any of it.
 
 **Batch `CheckForEOSAndPad` and `AppendNextTokensToSequences` too.** Worth roughly 0.16 ms. Needs
 per-row done flags, per-row EOS token sets and pointer-array kernels because each request's

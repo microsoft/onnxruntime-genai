@@ -29,10 +29,12 @@ def generate(engine, request, tokenizer):
     stream = tokenizer.create_stream()
     fragments = []
     token_ids = []
-    while not request.is_turn_complete():
-        ready_request = engine.step()
+    while engine.has_pending_requests():
+        ready_request = engine.run()
         if ready_request is None:
-            raise RuntimeError("Engine stopped before the request completed")
+            raise RuntimeError("Engine returned no request while work remained")
+        if ready_request is not request:
+            raise RuntimeError("Engine returned an unknown request")
         while ready_request.has_unseen_tokens():
             token_id = ready_request.get_unseen_token()
             token_ids.append(token_id)
@@ -110,31 +112,32 @@ def run(args):
         )
         params.set_guidance("lark_grammar", grammar)
     prompt_tokens = list(tokenizer.encode(prompt))
-    request = og.Request(params)
-    request.add_tokens(np.asarray(prompt_tokens, dtype=np.int32))
-    engine.add_request(request)
+    request = engine.create_request(params)
+    try:
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
 
-    tool_call_output, tool_call_tokens = generate(engine, request, tokenizer)
-    tool_call_start_tokens = list(tokenizer.encode(TOOL_CALL_START))
-    tool_call_end_tokens = list(tokenizer.encode(TOOL_CALL_END))
-    if not contains_token_sequence(tool_call_tokens, tool_call_start_tokens) or not contains_token_sequence(
-        tool_call_tokens, tool_call_end_tokens
-    ):
-        raise RuntimeError(f"Assistant did not produce tool-call delimiters: {tool_call_output!r}")
-    tool_call = parse_tool_call(tool_call_output)
-    tool_result = call_weather_tool(tool_call)
-    print(f"Tool call: {tool_call_output}")
-    print(f"Tool result: {json.dumps(tool_result)}")
+        tool_call_output, tool_call_tokens = generate(engine, request, tokenizer)
+        tool_call_start_tokens = list(tokenizer.encode(TOOL_CALL_START))
+        tool_call_end_tokens = list(tokenizer.encode(TOOL_CALL_END))
+        if not contains_token_sequence(tool_call_tokens, tool_call_start_tokens) or not contains_token_sequence(
+            tool_call_tokens, tool_call_end_tokens
+        ):
+            raise RuntimeError(f"Assistant did not produce tool-call delimiters: {tool_call_output!r}")
+        tool_call = parse_tool_call(tool_call_output)
+        tool_result = call_weather_tool(tool_call)
+        print(f"Tool call: {tool_call_output}")
+        print(f"Tool result: {json.dumps(tool_result)}")
 
-    continuation_tokens = tokenizer.encode(tool_result_fragment(tool_result))
-    request.continue_with(np.asarray(continuation_tokens, dtype=np.int32))
+        continuation_tokens = tokenizer.encode(tool_result_fragment(tool_result))
+        request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32))
 
-    final_output, _ = generate(engine, request, tokenizer)
-    final_output = final_output.strip()
-    engine.remove_request(request)
-    if not final_output or TOOL_CALL_START in final_output:
-        raise RuntimeError(f"Expected a final assistant answer, received: {final_output!r}")
-    print(f"Final answer: {final_output}")
+        final_output, _ = generate(engine, request, tokenizer)
+        final_output = final_output.strip()
+        if not final_output or TOOL_CALL_START in final_output:
+            raise RuntimeError(f"Expected a final assistant answer, received: {final_output!r}")
+        print(f"Final answer: {final_output}")
+    finally:
+        request.close()
 
 
 if __name__ == "__main__":

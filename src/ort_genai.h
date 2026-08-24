@@ -903,19 +903,18 @@ struct OgaAdapters : OgaAbstract {
 };
 
 struct OgaRequest : OgaAbstract {
-  static std::unique_ptr<OgaRequest> Create(OgaGeneratorParams& params) {
-    OgaRequest* p;
-    OgaCheckResult(OgaCreateRequest(&params, &p));
-    return std::unique_ptr<OgaRequest>(p);
+  void BeginTurn(const int32_t* input_ids, size_t input_ids_count,
+                 const OgaTurnOptions* options = nullptr) {
+    OgaCheckResult(OgaRequestBeginTurn(
+        this, options, input_ids, input_ids_count));
   }
 
-  void AddTokens(const OgaSequences& tokens) {
-    OgaCheckResult(OgaRequestAddTokens(this, &tokens));
+#if OGA_USE_SPAN
+  void BeginTurn(std::span<const int32_t> input_ids,
+                 const OgaTurnOptions* options = nullptr) {
+    BeginTurn(input_ids.data(), input_ids.size(), options);
   }
-
-  void Continue(const OgaSequences& tokens) {
-    OgaCheckResult(OgaRequestContinue(this, &tokens));
-  }
+#endif
 
   /**
    * \brief Returns whether the current generation turn is complete.
@@ -938,14 +937,8 @@ struct OgaRequest : OgaAbstract {
     return token;
   }
 
-  void SetOpaqueData(void* data) {
-    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
-  }
-
-  void* GetOpaqueData() {
-    void* data;
-    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
-    return data;
+  void Close() {
+    OgaCheckResult(OgaRequestClose(this));
   }
 
   static void operator delete(void* p) { OgaDestroyRequest(reinterpret_cast<OgaRequest*>(p)); }
@@ -964,29 +957,18 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
-  /**
-   * \brief Submits a request to the engine.
-   *
-   * Ownership continues after the current turn completes. Remove() releases resources immediately;
-   * releasing the final external handle instead defers reclamation until the next Add() or Step().
-   */
-  void Add(OgaRequest& request) {
-    OgaCheckResult(OgaEngineAddRequest(this, &request));
-  }
-
-  /**
-   * \brief Removes a request and releases engine ownership.
-   *
-   * Repeated calls after the request has already been removed are successful no-ops.
-   */
-  void Remove(OgaRequest& request) {
-    OgaCheckResult(OgaEngineRemoveRequest(this, &request));
-  }
-
-  std::unique_ptr<OgaRequest> Step() {
+  std::unique_ptr<OgaRequest> CreateRequest(
+      const OgaGeneratorParams& params) {
     OgaRequest* request;
-    OgaCheckResult(OgaEngineStep(this, &request));
-    return request ? std::unique_ptr<OgaRequest>(request) : nullptr;
+    OgaCheckResult(OgaEngineCreateRequest(this, &params, &request));
+    return std::unique_ptr<OgaRequest>(request);
+  }
+
+  OgaRequest* Run() {
+    // Borrowed alias: valid only while the owned CreateRequest() handle remains alive.
+    OgaRequest* request{};
+    OgaCheckResult(OgaEngineRun(this, &request));
+    return request;
   }
 
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }

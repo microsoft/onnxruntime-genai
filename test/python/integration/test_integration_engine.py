@@ -81,38 +81,40 @@ def _greedy_params(model: og.Model, prompt_len: int, max_new_tokens: int, min_ne
     return params
 
 
-def _add_request(engine, model, prompt_tokens, max_new_tokens, sink, *, min_new_tokens=0):
+def _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, *, min_new_tokens=0):
     params = _greedy_params(model, len(prompt_tokens), max_new_tokens, min_new_tokens)
-    request = og.Request(params)
-    request.add_tokens(prompt_tokens)
-    request.set_opaque_data(sink)
-    engine.add_request(request)
+    request = engine.create_request(params)
+    sinks[request] = sink
+    request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
     return request
 
 
-def _drain(ready) -> bool:
-    sink = ready.get_opaque_data()
+def _drain(ready, sinks) -> bool:
+    canonical = next((request for request in sinks if request is ready), None)
+    assert canonical is not None, "Engine.run() must return the existing borrowed Request object"
+    sink = sinks[ready]
     while ready.has_unseen_tokens():
         sink.tokens.append(ready.get_unseen_token())
     return ready.is_turn_complete()
 
 
-def _run(engine, *, max_steps=_MAX_STEPS) -> None:
+def _run(engine, sinks, *, max_steps=_MAX_STEPS) -> None:
     steps = 0
     while engine.has_pending_requests():
-        ready = engine.step()
-        assert ready is not None, "engine.step() returned no request while work remained"
-        if _drain(ready):
-            engine.remove_request(ready)
+        ready = engine.run()
+        assert ready is not None, "engine.run() returned no request while work remained"
+        if _drain(ready, sinks):
+            ready.close()
         steps += 1
-        assert steps <= max_steps, "engine.step() exceeded the safety bound; possible non-termination"
+        assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
 
 def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0) -> list[int]:
     sink = _Sink()
     engine = og.Engine(model)
-    request = _add_request(engine, model, prompt_tokens, max_new_tokens, sink, min_new_tokens=min_new_tokens)
-    _run(engine)
+    sinks = {}
+    request = _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
+    _run(engine, sinks)
     assert not request.is_turn_complete()
     del engine
     gc.collect()
@@ -131,8 +133,7 @@ def _eos_ids(bundle: _Bundle) -> set[int]:
 def test_model_is_paged(bundle):
     engine_cfg = bundle.config.get("engine")
     assert engine_cfg and "dynamic_batching" in engine_cfg, (
-        f"'{_MODEL_ID}' must declare engine.dynamic_batching to exercise the paged cache; "
-        f"got engine={engine_cfg!r}"
+        f"'{_MODEL_ID}' must declare engine.dynamic_batching to exercise the paged cache; got engine={engine_cfg!r}"
     )
 
 
@@ -170,13 +171,14 @@ def test_simultaneous_requests(bundle):
     max_new = 24
     engine = og.Engine(bundle.model)
     sinks = [_Sink() for _ in _PROMPTS]
+    sinks_by_request = {}
     requests = [
-        _add_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink)
+        _create_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
         for p, sink in zip(_PROMPTS, sinks, strict=True)
     ]
     assert engine.has_pending_requests()
 
-    _run(engine)
+    _run(engine, sinks_by_request)
 
     assert len(requests) == len(_PROMPTS)
     for prompt, sink in zip(_PROMPTS, sinks, strict=True):
@@ -193,22 +195,23 @@ def test_staggered_admission(bundle):
     engine = og.Engine(bundle.model)
 
     sink_a = _Sink()
-    request_a = _add_request(engine, bundle.model, prompt_a, max_new, sink_a)
+    sinks = {}
+    request_a = _create_request(engine, bundle.model, prompt_a, max_new, sink_a, sinks)
 
     for _ in range(3):
         if not engine.has_pending_requests():
             break
-        ready = engine.step()
+        ready = engine.run()
         if ready is None:
             break
-        if _drain(ready):
-            engine.remove_request(ready)
+        if _drain(ready, sinks):
+            ready.close()
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    request_b = _add_request(engine, bundle.model, prompt_b, max_new, sink_b)
+    request_b = _create_request(engine, bundle.model, prompt_b, max_new, sink_b, sinks)
 
-    _run(engine)
+    _run(engine, sinks)
 
     assert sink_a.tokens == isolated_a
     assert sink_b.tokens == isolated_b
@@ -225,11 +228,12 @@ def test_isolated_matches_batched(bundle):
 
     engine = og.Engine(bundle.model)
     sinks = {p: _Sink() for p in _PROMPTS}
+    sinks_by_request = {}
     requests = [
-        _add_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink)
+        _create_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
         for p, sink in sinks.items()
     ]
-    _run(engine)
+    _run(engine, sinks_by_request)
 
     assert sinks[prompt].tokens == isolated, "batched output diverged from the isolated run"
     assert all(not request.is_turn_complete() for request in requests)
@@ -245,11 +249,12 @@ def test_output_isolation(bundle):
 
     engine = og.Engine(bundle.model)
     s0, s1 = _Sink(), _Sink()
+    sinks = {}
     requests = [
-        _add_request(engine, bundle.model, bundle.tokenizer.encode(p0), max_new, s0),
-        _add_request(engine, bundle.model, bundle.tokenizer.encode(p1), max_new, s1),
+        _create_request(engine, bundle.model, bundle.tokenizer.encode(p0), max_new, s0, sinks),
+        _create_request(engine, bundle.model, bundle.tokenizer.encode(p1), max_new, s1, sinks),
     ]
-    _run(engine)
+    _run(engine, sinks)
 
     assert s0.tokens == isolated0
     assert s1.tokens == isolated1
@@ -264,12 +269,20 @@ def test_completion_isolation(bundle):
 
     engine = og.Engine(bundle.model)
     short_sink, long_sink = _Sink(), _Sink()
-    short_request = _add_request(
-        engine, bundle.model, bundle.tokenizer.encode(short_prompt), short_new, short_sink,
+    sinks = {}
+    short_request = _create_request(
+        engine,
+        bundle.model,
+        bundle.tokenizer.encode(short_prompt),
+        short_new,
+        short_sink,
+        sinks,
         min_new_tokens=short_new,
     )
-    long_request = _add_request(engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink)
-    _run(engine)
+    long_request = _create_request(
+        engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks
+    )
+    _run(engine, sinks)
 
     assert len(short_sink.tokens) == short_new, "forced-length request did not stop at its bound"
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
@@ -312,33 +325,34 @@ def test_eos_gates_termination(bundle):
     assert forced[: len(natural)] == natural, "forced continuation diverged from the natural greedy prefix"
 
 
-def test_remove_request_stops_output(bundle):
+def test_close_request_stops_output(bundle):
     max_new = 40
     sibling_prompt = bundle.tokenizer.encode(_PROMPTS[1])
     sibling_isolated = _generate_isolated(bundle.model, sibling_prompt, max_new)
     engine = og.Engine(bundle.model)
 
     sink_a, sink_b = _Sink(), _Sink()
-    request_a = _add_request(engine, bundle.model, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a)
-    request_b = _add_request(engine, bundle.model, sibling_prompt, max_new, sink_b)
+    sinks = {}
+    request_a = _create_request(engine, bundle.model, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a, sinks)
+    request_b = _create_request(engine, bundle.model, sibling_prompt, max_new, sink_b, sinks)
 
     for _ in range(4):
         if not engine.has_pending_requests():
             break
-        ready = engine.step()
+        ready = engine.run()
         if ready is None:
             break
-        if _drain(ready):
-            engine.remove_request(ready)
-    assert len(sink_a.tokens) > 0, "request A produced nothing before removal"
+        if _drain(ready, sinks):
+            ready.close()
+    assert len(sink_a.tokens) > 0, "request A produced nothing before close"
 
-    engine.remove_request(request_a)
+    request_a.close()
     frozen_a = len(sink_a.tokens)
 
-    _run(engine)
+    _run(engine, sinks)
 
-    assert len(sink_a.tokens) == frozen_a, "removed request kept producing tokens"
-    assert sink_b.tokens == sibling_isolated, "sibling diverged after request removal"
+    assert len(sink_a.tokens) == frozen_a, "closed request kept producing tokens"
+    assert sink_b.tokens == sibling_isolated, "sibling diverged after request close"
     assert not request_b.is_turn_complete()
 
 
@@ -349,8 +363,9 @@ def test_engine_teardown_and_recreation(bundle):
 
     first = og.Engine(bundle.model)
     sink1 = _Sink()
-    first_request = _add_request(first, bundle.model, prompt_tokens, max_new, sink1)
-    _run(first)
+    first_sinks = {}
+    first_request = _create_request(first, bundle.model, prompt_tokens, max_new, sink1, first_sinks)
+    _run(first, first_sinks)
     assert sink1.tokens == expected
     assert not first_request.is_turn_complete()
     del first
@@ -359,7 +374,8 @@ def test_engine_teardown_and_recreation(bundle):
     second = og.Engine(bundle.model)
     assert not second.has_pending_requests()
     sink2 = _Sink()
-    second_request = _add_request(second, bundle.model, prompt_tokens, max_new, sink2)
-    _run(second)
+    second_sinks = {}
+    second_request = _create_request(second, bundle.model, prompt_tokens, max_new, sink2, second_sinks)
+    _run(second, second_sinks)
     assert sink2.tokens == expected
     assert not second_request.is_turn_complete()

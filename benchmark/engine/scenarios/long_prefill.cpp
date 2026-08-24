@@ -77,17 +77,18 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
     params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
     params->SetSearchOption("random_seed", kRandomSeed);
 
-    auto request = OgaRequest::Create(*params);
-    request->AddTokens(*prompt_tokens);
-    engineResources.engine->Add(*request);
+    auto request = engineResources.engine->CreateRequest(*params);
+    request->BeginTurn(std::span<const int32_t>{
+        prompt_tokens->SequenceData(0), prompt_token_count});
 
     const auto start = std::chrono::steady_clock::now();
-    auto ready_request = engineResources.engine->Step();
+    auto* ready_request = engineResources.engine->Run();
     const auto first_token = std::chrono::steady_clock::now();
     if (!ready_request || !ready_request->HasUnseenTokens()) {
       throw std::runtime_error("long_prefill did not produce a first token");
     }
     ready_request->GetUnseenToken();
+    request->Close();
 
     const double prefill_ms = std::chrono::duration<double, std::milli>(first_token - start).count();
     const double prompt_processing_tps = static_cast<double>(prompt_token_count) / std::max(0.001, prefill_ms / 1000.0);

@@ -56,36 +56,11 @@ struct Request : std::enable_shared_from_this<Request>,
   ~Request();
 
   /**
-   * @brief Assigns this request to a specific engine for processing.
-   * @param engine Shared pointer to the Engine to be used for processing this request.
-   *
-   * Once assigned, the request will finalize the prefill tokens and prepare for scheduling.
-   */
-  void Assign(std::shared_ptr<Engine> engine);
-
-  /**
    * @brief Updates the status of the request to Active and prepares it for processing.
    */
   void Schedule();
 
-  /**
-   * @brief Adds initial input tokens before the request is submitted to an Engine.
-   * @param tokens Span of token IDs to be added.
-   *
-   * This operation is legal only while the request is Unassigned. Use Continue()
-   * to begin another turn after the current turn reaches TurnComplete.
-   */
-  void AddTokens(std::span<const int32_t> tokens);
-
-  /**
-   * @brief Queues another generation turn using resident model state.
-   * @param tokens New input tokens to append after the completed turn.
-   *
-   * This operation is legal only from TurnComplete. It preserves unread generated
-   * output, appends no input tokens to that output stream, and moves the request
-   * back to Assigned (the queued state).
-   */
-  void Continue(std::span<const int32_t> tokens);
+  void BeginTurn(std::span<const int32_t> tokens);
 
   /**
    * @brief Retrieves the next unseen token in the request.
@@ -114,7 +89,7 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Returns the unprocessed tokens from the host-side mirror of the sequence.
    * @return Span of unprocessed token IDs, valid only until the next call that appends to the
-   *         sequence (CommitStep, CompleteGeneration, Continue, or Assign). Copy it if it must
+   *         sequence (CommitStep, CompleteGeneration, or BeginTurn). Copy it if it must
    *         outlive those.
    *
    * Same tokens as UnprocessedTokens(), but readable without copying them back from the device.
@@ -168,10 +143,7 @@ struct Request : std::enable_shared_from_this<Request>,
 
   RequestStatus Status() const noexcept { return status_; }
 
-  /**
-   * @brief Removes the request from its engine and moves it to terminal Closed.
-   */
-  void Remove();
+  void Close();
 
   /**
    * @brief Checks if the request is in prefill mode.
@@ -273,38 +245,11 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
 
-  /**
-   * @brief Retrieves the generator parameters associated with this request.
-   * @return Shared pointer to GeneratorParams.
-   */
-  std::shared_ptr<GeneratorParams> Params();
-
-  /**
-   * @brief Sets the opaque data for user-defined purposes.
-   * @param data Pointer to the opaque data.
-   *
-   * This data can be used by the application to store additional information
-   * that may be useful for the application logic when new tokens are generated.
-   * For example, the application could store a pointer to a user-defined structure
-   * that contains the state of the application related to this request.
-   * The data can be retrieved later using GetOpaqueData(). The stored data is not
-   * used by the request or the engine and is solely for the application's use.
-   * It is the application's responsibility to manage the lifetime of this data.
-   */
-  void SetOpaqueData(void* data);
-
-  /**
-   * @brief Gets the opaque data set by the user.
-   * @return Pointer to the opaque data provided by the application.
-   */
-  void* GetOpaqueData();
-
  private:
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
   // seen_sequence_length_ is the high-water sequence index of generated output consumed by the
   // application. Continuation input creates gaps, so it is not an unseen-token count.
-  std::vector<int32_t> prefill_input_ids_;
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
@@ -344,7 +289,6 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
 
-  void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };
 
 }  // namespace Generators

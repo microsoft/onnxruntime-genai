@@ -10,31 +10,6 @@
 
 namespace Generators {
 
-namespace {
-
-DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
-                                     std::span<const int32_t> input_ids) {
-  auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
-  auto cpu_tokens = device_tokens.CpuSpan();
-  std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
-  device_tokens.CopyCpuToDevice();
-  return device_tokens;
-}
-
-void ValidateAppendLength(const GeneratorParams& params,
-                          size_t current_sequence_length,
-                          size_t token_count) {
-  const size_t max_length = static_cast<size_t>(params.search.max_length);
-  if (current_sequence_length >= max_length ||
-      token_count >= max_length - current_sequence_length) {
-    throw std::runtime_error(
-        "Input tokens must leave room for at least one generated token before max_length (" +
-        std::to_string(params.search.max_length) + ").");
-  }
-}
-
-}  // namespace
-
 Request::Request(std::shared_ptr<GeneratorParams> params)
     : params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
@@ -73,6 +48,7 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
+  tokens_host_.reserve(static_cast<size_t>(params_->search.max_length));
 }
 
 Request::~Request() = default;
@@ -87,26 +63,6 @@ void Request::OnLastExternalReference() noexcept {
 
 bool Request::IsExternallyAbandoned() const noexcept {
   return externally_abandoned_.load(std::memory_order_acquire);
-}
-
-void Request::Assign(std::shared_ptr<Engine> engine) {
-  if (status_ != RequestStatus::Unassigned) {
-    throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
-  }
-  if (prefill_input_ids_.empty()) {
-    throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
-  }
-  engine_ = engine;
-  status_ = RequestStatus::Assigned;
-
-  auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
-  processed_sequence_length_ = 0;
-  search_->AppendTokens(device_tokens);
-  prompt_sequence_length_ = CurrentSequenceLength();
-  seen_sequence_length_ = CurrentSequenceLength();
-  tokens_host_.reserve(params_->search.max_length);
-  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
-  prefill_input_ids_.clear();
 }
 
 void Request::PrepareForStep(size_t max_generated_token_indices) {
@@ -163,10 +119,7 @@ void Request::Schedule() {
   status_ = RequestStatus::Active;
 }
 
-void Request::Remove() {
-  if (status_ == RequestStatus::Unassigned) {
-    throw std::runtime_error("Cannot close a request that has not been submitted to an engine.");
-  }
+void Request::Close() {
   if (IsClosed(status_)) {
     return;
   }
@@ -176,7 +129,7 @@ void Request::Remove() {
     CompleteClose();
     return;
   }
-  engine->RemoveRequest(shared_from_this());
+  engine->CloseRequest(shared_from_this());
 }
 
 void Request::CompleteClose() {
@@ -184,70 +137,16 @@ void Request::CompleteClose() {
   status_ = RequestStatus::Closed;
 }
 
-void Request::AddTokens(std::span<const int32_t> tokens) {
-  if (tokens.empty())
-    throw std::runtime_error("Expected at least one token for generation. Received 0.");
-
-  if (status_ != RequestStatus::Unassigned) {
-    if (IsTurnComplete()) {
-      throw std::runtime_error(
-          "AddTokens only accepts initial input; use the continuation API for another turn.");
-    }
-    if (IsClosed(status_)) {
-      throw std::runtime_error("Cannot add tokens to a closed request.");
-    }
-    throw std::runtime_error("AddTokens only accepts initial input before submission to an engine.");
-  }
-
-  ValidateAppendLength(*params_, prefill_input_ids_.size(), tokens.size());
-  std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
-}
-
-void Request::Continue(std::span<const int32_t> tokens) {
+void Request::BeginTurn(std::span<const int32_t> tokens) {
   if (IsClosed(status_)) {
-    throw std::runtime_error("Cannot continue a closed request.");
+    throw std::runtime_error("Cannot begin a turn for a closed request.");
   }
-  if (tokens.empty())
-    throw std::runtime_error("Expected at least one token for continuation. Received 0.");
-  if (!IsTurnComplete()) {
-    throw std::runtime_error("Continue is only valid after the current turn is complete.");
-  }
-
   auto engine = engine_.lock();
   if (!engine) {
-    throw std::runtime_error("Cannot continue a request after its engine has been destroyed.");
-  }
-  const DeviceType cache_device = params_->model_->p_device_kvcache_->GetType();
-  if (!SupportsContinuousDecoding(cache_device)) {
     throw std::runtime_error(
-        "Continuous decoding is not supported on the selected KV-cache device type (" +
-        to_string(cache_device) + ").");
+        "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  engine->ValidateRequestCanContinue(shared_from_this());
-  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
-  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
-    throw std::logic_error("The request host token mirror does not have reserved continuation capacity.");
-  }
-
-  auto device_tokens = AllocateOnDevice(*params_, tokens);
-  search_->SaveStateForTransaction();
-  try {
-    search_->AppendTokens(device_tokens);
-    search_->CommitStateForTransaction();
-  } catch (...) {
-    const auto append_error = std::current_exception();
-    try {
-      search_->RestoreStateForTransaction();
-    } catch (...) {
-      engine->HandleContinuationRestoreFailure(
-          shared_from_this(), append_error, std::current_exception());
-    }
-    std::rethrow_exception(append_error);
-  }
-
-  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
-  prompt_sequence_length_ = CurrentSequenceLength();
-  status_ = RequestStatus::Assigned;
+  engine->BeginTurn(shared_from_this(), tokens);
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -559,18 +458,6 @@ void Request::CompleteGeneration() {
       guidance_logits_processor_->Reset();
     }
   }
-}
-
-std::shared_ptr<GeneratorParams> Request::Params() {
-  return params_;
-}
-
-void Request::SetOpaqueData(void* data) {
-  opaque_data_ = data;
-}
-
-void* Request::GetOpaqueData() {
-  return opaque_data_;
 }
 
 }  // namespace Generators

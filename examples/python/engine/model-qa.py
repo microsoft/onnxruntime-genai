@@ -4,6 +4,7 @@
 import argparse
 import json
 
+import numpy as np
 import onnxruntime_genai as og
 
 MAX_LENGTH = 1024
@@ -30,11 +31,9 @@ def run(args: argparse.Namespace):
         tokenizer.apply_chat_template(messages=system_message, add_generation_prompt=False),
     )
     session_token_count = len(system_tokens)
-    request = og.Request(params)
-    request.add_tokens(system_tokens)
-
     streaming_tokenizer = tokenizer.create_stream()
-    request_added = False
+    request = engine.create_request(params)
+    first_turn = True
 
     try:
         while prompt := input("🫵  : "):
@@ -51,16 +50,26 @@ def run(args: argparse.Namespace):
                 break
 
             session_token_count += len(turn_tokens)
-            if request_added:
-                request.continue_with(turn_tokens)
+            if first_turn:
+                input_tokens = np.concatenate(
+                    (
+                        np.asarray(system_tokens, dtype=np.int32),
+                        np.asarray(turn_tokens, dtype=np.int32),
+                    )
+                )
+                first_turn = False
             else:
-                request.add_tokens(turn_tokens)
-                engine.add_request(request)
-                request_added = True
+                input_tokens = np.asarray(turn_tokens, dtype=np.int32)
+            request.begin_turn(input_tokens)
 
             print("🤖 :", end="", flush=True)
 
-            while ready_request := engine.step():
+            while engine.has_pending_requests():
+                ready_request = engine.run()
+                if ready_request is None:
+                    raise RuntimeError("Engine returned no request while work remained")
+                if ready_request is not request:
+                    raise RuntimeError("Engine returned an unknown request")
                 while ready_request.has_unseen_tokens():
                     token = int(ready_request.get_unseen_token())
                     session_token_count += 1
@@ -69,11 +78,9 @@ def run(args: argparse.Namespace):
                         end="",
                         flush=True,
                     )
-
             print()
     finally:
-        if request_added:
-            engine.remove_request(request)
+        request.close()
 
 
 if __name__ == "__main__":

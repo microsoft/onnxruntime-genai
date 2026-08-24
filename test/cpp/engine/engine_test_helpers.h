@@ -61,23 +61,38 @@ inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
   static_cast<void>(ScheduledRequests{plan, model, nullptr, nullptr});
 }
 
-// Mints a Request carrying `prompt_tokens` but does not assign it, leaving it Unassigned so it can be
-// handed to Engine::AddRequest (which assigns it and enqueues it on the engine's scheduler).
-inline std::shared_ptr<Request> MintRequest(const Model& model, std::span<const int32_t> prompt_tokens) {
-  auto request = std::make_shared<Request>(MakeGreedyParams(model));
-  request->AddTokens(prompt_tokens);
+// Creates an Engine-owned Request from a frozen snapshot of `params`. Configuration changes must be
+// made before this call.
+inline std::shared_ptr<Request> CreateEngineRequest(
+    const std::shared_ptr<Engine>& engine,
+    const GeneratorParams& params) {
+  return engine->CreateRequest(params);
+}
+
+inline std::shared_ptr<Request> CreateEngineRequest(
+    const std::shared_ptr<Engine>& engine,
+    const Model& model) {
+  auto params = MakeGreedyParams(model);
+  return CreateEngineRequest(engine, *params);
+}
+
+// Creates an Engine-owned Request and begins its first turn, leaving it Assigned and queued.
+inline std::shared_ptr<Request> CreateRequestWithPrompt(
+    const std::shared_ptr<Engine>& engine,
+    const GeneratorParams& params,
+    std::span<const int32_t> prompt_tokens) {
+  auto request = CreateEngineRequest(engine, params);
+  request->BeginTurn(prompt_tokens);
   return request;
 }
 
-// Mints a Request carrying `prompt_tokens` and assigns it to `engine`, leaving it in the Assigned
-// state (prompt finalized on device, ready to be scheduled). The engine is only the assignment
-// target; the request may afterwards be driven through any scheduler under test.
-inline std::shared_ptr<Request> MintAssignedRequest(const std::shared_ptr<Engine>& engine,
-                                                    const Model& model,
-                                                    std::span<const int32_t> prompt_tokens) {
-  auto request = std::make_shared<Request>(MakeGreedyParams(model));
-  request->AddTokens(prompt_tokens);
-  request->Assign(engine);
+inline std::shared_ptr<Request> CreateRequestWithPrompt(
+    const std::shared_ptr<Engine>& engine,
+    const Model& model,
+    std::span<const int32_t> prompt_tokens) {
+  auto params = MakeGreedyParams(model);
+  auto request = CreateEngineRequest(engine, *params);
+  request->BeginTurn(prompt_tokens);
   return request;
 }
 

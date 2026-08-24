@@ -67,45 +67,49 @@ def model(device):
     return og.Model(config)
 
 
-def _add_request(engine, model, prompt, max_new_tokens, sink):
+def _create_request(engine, model, prompt, max_new_tokens, sink, sinks):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)
-    request = og.Request(params)
-    request.add_tokens(np.asarray(prompt, dtype=np.int32))
-    request.set_opaque_data(sink)
-    engine.add_request(request)
+    request = engine.create_request(params)
+    sinks[request] = sink
+    request.begin_turn(np.asarray(prompt, dtype=np.int32))
     return request
 
 
-def _drain(ready):
-    sink = ready.get_opaque_data()
+def _drain(ready, sinks):
+    canonical = next((request for request in sinks if request is ready), None)
+    assert canonical is not None, "Engine.run() must return the existing borrowed Request object"
+    sink = sinks[ready]
     while ready.has_unseen_tokens():
         sink.tokens.append(ready.get_unseen_token())
     return ready.is_turn_complete()
 
 
-def _step_once(engine):
-    ready = engine.step()
+def _step_once(engine, sinks, *, close_completed=True):
+    ready = engine.run()
     if ready is None:
         return False
-    if _drain(ready):
-        engine.remove_request(ready)
+    if _drain(ready, sinks) and close_completed:
+        ready.close()
     return True
 
 
-def _run(engine, *, max_steps=_MAX_STEPS):
+def _run(engine, sinks, *, max_steps=_MAX_STEPS, close_completed=True):
     steps = 0
     while engine.has_pending_requests():
-        assert _step_once(engine), "engine.step() returned no request while work remained"
+        assert _step_once(engine, sinks, close_completed=close_completed), (
+            "engine.run() returned no request while work remained"
+        )
         steps += 1
-        assert steps <= max_steps, "engine.step() exceeded the safety bound; possible non-termination"
+        assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
 
 def _generate_isolated(model, prompt, max_new_tokens):
     sink = _Sink()
     engine = og.Engine(model)
-    request = _add_request(engine, model, prompt, max_new_tokens, sink)
-    _run(engine)
+    sinks = {}
+    request = _create_request(engine, model, prompt, max_new_tokens, sink, sinks)
+    _run(engine, sinks)
     assert not request.is_turn_complete()
     del engine
     gc.collect()
@@ -166,12 +170,13 @@ def test_isolated_matches_simultaneous(model):
 
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
+    sinks = {}
     requests = [
-        _add_request(engine, model, _PROMPT_A, max_new, sink_a),
-        _add_request(engine, model, _PROMPT_B, max_new, sink_b),
+        _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks),
+        _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks),
     ]
     assert engine.has_pending_requests()
-    _run(engine)
+    _run(engine, sinks)
 
     assert sink_a.tokens == isolated_a, "request A diverged when batched with B"
     assert sink_b.tokens == isolated_b, "request B diverged when batched with A"
@@ -185,17 +190,18 @@ def test_staggered_admission(model):
 
     engine = og.Engine(model)
     sink_a = _Sink()
-    request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
+    sinks = {}
+    request_a = _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
 
     for _ in range(3):
         if not engine.has_pending_requests():
             break
-        _step_once(engine)
+        _step_once(engine, sinks)
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    request_b = _add_request(engine, model, _PROMPT_B, max_new, sink_b)
-    _run(engine)
+    request_b = _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks)
+    _run(engine, sinks)
 
     assert sink_a.tokens == expected_a
     assert sink_b.tokens == expected_b
@@ -233,9 +239,10 @@ def test_completion_isolation(model):
 
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
-    short_request = _add_request(engine, model, _PROMPT_A, short_new, short_sink)
-    long_request = _add_request(engine, model, _PROMPT_LONG, long_new, long_sink)
-    _run(engine)
+    sinks = {}
+    short_request = _create_request(engine, model, _PROMPT_A, short_new, short_sink, sinks)
+    long_request = _create_request(engine, model, _PROMPT_LONG, long_new, long_sink, sinks)
+    _run(engine, sinks)
 
     assert short_sink.tokens == predicted_tokens(_PROMPT_A, short_new)
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
@@ -245,157 +252,248 @@ def test_completion_isolation(model):
 
 def test_continuation_while_peer_remains_active(model):
     short_max_new, long_max_new = 60, 80
-    # EOS is valid input context here; Continue must reset the prior turn's done state rather than
+    # EOS is valid input context here; begin_turn must reset the prior turn's done state rather than
     # treating an EOS token in the new prompt fragment as a newly generated stop.
     follow_up = [_EOS_TOKEN_ID, 12]
 
     reference_engine = og.Engine(model)
     reference_sink = _Sink()
-    reference = _add_request(
-        reference_engine, model, _PROMPT_A, short_max_new, reference_sink
-    )
+    reference_sinks = {}
+    reference = _create_request(reference_engine, model, _PROMPT_A, short_max_new, reference_sink, reference_sinks)
     while not reference.is_turn_complete():
-        ready = reference_engine.step()
+        ready = reference_engine.run()
         assert ready is not None
-        _drain(ready)
-    reference.continue_with(np.asarray(follow_up, dtype=np.int32))
-    _run(reference_engine)
+        assert ready is reference
+        _drain(ready, reference_sinks)
+    reference.begin_turn(np.asarray(follow_up, dtype=np.int32))
+    _run(reference_engine, reference_sinks)
 
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
-    short = _add_request(engine, model, _PROMPT_A, short_max_new, short_sink)
-    long = _add_request(engine, model, _PROMPT_LONG, long_max_new, long_sink)
+    sinks = {}
+    short = _create_request(engine, model, _PROMPT_A, short_max_new, short_sink, sinks)
+    long = _create_request(engine, model, _PROMPT_LONG, long_max_new, long_sink, sinks)
 
     while not short.is_turn_complete():
-        ready = engine.step()
+        ready = engine.run()
         assert ready is not None
-        if _drain(ready) and ready is not short:
-            engine.remove_request(ready)
+        if _drain(ready, sinks) and ready is not short:
+            ready.close()
 
     assert not long.is_turn_complete(), "peer must remain active when continuation is appended"
     for _ in range(3):
-        ready = engine.step()
+        ready = engine.run()
         assert ready is not None
-        _drain(ready)
+        _drain(ready, sinks)
     assert not long.is_turn_complete(), "peer must remain active during the continuation delay"
 
-    short.continue_with(np.asarray(follow_up, dtype=np.int32))
-    _run(engine)
+    short.begin_turn(np.asarray(follow_up, dtype=np.int32))
+    _run(engine, sinks)
 
     assert short_sink.tokens == reference_sink.tokens
 
 
-def test_request_rejects_tokens_while_awaiting_admission(model):
+def test_continuation_waits_for_ready_notification(model):
     engine = og.Engine(model)
-    sink = _Sink()
-    request = _add_request(engine, model, _PROMPT_A, 8, sink)
+    sinks = {}
+    first = _create_request(engine, model, [5, 8, 57], 40, _Sink(), sinks)
+    second = _create_request(engine, model, [6, 8, 56], 40, _Sink(), sinks)
 
-    with pytest.raises(RuntimeError, match="initial input before submission"):
-        request.add_tokens(np.asarray([12], dtype=np.int32))
+    ready = engine.run()
+    assert ready is first
+    _drain(ready, sinks)
+    assert first.is_turn_complete()
+    assert second.is_turn_complete()
 
-    engine.remove_request(request)
+    continuation = np.asarray([12], dtype=np.int32)
+    with pytest.raises(RuntimeError, match="ready notification"):
+        second.begin_turn(continuation)
+
+    ready = engine.run()
+    assert ready is second
+    _drain(ready, sinks)
+    second.begin_turn(continuation)
+    first.close()
+    second.close()
 
 
-def test_request_cannot_be_removed_from_another_engine(model):
-    owner = og.Engine(model)
-    other = og.Engine(model)
-    sink = _Sink()
-    request = _add_request(owner, model, _PROMPT_A, 8, sink)
+def test_request_rejects_second_turn_while_active(model):
+    engine = og.Engine(model)
+    sinks = {}
+    request = _create_request(engine, model, _PROMPT_A, 8, _Sink(), sinks)
 
-    with pytest.raises(RuntimeError, match="does not belong"):
-        other.remove_request(request)
+    with pytest.raises(RuntimeError, match="new request or after the current turn is complete"):
+        request.begin_turn(np.asarray([12], dtype=np.int32))
 
-    owner.remove_request(request)
-    other.remove_request(request)
-    assert not request.is_turn_complete()
+    request.close()
 
 
 def test_request_lifecycle_operations(model):
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=64)
-    request = og.Request(params)
-
-    request.add_tokens(np.asarray(_PROMPT_A, dtype=np.int32))
-    sink = _Sink()
-    request.set_opaque_data(sink)
     engine = og.Engine(model)
-    engine.add_request(request)
+    sink = _Sink()
+    sinks = {}
+    request = _create_request(engine, model, _PROMPT_A, 61, sink, sinks)
 
-    ready = engine.step()
+    ready = engine.run()
     assert ready is not None
-    _drain(ready)
+    assert ready is request
+    _drain(ready, sinks)
     assert not request.is_turn_complete()
 
     while not request.is_turn_complete():
-        ready = engine.step()
+        ready = engine.run()
         assert ready is not None
-        _drain(ready)
+        _drain(ready, sinks)
     assert request.is_turn_complete()
 
-    with pytest.raises(RuntimeError, match="use the continuation API"):
-        request.add_tokens(np.asarray([12], dtype=np.int32))
-    request.continue_with(np.asarray([12], dtype=np.int32))
+    request.begin_turn(np.asarray([12], dtype=np.int32))
     assert not request.is_turn_complete()
 
-    engine.remove_request(request)
+    request.close()
     assert not request.is_turn_complete()
     with pytest.raises(RuntimeError, match="closed request"):
-        request.add_tokens(np.asarray([12], dtype=np.int32))
+        request.begin_turn(np.asarray([12], dtype=np.int32))
+    request.close()
+
+
+def test_request_parameters_are_snapshotted(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(_PROMPT_LONG) + 4)
+    request = engine.create_request(params)
+    sink = _Sink()
+    sinks = {request: sink}
+
+    params.set_search_options(max_length=len(_PROMPT_LONG) + 12)
+    request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
+    _run(engine, sinks)
+
+    assert sink.tokens == predicted_tokens(_PROMPT_LONG, 4)
+
+
+@pytest.mark.parametrize("state", ["created", "active", "turn-complete"])
+def test_close_is_valid_and_idempotent_from_every_state(model, state):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(_PROMPT_LONG) + 8)
+    request = engine.create_request(params)
+    sinks = {request: _Sink()}
+
+    if state != "created":
+        request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
+    if state == "active":
+        ready = engine.run()
+        assert ready is request
+        _drain(ready, sinks)
+        assert not request.is_turn_complete()
+    elif state == "turn-complete":
+        while not request.is_turn_complete():
+            ready = engine.run()
+            assert ready is request
+            _drain(ready, sinks)
+
+    request.close()
+    request.close()
+
+    assert not engine.has_pending_requests()
+    assert not request.is_turn_complete()
     with pytest.raises(RuntimeError, match="closed request"):
-        request.continue_with(np.asarray([12], dtype=np.int32))
-    engine.remove_request(request)
+        request.begin_turn(np.asarray([12], dtype=np.int32))
+
+
+def test_unread_tokens_remain_fifo_across_turns_and_close(model):
+    follow_up = np.asarray([_EOS_TOKEN_ID, 12], dtype=np.int32)
+
+    def run_two_turns(*, drain_during_run):
+        engine = og.Engine(model)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=64)
+        request = engine.create_request(params)
+        request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
+        tokens = []
+
+        while not request.is_turn_complete():
+            ready = engine.run()
+            assert ready is request
+            if drain_during_run:
+                while request.has_unseen_tokens():
+                    tokens.append(request.get_unseen_token())
+        first_turn_count = len(tokens)
+
+        request.begin_turn(follow_up)
+        while not request.is_turn_complete():
+            ready = engine.run()
+            assert ready is request
+            if drain_during_run:
+                while request.has_unseen_tokens():
+                    tokens.append(request.get_unseen_token())
+
+        request.close()
+        while request.has_unseen_tokens():
+            tokens.append(request.get_unseen_token())
+        return tokens, first_turn_count
+
+    expected, first_turn_count = run_two_turns(drain_during_run=True)
+    actual, unread_first_turn_count = run_two_turns(drain_during_run=False)
+
+    assert first_turn_count > 0
+    assert unread_first_turn_count == 0
+    assert actual == expected
 
 
 def test_last_handle_release_reclaims_retained_capacity(model):
     engine = og.Engine(model)
     sinks = [_Sink() for _ in range(8)]
+    sinks_by_request = {}
     requests = [
-        _add_request(engine, model, [5 + index, 9, 13], 1, sinks[index])
-        for index in range(8)
+        _create_request(engine, model, [5 + index, 9, 13], 1, sinks[index], sinks_by_request) for index in range(8)
     ]
 
     while not all(request.is_turn_complete() for request in requests):
-        ready = engine.step()
+        ready = engine.run()
         assert ready is not None
-        _drain(ready)
+        _drain(ready, sinks_by_request)
 
     # Every TurnComplete request still owns one of the eight resident slots. Dropping all public
     # handles must mark them abandoned so the next admission can reclaim that capacity.
+    sinks_by_request.clear()
     requests.clear()
     del ready
     gc.collect()
 
     replacement_sink = _Sink()
-    replacement = _add_request(engine, model, _PROMPT_A, 4, replacement_sink)
-    _run(engine)
+    replacement_sinks = {}
+    replacement = _create_request(engine, model, _PROMPT_A, 4, replacement_sink, replacement_sinks)
+    _run(engine, replacement_sinks)
 
     assert replacement_sink.tokens == predicted_tokens(_PROMPT_A, 4)
     assert not replacement.is_turn_complete()
 
 
-def test_remove_request_freezes_output(model):
+def test_close_request_freezes_output(model):
     max_new = 40
     sibling_new = 16
     sibling_expected = predicted_tokens(_PROMPT_B, sibling_new)
 
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
-    request_a = _add_request(engine, model, _PROMPT_A, max_new, sink_a)
-    request_b = _add_request(engine, model, _PROMPT_B, sibling_new, sink_b)
+    sinks = {}
+    request_a = _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
+    request_b = _create_request(engine, model, _PROMPT_B, sibling_new, sink_b, sinks)
 
     for _ in range(4):
         if not engine.has_pending_requests():
             break
-        _step_once(engine)
-    assert len(sink_a.tokens) > 0, "request A produced nothing before removal"
+        _step_once(engine, sinks)
+    assert len(sink_a.tokens) > 0, "request A produced nothing before close"
 
-    engine.remove_request(request_a)
+    request_a.close()
     frozen_a = list(sink_a.tokens)
 
-    _run(engine)
+    _run(engine, sinks)
 
-    assert sink_a.tokens == frozen_a, "removed request kept producing tokens"
-    assert sink_b.tokens == sibling_expected, "sibling did not complete after removal"
+    assert sink_a.tokens == frozen_a, "closed request kept producing tokens"
+    assert sink_b.tokens == sibling_expected, "sibling did not complete after close"
     assert not request_b.is_turn_complete()
 
 
@@ -405,8 +503,9 @@ def test_engine_teardown_and_recreation(model):
 
     first = og.Engine(model)
     sink1 = _Sink()
-    first_request = _add_request(first, model, _PROMPT_A, max_new, sink1)
-    _run(first)
+    first_sinks = {}
+    first_request = _create_request(first, model, _PROMPT_A, max_new, sink1, first_sinks)
+    _run(first, first_sinks)
     assert sink1.tokens == expected
     assert not first_request.is_turn_complete()
     del first
@@ -415,7 +514,8 @@ def test_engine_teardown_and_recreation(model):
     second = og.Engine(model)
     assert not second.has_pending_requests()
     sink2 = _Sink()
-    second_request = _add_request(second, model, _PROMPT_A, max_new, sink2)
-    _run(second)
+    second_sinks = {}
+    second_request = _create_request(second, model, _PROMPT_A, max_new, sink2, second_sinks)
+    _run(second, second_sinks)
     assert sink2.tokens == expected
     assert not second_request.is_turn_complete()

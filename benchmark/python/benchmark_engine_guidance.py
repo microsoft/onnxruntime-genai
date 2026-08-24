@@ -54,10 +54,12 @@ def generate(engine, request, tokenizer, request_started_at):
     last_token_at = None
     started = time.perf_counter()
 
-    while not request.is_turn_complete():
-        ready_request = engine.step()
+    while engine.has_pending_requests():
+        ready_request = engine.run()
         if ready_request is None:
-            raise RuntimeError("Engine stopped before the request completed")
+            raise RuntimeError("Engine returned no request while work remained")
+        if ready_request is not request:
+            raise RuntimeError("Engine returned an unknown request")
         while ready_request.has_unseen_tokens():
             now = time.perf_counter()
             if first_token_at is None:
@@ -105,17 +107,16 @@ def run_once(engine, model, tokenizer, prompt_tokens, max_length, guided):
     params.set_search_options(do_sample=False, max_length=max_length)
     if guided:
         params.set_guidance("lark_grammar", f"start: %json {json.dumps(SCHEMA)}\n")
-    request = og.Request(params)
-    request.add_tokens(np.asarray(prompt_tokens, dtype=np.int32))
+    request = engine.create_request(params)
     setup_ms = (time.perf_counter() - setup_started) * 1000
 
     try:
         admission_started = time.perf_counter()
-        engine.add_request(request)
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
         admission_ms = (time.perf_counter() - admission_started) * 1000
         output, metrics = generate(engine, request, tokenizer, setup_started)
     finally:
-        engine.remove_request(request)
+        request.close()
 
     metrics["setup_ms"] = setup_ms
     metrics["admission_ms"] = admission_ms

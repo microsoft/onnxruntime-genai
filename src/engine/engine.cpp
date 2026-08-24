@@ -3,9 +3,50 @@
 
 #include "engine.h"
 
+#include "../search.h"
+
 namespace Generators {
 
 namespace {
+
+std::shared_ptr<GeneratorParams> CloneRequestParams(
+    const GeneratorParams& source,
+    const Model& model) {
+  auto copy = std::make_shared<GeneratorParams>(model);
+  copy->search = source.search;
+  copy->speculative = source.speculative;
+  copy->max_batch_size = source.max_batch_size;
+  copy->use_graph_capture = source.use_graph_capture;
+  copy->max_graph_capture_length = source.max_graph_capture_length;
+  copy->use_multi_profile = source.use_multi_profile;
+  copy->p_device = source.p_device;
+  copy->guidance_type = source.guidance_type;
+  copy->guidance_data = source.guidance_data;
+  copy->guidance_ff_tokens_enabled = source.guidance_ff_tokens_enabled;
+  return copy;
+}
+
+DeviceSpan<int32_t> AllocateOnDevice(
+    GeneratorParams& params,
+    std::span<const int32_t> input_ids) {
+  auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
+  auto cpu_tokens = device_tokens.CpuSpan();
+  std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
+  device_tokens.CopyCpuToDevice();
+  return device_tokens;
+}
+
+void ValidateAppendLength(const GeneratorParams& params,
+                          size_t current_sequence_length,
+                          size_t token_count) {
+  const size_t max_length = static_cast<size_t>(params.search.max_length);
+  if (current_sequence_length >= max_length ||
+      token_count >= max_length - current_sequence_length) {
+    throw std::runtime_error(
+        "Input tokens must leave room for at least one generated token before max_length (" +
+        std::to_string(params.search.max_length) + ").");
+  }
+}
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   try {
@@ -47,6 +88,24 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   staged_ready_requests_.reserve(max_batch_size);
 }
 
+Engine::~Engine() {
+  while (!tracked_requests_.empty()) {
+    auto request = tracked_requests_.back().lock();
+    tracked_requests_.pop_back();
+    if (!request) {
+      continue;
+    }
+    if (IsClosed(request->status_)) {
+      continue;
+    }
+    try {
+      CloseRequest(request);
+    } catch (...) {
+      request->CompleteClose();
+    }
+  }
+}
+
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
   auto scheduler = Scheduler::Create(model, cache_manager);
@@ -54,31 +113,126 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
 }
 
-void Engine::AddRequest(std::shared_ptr<Request> request) {
+std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params) {
   ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (params.model_.get() != model_.get()) {
+    throw std::runtime_error(
+        "Engine request parameters must belong to the Engine's model.");
+  }
+
+  auto request = std::make_shared<Request>(
+      CloneRequestParams(params, *model_));
   if (cache_manager_->SupportsDynamicBatching()) {
     request->ValidateEngineCompatibility();
   }
 
-  // Track the request before assignment so every successfully submitted request can later be found
-  // even when the scheduler and cache hold it through implementation-specific containers. The
-  // registry allocation therefore happens before any request lifecycle mutation.
   tracked_requests_.push_back(request);
+  request->engine_ = shared_from_this();
+  return request;
+}
+
+void Engine::BeginTurn(const std::shared_ptr<Request>& request,
+                       std::span<const int32_t> tokens) {
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (!request || request->engine_.lock().get() != this) {
+    throw std::runtime_error(
+        "Cannot begin a turn for a request that does not belong to this engine.");
+  }
+  if (tokens.empty()) {
+    throw std::runtime_error(
+        "Expected at least one input token for generation. Received 0.");
+  }
+
+  const bool first_turn = request->status_ == RequestStatus::Unassigned;
+  if (!first_turn && !IsTurnComplete(request->status_)) {
+    if (IsClosed(request->status_)) {
+      throw std::runtime_error("Cannot begin a turn for a closed request.");
+    }
+    throw std::runtime_error(
+        "BeginTurn is only valid for a new request or after the current turn is complete.");
+  }
+
+  if (first_turn) {
+    if (cache_manager_->SupportsDynamicBatching()) {
+      request->ValidateEngineCompatibility();
+    }
+  } else {
+    const DeviceType cache_device =
+        request->params_->model_->p_device_kvcache_->GetType();
+    if (!SupportsContinuousDecoding(cache_device)) {
+      throw std::runtime_error(
+          "Continuous decoding is not supported on the selected KV-cache device type (" +
+          to_string(cache_device) + ").");
+    }
+    ValidateRequestCanContinue(request);
+  }
+
+  const size_t sequence_length =
+      first_turn ? 0 : static_cast<size_t>(request->CurrentSequenceLength());
+  ValidateAppendLength(*request->params_, sequence_length, tokens.size());
+  if (request->tokens_host_.capacity() <
+      request->tokens_host_.size() + tokens.size()) {
+    throw std::logic_error(
+        "The request host token mirror does not have reserved turn capacity.");
+  }
+
+  auto device_tokens = AllocateOnDevice(*request->params_, tokens);
+  const RequestStatus status_before = request->status_;
+  const size_t host_size_before = request->tokens_host_.size();
+  const int64_t prompt_length_before = request->prompt_sequence_length_;
+  const int64_t seen_length_before = request->seen_sequence_length_;
+  const int64_t processed_length_before =
+      request->processed_sequence_length_;
+  bool added_to_scheduler = false;
+
+  request->search_->SaveStateForTransaction();
   try {
-    request->Assign(shared_from_this());
-    scheduler_->AddRequest(request);
+    request->search_->AppendTokens(device_tokens);
+    request->tokens_host_.insert(
+        request->tokens_host_.end(), tokens.begin(), tokens.end());
+    request->prompt_sequence_length_ = request->CurrentSequenceLength();
+    if (first_turn) {
+      request->processed_sequence_length_ = 0;
+      request->seen_sequence_length_ = request->CurrentSequenceLength();
+      request->status_ = RequestStatus::Assigned;
+      scheduler_->AddRequest(request);
+      added_to_scheduler = true;
+    } else {
+      request->status_ = RequestStatus::Assigned;
+    }
+    request->search_->CommitStateForTransaction();
   } catch (...) {
-    tracked_requests_.pop_back();
-    throw;
+    const auto append_error = std::current_exception();
+    try {
+      if (added_to_scheduler) {
+        scheduler_->RemoveRequest(request);
+      }
+      request->status_ = status_before;
+      request->tokens_host_.resize(host_size_before);
+      request->prompt_sequence_length_ = prompt_length_before;
+      request->seen_sequence_length_ = seen_length_before;
+      request->processed_sequence_length_ = processed_length_before;
+      request->search_->RestoreStateForTransaction();
+    } catch (...) {
+      HandleContinuationRestoreFailure(
+          request, append_error, std::current_exception());
+    }
+    std::rethrow_exception(append_error);
   }
 }
 
-void Engine::RemoveRequest(std::shared_ptr<Request> request) {
+void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (request && IsClosed(request->status_)) {
     return;
   }
   if (!request || request->engine_.lock().get() != this) {
-    throw std::runtime_error("Cannot remove a request from an engine it does not belong to.");
+    throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
 
   scheduler_->RemoveRequest(request);
@@ -105,9 +259,9 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 }
 
 void Engine::ReclaimAbandonedRequests() {
-  // ExternalRelease only publishes an atomic abandonment marker. Engine entry points are externally
-  // serialized, so this boundary can safely perform the normal removal sequence: scheduler/cache
-  // release, ready-notification purge, and terminal close.
+  // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
+  // can safely perform the normal removal sequence: scheduler/cache release, ready-notification
+  // purge, and terminal close.
   std::vector<std::shared_ptr<Request>> abandoned_requests;
   abandoned_requests.reserve(tracked_requests_.size());
   tracked_requests_.erase(
@@ -130,7 +284,7 @@ void Engine::ReclaimAbandonedRequests() {
   for (const auto& request : abandoned_requests) {
     // Recheck defensively in case an external owner was reacquired before this serialized boundary.
     if (request->IsExternallyAbandoned()) {
-      RemoveRequest(request);
+      CloseRequest(request);
     }
   }
 }
@@ -151,7 +305,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
                 ready_requests_.end(), request) != ready_requests_.end()) {
     throw std::runtime_error(
         "Cannot continue a request while its ready notification is pending; "
-        "call Engine::Step() to drain the ready notification before continuing.");
+        "call Engine::Run() to drain the ready notification before continuing.");
   }
 
   if (!cache_manager_->SupportsDynamicBatching() &&
@@ -169,7 +323,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
       "Continuation append failed and its Search state could not be restored.",
       append_error);
   try {
-    RemoveRequest(request);
+    CloseRequest(request);
   } catch (...) {
     message = AddExceptionCause(
         std::move(message) + " Closing the poisoned request also failed.",
@@ -184,7 +338,7 @@ void Engine::ValidateRequestCanContinue(const std::shared_ptr<Request>& request)
       restore_error);
 }
 
-std::shared_ptr<Request> Engine::Step() {
+std::shared_ptr<Request> Engine::Run() {
   ReclaimAbandonedRequests();
   if (auto request = DrainReadyRequest()) {
     return request;
@@ -192,10 +346,10 @@ std::shared_ptr<Request> Engine::Step() {
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  return cache_manager_->SupportsDynamicBatching() ? StepDynamic() : StepStatic();
+  return cache_manager_->SupportsDynamicBatching() ? RunDynamic() : RunStatic();
 }
 
-std::shared_ptr<Request> Engine::StepStatic() {
+std::shared_ptr<Request> Engine::RunStatic() {
   while (scheduler_->HasPendingRequests()) {
     auto scheduled_requests = scheduler_->Schedule();
     std::vector<RequestStatus> statuses_before_step;
@@ -224,7 +378,7 @@ std::shared_ptr<Request> Engine::StepStatic() {
   return nullptr;
 }
 
-std::shared_ptr<Request> Engine::StepDynamic() {
+std::shared_ptr<Request> Engine::RunDynamic() {
   while (scheduler_->HasPendingRequests()) {
     // A dynamic step is a transaction with six phases:
     // plan -> reserve cache -> checkpoint request state -> execute -> stage sampled tokens -> commit.
@@ -307,7 +461,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     bool request_transaction_active = false;
     const auto rollback_transaction = [&]() {
       // Request/search state and paged-cache state are checkpointed separately. Both must be
-      // restored so a retry observes exactly the state that existed before this Step() call.
+      // restored so a retry observes exactly the state that existed before this Run() call.
       std::exception_ptr rollback_error;
       if (request_transaction_active) {
         try {
@@ -438,7 +592,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
-    // Step() returns one ready request at a time. Keep the rest queued so draining this committed
+    // Run() returns one ready request at a time. Keep the rest queued so draining this committed
     // batch does not trigger another model execution.
     ready_requests_.swap(staged_ready_requests_);
     ready_request_index_ = 0;
