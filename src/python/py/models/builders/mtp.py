@@ -16,7 +16,7 @@ from .base import Model
 class MTPModel(Model):
     """Base class for composite models with an optional MTP graph."""
 
-    def make_mtp_init(self, extra_options):
+    def make_mtp_init(self, config, extra_options):
         self.mtp_attrs = {
             "build": False,  # Whether the source checkpoint declares an MTP graph.
             "shared_initializers": [],  # Initializers shared by the decoder and MTP graph after saving.

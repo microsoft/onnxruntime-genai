@@ -15,13 +15,11 @@ class OliveModel(GPTQModel):
     - qzeros: (out_features, packed_num_groups) uint8, packed along last dim
     """
 
+    override_config_key = "overrides"
+
     def set_quantized_tensor_properties(self, module):
         module.out_features = module.qweight.shape[0]
         module.in_features = module.qweight.shape[1] * 8 // module.bits
-
-    def load_quant_config(self, quant_attrs):
-        super().load_quant_config(quant_attrs)
-        self.overrides = quant_attrs["config"]["overrides"] or {}
 
     def get_layer_bits(self, layer_name):
         name = ".".join(layer_name.split(".")[:-1])

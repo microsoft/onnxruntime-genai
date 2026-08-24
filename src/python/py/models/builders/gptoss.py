@@ -527,23 +527,15 @@ class GPTOSSModel(Model):
         gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
-        # HF GptOssExperts stores the expert weights input-major:
-        #   gate_up_proj = [E, hidden, 2*inter], down_proj = [E, inter, hidden].
-        # Every downstream consumer (non-quant MoE, and the QMoE quantizers in
-        # make_qmoe_weights) expects output-major [E, N, K] with the contraction
-        # axis (K) last: gate_up = [E, 2*inter, hidden], down = [E, hidden, inter].
-        # Transpose for all EPs/ops; the CUDA QMoE path is no exception (keeping
-        # the original orientation swaps N and K, which silently corrupts the
-        # quantized weights/scales and yields garbage output).
-        if not has_packed_experts and not is_fp4_moe:
-            gate_up_proj_layout = moe.experts.gate_up_proj.transpose(-1, -2)
-            down_proj_layout = moe.experts.down_proj.transpose(-1, -2)
-
         if has_packed_experts:
             self.make_moe_expert_initializers(layer_id, moe.experts)
         elif is_fp4_moe:
             self.make_moe_expert_initializers(layer_id, self.load_mxfp4_experts(layer_id))
         else:
+            # HF GptOssExperts stores weights input-major, while every downstream consumer
+            # expects output-major [E, N, K] with the contraction axis last.
+            gate_up_proj_layout = moe.experts.gate_up_proj.transpose(-1, -2)
+            down_proj_layout = moe.experts.down_proj.transpose(-1, -2)
             self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_proj_layout, down_proj_layout)
 
         # Save biases (shared for all paths)

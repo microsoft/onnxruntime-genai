@@ -236,19 +236,23 @@ class QuantizedModel:
         num_layers,
         load_weights=True,
         lm_head=None,
+        global_group_size=None,
+        global_bits=None,
     ):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = lm_head if lm_head is not None else TensorModule()
-        self.mtp = None
         self.layers = {} if load_weights else []
         self.num_layers = num_layers
         if not load_weights:
             return
 
         self.quant_attrs = quant_attrs
-        self.load_quant_config(quant_attrs)
+        self.global_group_size = (
+            quant_attrs["config"]["group_size"] if global_group_size is None else global_group_size
+        )
+        self.global_bits = quant_attrs["config"]["bits"] if global_bits is None else global_bits
 
         lm_head_tensors = {}
         for weight_file in os.listdir(input_path):
@@ -257,7 +261,7 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for raw_name, tensor in weights.items():
-                    name = self.normalize_weight_name(raw_name)
+                    name = QuantizedModel.normalize_weight_name(self, raw_name)
                     if name is None:
                         continue
 
@@ -726,6 +730,8 @@ class QuantizedModel:
             return None
         if name.startswith("model.language_model."):
             name = "model." + name[len("model.language_model.") :]
+        for old, new in getattr(self, "weight_name_replacements", ()):
+            name = name.replace(old, new)
         return name
 
     def assign_lm_head_tensors(self, lm_head_tensors):
@@ -779,10 +785,6 @@ class QuantizedModel:
             elif key == "lm_head.g_idx":
                 self.initialize_quantized_lm_head(local_bits, local_group_size)
                 self.lm_head.g_idx = tensor
-
-    def load_quant_config(self, quant_attrs):
-        self.global_group_size = quant_attrs["config"]["group_size"]
-        self.global_bits = quant_attrs["config"]["bits"]
 
     def get_layer_bits(self, layer_name):
         # 'bits' is globally defined for all layers

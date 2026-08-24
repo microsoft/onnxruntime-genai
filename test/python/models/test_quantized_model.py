@@ -24,10 +24,56 @@ from loaders.base import (
     QuantizedTensorModule,
     TensorModule,
 )
+from loaders.gptq import GPTQModel
+from loaders.olive import OliveModel
 from loaders.quark import QuarkModel
 
 _BASE_MODEL = object.__new__(QuantizedModel)
 _QUARK_MODEL = object.__new__(QuarkModel)
+
+
+def test_gptq_initializes_dynamic_quantization_overrides(tmp_path):
+    quant_attrs = {
+        "config": {"group_size": 128, "bits": 4, "dynamic": {"+:model.layers.0.*": {"bits": 8}}},
+        "use_g_idx": False,
+    }
+
+    model = GPTQModel("gptq", tmp_path, quant_attrs, 0, 0, 0, 0)
+
+    assert model.global_group_size == 128
+    assert model.global_bits == 4
+    assert model.get_layer_bits("model.layers.0.self_attn.q_proj") == 8
+
+
+def test_olive_initializes_per_layer_quantization_overrides(tmp_path):
+    quant_attrs = {
+        "config": {
+            "group_size": 128,
+            "bits": 4,
+            "overrides": {"model.layers.0.self_attn.q_proj": {"group_size": 64, "bits": 8}},
+        },
+        "use_g_idx": False,
+    }
+
+    model = OliveModel("olive", tmp_path, quant_attrs, 0, 0, 0, 0)
+
+    layer_name = "model.layers.0.self_attn.q_proj.weight"
+    assert model.get_layer_group_size(layer_name) == 64
+    assert model.get_layer_bits(layer_name) == 8
+
+
+def test_quark_initializes_global_quantization_config(tmp_path):
+    quant_attrs = {
+        "config": {
+            "global_quant_config": {"weight": {"group_size": 32, "dtype": "uint4"}},
+            "layer_quant_config": {},
+        }
+    }
+
+    model = QuarkModel("quark", tmp_path, quant_attrs, 0, 0, 0, 0)
+
+    assert model.global_group_size == 32
+    assert model.global_bits == 4
 
 
 def test_quark_finalizes_generic_packed_experts():

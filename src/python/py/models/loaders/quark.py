@@ -10,21 +10,33 @@ from .base import QuantizedModel
 
 
 class QuarkModel(QuantizedModel):
+    weight_name_replacements = (
+        (".weight_quantizer.scale", ".weight_scale"),
+        (".weight_quantizer.zero_point", ".weight_zero_point"),
+    )
+
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.global_quant_config = quant_attrs["config"]["global_quant_config"]["weight"]
+        global_dtype = self.global_quant_config["dtype"]
+        if global_dtype not in {"uint4", "int4"}:
+            raise ValueError(f"Unexpected dtype: {global_dtype}.")
+        super().__init__(
+            quant_type,
+            input_path,
+            quant_attrs,
+            q_size,
+            kv_size,
+            intermediate_size,
+            num_layers,
+            global_group_size=self.global_quant_config["group_size"],
+            global_bits=4,
+        )
         self.repack_quantized_tensors(clear_g_idx=True)
 
     def set_quantized_tensor_properties(self, module):
         module.out_features = module.scales.shape[1]
         module.in_features = module.qweight.shape[0]
         self.set_g_idx(module)
-
-    def normalize_weight_name(self, name):
-        name = super().normalize_weight_name(name)
-        if name is None:
-            return None
-        name = name.replace(".weight_quantizer.scale", ".weight_scale")
-        return name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
 
     def repack_experts(self, experts):
         """
@@ -262,20 +274,6 @@ class QuarkModel(QuantizedModel):
             packed_weight[..., i // 2] = packed_val
 
         return packed_weight
-
-    def load_quant_config(self, quant_attrs):
-        self.global_quant_config = quant_attrs["config"]["global_quant_config"]["weight"]
-        self.global_group_size = self.global_quant_config["group_size"]
-        global_dtype = self.global_quant_config["dtype"]
-
-        dtype_bits_maps = {
-            "uint4": 4,
-            "int4": 4,
-        }
-
-        if global_dtype not in dtype_bits_maps:
-            raise ValueError(f"Unexpected dtype: {global_dtype}.")
-        self.global_bits = dtype_bits_maps[global_dtype]
 
     def get_layer_bits(self, layer_name):
         name = layer_name.split(".")[0]

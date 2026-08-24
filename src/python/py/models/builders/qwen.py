@@ -620,7 +620,7 @@ class Qwen35MoEModel(MTPModel):
         self.model_type = self.decoder.model_type
 
     def make_mtp_init(self, config, extra_options):
-        decoder_options = super().make_mtp_init(extra_options)
+        decoder_options = super().make_mtp_init(config, extra_options)
         text_config = getattr(config, "text_config", config)
         num_mtp_layers = getattr(text_config, "mtp_num_hidden_layers", None)
         if num_mtp_layers is None:

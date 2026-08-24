@@ -12,7 +12,10 @@ from .base import QuantizedModel
 
 
 class GPTQModel(QuantizedModel):
+    override_config_key = "dynamic"
+
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+        self.overrides = quant_attrs["config"].get(self.override_config_key, {}) or {}
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
         self.repack_quantized_tensors(clear_g_idx=not quant_attrs["use_g_idx"])
 
@@ -46,10 +49,6 @@ class GPTQModel(QuantizedModel):
 
         self.pack_qzeros(temp_module)
         module.qzeros = temp_module.qzeros
-
-    def load_quant_config(self, quant_attrs):
-        super().load_quant_config(quant_attrs)
-        self.overrides = quant_attrs["config"].get("dynamic", {})
 
     def get_overrides(self, layer_name):
         for pattern, overrides in self.overrides.items():
