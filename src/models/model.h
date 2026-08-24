@@ -13,6 +13,7 @@
 #include "models/preprocessing/phi_image_processor.h"
 #include "models/preprocessing/whisper_processor.h"
 #include "models/preprocessing/parakeet_processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/phi_multimodal_processor.h"
 #include "models/preprocessing/gemma_image_processor.h"
 #include "models/preprocessing/gemma4_multimodal_processor.h"
@@ -107,64 +108,6 @@ struct State {
   OrtSession* graph_capture_session_{nullptr};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
-};
-
-struct TokenizerStream : LeakChecked<TokenizerStream> {
-  TokenizerStream(const Tokenizer& tokenizer);
-
-  const std::string& Decode(int32_t token);
-
- private:
-  std::shared_ptr<const Tokenizer> tokenizer_;
-  OrtxPtr<OrtxObject> cache_;
-  std::string chunk_;
-};
-
-// Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
-// Sequence length is vector.size()/count
-std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
-
-struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer>, ExternalRefCounted<Tokenizer> {
-  Tokenizer(Config& config);
-
-  std::unique_ptr<TokenizerStream> CreateStream() const;
-
-  void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
-  std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<const int32_t> tokens) const;
-  std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
-  std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
-                                           const char* template_kwargs, bool add_generation_prompt) const;
-
-  std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
-  std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
-  std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
-
-  int32_t TokenToTokenId(const char* token) const;
-  int32_t GetBosTokenId() const { return bos_token_id_; }
-  const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
-  int32_t GetPadTokenId() const { return pad_token_id_; }
-
-  // Tool-calling and reasoning token IDs.
-  // Naming follows the bos/eos/pad convention:
-  //   bot = beginning of tool (call), eot = end of tool (call)
-  //   bor = beginning of reasoning,   eor = end of reasoning
-  // Throws if the model does not define the requested token.
-  int32_t GetBotTokenId() const;
-  int32_t GetEotTokenId() const;
-  int32_t GetBorTokenId() const;
-  int32_t GetEorTokenId() const;
-
-  OrtxPtr<OrtxTokenizer> tokenizer_;
-
- private:
-  int32_t bos_token_id_;
-  std::vector<int32_t> eos_token_id_;
-  int32_t pad_token_id_;
-  std::optional<int32_t> bot_token_id_;
-  std::optional<int32_t> eot_token_id_;
-  std::optional<int32_t> bor_token_id_;
-  std::optional<int32_t> eor_token_id_;
 };
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {

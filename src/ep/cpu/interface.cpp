@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "search.h"
+#include "config_utils.h"
 #include "models/utils.h"
 #include "models/io/kv_cache.h"
 #include "interface.h"
@@ -195,6 +196,10 @@ struct CpuInterface : DeviceInterface {
   bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const override {
     return decoder.sliding_window &&
            decoder.sliding_window->slide_key_value_cache;
+  }
+
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
   }
 
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself

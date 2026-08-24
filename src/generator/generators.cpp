@@ -16,6 +16,7 @@
 #include "models/model_type.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
+#include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"
 #include "decoding/n_gram_decoding_strategy.h"
 #include "constrained_logits_processor.h"
@@ -439,6 +440,16 @@ std::string to_string(DeviceType device_type) {
 
 DeviceInterface* GetDeviceInterface(DeviceType type) {
   return GetOrtGlobals()->GetDeviceInterface(type);
+}
+
+DeviceInterface& DeviceInterface::GetCpuFallbackDevice() {
+  return *GetDeviceInterface(DeviceType::CPU);
+}
+
+std::unique_ptr<PositionInputs> DeviceInterface::CreatePositionInputs(State& state,
+                                                                      DeviceSpan<int32_t> sequence_lengths,
+                                                                      const std::string& attention_mask_name) {
+  return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
 }
 
 GeneratorParams::GeneratorParams(const Config& config)

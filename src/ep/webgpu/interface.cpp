@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "config_utils.h"
 #include "search.h"
 #include "interface.h"
 #include "models/graph_executor.h"
@@ -216,6 +217,10 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   bool ShouldZeroKeyValueCacheTensors() const override { return false; }
+
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+  }
 
   void Synchronize() override {}  // Nothing to do?
 

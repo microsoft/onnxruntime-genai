@@ -10,6 +10,7 @@
 // back to CPU staging via CopyThroughCpu.
 
 #include "generator/generators.h"
+#include "config_utils.h"
 #include "search.h"
 #include "models/session_options.h"
 #include "models/io/kv_cache.h"
@@ -268,6 +269,10 @@ struct InterfaceImpl : DeviceInterface {
     return CreateStandardKeyValueCache(state);
   }
 
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+  }
+
   void Synchronize() override {}
 
  private:
@@ -300,6 +305,9 @@ struct PinnedInputsImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return base_.CreateBeam(params); }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     return base_.CreateKeyValueCache(state);
+  }
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return base_.GetKeyValueCacheQuantizationBits(session_options);
   }
   void Synchronize() override { base_.Synchronize(); }
 

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #include "model.h"
 #include "models/io/input_ids.h"
-#include "models/io/position_inputs.h"
+#include "models/io/default_position_inputs.h"
 
 namespace Generators {
 

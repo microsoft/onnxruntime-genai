@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "config_utils.h"
 #include "ort_genai_c.h"  // For OGA_EXPORT
 #include "interface.h"
 #include "search.h"
@@ -403,6 +404,10 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return gp_genai->CreateStandardKeyValueCache(state);
   }
 
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+  }
+
   std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t max_batch_size, int vocab_size) override {
     return std::make_unique<CudaBatchedSampler>(static_cast<int>(max_batch_size), vocab_size);
   }
@@ -658,6 +663,10 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
       return 0;
     }
     return std::min(max_length, decoder.sliding_window->window_size);
+  }
+
+  bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const override {
+    return true;
   }
 
   bool SupportsPhi3RopeRewind(const Config& config) const override {

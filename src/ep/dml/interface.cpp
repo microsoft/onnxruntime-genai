@@ -5,6 +5,7 @@
 #include "search.h"
 #include "models/utils.h"
 #include "models/io/kv_cache.h"
+#include "config_utils.h"
 #include "interface.h"
 #include <cstdarg>
 
@@ -168,6 +169,10 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   bool ShouldClampZeroLengthKeyValueCacheTensors() const override { return true; }
+
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+  }
 
 #if 0
   void UpdatePositionIDs() {

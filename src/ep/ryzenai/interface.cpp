@@ -1,6 +1,7 @@
 // Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "generator/generators.h"
+#include "config_utils.h"
 #include "search.h"
 #include "models/model.h"
 #include "models/io/kv_cache.h"
@@ -199,6 +200,10 @@ struct Interface : RyzenAIInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     return CreateStandardKeyValueCache(state);
+  }
+
+  int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
+    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
   }
 
   void Synchronize() override {}

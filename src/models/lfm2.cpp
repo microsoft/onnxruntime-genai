@@ -19,7 +19,7 @@ LFM2_State::LFM2_State(const LFM2_Model& model, DeviceSpan<int32_t> sequence_len
     : State{params, model},
       model_{model},
       cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
   logits_.Add();

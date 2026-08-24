@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <type_traits>  // for std::remove_const_t
 #include <utility>
 #include "config.h"
@@ -25,6 +26,7 @@ struct GeneratorParams;
 struct Config;
 struct State;
 struct KeyValueCache;
+struct PositionInputs;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -171,7 +173,7 @@ struct StateSlotDesc {
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 2;
+inline constexpr uint32_t kDeviceInterfaceVersion = 3;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -278,6 +280,12 @@ struct DeviceInterface {
                                            const Config::Search& /*search*/,
                                            int /*max_length*/) const { return 0; }
   virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const { return false; }
+  virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
+  virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
+  virtual DeviceInterface& GetCpuFallbackDevice();
+  virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                               DeviceSpan<int32_t> sequence_lengths,
+                                                               const std::string& attention_mask_name);
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

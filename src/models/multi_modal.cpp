@@ -660,7 +660,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
