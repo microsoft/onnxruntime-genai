@@ -53,10 +53,10 @@ class Model:
             else self.context_length
         )
         self.context_length_attrs = {
-            "state_window": 0,
-            "state_window_dims": [],
-            "window_kv_cache": True,
-            "window_kv_cache_slack": 0,
+            "state_window": 0,                                                                                                       # Retained per-position recurrent/conv states
+            "state_window_dims": [],                                                                                                 # Optional leading dimensions for state windows
+            "window_kv_cache": True,                                                                                                 # Use bounded KV caches for sliding-attention layers
+            "window_kv_cache_slack": 0,                                                                                              # Positions beyond the window; 0 uses the EP default
         }
         self.make_context_length_init(config)
 
@@ -206,7 +206,7 @@ class Model:
             "block_table_windowed": ["batch_size", "max_num_blocks"],                                                                # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
-            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a tuple of scalars, not a per-sequence tensor.
         }
         self.make_inputs_init()
 
@@ -443,13 +443,13 @@ class Model:
         self.matmul_attrs["weights_prepacked"] = self.quant_config.runtime.matmulnbits_weights_prepacked
 
         self.quant_attrs = {
-            "accuracy_level": self.quant_config.weights.accuracy_level,
+            "accuracy_level": self.quant_config.weights.accuracy_level,                    # ORT quantization accuracy level for MatMulNBits
             "qmoe_block_size": self.quant_config.moe.block_size,                           # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig)
             "matmul_block_size": int(self.quant_config.weights.block_size),                # MatMulNBits block size
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
-            "is_symmetric": self.quant_config.weights.symmetric,
-            "op_types_to_quantize": self.quant_config.weights.op_types,
-            "nodes_to_exclude": nodes_to_exclude,
+            "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
+            "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
+            "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
             "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
