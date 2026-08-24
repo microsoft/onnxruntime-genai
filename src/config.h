@@ -477,6 +477,9 @@ struct Config {
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
+        // last axis. Empty unless the model was exported with aux_hidden_state_layers.
+        std::string aux_hidden_states;
 
         // RNNT decoder outputs
         std::string outputs;
@@ -546,6 +549,51 @@ struct Config {
         std::string present_value_names{Defaults::PresentValueName};
       } outputs;
     } mtp;
+
+    // DFlash 2 block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it reads the
+    // main model's auxiliary hidden states, predicts a whole block of tokens at once, and returns
+    // a candidate lattice (top-k ids per slot plus the pairwise edge scores) that the engine walks
+    // greedily. The Engine drives its session directly rather than through a Model.
+    struct Dflash2 {
+      std::string filename;  // e.g. "dflash2.onnx"
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
+
+      int num_hidden_layers{};
+      int num_key_value_heads{};
+      int head_size{};
+      int block_size{};        // Query rows per request: the anchor token plus one mask per draft.
+      int num_draft_tokens{};  // block_size - 1
+      int selector_top_k{};
+      int mask_token_id{};
+      int sliding_window{-1};
+      std::vector<int> aux_hidden_state_layers;
+
+      // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.
+      std::string main_aux_hidden_states{"aux_hidden_states"};
+
+      struct Inputs {
+        std::string aux_hidden_states{"aux_hidden_states"};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string q_row_map{"q_row_map"};
+        std::string qkv_row_map{"qkv_row_map"};
+        std::string block_row_index{"block_row_index"};
+        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
+        std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
+        std::string block_table{Defaults::BlockTableName};
+        std::string attention_metadata{Defaults::AttentionMetadataName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+      } inputs;
+
+      struct Outputs {
+        std::string candidate_ids{"draft_candidate_ids"};
+        std::string scores{"draft_scores"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+      } outputs;
+    } dflash2;
 
     std::optional<Decoder> draft;
 
