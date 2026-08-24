@@ -88,6 +88,10 @@ class FailingContinuationDevice final : public DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return inner_.GetMemoryInfo();
   }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return inner_.AllocateBase(size);
   }

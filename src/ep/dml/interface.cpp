@@ -148,6 +148,8 @@ struct InterfaceImpl : DeviceInterface {
                                  OrtMemType::OrtMemTypeDefault);
   }
 
+  std::string GetExecutionProviderName() const override { return "DML"; }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }

@@ -173,7 +173,7 @@ struct StateSlotDesc {
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 3;
+inline constexpr uint32_t kDeviceInterfaceVersion = 2;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -182,6 +182,10 @@ struct DeviceInterface {
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
+
+  // The execution provider name used when configuring session options for the trivial init
+  // session (see 'SetProviderSessionOptions'), e.g. "cuda", "DML", "QNN".
+  virtual std::string GetExecutionProviderName() const = 0;
 
   // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the device
   // supports it. Null default -> callers keep the current device-memory path.

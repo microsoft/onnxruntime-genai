@@ -202,6 +202,8 @@ struct InterfaceImpl : DeviceInterface {
     }
   }
 
+  std::string GetExecutionProviderName() const override { return "WebGPU"; }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<WebGPUMemory>(size, ort_allocator_, ort_memory_info_);
   }

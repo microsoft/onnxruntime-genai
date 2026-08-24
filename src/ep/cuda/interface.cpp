@@ -384,6 +384,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
                                  OrtMemType::OrtMemTypeDefault);
   }
 
+  std::string GetExecutionProviderName() const override { return "cuda"; }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }
@@ -655,6 +657,8 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
 
 struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
+  std::string GetExecutionProviderName() const override { return "NvTensorRtRtx"; }
+
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& /*search*/,
                                    int max_length) const override {

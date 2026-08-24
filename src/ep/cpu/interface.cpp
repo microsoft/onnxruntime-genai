@@ -65,6 +65,10 @@ struct CpuInterface : DeviceInterface {
     throw std::runtime_error("GetMemoryInfo for CPU should not be used.");
   }
 
+  std::string GetExecutionProviderName() const override {
+    throw std::runtime_error("GetExecutionProviderName for CPU should not be used.");
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<CpuMemory>(size);
   }

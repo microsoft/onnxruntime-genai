@@ -202,6 +202,8 @@ struct InterfaceImpl : DeviceInterface {
                                  device_id_, OrtMemType::OrtMemTypeDefault);
   }
 
+  std::string GetExecutionProviderName() const override { return "AMDGPU"; }
+
   // Read the id of the EP device the model will run on, so the allocators bind to it rather than
   // assuming device 0. Resolves to 0 on a single-GPU machine.
   int GetDeviceId(const ProviderOptions* user_options) override {
@@ -293,6 +295,8 @@ struct PinnedInputsImpl : DeviceInterface {
   Ort::Allocator& GetAllocator() override { return *base_.PinnedAllocator(); }
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
+  std::string GetExecutionProviderName() const override { return base_.GetExecutionProviderName(); }
+
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());

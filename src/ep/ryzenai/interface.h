@@ -20,6 +20,8 @@ struct RyzenAIInterface : DeviceInterface {
                                  OrtMemType::OrtMemTypeDefault);
   }
 
+  std::string GetExecutionProviderName() const override { return "RyzenAI"; }
+
   virtual void SetupProvider(OrtSessionOptions&, const ProviderOptions&) = 0;
 };
 

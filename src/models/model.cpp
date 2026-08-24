@@ -328,14 +328,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // re-use it for all models.
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
-  // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
-  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  const char* provider_name = device_type_names[static_cast<int>(type)];
+  std::string provider_name = device.GetExecutionProviderName();
   Config::ProviderOptions init_session_provider_options{provider_name, {}};
 
   // Look up the user-supplied provider options entry for this provider (if any),
@@ -345,7 +341,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
   const auto user_provider_options_it = std::find_if(
       user_provider_options_list.begin(), user_provider_options_list.end(),
-      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+      [&provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
   const Config::ProviderOptions* user_provider_options =
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
   if (user_provider_options)
@@ -354,7 +350,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
-  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  const std::vector<std::string> providers{provider_name};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 

@@ -52,6 +52,8 @@ struct QnnInterfaceBase : DeviceInterface {
     return OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
   }
 
+  std::string GetExecutionProviderName() const override { return "QNN"; }
+
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;

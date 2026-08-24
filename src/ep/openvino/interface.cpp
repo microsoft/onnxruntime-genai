@@ -31,6 +31,10 @@ struct InterfaceImpl : DeviceInterface {
     throw std::runtime_error("GetMemoryInfo for OpenVINO should not be used. Expected to use CPU interface instead.");
   }
 
+  std::string GetExecutionProviderName() const override {
+    throw std::runtime_error("GetExecutionProviderName for OpenVINO should not be used. Expected to use CPU interface instead.");
+  }
+
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return GetDeviceInterface(DeviceType::CPU)->AllocateBase(size);
   }
