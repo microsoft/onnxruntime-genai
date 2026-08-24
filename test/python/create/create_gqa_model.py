@@ -81,9 +81,7 @@ def create_decoder(output_dir):
     )
     graph_outputs.extend(
         [
-            helper.make_tensor_value_info(
-                f"present.{RECURRENT_LAYER}.conv_state", onnx_dtype, ["batch_size", 1, 1]
-            ),
+            helper.make_tensor_value_info(f"present.{RECURRENT_LAYER}.conv_state", onnx_dtype, ["batch_size", 1, 1]),
             helper.make_tensor_value_info(
                 f"present.{RECURRENT_LAYER}.recurrent_state", onnx_dtype, ["batch_size", 1, 1, 1]
             ),
@@ -115,11 +113,7 @@ def create_decoder(output_dir):
         )
     )
     inits.append(numpy_helper.from_array(np.array([1], dtype=np.int64), "state_logits.axes"))
-    nodes.append(
-        helper.make_node(
-            "Flatten", [f"present.{RECURRENT_LAYER}.conv_state"], ["state_scalar"], axis=1
-        )
-    )
+    nodes.append(helper.make_node("Flatten", [f"present.{RECURRENT_LAYER}.conv_state"], ["state_scalar"], axis=1))
     nodes.append(helper.make_node("MatMul", ["state_scalar", "state_logits.weight"], ["state_logits_2d"]))
     nodes.append(helper.make_node("Unsqueeze", ["state_logits_2d", "state_logits.axes"], ["state_logits"]))
 

@@ -35,7 +35,7 @@ TEST(ModelTests, DMLAdapterSelection) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto d3d12Device = model->GetD3D12Device();
 
-  auto adapterLuid = d3d12Device->GetAdapterLuid();  
+  auto adapterLuid = d3d12Device->GetAdapterLuid();
   for (const auto& provider_option: model->config_->model.decoder.session_options.provider_options) {
     if (provider_option.name == "dml") {
       for (const auto& [name, value] : provider_option.options) {
@@ -297,7 +297,12 @@ TEST(ModelTests, ContinuousDecodingCudaGraphCapture) {
   params->SetSearchOption("batch_size", 1);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids);
+  size_t rewind_pos = input_ids.size() - 1;
+  std::vector<int32_t> prefix_ids(input_ids.begin(), input_ids.begin() + rewind_pos);
+  std::vector<int32_t> resume_ids(input_ids.begin() + rewind_pos, input_ids.end());
+  generator->AppendTokens(prefix_ids);
+  generator->SnapshotState();
+  generator->AppendTokens(resume_ids);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -307,9 +312,7 @@ TEST(ModelTests, ContinuousDecodingCudaGraphCapture) {
   std::vector<int32_t> first_output(seq1.begin(), seq1.end());
 
   // Rewind and regenerate — should produce same output
-  size_t rewind_pos = input_ids.size() - 1;
   generator->RewindTo(rewind_pos);
-  std::vector<int32_t> resume_ids(input_ids.begin() + rewind_pos, input_ids.end());
   generator->AppendTokens(resume_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
