@@ -108,9 +108,13 @@ struct ScheduledRequests {
                                     std::vector<RequestStepResult>* results = nullptr);
   bool TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits);
   // Verifies each drafted request's proposal against the target model's own rows, rewinds the
-  // rejected tail, and returns the one row per request that the sampler must select from.
+  // rejected tail, and returns the one row per request that the sampler must select from. For a
+  // randomly sampled request, selected_tokens holds the accepted deterministic proposal prefix
+  // plus the target-distributed correction or bonus token to commit.
   std::vector<DeviceSpan<float>> SelectSampledRows(
-      std::vector<DeviceSpan<float>>& verify_rows);
+      std::vector<DeviceSpan<float>>& verify_rows,
+      std::vector<std::vector<int32_t>>& selected_tokens,
+      std::vector<size_t>& accepted_draft_counts);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
