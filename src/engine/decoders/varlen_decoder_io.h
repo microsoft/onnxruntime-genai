@@ -99,6 +99,10 @@ struct VarlenDecoderIO : DecoderIO {
   // the model emits one logits row per packed token.
   Tensor* HiddenStates() const override { return active_hidden_states_; }
 
+  // The step's packed [total_num_tokens, aux_hidden_size] auxiliary hidden states, or null when
+  // the model was not exported with aux_hidden_state_layers. This is what a DFlash 2 drafter reads.
+  Tensor* AuxHiddenStates() const override { return aux_hidden_states_.get(); }
+
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
@@ -106,6 +110,7 @@ struct VarlenDecoderIO : DecoderIO {
   void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 
   // Number of packed token rows in this step, which is what both the logits and the hidden states
   // are indexed by.
@@ -126,6 +131,7 @@ struct VarlenDecoderIO : DecoderIO {
   std::unique_ptr<Tensor> logits_fp32_;
   std::unique_ptr<Tensor> hidden_states_;
   Tensor* active_hidden_states_{};
+  std::unique_ptr<Tensor> aux_hidden_states_;
   bool logits_are_per_token_{true};
 };
 
