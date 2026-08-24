@@ -67,8 +67,9 @@ struct Dflash2Drafter {
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size);
 
-  // Blocks the pool needs for `max_batch_size` concurrent requests. The drafter is windowed, so a
-  // request only needs a fixed ring however long its context grows.
+  // Blocks the pool needs for `max_batch_size` concurrent requests, or 0 when the drafter runs
+  // full attention and has to be sized against the main cache instead. A windowed drafter only
+  // needs a fixed ring per request however long its context grows.
   static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
 
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }

@@ -1780,7 +1780,10 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
-    if (name == "dflash2") {
+    if (name == "dflash2" || name == "dspark") {
+      // DSpark is DFlash's backbone with a Markov head in place of the candidate selector. It
+      // emits the same lattice, so it is driven by the same drafter and described by the same
+      // section; only the name in the artifact differs.
       return dflash2_;
     }
     throw JSON::unknown_value_error{};
