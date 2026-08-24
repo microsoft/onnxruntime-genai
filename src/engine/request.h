@@ -143,8 +143,8 @@ struct Request : std::enable_shared_from_this<Request>,
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
    * The next decode step then runs 1 + tokens.size() rows, verifies each draft against the target
-   * model's own prediction, and keeps the accepted prefix. Only greedy requests may propose drafts,
-   * because verification compares argmax tokens rather than sampling probabilities.
+   * model's own prediction, and keeps the accepted prefix. Greedy requests compare argmax tokens;
+   * sampled requests draw from each target row's bounded top-k/top-p distribution.
    *
    * The proposal applies to the next step only. A committed step consumes it even when it could not
    * verify it (a prefill chunk, for one); a rolled back step leaves it pending.
@@ -170,6 +170,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::span<const int32_t> StagedDraftTokens() const;
   bool IsStopToken(int32_t token) const;
   void RewindDraftsForTransaction(size_t accepted_count);
+  void RecordSampledDraftAcceptance(size_t accepted_count);
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();

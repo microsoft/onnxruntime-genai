@@ -1791,22 +1791,77 @@ TEST_F(EngineStepTest, DraftsAreRejectedWhenTheCacheCannotRollThemBack) {
   EXPECT_THROW(request->SetDraftTokens(std::vector<int32_t>{11}), std::runtime_error);
 }
 
-TEST_F(EngineStepTest, DraftsAreRejectedBeyondTheCacheWindowAndForSampledRequests) {
+TEST_F(EngineStepTest, DraftsAreRejectedBeyondTheCacheWindow) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   engine.cache->SetMaxDraftTokensPerStep(2);
 
   auto request = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(request);
   EXPECT_THROW(request->SetDraftTokens(std::vector<int32_t>{11, 12, 13}), std::runtime_error);
+}
 
+TEST_F(EngineStepTest, SampledRequestVerifiesDeterministicDrafts) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
   auto sampled_params = MakeGreedyParams(*model_);
   sampled_params->search.do_sample = true;
-  sampled_params->search.top_k = 40;
+  sampled_params->search.top_k = 20;
+  sampled_params->search.top_p = 0.95f;
   sampled_params->search.temperature = 1.0f;
+  sampled_params->search.random_seed = 1234;
   auto sampled = std::make_shared<Request>(sampled_params);
   sampled->AddTokens(Prompt(20));
   engine.engine->AddRequest(sampled);
-  EXPECT_THROW(sampled->SetDraftTokens(std::vector<int32_t>{11}), std::runtime_error);
+  ASSERT_EQ(engine.engine->Step(), sampled);
+  DrainTokens(sampled);
+
+  sampled->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+  ASSERT_EQ(engine.engine->Step(), sampled);
+
+  EXPECT_EQ(DrainTokens(sampled), (std::vector<int32_t>{11, 12, 21}));
+  ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 3u);
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 3u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineStepTest, SampledRequestsVerifyMixedDraftLengthsInOneBatch) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  std::vector<std::shared_ptr<Request>> sampled_requests;
+  for (int32_t prompt_token : {20, 30}) {
+    auto params = MakeGreedyParams(*model_);
+    params->search.do_sample = true;
+    params->search.top_k = 20;
+    params->search.top_p = 0.95f;
+    params->search.temperature = 1.0f;
+    params->search.random_seed = static_cast<unsigned int>(1234 + prompt_token);
+    auto request = std::make_shared<Request>(params);
+    request->AddTokens(Prompt(prompt_token));
+    engine.engine->AddRequest(request);
+    sampled_requests.push_back(std::move(request));
+  }
+  ASSERT_EQ(engine.engine->Step(), sampled_requests[0]);
+  ASSERT_EQ(engine.engine->Step(), sampled_requests[1]);
+  DrainTokens(sampled_requests[0]);
+  DrainTokens(sampled_requests[1]);
+
+  sampled_requests[0]->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  sampled_requests[1]->SetDraftTokens(std::vector<int32_t>{14});
+  engine.executor->SetVerifyRowTokens({11, 22, 23, 24, 14, 25});
+  ASSERT_EQ(engine.engine->Step(), sampled_requests[0]);
+  ASSERT_EQ(engine.engine->Step(), sampled_requests[1]);
+
+  EXPECT_EQ(DrainTokens(sampled_requests[0]), (std::vector<int32_t>{11, 22}));
+  EXPECT_EQ(DrainTokens(sampled_requests[1]), (std::vector<int32_t>{14, 25}));
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 2u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 4u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
 }
 
 TEST_F(EngineStepTest, PrefillingRequestDoesNotVerifyDrafts) {

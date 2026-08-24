@@ -199,8 +199,6 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       const auto& entry = target_plan.requests[i];
       const auto& result = target_results[i];
       const auto& search = entry.request->SearchOptions();
-      const bool greedy =
-          !search.do_sample || search.top_k == 1 || search.temperature == 0;
       const int64_t committed_length_after_step =
           entry.request->CurrentSequenceLength();
       const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
@@ -208,7 +206,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                                 committed_length_after_step + 1 < search.max_length
                                                     ? static_cast<size_t>(search.max_length - committed_length_after_step - 1)
                                                     : size_t{0}});
-      if (!result.token_appended || result.done || !greedy ||
+      if (!result.token_appended || result.done ||
           search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
           search.min_length > entry.request->CurrentSequenceLength() ||
           max_draft_tokens == 0) {

@@ -250,10 +250,10 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   }
 
   const auto& search = params_->search;
-  // Verification compares the target model's argmax against each draft, which only reproduces the
-  // request's own token stream when that stream is greedy.
-  if (search.do_sample && search.top_k != 1 && search.temperature != 0) {
-    throw std::runtime_error("Speculative draft tokens require a greedy request.");
+  // Sampled verification extracts a bounded target distribution for every row. Pure nucleus
+  // sampling has no bounded sparse support and stays on the standard path.
+  if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
+    throw std::runtime_error("Sampled speculative draft tokens require top_k greater than 1.");
   }
   // The draft rows are read before any logits processor runs, so a processor that would change a
   // row's argmax has to be inactive for every position this step verifies.
@@ -320,6 +320,16 @@ void Request::RewindDraftsForTransaction(size_t accepted_count) {
   staged_draft_count_ = accepted_count;
   tokens_host_.resize(tokens_host_.size() - rejected_count);
   search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
+}
+
+void Request::RecordSampledDraftAcceptance(size_t accepted_count) {
+  if (staged_draft_count_ != 0 || accepted_count > draft_tokens_.size()) {
+    throw std::logic_error("Sampled verification recorded an invalid accepted draft prefix.");
+  }
+  tokens_host_.insert(tokens_host_.end(), draft_tokens_.begin(),
+                      draft_tokens_.begin() + static_cast<ptrdiff_t>(accepted_count));
+  staged_draft_count_ = accepted_count;
+  accepted_draft_count_ = accepted_count;
 }
 
 void Request::DiscardStagedDrafts() noexcept {

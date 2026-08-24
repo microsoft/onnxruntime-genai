@@ -5,6 +5,8 @@
 
 #include "engine.h"
 #include "../search.h"
+#include "../speculative_sampling.h"
+#include <cmath>
 #include <exception>
 
 namespace Generators {
@@ -50,6 +52,93 @@ std::vector<int32_t> TryDeviceArgmaxPerRow(DeviceInterface& device,
                      static_cast<int>(vocab_size), tokens.data()))
     return {};
   return tokens;
+}
+
+bool UsesRandomSampling(const Config::Search& search) {
+  return search.do_sample && search.top_k != 1 && search.temperature != 0;
+}
+
+struct TopKScores {
+  int k{};
+  std::vector<int32_t> tokens;
+  std::vector<float> scores;
+};
+
+TopKScores TryDeviceTopKScoresPerRow(DeviceInterface& device,
+                                     std::vector<DeviceSpan<float>>& rows,
+                                     int k) {
+  if (rows.empty() || k <= 1)
+    return {};
+
+  const size_t vocab_size = rows[0].size();
+  const float* base = rows[0].Span().data();
+  for (size_t i = 1; i < rows.size(); ++i) {
+    if (rows[i].size() != vocab_size || rows[i].Span().data() != base + i * vocab_size)
+      return {};
+  }
+
+  TopKScores result;
+  result.k = std::min(k, static_cast<int>(vocab_size));
+  const size_t value_count = rows.size() * static_cast<size_t>(result.k);
+  result.tokens.resize(value_count);
+  result.scores.resize(value_count);
+  if (!device.TopKScores(base, Ort::TypeToTensorType<float>, static_cast<int>(rows.size()),
+                         static_cast<int>(vocab_size), result.k,
+                         result.tokens.data(), result.scores.data())) {
+    return {};
+  }
+  return result;
+}
+
+TargetTokenSelection BuildTargetSelection(
+    size_t row, DeviceSpan<float> logits, const Config::Search& search,
+    const TopKScores& topk, SampledCategorical& scratch) {
+  TargetTokenSelection selection;
+  if (topk.k == 0) {
+    const auto cpu_logits = logits.CopyDeviceToCpu();
+    ComputeSampledCategorical(cpu_logits, search.top_k, search.top_p,
+                              search.temperature, scratch);
+    selection.indices = scratch.indices;
+    selection.probs = scratch.probs;
+    return selection;
+  }
+
+  const int k = std::min(search.top_k, topk.k);
+  const size_t offset = row * static_cast<size_t>(topk.k);
+  const float max_score = topk.scores[offset];
+  const float inverse_temperature = 1.0f / search.temperature;
+  std::vector<float> probabilities(static_cast<size_t>(k));
+  float sum = 0.0f;
+  for (int i = 0; i < k; ++i) {
+    probabilities[static_cast<size_t>(i)] =
+        std::exp((topk.scores[offset + static_cast<size_t>(i)] - max_score) *
+                 inverse_temperature);
+    sum += probabilities[static_cast<size_t>(i)];
+  }
+  for (float& probability : probabilities)
+    probability /= sum;
+
+  int keep = k;
+  if (search.top_p > 0.0f && search.top_p < 1.0f) {
+    float cumulative = 0.0f;
+    for (int i = 0; i < k; ++i) {
+      cumulative += probabilities[static_cast<size_t>(i)];
+      if (cumulative >= search.top_p) {
+        keep = i + 1;
+        break;
+      }
+    }
+  }
+  float kept_sum = 0.0f;
+  for (int i = 0; i < keep; ++i)
+    kept_sum += probabilities[static_cast<size_t>(i)];
+  selection.indices.assign(
+      topk.tokens.begin() + static_cast<ptrdiff_t>(offset),
+      topk.tokens.begin() + static_cast<ptrdiff_t>(offset + static_cast<size_t>(keep)));
+  selection.probs.assign(probabilities.begin(), probabilities.begin() + keep);
+  for (float& probability : selection.probs)
+    probability /= kept_sum;
+  return selection;
 }
 
 }  // namespace
@@ -204,9 +293,13 @@ Tensor* ScheduledRequests::HiddenStates() const {
 }
 
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
-    std::vector<DeviceSpan<float>>& verify_rows) {
+    std::vector<DeviceSpan<float>>& verify_rows,
+    std::vector<std::vector<int32_t>>& selected_tokens,
+    std::vector<size_t>& accepted_draft_counts) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
+  selected_tokens.resize(requests_.size());
+  accepted_draft_counts.assign(requests_.size(), 0);
 
   // Verification only needs each draft row's argmax. Reading a whole vocabulary row back to the host
   // costs about a megabyte and a stream synchronization per draft, which on a large-vocabulary model
@@ -216,6 +309,14 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   const std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};
+  int max_sampling_top_k = 0;
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    if (draft_token_counts_[i] != 0 && UsesRandomSampling(requests_[i]->SearchOptions()))
+      max_sampling_top_k = std::max(max_sampling_top_k, requests_[i]->SearchOptions().top_k);
+  }
+  const TopKScores topk = TryDeviceTopKScoresPerRow(
+      *model_->p_device_inputs_, verify_rows, max_sampling_top_k);
+  SampledCategorical sampling_scratch;
 
   size_t row = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {
@@ -223,6 +324,32 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         i < draft_token_counts_.size() ? draft_token_counts_[i] : 0;
     if (draft_count == 0) {
       sampled_rows.push_back(verify_rows[row++]);
+      continue;
+    }
+
+    if (UsesRandomSampling(requests_[i]->SearchOptions())) {
+      const auto drafts = requests_[i]->StagedDraftTokens();
+      requests_[i]->RewindDraftsForTransaction(0);
+      size_t accepted_count = 0;
+      for (; accepted_count < draft_count; ++accepted_count) {
+        const auto selection = BuildTargetSelection(
+            row + accepted_count, verify_rows[row + accepted_count],
+            requests_[i]->SearchOptions(), topk, sampling_scratch);
+        const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
+        selected_tokens[i].push_back(token);
+        if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
+          break;
+      }
+      if (accepted_count == draft_count) {
+        const auto selection = BuildTargetSelection(
+            row + draft_count, verify_rows[row + draft_count],
+            requests_[i]->SearchOptions(), topk, sampling_scratch);
+        selected_tokens[i].push_back(
+            SampleTargetToken(selection, requests_[i]->rng_));
+      }
+      accepted_draft_counts[i] = accepted_count;
+      sampled_rows.push_back({});
+      row += draft_count + 1;
       continue;
     }
 
@@ -334,7 +461,13 @@ void ScheduledRequests::BeginTransaction() {
   if (transaction_checkpoint_count_ != 0 || sampler_checkpoint_active_)
     throw std::logic_error("Scheduled request transaction is already active.");
 
-  transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
+  bool has_sampled_drafts = false;
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    has_sampled_drafts = has_sampled_drafts ||
+                         (draft_token_counts_[i] != 0 &&
+                          UsesRandomSampling(requests_[i]->SearchOptions()));
+  }
+  transaction_uses_batched_sampler_ = !has_sampled_drafts && PrepareBatchedSamplingPlan(true);
   try {
     for (const auto& request : requests_) {
       if (transaction_uses_batched_sampler_)
@@ -371,7 +504,9 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   }
 
   auto verify_rows = ProcessLogits();
-  auto logits = SelectSampledRows(verify_rows);
+  std::vector<std::vector<int32_t>> selected_tokens;
+  std::vector<size_t> accepted_draft_counts;
+  auto logits = SelectSampledRows(verify_rows, selected_tokens, accepted_draft_counts);
   results.assign(requests_.size(), RequestStepResult{});
   if (transaction_uses_batched_sampler_) {
     sampling_plan_->logits.clear();
@@ -409,8 +544,77 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     return;
   }
 
+  size_t sampled_request_count = 0;
+  size_t max_selected_tokens = 0;
+  for (const auto& tokens : selected_tokens) {
+    if (!tokens.empty()) {
+      ++sampled_request_count;
+      max_selected_tokens = std::max(max_selected_tokens, tokens.size());
+    }
+  }
+  if (sampled_request_count != 0) {
+    bool can_batch_commits = true;
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      if (!selected_tokens[i].empty() && !requests_[i]->SupportsBatchedSampling()) {
+        can_batch_commits = false;
+        break;
+      }
+    }
+    DeviceSpan<int32_t> committed_tokens;
+    if (can_batch_commits)
+      committed_tokens = model_->p_device_->Allocate<int32_t>(sampled_request_count);
+
+    for (size_t stage = 0; stage < max_selected_tokens; ++stage) {
+      std::vector<size_t> active;
+      active.reserve(sampled_request_count);
+      for (size_t i = 0; i < selected_tokens.size(); ++i) {
+        if (stage < selected_tokens[i].size())
+          active.push_back(i);
+      }
+
+      if (can_batch_commits) {
+        auto stage_tokens = committed_tokens.subspan(0, active.size());
+        auto cpu_tokens = stage_tokens.CpuSpan();
+        for (size_t row = 0; row < active.size(); ++row)
+          cpu_tokens[row] = selected_tokens[active[row]][stage];
+        stage_tokens.CopyCpuToDevice();
+        for (size_t row = 0; row < active.size(); ++row) {
+          auto& request = requests_[active[row]];
+          request->sequence_length_before_sampling_ = request->CurrentSequenceLength();
+          if (!request->BindNextTokensSlot(stage_tokens.subspan(row, 1)))
+            throw std::logic_error("Sampled draft commit lost batched-search support.");
+          request->OnNextTokensSampled();
+        }
+        stage_tokens.CopyDeviceToCpu();
+        for (size_t row = 0; row < active.size(); ++row) {
+          const size_t request_index = active[row];
+          const auto stage_result = requests_[request_index]->StageGenerationForTransaction();
+          if (stage + 1 == selected_tokens[request_index].size())
+            results[request_index] = stage_result;
+          else if (!stage_result.token_appended || stage_result.done)
+            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+        }
+      } else {
+        for (size_t request_index : active) {
+          auto& request = requests_[request_index];
+          request->sequence_length_before_sampling_ = request->CurrentSequenceLength();
+          request->search_->CommitToken(selected_tokens[request_index][stage]);
+          const auto stage_result = request->StageGenerationForTransaction();
+          if (stage + 1 == selected_tokens[request_index].size())
+            results[request_index] = stage_result;
+          else if (!stage_result.token_appended || stage_result.done)
+            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+        }
+      }
+    }
+    for (size_t i = 0; i < requests_.size(); ++i) {
+      if (!selected_tokens[i].empty())
+        requests_[i]->RecordSampledDraftAcceptance(accepted_draft_counts[i]);
+    }
+  }
+
   for (size_t i = 0; i < requests_.size(); ++i) {
-    if (requests_[i]->IsChunkComplete())
+    if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty())
       results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
   }
 }
