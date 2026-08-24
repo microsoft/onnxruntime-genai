@@ -1,0 +1,263 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include <gtest/gtest.h>
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "engine_test_helpers.h"
+#include "models/model_state_manifest.h"
+
+namespace Generators::test {
+namespace {
+
+struct TensorMetadata {
+  ONNXTensorElementDataType data_type;
+  std::vector<int64_t> shape;
+};
+
+class FakeModelStateMetadata final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name,
+                ONNXTensorElementDataType data_type,
+                std::vector<int64_t> shape) {
+    inputs_.insert_or_assign(
+        std::move(name),
+        TensorMetadata{data_type, std::move(shape)});
+  }
+
+  void AddOutput(std::string name,
+                 ONNXTensorElementDataType data_type,
+                 std::vector<int64_t> shape) {
+    outputs_.insert_or_assign(
+        std::move(name),
+        TensorMetadata{data_type, std::move(shape)});
+  }
+
+  bool HasInput(const std::string& name) const override {
+    return inputs_.contains(name);
+  }
+
+  bool HasOutput(const std::string& name) const override {
+    return outputs_.contains(name);
+  }
+
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
+    return inputs_.at(name).data_type;
+  }
+
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override {
+    return outputs_.at(name).data_type;
+  }
+
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    return inputs_.at(name).shape;
+  }
+
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    return outputs_.at(name).shape;
+  }
+
+ private:
+  std::unordered_map<std::string, TensorMetadata> inputs_;
+  std::unordered_map<std::string, TensorMetadata> outputs_;
+};
+
+Config::Model::Decoder MakeSparseDecoder() {
+  using Decoder = Config::Model::Decoder;
+
+  Decoder decoder;
+  decoder.num_hidden_layers = 4;
+  decoder.state_groups = std::vector<Decoder::StateGroup>{
+      Decoder::StateGroup{
+          Decoder::StateGroupKind::PagedKeyValue,
+          {1, 3},
+          Decoder::StateBinding{"past.%d.key", "present.%d.key"},
+          Decoder::StateBinding{"past.%d.value", "present.%d.value"},
+          std::nullopt},
+      Decoder::StateGroup{
+          Decoder::StateGroupKind::Fixed,
+          {0, 2},
+          std::nullopt,
+          std::nullopt,
+          Decoder::StateBinding{"past.%d.conv", "present.%d.conv"}}};
+  return decoder;
+}
+
+FakeModelStateMetadata MakeValidMetadata() {
+  FakeModelStateMetadata metadata;
+  for (const int layer_id : {1, 3}) {
+    for (const auto* semantic : {"key", "value"}) {
+      metadata.AddInput(
+          "past." + std::to_string(layer_id) + "." + semantic,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+          {-1, 256, 4, 128});
+      metadata.AddOutput(
+          "present." + std::to_string(layer_id) + "." + semantic,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+          {-1, 256, 4, 128});
+    }
+  }
+  for (const int layer_id : {0, 2}) {
+    metadata.AddInput(
+        "past." + std::to_string(layer_id) + ".conv",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+        {-1, 8192, 3});
+    metadata.AddOutput(
+        "present." + std::to_string(layer_id) + ".conv",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+        {-1, 8192, 3});
+  }
+  return metadata;
+}
+
+std::string CaptureValidationError(const ModelStateManifest& manifest,
+                                   const ModelStateMetadata& metadata) {
+  try {
+    manifest.ValidateSession(metadata);
+  } catch (const std::runtime_error& error) {
+    return error.what();
+  }
+  return {};
+}
+
+TEST(ModelStateManifestTest, ValidatesEveryExpandedBinding) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  const auto metadata = MakeValidMetadata();
+
+  EXPECT_NO_THROW(manifest.ValidateSession(metadata));
+}
+
+TEST(ModelStateManifestTest, RejectsMissingBinding) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  const FakeModelStateMetadata metadata;
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("input was not found: past.1.key"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsInputOutputDtypeMismatch) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  auto metadata = MakeValidMetadata();
+  metadata.AddOutput(
+      "present.1.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 256, 4, 128});
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("incompatible dtypes"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsInputOutputShapeMismatch) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  auto metadata = MakeValidMetadata();
+  metadata.AddOutput(
+      "present.1.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 256, 4, 64});
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("incompatible shapes"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, AllowsDynamicDimensions) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  auto metadata = MakeValidMetadata();
+  metadata.AddInput(
+      "past.1.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, -1, 4, 128});
+  metadata.AddOutput(
+      "present.1.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, -1, 4, 128});
+
+  EXPECT_NO_THROW(manifest.ValidateSession(metadata));
+}
+
+TEST(ModelStateManifestTest, RejectsIncompatiblePagedGeometry) {
+  const ModelStateManifest manifest{MakeSparseDecoder()};
+  auto metadata = MakeValidMetadata();
+  metadata.AddInput(
+      "past.1.value",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 256, 4, 64});
+  metadata.AddOutput(
+      "present.1.value",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 256, 4, 64});
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("incompatible paged geometry"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, DecoderModelLoadValidatesExplicitBindings) {
+  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const auto invalid_overlay = R"({
+    "model": {"decoder": {"state_groups": [{
+      "kind": "paged_kv",
+      "layer_ids": [0],
+      "bindings": {
+        "key": {"input": "past_key_values.%d.key", "output": "missing.%d.key"},
+        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
+      }
+    }]}}
+  })";
+  auto invalid_config = std::make_unique<Config>(model_path, invalid_overlay);
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(invalid_config)), std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, DecoderModelLoadsWithValidExplicitBindings) {
+  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const auto valid_overlay = R"({
+    "model": {"decoder": {"state_groups": [{
+      "kind": "paged_kv",
+      "layer_ids": [0],
+      "bindings": {
+        "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
+        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
+      }
+    }]}}
+  })";
+  auto valid_config = std::make_unique<Config>(model_path, valid_overlay);
+  EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
+}
+
+TEST(ModelStateManifestTest, RejectsSparsePagedDynamicEngineContract) {
+  auto decoder = MakeSparseDecoder();
+  try {
+    ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
+    FAIL() << "Expected the sparse state contract to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("dense paged_kv"), std::string::npos) << error.what();
+  }
+}
+
+TEST(ModelStateManifestTest, RejectsDynamicEngineBindingsThatDifferFromLegacyNames) {
+  using Decoder = Config::Model::Decoder;
+  Decoder decoder;
+  decoder.num_hidden_layers = 1;
+  decoder.state_groups = std::vector<Decoder::StateGroup>{
+      Decoder::StateGroup{
+          Decoder::StateGroupKind::PagedKeyValue,
+          {0},
+          Decoder::StateBinding{"custom.%d.key", "present.%d.key"},
+          Decoder::StateBinding{"custom.%d.value", "present.%d.value"},
+          std::nullopt}};
+
+  EXPECT_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder),
+      std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, AcceptsLegacyDynamicEngineContract) {
+  Config::Model::Decoder decoder;
+  decoder.num_hidden_layers = 4;
+
+  EXPECT_NO_THROW(ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
+}
+
+}  // namespace
+}  // namespace Generators::test

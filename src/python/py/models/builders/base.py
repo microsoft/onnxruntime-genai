@@ -1121,6 +1121,10 @@ class Model:
                 },
             }
 
+        state_groups = self.make_decoder_state_groups(inputs, outputs)
+        if state_groups:
+            genai_config["model"]["decoder"]["state_groups"] = state_groups
+
         self.update_genai_config(genai_config)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -1132,6 +1136,25 @@ class Model:
         Override in subclasses to modify genai_config before it is written to disk.
         """
         pass
+
+    def make_decoder_state_groups(self, inputs, outputs):
+        return []
+
+    def make_paged_key_value_state_group(self, layer_ids, inputs, outputs):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": list(layer_ids),
+            "bindings": {
+                "key": {
+                    "input": inputs["past_key_names"],
+                    "output": outputs["present_key_names"],
+                },
+                "value": {
+                    "input": inputs["past_value_names"],
+                    "output": outputs["present_value_names"],
+                },
+            },
+        }
 
     def make_key_value_cache_names(self, layer_id):
         """
