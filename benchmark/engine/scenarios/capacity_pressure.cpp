@@ -23,7 +23,7 @@ namespace engine_benchmark {
 namespace {
 
 constexpr int kRandomSeed = 42;
-constexpr std::array<int, 8> kPromptLengthsK = {4, 32, 46, 64, 96, 128, 128, 128};
+constexpr std::array<int, 8> kPromptLengthsK = {4, 4, 32, 32, 48, 64, 96, 128};
 
 }  // namespace
 
