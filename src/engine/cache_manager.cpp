@@ -477,11 +477,15 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   const bool has_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-  if (has_prefill && has_drafts) {
+  if (has_prefill && has_drafts && !model_->config_->model.decoder.mixed_batch_checkpoints) {
     // Packed recurrent operators choose one execution plan for the whole batch. A long prefill
     // selects the chunked GDN path, which only publishes final state and cannot provide the
     // intermediate checkpoints needed to reject a draft. Keep every selected request progressing
     // in this mixed step, but verify drafts only once the selected batch is decode-only.
+    //
+    // A model that declares mixed_batch_checkpoints runs on operators that decide this per
+    // request, so the decode rows keep their drafts. The scheduler has already zeroed the
+    // prefill rows, which is the whole of the per-request rule.
     for (auto& entry : plan.requests) {
       entry.draft_token_count = 0;
     }

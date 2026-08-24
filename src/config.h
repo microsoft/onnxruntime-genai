@@ -410,6 +410,12 @@ struct Config {
       // Absence preserves the legacy dense, sequential paged-KV contract.
       std::optional<std::vector<StateGroup>> state_groups;
 
+      // Whether the packed recurrent operators emit their checkpoint series per request. A
+      // runtime that decides it batch-wide loses the series for every request as soon as one is
+      // prefilling, so the engine has to defer the whole step's drafts. The change is invisible
+      // in the graph, so the exporter has to declare it.
+      bool mixed_batch_checkpoints{false};
+
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};

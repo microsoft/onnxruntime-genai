@@ -867,6 +867,8 @@ struct Decoder_Element : JSON::Element {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "mixed_batch_checkpoints") {
+      v_.mixed_batch_checkpoints = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

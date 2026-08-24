@@ -144,6 +144,7 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     }
     assert "checkpoint_count" not in groups[1]
     assert "checkpoint_count" not in groups[2]
+    assert "mixed_batch_checkpoints" not in config["model"]["decoder"]
 
 
 def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
@@ -159,6 +160,8 @@ def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
     assert groups[2]["checkpoint_count"] == 4
     assert groups[2]["checkpoint_alignment"] == "right"
     assert groups[2]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.recurrent_state"
+    # A per-request checkpoint series is what lets the engine verify drafts in a mixed step.
+    assert config["model"]["decoder"]["mixed_batch_checkpoints"] is True
 
 
 def test_qwen38_layer_types_support_reduced_official_fixture():
