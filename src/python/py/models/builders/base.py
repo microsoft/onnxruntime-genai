@@ -495,20 +495,7 @@ class Model:
 
         # Build packed, variable-length inputs for the continuous-batching engine.
         self.use_paged_attention = self.extra_options.get("use_paged_attention", False)
-        use_windowed_kv_cache = self.extra_options.get("windowed_kv_cache", True)
-
-        # CPU and CUDA evict inside GroupQueryAttention. TRT-RTX evicts inside the EP.
-        self.eps_with_windowed_kv_cache = (
-            {"cpu", "cuda", "trt-rtx"}
-            if use_windowed_kv_cache and not self.use_paged_attention
-            else set()
-        )
-        self.use_windowed_paged_kv_cache = bool(
-            use_windowed_kv_cache
-            and self.use_paged_attention
-            and self.window_size is not None
-            and self.window_size > 0
-        )
+        self.windowed_kv_cache_enabled = self.extra_options.get("windowed_kv_cache", True)
 
         # Optionally widen the recurrent/conv state I/O into a window of the last W per-position
         # states (`state_window=W`): {past,present}.%d.{conv,recurrent} become
@@ -1198,7 +1185,7 @@ class Model:
             if hasattr(config, token_id_name):
                 genai_config["model"][token_id_name] = int(getattr(config, token_id_name))
 
-        if self.ep in self.eps_with_windowed_kv_cache and self.window_size is not None and self.window_size > 0:
+        if self.uses_windowed_kv_cache() and self.window_size is not None and self.window_size > 0:
             # Compute layer indices that use sliding window attention
             layer_idxs = [layer_id for layer_id in range(self.num_layers) if self.is_local(layer_id)]
 
@@ -1270,6 +1257,14 @@ class Model:
         """Return whether Hugging Face marks this layer as sliding-window attention."""
         return self.layer_types[layer_id] == "sliding_attention"
 
+    def uses_windowed_kv_cache(self):
+        """Return whether local layers use bounded contiguous KV caches on this EP."""
+        return (
+            self.windowed_kv_cache_enabled
+            and not self.use_paged_attention
+            and self.ep in {"cpu", "cuda", "trt-rtx"}
+        )
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
@@ -1293,7 +1288,12 @@ class Model:
         The runtime also needs at least one full-context layer to size the shared paged cache, so
         an all-local export falls back to full paged caches.
         """
-        if not self.use_windowed_paged_kv_cache:
+        if (
+            not self.windowed_kv_cache_enabled
+            or not self.use_paged_attention
+            or self.window_size is None
+            or self.window_size <= 0
+        ):
             return False
         local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
         return any(local_layers) and not all(local_layers)
@@ -1307,7 +1307,7 @@ class Model:
         if self.is_windowed_paged_layer(layer_id):
             # Paged layout is [num_blocks, block_size, heads, head_size]; only the block count shrinks.
             return ["num_blocks_windowed", shape[1], shape[2], shape[3]]
-        if self.ep in self.eps_with_windowed_kv_cache and self.is_local(layer_id):
+        if self.uses_windowed_kv_cache() and self.is_local(layer_id):
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
@@ -3596,7 +3596,12 @@ class Model:
             attributes["k_quant_type"] = self.kv_cache_attrs["quant_mode"]
             attributes["v_quant_type"] = self.kv_cache_attrs["quant_mode"]
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in self.eps_with_windowed_kv_cache and self.ep != "trt-rtx":
+        if (
+            self.window_size is not None
+            and self.window_size > 0
+            and self.uses_windowed_kv_cache()
+            and self.ep != "trt-rtx"
+        ):
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
             attributes["sliding_window_cache"] = 1

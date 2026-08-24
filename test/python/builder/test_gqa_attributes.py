@@ -29,6 +29,7 @@ Model = base_module.Model
 
 class _FakeGQAModel:
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
+    uses_windowed_kv_cache = Model.uses_windowed_kv_cache
     make_group_query_attention = Model.make_group_query_attention
     make_paged_attention = Model.make_paged_attention
     get_qk_norm_weight_names = Model.get_qk_norm_weight_names
@@ -41,7 +42,8 @@ class _FakeGQAModel:
     def __init__(self, ep="cpu", fuse_qk_norm_gqa=True):
         self.ep = ep
         self.extra_options = {"fuse_qk_norm_gqa": fuse_qk_norm_gqa}
-        self.eps_with_windowed_kv_cache = {"cpu", "cuda", "trt-rtx"}
+        self.windowed_kv_cache_enabled = True
+        self.use_paged_attention = False
         self.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
         self.num_attn_heads = 8
         self.num_kv_heads = 2

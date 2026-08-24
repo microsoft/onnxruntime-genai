@@ -289,7 +289,7 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
     model.hf_token = None
     model.hf_remote = False
     model.use_paged_attention = False
-    model.use_windowed_paged_kv_cache = False
+    model.windowed_kv_cache_enabled = True
     model.input_names = {
         "input_ids": "input_ids",
         "past_key_values.key": {1: "past_key_values.1.key"},
@@ -316,7 +316,6 @@ def test_qwen35_genai_config_includes_recurrent_cache_names(monkeypatch, tmp_pat
     model.extra_options = {}
     model.past_present_share_buffer = False
     model.ep = "cpu"
-    model.eps_with_windowed_kv_cache = {"cpu"}
     model.window_size = -1
 
     config = types.SimpleNamespace(

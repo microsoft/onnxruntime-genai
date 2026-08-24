@@ -67,30 +67,33 @@ def _new_model():
 
 def _window_model(extra_options, window_size):
     model = _new_model()
+    model.ep = "cuda"
     model.extra_options = extra_options
     model.make_context_length_init(SimpleNamespace(sliding_window=window_size))
+    model.num_layers = 2
+    model.layer_types = ["sliding_attention", "full_attention"]
     return model
 
 
 def test_ring_needs_paged_attention():
     # Without PagedAttention the sliding-window layers use the GQA windowed cache instead.
-    assert _window_model({}, 128).use_windowed_paged_kv_cache is False
+    assert _window_model({}, 128).has_windowed_paged_layers() is False
 
 
 def test_ring_is_on_for_paged_sliding_window_models():
-    assert _window_model({"use_paged_attention": True}, 128).use_windowed_paged_kv_cache is True
+    assert _window_model({"use_paged_attention": True}, 128).has_windowed_paged_layers() is True
 
 
 @pytest.mark.parametrize("window_size", [-1, 0, None])
 def test_ring_needs_a_window(window_size):
     # A model with no sliding-window layers has nothing to shorten.
-    assert _window_model({"use_paged_attention": True}, window_size).use_windowed_paged_kv_cache is False
+    assert _window_model({"use_paged_attention": True}, window_size).has_windowed_paged_layers() is False
 
 
 def test_ring_honours_the_windowed_kv_cache_opt_out():
     # windowed_kv_cache=false builds a full-length-KV baseline, paged or not.
     extra_options = {"use_paged_attention": True, "windowed_kv_cache": False}
-    assert _window_model(extra_options, 128).use_windowed_paged_kv_cache is False
+    assert _window_model(extra_options, 128).has_windowed_paged_layers() is False
 
 
 # ===========================================================================
@@ -100,7 +103,9 @@ def test_ring_honours_the_windowed_kv_cache_opt_out():
 
 def _make_layer_model(use_ring, local_layers=(0, 2), num_layers=4):
     model = _new_model()
-    model.use_windowed_paged_kv_cache = use_ring
+    model.windowed_kv_cache_enabled = use_ring
+    model.use_paged_attention = True
+    model.window_size = 128
     model.num_layers = num_layers
     model.layer_types = [
         "sliding_attention" if local_layers and layer_id in local_layers else "full_attention"
@@ -165,8 +170,6 @@ _PAGED_CACHE_SHAPE = ["num_blocks", 256, 2, 16]
 def _make_shape_model(use_ring, local_layers=(0,)):
     model = _make_layer_model(use_ring, local_layers)
     model.ep = "cuda"
-    # PagedAttention never qualifies for the GQA-style windowed cache.
-    model.eps_with_windowed_kv_cache = set()
     return model
 
 
@@ -204,7 +207,8 @@ def _make_inputs_model(use_paged_attention, use_ring):
     model = _new_model()
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
-    model.use_windowed_paged_kv_cache = use_ring
+    model.windowed_kv_cache_enabled = use_ring
+    model.window_size = 128
     model.num_layers = 2
     model.layer_types = ["sliding_attention", "full_attention"]
     model.num_kv_heads = 2
@@ -388,7 +392,7 @@ def _write_genai_config(
     model.extra_options = dict(extra_options or {})
     model.attention_attrs = {"paged_block_size": 256}
     model.use_paged_attention = True
-    model.use_windowed_paged_kv_cache = use_ring
+    model.windowed_kv_cache_enabled = use_ring
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"
@@ -400,8 +404,6 @@ def _write_genai_config(
     model.model_type = "TestForCausalLM"
     model.vocab_size = 32
     model.window_size = window_size
-    # PagedAttention never qualifies for the GQA-style windowed cache.
-    model.eps_with_windowed_kv_cache = set()
     model.context_length_attrs["window_kv_cache_slack"] = 0
     model.layer_types = [
         "sliding_attention" if has_local_layers and (all_local_layers or layer_id % 2 == 0) else "full_attention"
