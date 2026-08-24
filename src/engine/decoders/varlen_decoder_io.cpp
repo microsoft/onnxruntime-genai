@@ -183,6 +183,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
   PrepareHiddenStates(model, scheduled_requests);
+  PrepareAuxHiddenStates(model, scheduled_requests);
 
   auto cache = cache_manager->Cache();
   for (size_t i = 0; i < cache->input_names_.size(); ++i) {
@@ -519,6 +520,31 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
 
   output_names_.push_back(hidden_states_name.c_str());
   outputs_.push_back(active_hidden_states_->GetOrtTensor());
+}
+
+void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+                                             ScheduledRequests& scheduled_requests) {
+  // Only models exported with aux_hidden_state_layers expose this; it is what a DFlash 2 drafter
+  // turns into its own per-layer K/V.
+  const auto& name = model->config_->model.decoder.outputs.aux_hidden_states;
+  if (name.empty() || !model->session_info_.HasOutput(name)) {
+    return;
+  }
+  if (graph_buffers_ != nullptr) {
+    throw std::logic_error("Auxiliary hidden states are not supported by CUDA graph capture.");
+  }
+
+  const auto shape = model->session_info_.GetOutputShape(name);
+  if (shape.size() != 2 || shape[1] <= 0) {
+    throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
+  }
+  aux_hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_,
+                                                model->session_info_.GetOutputDataType(name));
+  aux_hidden_states_->CreateTensor(
+      std::vector<int64_t>{static_cast<int64_t>(TokenCount(scheduled_requests)), shape[1]});
+
+  output_names_.push_back(name.c_str());
+  outputs_.push_back(aux_hidden_states_->GetOrtTensor());
 }
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {

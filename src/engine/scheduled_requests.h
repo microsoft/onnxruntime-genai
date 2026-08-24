@@ -71,6 +71,7 @@ struct ScheduledRequests {
 
   std::vector<DeviceSpan<float>> ProcessLogits();
   Tensor* HiddenStates() const;
+  Tensor* AuxHiddenStates() const;
 
   void GenerateNextTokens();
   void BeginTransaction();
