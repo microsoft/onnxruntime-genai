@@ -5,7 +5,11 @@
 #include "hybrid_decoder_io.h"
 #include "static_batch_decoder_io.h"
 #include "varlen_decoder_io.h"
+#include "../../models/env_utils.h"
 #include "../../models/model_state_manifest.h"
+
+#include <array>
+#include <fstream>
 
 namespace Generators {
 
@@ -41,6 +45,32 @@ bool IsPureDecodeStep(ScheduledRequests& scheduled_requests) {
   return true;
 }
 
+void DumpDiagnosticRows(Tensor& output, const StepPlan& plan, const std::string& path) {
+  auto device_bytes = output.GetByteSpan();
+  auto bytes = device_bytes.CopyDeviceToCpu();
+  if (plan.token_count == 0 || bytes.size() % plan.token_count != 0) {
+    throw std::runtime_error("Diagnostic output size does not match the step token count.");
+  }
+  const size_t row_bytes = bytes.size() / plan.token_count;
+  std::ofstream stream{path, std::ios::app};
+  if (!stream) {
+    throw std::runtime_error("Failed to open diagnostic output file: " + path);
+  }
+  for (size_t request_index = 0; request_index < plan.requests.size(); ++request_index) {
+    const auto& entry = plan.requests[request_index];
+    for (size_t local_row = 0; local_row < entry.unprocessed_token_count; ++local_row) {
+      const size_t packed_row = entry.packed_token_offset + local_row;
+      uint64_t hash = 1469598103934665603ull;
+      for (uint8_t value : bytes.subspan(packed_row * row_bytes, row_bytes)) {
+        hash = (hash ^ value) * 1099511628211ull;
+      }
+      stream << plan.transaction_id << ' ' << request_index << ' ' << entry.sequence_length_before << ' '
+             << entry.unprocessed_token_count << ' ' << entry.draft_token_count << ' ' << local_row << ' '
+             << packed_row << ' ' << hash << '\n';
+    }
+  }
+}
+
 }  // namespace
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
@@ -61,6 +91,21 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
     decoder_state = std::make_unique<VarlenDecoderIO>(
         model_, scheduled_requests, cache_manager_, &context,
         capture ? graph_buffers_.get() : nullptr);
+  }
+
+  const std::string diagnostic_output_name = GetEnv("ORTGENAI_DIAGNOSTIC_OUTPUT_NAME");
+  const std::string diagnostic_output_path = GetEnv("ORTGENAI_DIAGNOSTIC_OUTPUT_PATH");
+  std::unique_ptr<Tensor> diagnostic_output;
+  if (!diagnostic_output_name.empty() && !diagnostic_output_path.empty() && context.plan != nullptr &&
+      context.hidden_states_input == nullptr && model_->session_info_.HasOutput(diagnostic_output_name)) {
+    diagnostic_output = std::make_unique<Tensor>(
+        model_->p_device_inputs_, model_->session_info_.GetOutputDataType(diagnostic_output_name));
+    const std::array<int64_t, 2> diagnostic_shape{
+      static_cast<int64_t>(context.plan->token_count),
+      static_cast<int64_t>(model_->config_->model.decoder.hidden_size)};
+    diagnostic_output->CreateTensor(diagnostic_shape);
+    decoder_state->output_names_.push_back(diagnostic_output_name.c_str());
+    decoder_state->outputs_.push_back(diagnostic_output->GetOrtTensor());
   }
 
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
@@ -87,6 +132,10 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
                                 decoder_state->outputs_.data(),
                                 decoder_state->output_names_.size());
   decoder_state->DumpOutputs();
+
+  if (diagnostic_output != nullptr) {
+    DumpDiagnosticRows(*diagnostic_output, *context.plan, diagnostic_output_path);
+  }
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));
 }
