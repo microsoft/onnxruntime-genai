@@ -129,6 +129,7 @@ struct FixedStateReservation::Storage {
     std::unique_ptr<OrtValue> decay;
     std::unique_ptr<OrtValue> key;
     std::unique_ptr<OrtValue> delta;
+    std::unique_ptr<OrtValue> capsule;
   };
 
   std::shared_ptr<Model> model_keepalive;
@@ -141,6 +142,7 @@ struct FixedStateReservation::Storage {
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
   std::vector<std::unique_ptr<OrtValue>> staged_checkpoints;
   std::unique_ptr<OrtValue> state_update_capture_count;
+  std::unique_ptr<OrtValue> state_update_active;
   std::vector<StateUpdateTensors> state_update_tensors;
   // Per row, the step length and the accepted prefix of it. Zero means "commit the step's final
   // state", which is every row of a non-speculative step.
@@ -152,10 +154,12 @@ struct FixedStateReservation::Storage {
   std::vector<std::string> output_names;
   std::vector<std::string> checkpoints_names;
   std::string state_update_capture_count_name;
+  std::string state_update_active_name;
   std::vector<std::string> state_update_value_names;
   std::vector<std::string> state_update_decay_names;
   std::vector<std::string> state_update_key_names;
   std::vector<std::string> state_update_delta_names;
+  std::vector<std::string> state_update_capsule_names;
   std::vector<FixedStateBinding> bindings;
   size_t staging_bytes{};
   size_t batch_rows{};
@@ -185,10 +189,12 @@ struct FixedStatePool::Impl {
     bool state_update_enabled{};
     size_t state_update_capacity{};
     std::string state_update_capture_count_name;
+    std::string state_update_active_name;
     StateUpdateOutputSpec state_update_value;
     StateUpdateOutputSpec state_update_decay;
     StateUpdateOutputSpec state_update_key;
     StateUpdateOutputSpec state_update_delta;
+    StateUpdateOutputSpec state_update_capsule;
     size_t state_update_row_bytes{};
     size_t state_update_channel_count{};
     size_t state_update_state_width{};
@@ -362,6 +368,7 @@ struct FixedStatePool::Impl {
   bool state_update_enabled{};
   size_t state_update_capacity{};
   std::string state_update_capture_count_name;
+  std::string state_update_active_name;
   uint64_t next_reservation_id{1};
   uint64_t active_reservation_id{};
   bool healthy{true};
@@ -605,6 +612,7 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
         spec.state_update_kind = update.kind;
         spec.state_update_capacity = static_cast<size_t>(update.capacity);
         spec.state_update_capture_count_name = update.capture_count;
+        spec.state_update_active_name = update.active;
 
         const auto load_update_output = [&](const std::string& output_template) {
           Impl::StateUpdateOutputSpec output;
@@ -634,8 +642,10 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
         spec.state_update_decay = load_update_output(update.decay);
         spec.state_update_key = load_update_output(update.key);
         spec.state_update_delta = load_update_output(update.delta);
+        spec.state_update_capsule = load_update_output(update.capsule);
         for (const auto* output : {&spec.state_update_value, &spec.state_update_decay,
-                                   &spec.state_update_key, &spec.state_update_delta}) {
+                 &spec.state_update_key, &spec.state_update_delta,
+                 &spec.state_update_capsule}) {
           spec.state_update_row_bytes = CheckedAdd(
               spec.state_update_row_bytes, output->row_bytes, "state_update staging allocation");
         }
@@ -650,8 +660,9 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
           }
         } else {
           spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
-          spec.state_update_key_head_count =
-              static_cast<size_t>(spec.state_update_key.session_shape[2]);
+          spec.state_update_key_head_count = update.capsule.empty()
+                                                   ? static_cast<size_t>(spec.state_update_key.session_shape[2])
+                                                   : static_cast<size_t>(update.key_head_count);
         }
       }
       // Two persistent banks per tensor so publish can flip banks without any device copy.
@@ -700,10 +711,13 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
   const size_t state_update_capacity = impl_->tensors.front().state_update_capacity;
   const std::string& state_update_capture_count_name =
       impl_->tensors.front().state_update_capture_count_name;
+    const std::string& state_update_active_name =
+      impl_->tensors.front().state_update_active_name;
   for (const auto& spec : impl_->tensors) {
     if (spec.state_update_enabled != state_update_enabled ||
         spec.state_update_capacity != state_update_capacity ||
-        spec.state_update_capture_count_name != state_update_capture_count_name) {
+        spec.state_update_capture_count_name != state_update_capture_count_name ||
+        spec.state_update_active_name != state_update_active_name) {
       throw std::runtime_error(
           "Fixed state bindings declare inconsistent compact state_update contracts.");
     }
@@ -711,6 +725,7 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
   impl_->state_update_enabled = state_update_enabled;
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
+  impl_->state_update_active_name = state_update_active_name;
   // A session with a fixed batch dimension can only ever be served with exactly that many rows, so
   // a pool too small to hold a single batch could never satisfy any reservation.
   if (impl_->fixed_session_batch_size != 0 &&
@@ -802,6 +817,9 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
     bytes = CheckedAdd(
         bytes, CheckedMultiply(row_count, sizeof(int32_t), "capture_count staging allocation"),
         "capture_count staging allocation");
+    if (!impl_->state_update_active_name.empty()) {
+      bytes = CheckedAdd(bytes, sizeof(int32_t), "state_update active staging allocation");
+    }
   }
   return bytes;
 }
@@ -987,6 +1005,8 @@ FixedStateReservation FixedStatePool::Reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
   storage->state_update_delta_names.reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
+    storage->state_update_capsule_names.reserve(
+      capture_state_updates ? impl_->tensors.size() : 0);
   storage->bindings.reserve(impl_->tensors.size());
 
   const size_t batch_rows = requests.size();
@@ -1001,6 +1021,17 @@ FixedStateReservation FixedStatePool::Reserve(
         storage->staging_bytes,
         CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
         "capture_count staging allocation");
+      if (!impl_->state_update_active_name.empty()) {
+        storage->state_update_active_name = impl_->state_update_active_name;
+        const std::array<int64_t, 1> active_shape{1};
+        storage->state_update_active = OrtValue::CreateTensor(
+          impl_->model->allocator_cpu_, active_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        storage->state_update_active->GetTensorMutableData<int32_t>()[0] =
+          capture_state_updates ? 1 : 0;
+        storage->staging_bytes = CheckedAdd(
+          storage->staging_bytes, sizeof(int32_t), "state_update active staging allocation");
+      }
   }
   for (auto& spec : impl_->tensors) {
     const auto shape = StorageShape(batch_rows, spec.session_shape);
@@ -1029,6 +1060,7 @@ FixedStateReservation FixedStatePool::Reserve(
     state_updates.decay = allocate_update_output(spec.state_update_decay);
     state_updates.key = allocate_update_output(spec.state_update_key);
     state_updates.delta = allocate_update_output(spec.state_update_delta);
+    state_updates.capsule = allocate_update_output(spec.state_update_capsule);
 
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
@@ -1064,6 +1096,8 @@ FixedStateReservation FixedStatePool::Reserve(
         keep_update_name(spec.state_update_key, storage->state_update_key_names);
     const char* state_update_delta_name =
         keep_update_name(spec.state_update_delta, storage->state_update_delta_names);
+    const char* state_update_capsule_name =
+      keep_update_name(spec.state_update_capsule, storage->state_update_capsule_names);
     storage->bindings.push_back(FixedStateBinding{
         StateGroupKind::Fixed,
         spec.layer_id,
@@ -1077,6 +1111,8 @@ FixedStateReservation FixedStatePool::Reserve(
         spec.state_update_capacity,
         impl_->state_update_capacity != 0 ? storage->state_update_capture_count_name.c_str() : nullptr,
         storage->state_update_capture_count.get(),
+        storage->state_update_active_name.empty() ? nullptr : storage->state_update_active_name.c_str(),
+        storage->state_update_active.get(),
         state_update_value_name,
         state_updates.value.get(),
         state_update_decay_name,
@@ -1085,6 +1121,8 @@ FixedStateReservation FixedStatePool::Reserve(
         state_updates.key.get(),
         state_update_delta_name,
         state_updates.delta.get(),
+        state_update_capsule_name,
+        state_updates.capsule.get(),
     });
     storage->gathered_inputs.push_back(std::move(gathered));
     storage->staged_outputs.push_back(std::move(staged));
@@ -1320,16 +1358,29 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
                                  .Span()
                                  .data() +
                              storage.handles[row].slot * spec.row_bytes;
+                          const auto* capsule = reinterpret_cast<const float*>(
+                          row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
+                          const float* decay = capsule != nullptr
+                                   ? capsule
+                                   : reinterpret_cast<const float*>(
+                                     row_pointer(updates.decay, spec.state_update_decay.row_bytes));
+                          const float* key = capsule != nullptr
+                                 ? capsule + spec.state_update_capacity * spec.state_update_channel_count
+                                 : reinterpret_cast<const float*>(
+                                   row_pointer(updates.key, spec.state_update_key.row_bytes));
+                          const float* delta = capsule != nullptr
+                                   ? key + spec.state_update_capacity *
+                                       spec.state_update_key_head_count *
+                                       spec.state_update_key_width
+                                   : reinterpret_cast<const float*>(
+                                     row_pointer(updates.delta, spec.state_update_delta.row_bytes));
           replay_descriptors.push_back(StateUpdateReplayDesc{
               source,
               destination,
               row_pointer(updates.value, spec.state_update_value.row_bytes),
-              reinterpret_cast<const float*>(
-                  row_pointer(updates.decay, spec.state_update_decay.row_bytes)),
-              reinterpret_cast<const float*>(
-                  row_pointer(updates.key, spec.state_update_key.row_bytes)),
-              reinterpret_cast<const float*>(
-                  row_pointer(updates.delta, spec.state_update_delta.row_bytes)),
+                decay,
+                key,
+                delta,
               static_cast<uint64_t>(spec.state_update_channel_count),
               static_cast<uint64_t>(spec.state_update_state_width),
               static_cast<uint64_t>(spec.state_update_key_width),

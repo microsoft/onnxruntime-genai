@@ -3516,6 +3516,8 @@ class Model:
             outputs.append(checkpoints)
         state_update_value = kwargs.get("state_update_value", "")
         if state_update_capacity:
+            if not checkpoints:
+                outputs.append("")
             outputs.append(state_update_value)
         attributes = {
             "activation": kwargs.get("activation", "silu"),
@@ -3659,11 +3661,7 @@ class Model:
             self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
-        """Packed-layout GatedDeltaNet evaluation path with precomputed normalization and gates.
-
-        This intentionally keeps the same upstream graph as `make_varlen_linear_attention` so
-        model-level comparisons isolate the recurrent operator rather than its optional fusions.
-        """
+        """Packed-layout GatedDeltaNet with optional fused normalization and gate activations."""
         if self.io_dtype == ir.DataType.BFLOAT16:
             raise ValueError(
                 "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
@@ -3685,9 +3683,18 @@ class Model:
             f"{beta_cast}/output_0",
             kwargs["past_recurrent_state"],
         ]
+        a_log = kwargs.get("a_log", "")
+        dt_bias = kwargs.get("dt_bias", "")
+        if bool(a_log) != bool(dt_bias):
+            raise ValueError("a_log and dt_bias must be set together")
         state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if a_log or state_update_capacity:
+            inputs.extend([a_log, dt_bias])
         if state_update_capacity:
-            inputs.extend(["", "", kwargs["state_update_capture_count"]])
+            inputs.append(kwargs["state_update_capture_count"])
+            state_update_active = kwargs.get("state_update_active", "")
+            if state_update_active:
+                inputs.append(state_update_active)
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         # `state_checkpoints=W` adds the right-aligned `checkpoints` output alongside the
@@ -3707,14 +3714,22 @@ class Model:
             kwargs.get("state_update_key", ""),
             kwargs.get("state_update_delta", ""),
         ]
+        state_update_capsule = kwargs.get("state_update_capsule", "")
         if state_update_capacity:
-            outputs.extend(state_update_outputs)
+            while len(outputs) < 3:
+                outputs.append("")
+            if state_update_capsule:
+                if any(state_update_outputs):
+                    raise ValueError("state_update_capsule cannot be combined with separate outputs")
+                outputs.extend(["", "", "", state_update_capsule])
+            else:
+                outputs.extend(state_update_outputs)
         attributes = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
             "scale": kwargs.get("scale", 1.0),
-            "gate_activation": "none",
-            "beta_activation": "none",
-            "qk_l2_norm": 0,
+            "gate_activation": kwargs.get("gate_activation", "none"),
+            "beta_activation": kwargs.get("beta_activation", "none"),
+            "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
             "chunk_size": kwargs.get("chunk_size", 64),
             "state_checkpoints": state_checkpoints,
         }
@@ -3733,12 +3748,19 @@ class Model:
         if checkpoints:
             self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
         if state_update_capacity:
-            for state_update_output, state_update_shape in zip(
-                state_update_outputs,
-                kwargs["state_update_shapes"],
-                strict=True,
-            ):
-                self.make_value(state_update_output, ir.DataType.FLOAT, shape=state_update_shape)
+            if state_update_capsule:
+                self.make_value(
+                    state_update_capsule,
+                    ir.DataType.FLOAT,
+                    shape=kwargs["state_update_capsule_shape"],
+                )
+            else:
+                for state_update_output, state_update_shape in zip(
+                    state_update_outputs,
+                    kwargs["state_update_shapes"],
+                    strict=True,
+                ):
+                    self.make_value(state_update_output, ir.DataType.FLOAT, shape=state_update_shape)
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [

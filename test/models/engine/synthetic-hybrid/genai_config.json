@@ -45,6 +45,7 @@
             "kind": "causal_conv",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
+            "active": "state_update_active",
             "value": "state_update.%d.conv_value"
           }
         },
@@ -67,9 +68,9 @@
             "kind": "gated_delta_net",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
-            "decay": "state_update.%d.recurrent_decay",
-            "key": "state_update.%d.recurrent_key",
-            "delta": "state_update.%d.recurrent_delta"
+            "active": "state_update_active",
+            "capsule": "state_update.%d.recurrent_capsule",
+            "key_head_count": 1
           }
         }
       ]

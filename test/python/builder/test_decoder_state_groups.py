@@ -56,6 +56,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.num_attn_heads = 24
     model.num_kv_heads = 4
     model.num_layers = 64
+    model.linear_num_key_heads = 16
     model.model_type = "Qwen3_5_textForCausalLM"
     model.vocab_size = 248320
     model.window_size = None
@@ -193,6 +194,7 @@ def test_qwen38_compact_state_updates_coexist_with_checkpoints(monkeypatch, tmp_
             "kind": "causal_conv",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
+            "active": "state_update_active",
             "value": "state_update.%d.conv_value",
         },
     }
@@ -212,9 +214,9 @@ def test_qwen38_compact_state_updates_coexist_with_checkpoints(monkeypatch, tmp_
             "kind": "gated_delta_net",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
-            "decay": "state_update.%d.recurrent_decay",
-            "key": "state_update.%d.recurrent_key",
-            "delta": "state_update.%d.recurrent_delta",
+            "active": "state_update_active",
+            "capsule": "state_update.%d.recurrent_capsule",
+            "key_head_count": 16,
         },
     }
     assert "mixed_batch_checkpoints" not in config["model"]["decoder"]
@@ -423,6 +425,60 @@ def test_gated_delta_net_evaluation_preserves_precomputed_gate_contract():
     assert model.values[-1] == ("present", base_module.ir.DataType.FLOAT, state_shape)
 
 
+def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count():
+    model = _recording_model()
+    model.make_varlen_gated_delta_net(
+        "/gdn",
+        q_path="q_raw",
+        k_path="k_raw",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        decay="a_raw",
+        beta="b_raw",
+        a_log="a_log",
+        dt_bias="dt_bias",
+        gate_shape=["num_tokens", 16],
+        gate_activation="qwen",
+        beta_activation="sigmoid",
+        qk_l2_norm=1,
+        scale=0.0,
+        state_update_capture_count="capture_count",
+        state_update_active="state_update_active",
+        state_update_capacity=7,
+        state_update_decay="update_decay",
+        state_update_key="update_key",
+        state_update_delta="update_delta",
+        state_update_shapes=[
+            ["batch_size", 7, 16],
+            ["batch_size", 7, 16, 128],
+            ["batch_size", 7, 16, 128],
+        ],
+        output_shape=["num_tokens", 16, 128],
+        present_recurrent_shape=["batch_size", 16, 128, 128],
+    )
+
+    node = model.nodes[-1][1]
+    assert node["inputs"] == [
+        "q_raw",
+        "k_raw",
+        "v",
+        "cu",
+        "/gdn/decay_fp32/Cast/output_0",
+        "/gdn/beta_fp32/Cast/output_0",
+        "past",
+        "a_log",
+        "dt_bias",
+        "capture_count",
+        "state_update_active",
+    ]
+    assert node["gate_activation"] == "qwen"
+    assert node["beta_activation"] == "sigmoid"
+    assert node["qk_l2_norm"] == 1
+    assert node["scale"] == 0.0
+
+
 def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
     model = _recording_model()
     model.make_varlen_causal_conv_with_state(
@@ -457,6 +513,29 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
         base_module.ir.DataType.FLOAT16,
         ["batch_size", 3, 48],
     )
+
+    model.make_varlen_causal_conv_with_state(
+        "/compact_conv",
+        root_input="x",
+        weight="w",
+        bias="b",
+        cumulative_sequence_length="cu",
+        past_conv_state="past",
+        present_conv_state="present",
+        state_update_capture_count="state_update_capture_count",
+        state_update_capacity=3,
+        state_update_value="state_update.0.conv_value",
+        output_shape=["num_tokens", 48],
+        present_conv_shape=["batch_size", 48, 3],
+        state_update_value_shape=["batch_size", 3, 48],
+    )
+    compact_conv = model.nodes[-1][1]
+    assert compact_conv["outputs"] == [
+        "/compact_conv/output_0",
+        "present",
+        "",
+        "state_update.0.conv_value",
+    ]
 
     model.make_varlen_gated_delta_net(
         "/gdn",
@@ -550,13 +629,19 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     model.linear_conv_kernel_dim = 4
     model._state_window_dims = []
     model._state_window = 0
+    model.state_update_capacity = 3
     model.input_names = {"cumulative_sequence_lengths": "cu"}
     model._leading_dims = lambda: ["num_tokens"]
     model._make_linear_attention_projections = lambda *args: ("z", "b", "a", "conv_input", "weight")
     model.make_initializer = lambda *args, **kwargs: None
     conv_calls = []
     model.make_varlen_causal_conv_with_state = lambda name, **kwargs: conv_calls.append((name, kwargs))
-    model._make_linear_attention_normalize_and_gate = lambda *args: ("q_flat", "k_flat", "v_flat", "decay", "beta")
+    model._make_linear_attention_normalize_and_gate = lambda *args: pytest.fail(
+        "packed GDN must fuse normalization and gates"
+    )
+    nodes = []
+    model.make_node = lambda op_type, inputs, outputs, **kwargs: nodes.append((op_type, inputs, outputs, kwargs))
+    model.make_value = lambda *args, **kwargs: None
     reshapes = []
     model.make_reshape = lambda name, inputs, dtype, shape: reshapes.append((name, inputs, dtype, shape))
     linear_calls = []
@@ -564,7 +649,7 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     outputs = []
     model._make_linear_attention_output = lambda *args: outputs.append(args)
 
-    model._make_linear_attention(1, SimpleNamespace(), "root")
+    model._make_linear_attention(1, SimpleNamespace(A_log="a_log_value", dt_bias="dt_bias_value"), "root")
 
     assert conv_calls[0][1]["output_shape"] == ["num_tokens", 48]
     assert [reshape[3] for reshape in reshapes[:3]] == [
@@ -577,6 +662,15 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     assert linear["q_path"].endswith("/q_thd/Reshape/output_0")
     assert linear["k_path"].endswith("/k_thd/Reshape/output_0")
     assert linear["v_path"].endswith("/v_thd/Reshape/output_0")
+    assert linear["decay"] == "a/output_0"
+    assert linear["beta"] == "b/output_0"
+    assert linear["gate_activation"] == "qwen"
+    assert linear["beta_activation"] == "sigmoid"
+    assert linear["qk_l2_norm"] == 1
+    assert linear["scale"] == 0.0
+    assert linear["state_update_capacity"] == 3
+    assert linear["state_update_capsule"] == "state_update.1.recurrent_capsule"
+    assert linear["state_update_capsule_shape"] == ["batch_size", 3 * (3 + 2 * 4 + 3 * 8)]
     assert linear["output_shape"] == ["num_tokens", 3, 8]
     assert linear["present_recurrent_shape"] == ["batch_size", 3, 8, 4]
     assert linear["gate_shape"] == ["num_tokens", 3]
@@ -678,17 +772,16 @@ def test_qwen_packed_compact_state_update_declares_exact_graph_io():
     assert model.input_names["state_update.capture_count"] == "state_update_capture_count"
     assert model.input_types["state_update.capture_count"] == base_module.ir.DataType.INT32
     assert model.input_shapes["state_update.capture_count"] == ["batch_size"]
+    assert model.input_names["state_update.active"] == "state_update_active"
+    assert model.input_types["state_update.active"] == base_module.ir.DataType.INT32
+    assert model.input_shapes["state_update.active"] == [1]
     assert model.output_shapes["state_update.0.conv_value"] == ["batch_size", 3, 48]
     assert model.output_types["state_update.0.conv_value"] == base_module.ir.DataType.FLOAT16
-    assert model.output_shapes["state_update.0.recurrent_decay"] == ["batch_size", 3, 3]
-    assert model.output_shapes["state_update.0.recurrent_key"] == ["batch_size", 3, 2, 4]
-    assert model.output_shapes["state_update.0.recurrent_delta"] == ["batch_size", 3, 3, 8]
-    for output_name in (
-        "state_update.0.recurrent_decay",
-        "state_update.0.recurrent_key",
-        "state_update.0.recurrent_delta",
-    ):
-        assert model.output_types[output_name] == base_module.ir.DataType.FLOAT
+    assert model.output_shapes["state_update.0.recurrent_capsule"] == [
+        "batch_size",
+        3 * (3 + 2 * 4 + 3 * 8),
+    ]
+    assert model.output_types["state_update.0.recurrent_capsule"] == base_module.ir.DataType.FLOAT
 
 
 def test_varlen_ops_emit_checkpoint_outputs():

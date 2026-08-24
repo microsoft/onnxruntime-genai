@@ -63,6 +63,7 @@ def create_decoder(output_dir):
         helper.make_tensor_value_info(
             "state_update_capture_count", TensorProto.INT32, ["batch_size"]
         ),
+        helper.make_tensor_value_info("state_update_active", TensorProto.INT32, [1]),
     ]
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch_size", "sequence_length", VOCAB_SIZE]),
@@ -114,24 +115,16 @@ def create_decoder(output_dir):
             decay_name = f"state_update.{layer}.recurrent_decay"
             key_name = f"state_update.{layer}.recurrent_key"
             delta_name = f"state_update.{layer}.recurrent_delta"
-            outputs.extend(
-                [
-                    helper.make_tensor_value_info(
-                        decay_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0]],
-                    ),
-                    helper.make_tensor_value_info(
-                        key_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, 1, row_dims[2]],
-                    ),
-                    helper.make_tensor_value_info(
-                        delta_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0], row_dims[1]],
-                    ),
-                ]
+            capsule_name = f"state_update.{layer}.recurrent_capsule"
+            capsule_width = STATE_UPDATE_CAPACITY * (
+                row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1]
+            )
+            outputs.append(
+                helper.make_tensor_value_info(
+                    capsule_name,
+                    TensorProto.FLOAT,
+                    ["batch_size", capsule_width],
+                )
             )
             decay_base = f"{decay_name}/base"
             key_base = f"{key_name}/base"
@@ -161,6 +154,15 @@ def create_decoder(output_dir):
                     helper.make_node("Unsqueeze", [delta_base, "state_update_axis"], [delta_step]),
                     helper.make_node(
                         "Concat", [delta_step] * STATE_UPDATE_CAPACITY, [delta_name], axis=1
+                    ),
+                    helper.make_node("Flatten", [decay_name], [f"{decay_name}/flat"], axis=1),
+                    helper.make_node("Flatten", [key_name], [f"{key_name}/flat"], axis=1),
+                    helper.make_node("Flatten", [delta_name], [f"{delta_name}/flat"], axis=1),
+                    helper.make_node(
+                        "Concat",
+                        [f"{decay_name}/flat", f"{key_name}/flat", f"{delta_name}/flat"],
+                        [capsule_name],
+                        axis=1,
                     ),
                 ]
             )
@@ -246,6 +248,7 @@ def create_config(output_dir):
                             "kind": "causal_conv",
                             "capacity": STATE_UPDATE_CAPACITY,
                             "capture_count": "state_update_capture_count",
+                            "active": "state_update_active",
                             "value": "state_update.%d.conv_value",
                         },
                     },
@@ -265,9 +268,9 @@ def create_config(output_dir):
                             "kind": "gated_delta_net",
                             "capacity": STATE_UPDATE_CAPACITY,
                             "capture_count": "state_update_capture_count",
-                            "decay": "state_update.%d.recurrent_decay",
-                            "key": "state_update.%d.recurrent_key",
-                            "delta": "state_update.%d.recurrent_delta",
+                            "active": "state_update_active",
+                            "capsule": "state_update.%d.recurrent_capsule",
+                            "key_head_count": 1,
                         },
                     },
                 ],

@@ -271,6 +271,7 @@ TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints
           "enabled": false,
           "kind": "causal_conv", "capacity": 3,
           "capture_count": "state_update_capture_count",
+          "active": "state_update_active",
           "value": "state_update.%d.conv_value"
         }
       },
@@ -283,6 +284,7 @@ TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints
           "enabled": false,
           "kind": "gated_delta_net", "capacity": 3,
           "capture_count": "state_update_capture_count",
+          "active": "state_update_active",
           "decay": "state_update.%d.decay",
           "key": "state_update.%d.key",
           "delta": "state_update.%d.delta"
@@ -299,12 +301,14 @@ TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints
             Config::Model::Decoder::StateUpdateKind::CausalConv);
   EXPECT_EQ(groups[0].state_update->capacity, 3);
   EXPECT_EQ(groups[0].state_update->capture_count, "state_update_capture_count");
+  EXPECT_EQ(groups[0].state_update->active, "state_update_active");
   EXPECT_EQ(groups[0].state_update->value, "state_update.%d.conv_value");
   EXPECT_EQ(groups[0].checkpoint_count, 4);
   ASSERT_TRUE(groups[1].state_update);
   EXPECT_FALSE(groups[1].state_update->enabled);
   EXPECT_EQ(groups[1].state_update->kind,
             Config::Model::Decoder::StateUpdateKind::GatedDeltaNet);
+  EXPECT_EQ(groups[1].state_update->active, "state_update_active");
   EXPECT_EQ(groups[1].state_update->decay, "state_update.%d.decay");
   EXPECT_EQ(groups[1].state_update->key, "state_update.%d.key");
   EXPECT_EQ(groups[1].state_update->delta, "state_update.%d.delta");

@@ -117,6 +117,15 @@ void FillGdnUpdates(const FixedStateBinding& binding, size_t row,
                     std::span<const float> decay,
                     std::span<const float> key,
                     std::span<const float> delta) {
+  if (binding.state_update_capsule) {
+    const size_t row_elements = RowElements(*binding.state_update_capsule);
+    ASSERT_EQ(decay.size() + key.size() + delta.size(), row_elements);
+    auto* data = binding.state_update_capsule->GetTensorMutableData<float>() + row * row_elements;
+    data = std::copy(decay.begin(), decay.end(), data);
+    data = std::copy(key.begin(), key.end(), data);
+    std::copy(delta.begin(), delta.end(), data);
+    return;
+  }
   ASSERT_NE(binding.state_update_decay, nullptr);
   ASSERT_NE(binding.state_update_key, nullptr);
   ASSERT_NE(binding.state_update_delta, nullptr);
@@ -443,7 +452,7 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
     const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};  // A resident, B provisional.
     auto reservation = pool->Reserve(requests);
     const size_t expected_staging =
-        4 * bytes_per_request + 2 * sizeof(int32_t);  // gather + output + count input
+      4 * bytes_per_request + 3 * sizeof(int32_t);  // gather + output + counts + activity
     EXPECT_EQ(reservation.PlannedStagingBytes(), expected_staging);
     EXPECT_EQ(pool->ActiveStagingBytes(), expected_staging);
     const auto snapshot = pool->Snapshot();
@@ -746,6 +755,7 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
     auto reservation = pool->Reserve(requests);
     EXPECT_FALSE(reservation.CapturesStateUpdates());
     OrtValue* shared_count{};
+    OrtValue* shared_active{};
     for (const auto& binding : reservation.Bindings()) {
       EXPECT_STREQ(binding.state_update_capture_count_name, "state_update_capture_count");
       ASSERT_NE(binding.state_update_capture_count, nullptr);
@@ -755,10 +765,18 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
       }
       EXPECT_EQ(binding.state_update_capture_count, shared_count);
       EXPECT_EQ(binding.state_update_capture_count->GetTensorData<int32_t>()[0], 0);
+      EXPECT_STREQ(binding.state_update_active_name, "state_update_active");
+      ASSERT_NE(binding.state_update_active, nullptr);
+      if (!shared_active) {
+        shared_active = binding.state_update_active;
+      }
+      EXPECT_EQ(binding.state_update_active, shared_active);
+      EXPECT_EQ(binding.state_update_active->GetTensorData<int32_t>()[0], 0);
       EXPECT_EQ(binding.state_update_value, nullptr);
       EXPECT_EQ(binding.state_update_decay, nullptr);
       EXPECT_EQ(binding.state_update_key, nullptr);
       EXPECT_EQ(binding.state_update_delta, nullptr);
+      EXPECT_EQ(binding.state_update_capsule, nullptr);
     }
     reservation.Discard();
   }
@@ -773,18 +791,22 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
             (std::vector<int64_t>{2}));
   EXPECT_EQ(conv.state_update_capture_count->GetTensorData<int32_t>()[0], 3);
   EXPECT_EQ(conv.state_update_capture_count->GetTensorData<int32_t>()[1], 0);
+  EXPECT_STREQ(conv.state_update_active_name, "state_update_active");
+  ASSERT_NE(conv.state_update_active, nullptr);
+  EXPECT_EQ(conv.state_update_active->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{1}));
+  EXPECT_EQ(conv.state_update_active->GetTensorData<int32_t>()[0], 1);
+  EXPECT_EQ(recurrent.state_update_active, conv.state_update_active);
   ASSERT_NE(conv.state_update_value, nullptr);
   EXPECT_EQ(conv.state_update_value->GetTensorTypeAndShapeInfo()->GetShape(),
             (std::vector<int64_t>{2, 3, 2}));
-  ASSERT_NE(recurrent.state_update_decay, nullptr);
-  ASSERT_NE(recurrent.state_update_key, nullptr);
-  ASSERT_NE(recurrent.state_update_delta, nullptr);
-  EXPECT_EQ(recurrent.state_update_decay->GetTensorTypeAndShapeInfo()->GetShape(),
-            (std::vector<int64_t>{2, 3, 2}));
-  EXPECT_EQ(recurrent.state_update_key->GetTensorTypeAndShapeInfo()->GetShape(),
-            (std::vector<int64_t>{2, 3, 1, 2}));
-  EXPECT_EQ(recurrent.state_update_delta->GetTensorTypeAndShapeInfo()->GetShape(),
-            (std::vector<int64_t>{2, 3, 2, 2}));
+  EXPECT_EQ(recurrent.state_update_decay, nullptr);
+  EXPECT_EQ(recurrent.state_update_key, nullptr);
+  EXPECT_EQ(recurrent.state_update_delta, nullptr);
+  ASSERT_NE(recurrent.state_update_capsule, nullptr);
+  EXPECT_STREQ(recurrent.state_update_capsule_name, "state_update.2.recurrent_capsule");
+  EXPECT_EQ(recurrent.state_update_capsule->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 24}));
   EXPECT_EQ(reservation.PlannedStagingBytes(),
             pool->PlannedStagingBytes(2, false, true));
 }

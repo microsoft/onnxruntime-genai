@@ -1223,6 +1223,9 @@ class Qwen35TextModel(Model):
             self.input_names["state_update.capture_count"] = "state_update_capture_count"
             self.input_types["state_update.capture_count"] = ir.DataType.INT32
             self.input_shapes["state_update.capture_count"] = ["batch_size"]
+            self.input_names["state_update.active"] = "state_update_active"
+            self.input_types["state_update.active"] = ir.DataType.INT32
+            self.input_shapes["state_update.active"] = [1]
 
         for i, lt in enumerate(self.layer_types):
             if lt == "full_attention":
@@ -1295,26 +1298,15 @@ class Qwen35TextModel(Model):
                         self.linear_conv_dim,
                     ]
 
-                    state_update_specs = {
-                        "recurrent_decay": ["batch_size", state_update_capacity, self.linear_num_value_heads],
-                        "recurrent_key": [
-                            "batch_size",
-                            state_update_capacity,
-                            self.linear_num_key_heads,
-                            self.linear_key_head_dim,
-                        ],
-                        "recurrent_delta": [
-                            "batch_size",
-                            state_update_capacity,
-                            self.linear_num_value_heads,
-                            self.linear_value_head_dim,
-                        ],
-                    }
-                    for update_name, update_shape in state_update_specs.items():
-                        key = f"state_update.{i}.{update_name}"
-                        self.output_names[key] = key
-                        self.output_types[key] = ir.DataType.FLOAT
-                        self.output_shapes[key] = update_shape
+                    capsule_name = f"state_update.{i}.recurrent_capsule"
+                    capsule_width = state_update_capacity * (
+                        self.linear_num_value_heads
+                        + self.linear_num_key_heads * self.linear_key_head_dim
+                        + self.linear_num_value_heads * self.linear_value_head_dim
+                    )
+                    self.output_names[capsule_name] = capsule_name
+                    self.output_types[capsule_name] = ir.DataType.FLOAT
+                    self.output_shapes[capsule_name] = ["batch_size", capsule_width]
 
         self.input_names["past_key_values.key"] = filtered_key_inputs
         self.input_names["past_key_values.value"] = filtered_value_inputs
@@ -2140,9 +2132,19 @@ class Qwen35TextModel(Model):
             )
 
         # Split QKV, L2 norm, gates
-        # The packed layout has its own GatedDeltaNet path below; this one is the dense
-        # rank-4 export with the operator's fused qwen/sigmoid gates and state window.
-        if not packed and self.linear_attn_op == "gated_delta_net":
+        if packed:
+            la_output = self._make_packed_gated_delta_net(
+                layer_id,
+                linear_attn,
+                conv_out,
+                b_name,
+                a_name,
+            )
+            self._make_linear_attention_output(layer_id, linear_attn, la_output, z_name)
+            return
+
+        # Dense rank-4 export with the operator's fused qwen/sigmoid gates and state window.
+        if self.linear_attn_op == "gated_delta_net":
             la_output = self._make_gated_delta_net(
                 layer_id,
                 linear_attn,
@@ -2165,84 +2167,26 @@ class Qwen35TextModel(Model):
         past_recurrent = f"past_key_values.{layer_id}.recurrent_state"
         present_recurrent = f"present.{layer_id}.recurrent_state"
 
-        if packed:
-            def reshape_thd(path, label, heads, dim):
-                reshape_name = f"{basename}/{label}_thd/Reshape"
-                self.make_reshape(
-                    reshape_name,
-                    [path, f"/model/constants/INT64/[0, {heads}, {dim}]"],
-                    self.io_dtype,
-                    ["num_tokens", heads, dim],
-                )
-                return f"{reshape_name}/output_0"
-
-            q_thd = reshape_thd(q_scaled_output, "q", n_k, hk)
-            k_thd = reshape_thd(k_norm_out, "k", n_k, hk)
-            v_thd = reshape_thd(v_out, "v", n_kv, hv)
-            present_recurrent_shape = ["batch_size", n_kv, hv, hk]
-            checkpoints = self._packed_state_checkpoints()
-            state_update_capacity = getattr(self, "state_update_capacity", 0)
-            la_op_name = f"{basename}/GatedDeltaNet"
-            self.make_varlen_gated_delta_net(
-                la_op_name,
-                q_path=q_thd,
-                k_path=k_thd,
-                v_path=v_thd,
-                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
-                past_recurrent_state=past_recurrent,
-                present_recurrent_state=present_recurrent,
-                checkpoints=f"checkpoints.{layer_id}.recurrent_state" if checkpoints else "",
-                state_checkpoints=checkpoints,
-                decay=g_output,
-                beta=beta_output,
-                gate_shape=["num_tokens", n_kv],
-                q_num_heads=n_k,
-                kv_num_heads=n_kv,
-                update_rule="gated_delta",
-                scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
-                output_shape=["num_tokens", n_kv, hv],
-                present_recurrent_shape=present_recurrent_shape,
-                checkpoints_shape=[checkpoints, *present_recurrent_shape],
-                state_update_capture_count="state_update_capture_count",
-                state_update_capacity=state_update_capacity,
-                state_update_decay=f"state_update.{layer_id}.recurrent_decay",
-                state_update_key=f"state_update.{layer_id}.recurrent_key",
-                state_update_delta=f"state_update.{layer_id}.recurrent_delta",
-                state_update_shapes=[
-                    ["batch_size", state_update_capacity, n_kv],
-                    ["batch_size", state_update_capacity, n_k, hk],
-                    ["batch_size", state_update_capacity, n_kv, hv],
-                ],
-            )
-            la_flatten_name = f"{basename}/linear_attention_output/Reshape"
-            self.make_reshape(
-                la_flatten_name,
-                [f"{la_op_name}/output_0", f"/model/constants/INT64/[0, {v_dim}]"],
-                self.io_dtype,
-                ["num_tokens", v_dim],
-            )
-            la_output = f"{la_flatten_name}/output_0"
-        else:
-            present_recurrent_shape = ["batch_size", n_kv, hk, hv]
-            la_op_name = f"{basename}/LinearAttention"
-            self.make_linear_attention(
-                la_op_name,
-                q_path=q_scaled_output,
-                k_path=k_norm_out,
-                v_path=v_out,
-                past_recurrent_state=past_recurrent,
-                present_recurrent_state=present_recurrent,
-                decay=g_output,
-                beta=beta_output,
-                q_num_heads=n_k,
-                kv_num_heads=n_kv,
-                update_rule="gated_delta",
-                scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
-                output_shape=["batch_size", "sequence_length", v_dim],
-                present_recurrent_shape=[*self._state_window_dims, *present_recurrent_shape],
-                state_window=self._state_window,
-            )
-            la_output = f"{la_op_name}/output_0"
+        present_recurrent_shape = ["batch_size", n_kv, hk, hv]
+        la_op_name = f"{basename}/LinearAttention"
+        self.make_linear_attention(
+            la_op_name,
+            q_path=q_scaled_output,
+            k_path=k_norm_out,
+            v_path=v_out,
+            past_recurrent_state=past_recurrent,
+            present_recurrent_state=present_recurrent,
+            decay=g_output,
+            beta=beta_output,
+            q_num_heads=n_k,
+            kv_num_heads=n_kv,
+            update_rule="gated_delta",
+            scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
+            output_shape=["batch_size", "sequence_length", v_dim],
+            present_recurrent_shape=[*self._state_window_dims, *present_recurrent_shape],
+            state_window=self._state_window,
+        )
+        la_output = f"{la_op_name}/output_0"
 
         # Gated RMSNorm + output projection
         self._make_linear_attention_output(
@@ -2251,6 +2195,96 @@ class Qwen35TextModel(Model):
             la_output,
             z_name,
         )
+
+    def _make_packed_gated_delta_net(self, layer_id, linear_attn, conv_out, b_name, a_name):
+        """Build packed GDN directly from raw QKV and gate projections."""
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        v_dim = self.linear_value_dim
+        n_kv = self.linear_num_value_heads
+        n_k = self.linear_num_key_heads
+        hk = self.linear_key_head_dim
+        hv = self.linear_value_head_dim
+        k_dim = n_k * hk
+
+        split_qkv_name = f"{basename}/split_qkv/Split"
+        q_out = f"{split_qkv_name}/output_0"
+        k_out = f"{split_qkv_name}/output_1"
+        v_out = f"{split_qkv_name}/output_2"
+        self.make_node(
+            "Split",
+            [conv_out, f"/model/constants/INT64/[{k_dim}, {k_dim}, {v_dim}]"],
+            [q_out, k_out, v_out],
+            name=split_qkv_name,
+            axis=-1,
+        )
+        self.make_value(q_out, self.io_dtype, ["num_tokens", k_dim])
+        self.make_value(k_out, self.io_dtype, ["num_tokens", k_dim])
+        self.make_value(v_out, self.io_dtype, ["num_tokens", v_dim])
+
+        def add_head_axis(tag, value, n_heads, head_dim):
+            name = f"{basename}/{tag}_thd/Reshape"
+            self.make_reshape(
+                name,
+                [value, f"/model/constants/INT64/[0, {n_heads}, {head_dim}]"],
+                self.io_dtype,
+                ["num_tokens", n_heads, head_dim],
+            )
+            return f"{name}/output_0"
+
+        q_thd = add_head_axis("q", q_out, n_k, hk)
+        k_thd = add_head_axis("k", k_out, n_k, hk)
+        v_thd = add_head_axis("v", v_out, n_kv, hv)
+
+        a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
+        self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
+        dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
+        self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
+
+        present_recurrent_shape = ["batch_size", n_kv, hv, hk]
+        checkpoints = self._packed_state_checkpoints()
+        state_update_capacity = getattr(self, "state_update_capacity", 0)
+        op_name = f"{basename}/GatedDeltaNet"
+        self.make_varlen_gated_delta_net(
+            op_name,
+            q_path=q_thd,
+            k_path=k_thd,
+            v_path=v_thd,
+            cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+            past_recurrent_state=f"past_key_values.{layer_id}.recurrent_state",
+            present_recurrent_state=f"present.{layer_id}.recurrent_state",
+            checkpoints=f"checkpoints.{layer_id}.recurrent_state" if checkpoints else "",
+            state_checkpoints=checkpoints,
+            decay=f"{a_name}/output_0",
+            beta=f"{b_name}/output_0",
+            a_log=a_log_init,
+            dt_bias=dt_bias_init,
+            gate_shape=["num_tokens", n_kv],
+            gate_activation="qwen",
+            beta_activation="sigmoid",
+            qk_l2_norm=1,
+            update_rule="gated_delta",
+            scale=0.0,
+            output_shape=["num_tokens", n_kv, hv],
+            present_recurrent_shape=present_recurrent_shape,
+            checkpoints_shape=[checkpoints, *present_recurrent_shape],
+            state_update_capture_count="state_update_capture_count",
+            state_update_active="state_update_active",
+            state_update_capacity=state_update_capacity,
+            state_update_capsule=f"state_update.{layer_id}.recurrent_capsule",
+            state_update_capsule_shape=[
+                "batch_size",
+                state_update_capacity * (n_kv + n_k * hk + n_kv * hv),
+            ],
+        )
+
+        flat_name = f"{basename}/linear_attention_output/Reshape"
+        self.make_reshape(
+            flat_name,
+            [f"{op_name}/output_0", f"/model/constants/INT64/[0, {v_dim}]"],
+            self.io_dtype,
+            ["num_tokens", v_dim],
+        )
+        return f"{flat_name}/output_0"
 
     def _make_gated_delta_net(self, layer_id, linear_attn, conv_out_3d, b_name, a_name):
         """Build the recurrence with com.microsoft::GatedDeltaNet.
@@ -2732,15 +2766,15 @@ class Qwen35TextModel(Model):
                         "kind": "causal_conv" if state_name == "conv_state" else "gated_delta_net",
                         "capacity": state_update_capacity,
                         "capture_count": "state_update_capture_count",
+                        "active": "state_update_active",
                     }
                     if state_name == "conv_state":
                         state_update["value"] = "state_update.%d.conv_value"
                     else:
                         state_update.update(
                             {
-                                "decay": "state_update.%d.recurrent_decay",
-                                "key": "state_update.%d.recurrent_key",
-                                "delta": "state_update.%d.recurrent_delta",
+                                "capsule": "state_update.%d.recurrent_capsule",
+                                "key_head_count": self.linear_num_key_heads,
                             }
                         )
                     group["state_update"] = state_update

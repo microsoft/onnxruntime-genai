@@ -583,6 +583,17 @@ struct StateUpdate_Element : JSON::Element {
       v_.key = JSON::Get<std::string_view>(value);
     } else if (name == "delta") {
       v_.delta = JSON::Get<std::string_view>(value);
+    } else if (name == "active") {
+      v_.active = JSON::Get<std::string_view>(value);
+    } else if (name == "capsule") {
+      v_.capsule = JSON::Get<std::string_view>(value);
+    } else if (name == "key_head_count") {
+      const auto count = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.key_head_count");
+      if (count < 1 || count > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("Decoder state update key_head_count must be positive");
+      }
+      v_.key_head_count = static_cast<int>(count);
     } else {
       throw JSON::unknown_value_error{};
     }

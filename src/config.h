@@ -412,6 +412,9 @@ struct Config {
         std::string key;
         std::string delta;
         bool enabled{true};
+        std::string active;
+        std::string capsule;
+        int key_head_count{0};
       };
 
       struct StateGroup {

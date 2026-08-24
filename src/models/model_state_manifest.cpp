@@ -200,6 +200,27 @@ void ValidateStateUpdateSession(std::string_view group_label,
         "' must have int32 dtype");
   }
   ValidateRank(group_label, "state_update capture_count input", capture_count, 1);
+  if (!update.active.empty()) {
+    if (!metadata.HasInput(update.active)) {
+      throw std::runtime_error(
+          std::string{group_label} + " state_update active input was not found: " + update.active);
+    }
+    const TensorMetadata active{
+        metadata.GetInputDataType(update.active),
+        metadata.GetInputShape(update.active),
+        update.active};
+    if (active.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      throw std::runtime_error(
+          std::string{group_label} + " state_update active input '" + update.active +
+          "' must have int32 dtype");
+    }
+    ValidateRank(group_label, "state_update active input", active, 1);
+    if (active.shape[0] != 1) {
+      throw std::runtime_error(
+          std::string{group_label} + " state_update active input '" + update.active +
+          "' must have shape [1]");
+    }
+  }
 
   const auto get_output = [&](std::string_view role,
                               const std::string& output_template,
@@ -269,6 +290,25 @@ void ValidateStateUpdateSession(std::string_view group_label,
       validate_batch(state, value);
       validate_capacity(value);
       validate_dimension("channel", state, 1, value, 2);
+    } else if (!update.capsule.empty()) {
+      const auto capsule = get_output("capsule", update.capsule, layer_id);
+      ValidateRank(group_label, "state_update capsule output", capsule, 2);
+      if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+          capsule.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        throw std::runtime_error(
+            std::string{group_label} +
+            " gated_delta_net state and state_update capsule must have float dtype");
+      }
+      validate_batch(state, capsule);
+      const int64_t expected_width = static_cast<int64_t>(update.capacity) *
+                                     (state.shape[1] +
+                                      static_cast<int64_t>(update.key_head_count) * state.shape[3] +
+                                      state.shape[1] * state.shape[2]);
+      if (capsule.shape[1] != expected_width) {
+        throw std::runtime_error(
+            std::string{group_label} + " state_update capsule output '" + capsule.name +
+            "' width must be " + std::to_string(expected_width));
+      }
     } else {
       const auto decay = get_output("decay", update.decay, layer_id);
       const auto key = get_output("key", update.key, layer_id);
@@ -329,7 +369,7 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
 
   std::set<int> paged_layers;
   std::set<std::string> expanded_bindings;
-  std::optional<std::pair<int, std::string>> fixed_state_update_contract;
+  std::optional<std::pair<std::pair<int, std::string>, std::string>> fixed_state_update_contract;
   std::optional<bool> fixed_state_update_enabled;
   size_t fixed_group_count{};
   size_t fixed_state_update_group_count{};
@@ -384,20 +424,35 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       if (update.capture_count.find('%') != std::string::npos) {
         throw std::runtime_error(group_label + " state_update capture_count must be a graph input name, not a template");
       }
+      if (update.active.find('%') != std::string::npos) {
+        throw std::runtime_error(group_label + " state_update active must be a graph input name, not a template");
+      }
       if (update.kind == StateUpdateKind::CausalConv) {
-        if (update.value.empty() || !update.decay.empty() || !update.key.empty() || !update.delta.empty()) {
+        if (update.value.empty() || !update.decay.empty() || !update.key.empty() ||
+            !update.delta.empty() || !update.capsule.empty() || update.key_head_count != 0) {
           throw std::runtime_error(group_label + " causal_conv state_update requires only value");
         }
-      } else if (!update.value.empty() || update.decay.empty() || update.key.empty() || update.delta.empty()) {
-        throw std::runtime_error(group_label + " gated_delta_net state_update requires decay, key, and delta and no value");
+      } else {
+        const bool separate = update.value.empty() && !update.decay.empty() &&
+                              !update.key.empty() && !update.delta.empty() &&
+                              update.capsule.empty() && update.key_head_count == 0;
+        const bool capsule = update.value.empty() && update.decay.empty() &&
+                             update.key.empty() && update.delta.empty() &&
+                             !update.capsule.empty() && update.key_head_count > 0;
+        if (!separate && !capsule) {
+          throw std::runtime_error(
+              group_label + " gated_delta_net state_update requires decay, key, and delta and no "
+                    "value, or capsule and key_head_count");
+        }
       }
 
-      const auto contract = std::pair{update.capacity, update.capture_count};
+      const auto contract = std::pair{std::pair{update.capacity, update.capture_count}, update.active};
       if (!fixed_state_update_contract) {
         fixed_state_update_contract = contract;
       } else if (*fixed_state_update_contract != contract) {
         throw std::runtime_error(
-            "All fixed state_update groups must use the same capacity and capture_count input");
+          "All fixed state_update groups must use the same capacity and capture_count input, "
+          "and the same active input");
       }
       if (!fixed_state_update_enabled) {
         fixed_state_update_enabled = update.enabled;
@@ -480,6 +535,7 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       validate_update_output("state_update.decay", update.decay);
       validate_update_output("state_update.key", update.key);
       validate_update_output("state_update.delta", update.delta);
+      validate_update_output("state_update.capsule", update.capsule);
     }
   }
 

@@ -84,6 +84,8 @@ struct FixedStateBinding {
   size_t state_update_capacity{};
   const char* state_update_capture_count_name{};
   OrtValue* state_update_capture_count{};
+  const char* state_update_active_name{};
+  OrtValue* state_update_active{};
   const char* state_update_value_name{};
   OrtValue* state_update_value{};
   const char* state_update_decay_name{};
@@ -92,6 +94,8 @@ struct FixedStateBinding {
   OrtValue* state_update_key{};
   const char* state_update_delta_name{};
   OrtValue* state_update_delta{};
+  const char* state_update_capsule_name{};
+  OrtValue* state_update_capsule{};
 };
 
 enum class FixedStateReservationState {

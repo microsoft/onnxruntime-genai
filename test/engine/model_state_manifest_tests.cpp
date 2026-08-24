@@ -316,6 +316,34 @@ TEST(ModelStateManifestTest, ValidatesCompactGdnUpdatesWithDynamicBatch) {
   EXPECT_NO_THROW(manifest.ValidateSession(MakeCompactGdnMetadata()));
 }
 
+TEST(ModelStateManifestTest, ValidatesCompactStateUpdateActivityInput) {
+  auto decoder = MakeCompactGdnDecoder();
+  decoder.state_groups->front().state_update->active = "state_update_active";
+  const ModelStateManifest manifest{decoder};
+  auto metadata = MakeCompactGdnMetadata();
+  metadata.AddInput(
+      "state_update_active",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {1});
+  EXPECT_NO_THROW(manifest.ValidateSession(metadata));
+
+  metadata.AddInput(
+      "state_update_active",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+      {1});
+  auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("active input 'state_update_active' must have int32 dtype"),
+            std::string::npos)
+      << message;
+
+  metadata.AddInput(
+      "state_update_active",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {2});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("must have shape [1]"), std::string::npos) << message;
+}
+
 TEST(ModelStateManifestTest, RejectsInvalidCompactCaptureCountMetadata) {
   const ModelStateManifest manifest{MakeCompactConvDecoder()};
   auto metadata = MakeCompactConvMetadata();

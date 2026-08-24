@@ -54,6 +54,8 @@ void HybridDecoderIO::BindFixedState() {
 
   const char* state_update_capture_count_name{};
   OrtValue* state_update_capture_count{};
+  const char* state_update_active_name{};
+  OrtValue* state_update_active{};
   size_t state_update_capacity{};
   for (const auto& binding : execution_context_.fixed_state_bindings) {
     if (!binding.input_name || !binding.output_name || !binding.input || !binding.output ||
@@ -84,6 +86,10 @@ void HybridDecoderIO::BindFixedState() {
       throw std::runtime_error(
           "Hybrid fixed state contains incomplete state_update capture-count metadata.");
     }
+            if (bool(binding.state_update_active_name) != bool(binding.state_update_active)) {
+          throw std::runtime_error(
+              "Hybrid fixed state contains incomplete state_update activity metadata.");
+            }
     if (!state_update_capture_count_name) {
       if (!input_names.insert(binding.state_update_capture_count_name).second) {
         throw std::runtime_error(
@@ -94,9 +100,23 @@ void HybridDecoderIO::BindFixedState() {
       state_update_capacity = binding.state_update_capacity;
       input_names_.push_back(state_update_capture_count_name);
       inputs_.push_back(state_update_capture_count);
+      if (binding.state_update_active_name) {
+        if (!input_names.insert(binding.state_update_active_name).second) {
+          throw std::runtime_error(
+              "Hybrid state_update activity collides with another decoder input.");
+        }
+        state_update_active_name = binding.state_update_active_name;
+        state_update_active = binding.state_update_active;
+        input_names_.push_back(state_update_active_name);
+        inputs_.push_back(state_update_active);
+      }
     } else if (std::string_view{state_update_capture_count_name} !=
                    binding.state_update_capture_count_name ||
                state_update_capture_count != binding.state_update_capture_count ||
+               bool(state_update_active_name) != bool(binding.state_update_active_name) ||
+               (state_update_active_name &&
+                std::string_view{state_update_active_name} != binding.state_update_active_name) ||
+               state_update_active != binding.state_update_active ||
                state_update_capacity != binding.state_update_capacity) {
       throw std::runtime_error(
           "Hybrid fixed state bindings disagree on the shared state_update contract.");
@@ -104,7 +124,7 @@ void HybridDecoderIO::BindFixedState() {
 
     const bool has_state_update_outputs =
         binding.state_update_value || binding.state_update_decay || binding.state_update_key ||
-        binding.state_update_delta;
+      binding.state_update_delta || binding.state_update_capsule;
     if (!has_state_update_outputs) {
       continue;
     }
@@ -112,9 +132,13 @@ void HybridDecoderIO::BindFixedState() {
     const bool valid_outputs =
         binding.state_update_kind == StateUpdateKind::CausalConv
             ? binding.state_update_value && !binding.state_update_decay &&
-                  !binding.state_update_key && !binding.state_update_delta
-            : !binding.state_update_value && binding.state_update_decay &&
-                  binding.state_update_key && binding.state_update_delta;
+            !binding.state_update_key && !binding.state_update_delta &&
+            !binding.state_update_capsule
+          : !binding.state_update_value &&
+            ((binding.state_update_decay && binding.state_update_key &&
+              binding.state_update_delta && !binding.state_update_capsule) ||
+             (!binding.state_update_decay && !binding.state_update_key &&
+              !binding.state_update_delta && binding.state_update_capsule));
     if (!valid_outputs) {
       throw std::runtime_error(
           "Hybrid fixed state contains incomplete state_update output tensors.");
@@ -134,6 +158,7 @@ void HybridDecoderIO::BindFixedState() {
     bind_state_update_output(binding.state_update_decay_name, binding.state_update_decay);
     bind_state_update_output(binding.state_update_key_name, binding.state_update_key);
     bind_state_update_output(binding.state_update_delta_name, binding.state_update_delta);
+    bind_state_update_output(binding.state_update_capsule_name, binding.state_update_capsule);
   }
 }
 
