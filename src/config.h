@@ -410,10 +410,12 @@ struct Config {
       // Absence preserves the legacy dense, sequential paged-KV contract.
       std::optional<std::vector<StateGroup>> state_groups;
 
-      // Whether the packed recurrent operators emit their checkpoint series per request. A
-      // runtime that decides it batch-wide loses the series for every request as soon as one is
-      // prefilling, so the engine has to defer the whole step's drafts. The change is invisible
-      // in the graph, so the exporter has to declare it.
+      // EXPERIMENTAL, known broken -- leave false. Setting it keeps drafts alive on the decode
+      // rows of a step that also holds a prefill, instead of deferring the whole step's drafts.
+      // ONNX Runtime emits its recurrent checkpoint series per request, but something else in
+      // the mixed-step rollback path still corrupts state: MMLU-Pro falls from 82.75% to 68.75%
+      // with token-0 degeneration. See
+      // dev/docs/memory/qwen_3.8_27b_nvfp4_gdn_paged_dflash2_hybrid_dispatch_design.md 6.2.
       bool mixed_batch_checkpoints{false};
 
       struct Inputs {

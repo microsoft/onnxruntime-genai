@@ -1164,10 +1164,6 @@ class Model:
 
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
-            if any(group.get("checkpoint_count") for group in state_groups):
-                # The packed recurrent operators emit the checkpoint series per request, so a step
-                # that mixes a prefill with decodes can still verify the decodes' drafts.
-                genai_config["model"]["decoder"]["mixed_batch_checkpoints"] = True
 
         self.update_genai_config(genai_config)
 

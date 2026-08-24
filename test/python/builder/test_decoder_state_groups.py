@@ -160,8 +160,10 @@ def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
     assert groups[2]["checkpoint_count"] == 4
     assert groups[2]["checkpoint_alignment"] == "right"
     assert groups[2]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.recurrent_state"
-    # A per-request checkpoint series is what lets the engine verify drafts in a mixed step.
-    assert config["model"]["decoder"]["mixed_batch_checkpoints"] is True
+    # mixed_batch_checkpoints stays opt-in: keeping drafts alive in a mixed prefill+decode step
+    # still corrupts state even with per-request operator checkpoints. See
+    # dev/docs/memory/qwen_3.8_27b_nvfp4_gdn_paged_dflash2_hybrid_dispatch_design.md section 6.2.
+    assert "mixed_batch_checkpoints" not in config["model"]["decoder"]
 
 
 def test_qwen38_layer_types_support_reduced_official_fixture():
