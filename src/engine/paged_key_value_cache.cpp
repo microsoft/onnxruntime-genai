@@ -593,8 +593,7 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
         delta.reserved_window_block_count);
     for (size_t i = 0; i < delta.reserved_window_block_count; ++i) {
       request_reservation.reserved_window_block_ids.push_back(
-          reservation.ReservedWindowBlocks()[
-              delta.reserved_window_block_offset + i]
+          reservation.ReservedWindowBlocks()[delta.reserved_window_block_offset + i]
               ->Id());
     }
     request_reservation.newly_admitted = delta.newly_admitted;

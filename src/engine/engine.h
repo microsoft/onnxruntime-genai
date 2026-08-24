@@ -151,7 +151,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<std::shared_ptr<Request>> ready_requests_;
   std::vector<std::shared_ptr<Request>> staged_ready_requests_;
   size_t ready_request_index_{};
-
 };
 
 }  // namespace Generators
