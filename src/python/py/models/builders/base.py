@@ -4743,7 +4743,7 @@ class Model:
 
         raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)}) "
                            "for QMoE expert weights quantization. "
-                           f"Got qmoe_block_size={self.quant_attrs["qmoe_block_size"]} and ep={self.ep}.")
+                           f"Got qmoe_block_size={self.quant_attrs['qmoe_block_size']} and ep={self.ep}.")
 
     # TODO: replace all five CudaQuantizer methods with calls to native ORT APIs
     def _symmetric_per_channel_quantize(self, weights):
