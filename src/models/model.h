@@ -4,6 +4,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
+#include "model_state_manifest.h"
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
@@ -33,13 +34,39 @@ struct State {
   virtual void Finalize(int current_length) {}
 
   virtual void RewindTo(size_t index) { (void)index; };
+
+  // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
+  // for models without recurrent state. SnapshotState() captures the conv/linear-attention
+  // state at the current length; a later RewindTo(length) restores it (the attention KV
+  // cache is rolled back the usual way). Used by MTP self-speculative decoding to undo a
+  // rejected draft, since recurrent state cannot be partially cropped like KV cache.
+  virtual void SnapshotState(size_t position) { (void)position; }
+
+  // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
+  // state (state_window > 1), the accepted prefix can be committed WITHOUT a replay
+  // forward. HasCroppableRecurrentState() reports availability; CropToAccepted() rolls the
+  // attention KV cache + position to `new_length` and crops the recurrent state to the state
+  // AFTER verify token `recurrent_position` (that token's window slot).
+  virtual bool HasCroppableRecurrentState() const { return false; }
+  // Width of that window, i.e. the longest forward whose per-token states all stay addressable.
+  // 1 when the model carries no window.
+  virtual int64_t RecurrentStateWindow() const { return 1; }
+  virtual void CropToAccepted(size_t new_length, size_t recurrent_position) {
+    (void)new_length;
+    (void)recurrent_position;
+  }
+
+  // Stage a hidden_states input value for the next Run (models with a hidden_states input,
+  // e.g. the MTP self-speculative head). Default no-op.
+  virtual void SetHiddenStates(OrtValue* hidden_states) { (void)hidden_states; }
+
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
 
-  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
-  void SetRunOption(const char* key, const char* value);
+  virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+  virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
@@ -57,14 +84,23 @@ struct State {
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);
+  void Run(OrtSession& session, bool graph_capture_this_run = false, int graph_capture_length = 1,
+           int graph_capture_variant = 0);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
-  std::string graph_id_{};
-  int graph_id_value_{0};  // integer form of graph_id_, used to avoid re-parsing in the destructor
+  // CUDA graph annotation id per captured input length. The decode path captures
+  // sequence_length == 1; speculative decoding (MTP) also captures the 2-token verify shape.
+  // Each distinct length gets its own annotation id so ORT captures/replays an independent graph
+  // bound to that shape's (static) buffers.
+  struct GraphId {
+    int value{};       // integer form, so the destructor never has to re-parse (std::stoi throws)
+    std::string text;  // string form passed to the "gpu_graph_id" run option
+  };
+  const std::string& GraphIdForLength(int graph_capture_length, int graph_capture_variant);
+  std::unordered_map<int, GraphId> graph_ids_{};
   // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.
@@ -97,6 +133,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
+  std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                           const char* template_kwargs, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
@@ -142,21 +180,21 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
-struct SessionInfo {
+struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
 
   void Add(OrtSession& session);
 
-  bool HasInput(const std::string& name) const;
-  bool HasOutput(const std::string& name) const;
+  bool HasInput(const std::string& name) const override;
+  bool HasOutput(const std::string& name) const override;
 
-  ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
-  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override;
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override;
 
   std::vector<std::string> GetInputNames() const;
 
-  std::vector<int64_t> GetInputShape(const std::string& name) const;
-  std::vector<int64_t> GetOutputShape(const std::string& name) const;
+  std::vector<int64_t> GetInputShape(const std::string& name) const override;
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override;
 
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
@@ -185,9 +223,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
+  DeviceInterface* p_device_logits_{};   // Matches p_device_inputs_ unless the device reads logits back on the CPU
   DeviceInterface* p_device_scoring_{};  // Device for search/scoring (sequences, token allocation).
   DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
 
@@ -202,10 +242,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      bool cloned_from_parent = false,
+                                      bool append_providers = true);
 
  protected:
   void CreateSessionOptions();
+  void AddSharedInitializers();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

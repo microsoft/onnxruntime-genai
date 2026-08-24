@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "execution_context.h"
 #include "request.h"
 
 namespace Generators {
@@ -36,7 +37,12 @@ struct ScheduledRequests {
                     BatchedSampler* batched_sampler,
                     BatchedSamplingPlan* sampling_plan);
 
-  std::unique_ptr<OrtRunOptions> RunOptions();
+  ScheduledRequests(const StepPlan& plan,
+                    std::shared_ptr<Model> model,
+                    BatchedSampler* batched_sampler,
+                    BatchedSamplingPlan* sampling_plan);
+
+  ExecutionContext& CreateExecutionContext();
 
   std::shared_ptr<GeneratorParams> Params();
 
@@ -59,19 +65,34 @@ struct ScheduledRequests {
     return requests_[idx];
   }
 
+  const std::vector<std::shared_ptr<Request>>& Requests() const { return requests_; }
+
   void AddDecoderState(std::unique_ptr<DecoderIO> decoder_state);
 
+  std::vector<DeviceSpan<float>> ProcessLogits();
+
   void GenerateNextTokens();
+  void BeginTransaction();
+  void GenerateNextTokensForTransaction(
+      const StepPlan& plan,
+      std::vector<RequestStepResult>& results);
+  void RestoreStateForTransaction();
+  void CommitStateForTransaction();
 
  private:
+  bool PrepareBatchedSamplingPlan(bool require_transaction_support);
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
 
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
+  std::unique_ptr<ExecutionContext> execution_context_;
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};
+  size_t transaction_checkpoint_count_{};
+  bool transaction_uses_batched_sampler_{};
+  bool sampler_checkpoint_active_{};
 };
 
 }  // namespace Generators

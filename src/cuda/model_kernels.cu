@@ -92,7 +92,10 @@ __global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int voca
     return;
   int batch_index = index / vocab_size;
   int vocab_index = index % vocab_size;
-  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (1 << (vocab_index % 32))))
+  const size_t words_per_row = (static_cast<size_t>(vocab_size) + 31) / 32;
+  const size_t mask_index = static_cast<size_t>(batch_index) * words_per_row +
+                            static_cast<size_t>(vocab_index) / 32;
+  if (!(logits_mask[mask_index] & (uint32_t{1} << (vocab_index % 32))))
     batch_logits[index] = std::numeric_limits<float>::lowest();
 }
 
@@ -471,6 +474,50 @@ template void LaunchFinalizeCrossQK(cudaStream_t stream,
                                     uint16_t* cross_qk_output,
                                     int num_return_sequences,
                                     const int* cache_indir_data);
+
+namespace {
+
+struct StateSlotDescGpu {
+  uint8_t* base;
+  uint64_t slot_bytes;
+};
+
+constexpr int kSlotCopyThreads = 256;
+constexpr int kSlotCopyBlocksPerTensor = 128;
+
+__global__ void CopyStateSlotsKernel(const StateSlotDescGpu* __restrict__ descs, int src_slot, int dst_slot) {
+  const StateSlotDescGpu desc = descs[blockIdx.y];
+  const uint64_t bytes = desc.slot_bytes;
+  uint8_t* dst_bytes = desc.base + static_cast<uint64_t>(dst_slot) * bytes;
+  const uint8_t* src_bytes = desc.base + static_cast<uint64_t>(src_slot) * bytes;
+
+  const uint64_t stride = static_cast<uint64_t>(gridDim.x) * kSlotCopyThreads;
+  const uint64_t start = static_cast<uint64_t>(blockIdx.x) * kSlotCopyThreads + threadIdx.x;
+
+  uint64_t copied_bytes = 0;
+  if (((reinterpret_cast<uintptr_t>(src_bytes) | reinterpret_cast<uintptr_t>(dst_bytes)) & 0xF) == 0) {
+    const uint64_t vec_count = bytes >> 4;
+    auto* dst_vec = reinterpret_cast<uint4*>(dst_bytes);
+    const auto* src_vec = reinterpret_cast<const uint4*>(src_bytes);
+    for (uint64_t i = start; i < vec_count; i += stride) {
+      dst_vec[i] = src_vec[i];
+    }
+    copied_bytes = vec_count << 4;
+  }
+
+  for (uint64_t i = copied_bytes + start; i < bytes; i += stride) {
+    dst_bytes[i] = src_bytes[i];
+  }
+}
+
+}  // namespace
+
+void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream) {
+  if (count <= 0 || src_slot == dst_slot) return;
+  const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
+  CopyStateSlotsKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
+      reinterpret_cast<const StateSlotDescGpu*>(descs), src_slot, dst_slot);
+}
 
 }  // namespace cuda
 }  // namespace Generators

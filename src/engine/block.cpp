@@ -33,11 +33,15 @@ size_t Block::Capacity() const {
 }
 
 void Block::AddSlot() {
-  if (IsFull()) {
-    throw std::runtime_error("Cannot add a slot. The block is full.");
+  AddSlots(1);
+}
+
+void Block::AddSlots(size_t slots) {
+  if (slots > EmptySlots()) {
+    throw std::runtime_error("Cannot add slots beyond the block capacity.");
   }
 
-  size_++;
+  size_ += slots;
 }
 
 std::vector<size_t> Block::SlotIds() const {

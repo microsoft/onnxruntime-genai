@@ -46,6 +46,10 @@ void LaunchGatherSamplingRows(const float* const* rows, float* packed_scores, in
                               cudaStream_t stream);
 void LaunchScatterSamplingTokens(const int32_t* packed_tokens, const int* output_indices,
                                  int32_t* next_tokens, int batch_size, cudaStream_t stream);
+void LaunchGatherCurandStates(const curandState* states, const int* state_indices,
+                              curandState* checkpoint, int count, cudaStream_t stream);
+void LaunchScatterCurandStates(const curandState* checkpoint, const int* state_indices,
+                               curandState* states, int count, cudaStream_t stream);
 
 // A general-purpose block-wise softmax implementation, needed by beam search.
 template <bool is_log_softmax>

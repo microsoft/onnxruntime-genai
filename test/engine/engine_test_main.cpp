@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include "generators.h"
 #include "telemetry_test_environment.h"
 
 int main(int argc, char** argv) {
@@ -25,5 +26,9 @@ int main(int argc, char** argv) {
   Generators::test::SuppressTelemetryForTests();
 
   ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  const int result = RUN_ALL_TESTS();
+  // Tear genai down while ORT and CUDA are still alive. Left to the process-exit static
+  // destructor, releasing the CUDA trivial session faults inside the CUDA EP.
+  Generators::Shutdown();
+  return result;
 }

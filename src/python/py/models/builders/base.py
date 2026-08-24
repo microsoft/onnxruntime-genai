@@ -35,8 +35,46 @@ from transformers import (
 from .cuda_quantizer import CudaQuantizer
 from .quant_config import QuantConfig, desugar_algo_config, resolve_dtype
 
+PAGED_ATTENTION_METADATA_SHAPE = [3]
+
+# EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx evicts
+# inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
+EPS_WITH_WINDOWED_KV_CACHE = {"trt-rtx", "cuda", "cpu"}
+
+
+def resolve_windowed_kv_cache_eps(extra_options):
+    """EPs allowed to give the sliding-window layers a cache shorter than max_length.
+
+    Empty means every layer keeps a full-length KV cache. PagedAttention has no windowed-cache
+    mode, so it never qualifies, and ``windowed_kv_cache=false`` opts out explicitly to build a
+    full-length-KV baseline from the same builder.
+    """
+    if not extra_options.get("windowed_kv_cache", True) or extra_options.get("use_paged_attention", False):
+        return set()
+    return set(EPS_WITH_WINDOWED_KV_CACHE)
+
+
+def resolve_windowed_paged_kv_cache(extra_options, window_size):
+    """Whether the sliding-window layers get a ring of paged blocks instead of one block per token.
+
+    PagedAttention has its own flavour of windowed cache. A sliding-window layer only ever reads the
+    last ``window_size`` positions, so instead of one block per position it is given a short ring of
+    blocks that the runtime repeats across the block table. Position p then lands in slot
+    ``p mod (ring_blocks * block_size)`` and old positions are overwritten in place. The operator
+    needs no change: it already masks reads to ``[kv_end - window_size, kv_end]``.
+    """
+    return bool(
+        extra_options.get("windowed_kv_cache", True)
+        and extra_options.get("use_paged_attention", False)
+        and window_size is not None
+        and window_size > 0
+    )
+
 
 class Model:
+    def _get_model_type(self, config):
+        return config.architectures[0]
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Model attributes from config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
@@ -53,9 +91,8 @@ class Model:
             else self.context_length
         )
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
-        # EPs that can hold a KV cache smaller than max_length for sliding-window layers: trt-rtx
-        # evicts inside the EP, cuda and cpu evict inside GroupQueryAttention (sliding_window_cache=1).
-        self.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
+        self.eps_with_windowed_kv_cache = resolve_windowed_kv_cache_eps(extra_options)
+        self.use_windowed_paged_kv_cache = resolve_windowed_paged_kv_cache(extra_options, self.window_size)
         # Positions kept beyond the window to cover a prefill chunk and amortize cache compaction.
         # 0 means "use the EP default at runtime"; set explicitly to override.
         # CUDA optimal: 0 (launch overhead dominates; attention is O(W) regardless of C).
@@ -91,7 +128,7 @@ class Model:
         )
 
         self.model_name_or_path = config._name_or_path
-        self.model_type = config.architectures[0]
+        self.model_type = self._get_model_type(config)
         self.io_dtype = ir.DataType(io_dtype)
         self.onnx_dtype = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
@@ -151,6 +188,7 @@ class Model:
             "past_key_values.key": [f"past_key_values.{i}.key" for i in range(self.num_layers)],
             "past_key_values.value": [f"past_key_values.{i}.value" for i in range(self.num_layers)],
             "block_table": "block_table",                                                                        # For paged attention models
+            "block_table_windowed": "block_table_windowed",                                                      # For paged attention models with sliding-window layers
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                        # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                    # For paged attention models
             "attention_metadata": "attention_metadata",                                                          # For paged attention models
@@ -163,6 +201,7 @@ class Model:
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "block_table": ir.DataType.INT32,                                                                    # For paged attention models
+            "block_table_windowed": ir.DataType.INT32,                                                           # For paged attention models with sliding-window layers
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                    # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                          # For paged attention models
             "attention_metadata": ir.DataType.INT32,                                                              # For paged attention models
@@ -175,9 +214,10 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", "kv_cache_dim"],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format). Last dim is symbolic so a single export serves both non-quantized (head_size) and quantized (compressed) KV caches.
             "block_table": ["batch_size", "max_num_blocks"],                                                     # For paged attention models
+            "block_table_windowed": ["batch_size", "max_num_blocks"],                                            # Same column count as `block_table`: the op indexes it by true position, only the block ids repeat
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                   # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                             # For paged attention models
-            "attention_metadata": [2],                                                                           # For paged attention models. Static shape: a pair of scalars, not a per-sequence tensor.
+            "attention_metadata": PAGED_ATTENTION_METADATA_SHAPE.copy(),                                         # For paged attention models. Static upper query/KV bounds plus a replay-safe lower KV bound.
         }
         self.make_inputs_init()
 
@@ -325,28 +365,38 @@ class Model:
         # (weights / moe / runtime), then source every quantization knob below from it so there is a
         # single source of truth. `from_extra_options` mirrors the legacy desugaring exactly, so the
         # exported models remain byte-identical to the flat-option path.
-        self.quant_config = QuantConfig.from_extra_options(
-            extra_options,
-            precision=self.onnx_dtype_to_precision(self.onnx_dtype),
-            execution_provider=self.ep,
-        )
+        self.quant_config = extra_options.get("_quant_config")
+        if self.quant_config is None:
+            self.quant_config = QuantConfig.from_extra_options(
+                extra_options,
+                precision=self.onnx_dtype_to_precision(self.onnx_dtype),
+                execution_provider=self.ep,
+            )
+        elif not isinstance(self.quant_config, QuantConfig):
+            raise TypeError("_quant_config must be a QuantConfig instance")
 
         # int8 precision (onnx_dtype INT8/UINT8) builds a float graph and quantizes the dense weights
         # to 8-bit MatMulNBits at save time, mirroring the int4 path (onnx_dtype INT4/UINT4).
         quantize_to_8bits = self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8}
 
         # MoE-specific variables
-        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4 or quantize_to_8bits) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"), which maps to
+        # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
         # (expert_weight_bits, QMoE quant_type):
-        #   "int4"  -> (4, "int")  INT4 QMoE (default)
-        #   "int8"  -> (8, "int")  INT8 QMoE
-        #   "mxfp4" -> (4, "fp4")  MXFP4 QMoE (CUDA-only)
+        #   "int4"  -> (4, "int")    INT4 QMoE (default)
+        #   "int8"  -> (8, "int")    INT8 QMoE
+        #   "mxfp4" -> (4, "fp4")    MXFP4 QMoE (CUDA-only)
+        #   "nvfp4" -> (4, "nvfp4")  NVFP4 QMoE (CUDA-only)
         moe_descriptor = resolve_dtype(self.quant_config.moe.type)
         expert_weight_bits = moe_descriptor.bits
-        qmoe_quant_type = "fp4" if moe_descriptor.kind == "mx" else "int"
+        # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
+        # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
+        moe_op_type = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        if moe_descriptor.kind == "mx":
+            qmoe_quant_type = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+        else:
+            qmoe_quant_type = "int"
         swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -366,7 +416,7 @@ class Model:
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "weights_prepacked": weights_prepacked,          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8) or "fp4" (MXFP4).
+            "quant_type": qmoe_quant_type,                   # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
         }
 
         # LM head-specific variables
@@ -387,7 +437,7 @@ class Model:
         # 2 = SM90/Hopper fpA_intB layout (weight_prepacked=2). Only meaningful on the CUDA EP; other EPs
         # keep the raw blockwise layout. Override via extra_options["matmulnbits_weights_prepacked"].
         self.matmulnbits_weights_prepacked = self.quant_config.runtime.matmulnbits_weights_prepacked
-        # QMoE block size (MXFP4 is pinned to a block size of 32 inside MoEConfig).
+        # QMoE block size (MXFP4 is pinned to 32 and NVFP4 to 16 inside MoEConfig).
         self.qmoe_block_size = self.quant_config.moe.block_size
         self.quant_attrs = {
             "accuracy_level": weights_cfg.accuracy_level,
@@ -444,8 +494,16 @@ class Model:
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
                 del self.input_names["attention_mask"]
+            if not self.use_windowed_paged_kv_cache:
+                del self.input_names["block_table_windowed"]
         else:
-            for name in ["block_table", "cumulative_sequence_lengths", "past_sequence_lengths", "attention_metadata"]:
+            for name in [
+                "block_table",
+                "block_table_windowed",
+                "cumulative_sequence_lengths",
+                "past_sequence_lengths",
+                "attention_metadata",
+            ]:
                 del self.input_names[name]
 
     def make_outputs_init(self):
@@ -453,19 +511,21 @@ class Model:
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
-        if self.use_paged_attention:
-            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
-            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            self.output_shapes["logits"] = ["num_tokens", self.vocab_size]
-
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
         if self.prune_lm_head and self.exclude_lm_head:
-            print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
+            if "prune_lm_head" in self.extra_options:
+                print("Warning: prune_lm_head is ignored when exclude_lm_head is set")
             self.prune_lm_head = False
+
+        if self.use_paged_attention:
+            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
+            logits_first_dim = "batch_size" if self.prune_lm_head else "num_tokens"
+            self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
@@ -474,10 +534,11 @@ class Model:
             del self.output_names["logits"]
 
     def hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
-        """Return a standard 3D shape or a packed 2D paged-attention shape."""
+        """Return a standard 3D shape or a 2D paged-attention shape."""
         last_dim = self.hidden_size if last_dim is None else last_dim
         if self.use_paged_attention:
-            return ["num_tokens", last_dim]
+            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
+            return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
     def get_rope_parameters(self, config):
@@ -701,10 +762,9 @@ class Model:
         per_channel = self.kv_quant_type == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
 
-        # Calibrated per-layer scales are required and supplied via a JSON file:
-        #   {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}}
-        # where each per-layer entry is a scalar (PER_TENSOR) or a length-scale_size
-        # vector (PER_CHANNEL).
+        # Calibrated per-layer scales are required and supplied via a JSON file. Optional
+        # `layer_ids` maps sparse scale entries to their original model layers; without it,
+        # the scale arrays use the legacy dense 0..num_layers-1 order.
         scale_file = self.extra_options.get("kv_cache_scale_file", None)
         if scale_file is None:
             raise ValueError(
@@ -720,9 +780,36 @@ class Model:
             raise ValueError(
                 "kv_cache_scale_file must contain scales.k_scales and scales.v_scales."
             ) from error
-        if len(k_scales_per_layer) != self.num_layers or len(v_scales_per_layer) != self.num_layers:
+        layer_ids = scale_data.get("layer_ids")
+        if layer_ids is None:
+            layer_ids = list(range(self.num_layers))
+            expected_scale_count = self.num_layers
+        else:
+            if not isinstance(layer_ids, list) or any(type(layer_id) is not int for layer_id in layer_ids):
+                raise ValueError("kv_cache_scale_file layer_ids must be a list of integer model layer IDs.")
+            if not layer_ids:
+                raise ValueError("kv_cache_scale_file layer_ids must not be empty.")
+            if len(set(layer_ids)) != len(layer_ids):
+                raise ValueError("kv_cache_scale_file layer_ids must not contain duplicates.")
+            if any(layer_id < 0 or layer_id >= self.num_layers for layer_id in layer_ids):
+                raise ValueError(
+                    f"kv_cache_scale_file layer_ids must be in [0, {self.num_layers}), got {layer_ids}."
+                )
+            kv_input_names = self.input_names.get("past_key_values.key", [])
+            kv_layer_ids = {
+                int(parts[1])
+                for input_name in kv_input_names
+                if len(parts := input_name.split(".")) == 3 and parts[1].isdigit()
+            }
+            if set(layer_ids) != kv_layer_ids:
+                raise ValueError(
+                    f"kv_cache_scale_file layer_ids must match the model's KV-cache layers; "
+                    f"got {sorted(layer_ids)}, expected {sorted(kv_layer_ids)}."
+                )
+            expected_scale_count = len(layer_ids)
+        if len(k_scales_per_layer) != expected_scale_count or len(v_scales_per_layer) != expected_scale_count:
             raise ValueError(
-                f"kv_cache_scale_file must provide {self.num_layers} per-layer scales, "
+                f"kv_cache_scale_file must provide {expected_scale_count} per-layer scales, "
                 f"got k={len(k_scales_per_layer)} v={len(v_scales_per_layer)}"
             )
 
@@ -731,8 +818,8 @@ class Model:
         # count. Emit the canonical shape on the paged path and keep the flat vector elsewhere.
         scale_shape = (self.num_kv_heads, 1, self.head_size) if (per_channel and self.use_paged_attention) else (-1,)
 
-        def make_scale(per_layer, layer_id):
-            scale = np.asarray(per_layer[layer_id], dtype=np.float32).reshape(-1)
+        def make_scale(per_layer, scale_index, layer_id):
+            scale = np.asarray(per_layer[scale_index], dtype=np.float32).reshape(-1)
             if scale.size != scale_size:
                 raise ValueError(
                     f"kv_cache scale for layer {layer_id} has size {scale.size}, expected {scale_size}"
@@ -741,10 +828,10 @@ class Model:
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
             return scale.reshape(scale_shape)
 
-        for layer_id in range(self.num_layers):
+        for scale_index, layer_id in enumerate(layer_ids):
             k_scale_name, v_scale_name = self.get_kv_cache_scale_names(layer_id)
-            self.make_initializer(make_scale(k_scales_per_layer, layer_id), k_scale_name)
-            self.make_initializer(make_scale(v_scales_per_layer, layer_id), v_scale_name)
+            self.make_initializer(make_scale(k_scales_per_layer, scale_index, layer_id), k_scale_name)
+            self.make_initializer(make_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_lm_head_init(self, config):
         pass
@@ -775,7 +862,7 @@ class Model:
         # `matmul_mixed_precision` maps a node-group selector to a quant-type name (int4/int8,
         # extensible to fp8/fp4); the bit width is resolved on demand via `resolve_dtype`, so a
         # new scheme needs no new option and no stored bit table.
-        self.resolve_quant_config(self.extra_options)
+        self.resolve_quant_config()
         self.make_matmul_mixed_precision(self.matmul_mixed_precision)
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
@@ -841,7 +928,10 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         if not hasattr(self, "quantization_algo") or not hasattr(self, "matmul_mixed_precision"):
-            self.resolve_quant_config(getattr(self, "extra_options", {}))
+            if hasattr(self, "quant_config"):
+                self.resolve_quant_config()
+            else:
+                self.resolve_quant_config(getattr(self, "extra_options", {}))
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -912,6 +1002,8 @@ class Model:
             inputs["position_ids"] = self.input_names["position_ids"]
         if self.use_paged_attention:
             inputs["block_table"] = self.input_names["block_table"]
+            if self.has_windowed_paged_layers():
+                inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
             inputs["attention_metadata"] = self.input_names["attention_metadata"]
@@ -995,6 +1087,26 @@ class Model:
                 "cache_slack": self.window_kv_cache_slack,
             }
 
+        if self.has_windowed_paged_layers():
+            # The runtime sizes the ring from `window_size` and the prefill chunk size, and
+            # builds `block_table_windowed` by repeating each request's ring across the columns.
+            # Only these layers read that table and the smaller `num_blocks_windowed` cache.
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": [
+                    layer_id for layer_id in range(self.num_layers) if self.uses_windowed_paged_cache(layer_id)
+                ],
+                "cache_slack": 0,  # ring capacity comes from chunk_size, not from slack
+            }
+            # The ring only holds `chunk_size + window_size - 1` positions, so a prefill that
+            # ran in one shot would overwrite positions it still had to attend to. Chunking is
+            # not optional for this model, hence a default rather than an opt-in.
+            genai_config["search"]["chunk_size"] = int(
+                self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
+            )
+
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
@@ -1009,6 +1121,10 @@ class Model:
                 },
             }
 
+        state_groups = self.make_decoder_state_groups(inputs, outputs)
+        if state_groups:
+            genai_config["model"]["decoder"]["state_groups"] = state_groups
+
         self.update_genai_config(genai_config)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -1021,6 +1137,25 @@ class Model:
         """
         pass
 
+    def make_decoder_state_groups(self, inputs, outputs):
+        return []
+
+    def make_paged_key_value_state_group(self, layer_ids, inputs, outputs):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": list(layer_ids),
+            "bindings": {
+                "key": {
+                    "input": inputs["past_key_names"],
+                    "output": outputs["present_key_names"],
+                },
+                "value": {
+                    "input": inputs["past_value_names"],
+                    "output": outputs["present_value_names"],
+                },
+            },
+        }
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
@@ -1031,12 +1166,34 @@ class Model:
         present_v = self.output_names["present.value"][layer_id]
         return past_k, past_v, present_k, present_v
 
+    def uses_windowed_paged_cache(self, layer_id):
+        """True when this layer's paged KV cache is a ring sized to the window rather than to the
+        full context. Such layers read a different block table and a differently sized cache."""
+        return self.has_windowed_paged_layers() and self.is_local(layer_id)
+
+    def has_windowed_paged_layers(self):
+        """True when at least one layer is actually served from the ring.
+
+        A model can carry `sliding_window` in its config without the builder knowing which layers
+        it applies to, in which case no layer reads the ring and nothing extra must be emitted.
+        The runtime also needs at least one full-context layer to size the shared paged cache, so
+        an all-local export falls back to full paged caches. `is_local` is assigned by the subclass
+        after `Model.__init__`, so this cannot be asked from `make_inputs_init`, which runs during it.
+        """
+        if not self.use_windowed_paged_kv_cache or not hasattr(self, "is_local"):
+            return False
+        local_layers = [self.is_local(layer_id) for layer_id in range(self.num_layers)]
+        return any(local_layers) and not all(local_layers)
+
     def make_key_value_cache_shape(self, layer_id, shape):
         """
         Modifies KV cache shape dimension names for models with alternating attention patterns.
         Sliding window layers get a distinct symbolic sequence dim so ONNX shape inference does not
         unify them with the full-attention layers, whose cache is allocated at max_length.
         """
+        if self.uses_windowed_paged_cache(layer_id):
+            # Paged layout is [num_blocks, block_size, heads, head_size]; only the block count shrinks.
+            return ["num_blocks_windowed", shape[1], shape[2], shape[3]]
         if (
             self.ep in self.eps_with_windowed_kv_cache
             and hasattr(self, "is_local")
@@ -1055,20 +1212,24 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def resolve_quant_config(self, extra_options):
-        """Split `algo_config` into a base method and a mixed-precision map.
+    def resolve_quant_config(self, extra_options=None):
+        """Resolve the dense quantization method and mixed-precision map.
 
-        Uses the shared `desugar_algo_config` helper (the same desugaring `QuantConfig`
-        applies), so both surfaces stay consistent. Sets ``self.quantization_algo`` (one of
-        ``{"default", "rtn", "k_quant"}``) and ``self.matmul_mixed_precision`` (a dict mapping
-        node-group selectors to a quant type, e.g. ``{"last_matmul": "int8"}``). Explicit
-        ``matmul_mixed_precision`` entries take precedence over the defaults implied by a legacy
-        compound name. An unknown base method is passed through unchanged and rejected later
-        (in `make_algo_config` / `make_tied_quantized_embedding_input_names`).
+        Both values come from ``self.quant_config`` regardless of whether it was constructed from
+        flat extra options or structured JSON. ``self.matmul_mixed_precision`` maps node-group
+        selectors to a quant type, for example ``{"last_matmul": "int8"}``. The optional flat
+        options argument is retained for direct adapter callers that do not construct a ``Model``.
         """
-        base_method, placement = desugar_algo_config(extra_options)
-        self.quantization_algo = base_method
-        self.matmul_mixed_precision = placement
+        if extra_options is not None:
+            self.quantization_algo, self.matmul_mixed_precision = desugar_algo_config(extra_options)
+            return
+
+        self.quantization_algo = self.quant_config.weights.method
+        self.matmul_mixed_precision = {
+            override.match["preset"]: override.type
+            for override in self.quant_config.weights.overrides
+            if "preset" in override.match and override.type is not None
+        }
 
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
@@ -1320,8 +1481,9 @@ class Model:
                 callback=callback,
             )
 
-        # Delete temporary cache dir if empty
-        if not os.listdir(self.cache_dir):
+        # Delete temporary cache dir if empty. The MTP head shares the main model's
+        # cache dir and saves afterwards, so it may already be gone.
+        if os.path.isdir(self.cache_dir) and not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
@@ -1393,6 +1555,11 @@ class Model:
         return value
 
     def make_inputs_and_outputs(self):
+        # Only now, once the subclass has declared `is_local`, can we tell whether any layer reads
+        # the ring. Without one, `block_table_windowed` would be a graph input nothing consumes.
+        if "block_table_windowed" in self.input_names and not self.has_windowed_paged_layers():
+            del self.input_names["block_table_windowed"]
+
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for key in self.input_names:
@@ -1649,6 +1816,30 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
+        if getattr(self, "quant_type", None) == "modelopt":
+            weight_scale = getattr(matmul, "weight_scale", None)
+            weight_scale_2 = getattr(matmul, "weight_scale_2", None)
+            if weight_scale_2 is not None:
+                out_features = int(matmul.weight.shape[0])
+                scale_shape = (out_features, int(matmul.weight.shape[1]) // 8)
+                scale_bytes = self.modelopt_e4m3_bytes(weight_scale, f"{basename}.weight_scale", scale_shape)
+                global_scale = self.modelopt_positive_scalar(weight_scale_2, f"{basename}.weight_scale_2")
+                return self.make_matmul_block_quantized_nvfp4_weight(
+                    basename, root_input, matmul.weight, scale_bytes, global_scale, **kwargs
+                )
+            if matmul.weight.dtype == torch.float8_e4m3fn:
+                if weight_scale is None:
+                    raise ValueError(f"ModelOpt FP8 weight '{basename}' is missing its weight_scale tensor.")
+                input_scale_tensor = getattr(matmul, "input_scale", None)
+                input_scale = (
+                    self.modelopt_positive_scalar(input_scale_tensor, f"{basename}.input_scale")
+                    if input_scale_tensor is not None
+                    else None
+                )
+                return self.make_matmul_block_quantized_fp8_weight(
+                    basename, root_input, matmul.weight, weight_scale, input_scale, **kwargs
+                )
+
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
@@ -1658,6 +1849,127 @@ class Model:
                 return self.make_matmul_nbits(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
+
+    def modelopt_e4m3_bytes(self, tensor, tensor_name, expected_shape):
+        if tensor is None or tensor.dtype not in {torch.uint8, torch.float8_e4m3fn}:
+            dtype = None if tensor is None else tensor.dtype
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' must contain E4M3 bytes as uint8 or float8_e4m3fn, got {dtype}."
+            )
+        if tuple(tensor.shape) != tuple(expected_shape):
+            raise ValueError(
+                f"ModelOpt tensor '{tensor_name}' has shape {tuple(tensor.shape)}, expected {tuple(expected_shape)}."
+            )
+        return tensor.view(torch.uint8).contiguous()
+
+    def modelopt_positive_scalar(self, tensor, tensor_name):
+        if tensor.numel() != 1:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be a scalar, got shape {tuple(tensor.shape)}.")
+        value = float(tensor.float().item())
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"ModelOpt tensor '{tensor_name}' must be finite and positive, got {value}.")
+        return value
+
+    def prepare_matmul_block_quantized_scales(self, weight_scale, out_features, block_count):
+        scale = weight_scale.float()
+        if scale.numel() == 1:
+            return scale.reshape(1, 1).expand(out_features, block_count).contiguous()
+        if scale.ndim >= 2 and scale.shape[0] == out_features:
+            scale = scale.reshape(out_features, -1)
+            if scale.shape[1] == block_count:
+                return scale.contiguous()
+        if scale.ndim >= 2 and scale.shape[0] == block_count:
+            scale = scale.reshape(block_count, -1)
+            if scale.shape[1] == out_features:
+                return scale.transpose(0, 1).contiguous()
+        if scale.ndim == 1 and scale.numel() == out_features * block_count:
+            return scale.view(out_features, block_count).contiguous()
+        return None
+
+    def make_fp8_activation_scale_initializer(self, scale):
+        cache = getattr(self, "_fp8_activation_scale_cache", None)
+        if cache is None:
+            cache = self._fp8_activation_scale_cache = {}
+        if scale in cache:
+            return cache[scale]
+
+        name = f"model.fp8_input_scale.{len(cache)}"
+        self.make_initializer(torch.tensor([scale], dtype=torch.float32), name, to=ir.DataType.FLOAT)
+        cache[scale] = name
+        return name
+
+    def make_matmul_block_quantized_fp8_weight(
+        self, basename, root_input, weight, weight_scale, input_scale=None, **kwargs
+    ):
+        if weight.dtype != torch.float8_e4m3fn:
+            raise ValueError(f"FP8 weight for '{basename}' must be float8_e4m3fn, got {weight.dtype}.")
+        if weight.ndim != 2:
+            raise ValueError(f"FP8 weight for '{basename}' must have shape [N, K], got {tuple(weight.shape)}.")
+
+        out_features = int(weight.shape[0])
+        block_size = int(weight.shape[1])
+        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, 1)
+        if scale is None:
+            raise ValueError(
+                f"FP8 weight scale for '{basename}' has shape {tuple(weight_scale.shape)}, "
+                f"expected a scalar or [{out_features}, 1]."
+            )
+
+        prefix = basename[1:].replace("/", ".")
+        weight_name = f"{prefix}.fp8_weight"
+        self.make_initializer(weight.contiguous(), weight_name)
+        scale_name = f"{prefix}.fp8_weight_scale"
+        self.make_initializer(scale, scale_name, to=ir.DataType.FLOAT)
+
+        inputs = [root_input, weight_name, scale_name]
+        if input_scale is not None:
+            inputs.append(self.make_fp8_activation_scale_initializer(input_scale))
+
+        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
+        self.make_node(
+            "MatMulBlockQuantizedFp8Weight",
+            inputs=inputs,
+            outputs=[output],
+            name=basename,
+            domain="com.microsoft",
+            block_size=block_size,
+        )
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        return basename
+
+    def make_matmul_block_quantized_nvfp4_weight(
+        self, basename, root_input, weight, weight_scale, global_scale, **kwargs
+    ):
+        if weight.dtype != torch.uint8:
+            raise ValueError(f"NVFP4 weight for '{basename}' must contain packed uint8 codes, got {weight.dtype}.")
+        if weight.ndim != 2 or weight.shape[1] % 8 != 0:
+            raise ValueError(
+                f"NVFP4 weight for '{basename}' must have shape [N, K/2] with K divisible by 16, "
+                f"got {tuple(weight.shape)}."
+            )
+
+        out_features = int(weight.shape[0])
+        prefix = basename[1:].replace("/", ".")
+        weight_name = f"{prefix}.nvfp4_weight"
+        self.make_initializer(weight, weight_name)
+        scale_name = f"{prefix}.nvfp4_weight_scale"
+        self.make_initializer(weight_scale, scale_name)
+        global_scale_name = f"{prefix}.nvfp4_weight_scale_2"
+        self.make_initializer(torch.tensor([global_scale], dtype=torch.float32), global_scale_name)
+
+        output = "logits" if kwargs.get("logits", False) else f"{basename}/output_0"
+        self.make_node(
+            "MatMulBlockQuantizedFp4Weight",
+            inputs=[root_input, weight_name, scale_name, global_scale_name],
+            outputs=[output],
+            name=basename,
+            domain="com.microsoft",
+            block_size=16,
+        )
+        seq_dim = kwargs.get("seq_dim", "sequence_length")
+        self.make_value(output, self.io_dtype, shape=["batch_size", seq_dim, out_features])
+        return basename
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
@@ -2919,11 +3231,19 @@ class Model:
                 **kwargs,
             )
         elif op_type == "PagedAttention":
+            # A sliding-window layer is served from a ring of blocks, so it reads the repeating
+            # block table instead of the growing one. Both tables have the same column count,
+            # because the op indexes them with the token's true position.
+            block_table = (
+                self.input_names["block_table_windowed"]
+                if self.uses_windowed_paged_cache(kwargs["layer_id"])
+                else self.input_names["block_table"]
+            )
             self.make_paged_attention(
                 name,
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
-                block_table=self.input_names["block_table"],
+                block_table=block_table,
                 attention_metadata=self.input_names["attention_metadata"],
                 **kwargs,
             )
@@ -3034,7 +3354,7 @@ class Model:
             attributes["k_quant_type"] = self.kv_quant_type
             attributes["v_quant_type"] = self.kv_quant_type
 
-        if self.window_size is not None and self.window_size > 0 and self.ep in {"cuda", "cpu"}:
+        if self.window_size is not None and self.window_size > 0 and self.ep in self.eps_with_windowed_kv_cache and self.ep != "trt-rtx":
             # The past/present buffers of this layer are window-sized rather than max_length-sized,
             # so the kernel indexes them in cache-relative coordinates and evicts as the window moves.
             attributes["sliding_window_cache"] = 1
@@ -3098,14 +3418,23 @@ class Model:
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
         outputs = [output, present_conv]
+        attributes = {
+            "ndim": kwargs.get("ndim", 1),
+            "activation": kwargs.get("activation", "silu"),
+        }
+        # state_window=W widens past_conv_state / present_conv_state to [W, B, C, K-1]: the carry
+        # states after the last W positions, right-aligned. Slot W-1 is the state after the final
+        # position (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "CausalConvWithState",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            ndim=kwargs.get("ndim", 1),
-            activation=kwargs.get("activation", "silu"),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
@@ -3122,16 +3451,25 @@ class Model:
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         outputs = [output, present_recurrent]
+        attributes = {
+            "q_num_heads": kwargs["q_num_heads"],
+            "kv_num_heads": kwargs["kv_num_heads"],
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+        # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+        # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        state_window = kwargs.get("state_window", 0)
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            q_num_heads=kwargs["q_num_heads"],
-            kv_num_heads=kwargs["kv_num_heads"],
-            update_rule=kwargs.get("update_rule", "gated_delta"),
-            scale=kwargs.get("scale", 1.0),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, self.io_dtype, shape=kwargs["present_recurrent_shape"])
@@ -3188,9 +3526,10 @@ class Model:
         #   16: attention_metadata
         # The scheduler-provided slot_mapping is not used here; slots are derived from
         # past_seqlens / cumulative_sequence_length / block_table by the op.
-        # attention_metadata carries [max_query_len_bound, max_kv_len_bound] in CPU memory so the op
-        # can select a backend and size its launch without a device-to-host readback of the sequence
-        # lengths. Feeding it is what removes the per-node stream synchronization on the decode path.
+        # attention_metadata carries [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]
+        # in CPU memory so the op can select a backend and size its launch without a device-to-host
+        # readback of the sequence lengths. Feeding it is what removes the per-node stream
+        # synchronization on the decode path.
         self.extend_with_optional_inputs(
             inputs,
             [
@@ -3913,6 +4252,50 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
+    def make_fp8e4m3_initializer(self, scales_uint8, name):
+        """Register a FLOAT8E4M3FN initializer from raw e4m3 code bytes (uint8).
+
+        NVFP4 block scales are stored as FP8 e4m3 bytes. Build the IR tensor directly
+        from the raw uint8 bytes and tag it FLOAT8E4M3FN (the encoding the CUDA QMoE
+        NVFP4 kernel expects).
+        """
+        arr = scales_uint8.detach().cpu().numpy().astype(np.uint8) if isinstance(scales_uint8, torch.Tensor) else np.asarray(scales_uint8, dtype=np.uint8)
+        ir_tensor = ir.Tensor(np.ascontiguousarray(arr), dtype=ir.DataType.FLOAT8E4M3FN, name=name)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
+        value.const_value = ir_tensor
+        self.model.graph.register_initializer(value)
+
+    def repack_modelopt_nvfp4_weight_codes(self, packed_nk2):
+        """Unpack a Model Optimizer NVFP4 weight tensor to per-element e2m1 codes.
+
+        ``packed_nk2`` is uint8 ``[N, K/2]`` where each byte holds two adjacent K-axis
+        e2m1 codes for the same output row N (low nibble = even K, high nibble = odd K)
+        -- the layout Model Optimizer writes. Returns uint8 codes ``[N, K]`` (0-15).
+        """
+        if packed_nk2.dtype != torch.uint8:
+            packed_nk2 = packed_nk2.to(torch.uint8)
+        low = packed_nk2 & 0x0F
+        high = packed_nk2 >> 4
+        n = packed_nk2.shape[0]
+        codes = torch.stack((low, high), dim=-1).reshape(n, -1)  # [N, K]
+        return codes.contiguous()
+
+    def pack_nvfp4_codes_for_qmoe(self, codes_nk):
+        """Pack per-element e2m1 codes ``[N, K]`` into the CUDA QMoE ``[K, N/2]`` layout.
+
+        The QMoE FP4 kernel reads weights as ``[E, K, N/2]`` with each byte holding two
+        adjacent N-axis codes for the same K (even N = low nibble, odd N = high nibble).
+        """
+        if codes_nk.dtype != torch.uint8:
+            codes_nk = codes_nk.to(torch.uint8)
+        n = codes_nk.shape[0]
+        if n % 2 != 0:
+            raise ValueError(f"NVFP4 QMoE packing requires an even N={n} for nibble packing.")
+        codes_kn = codes_nk.T.contiguous()  # [K, N]
+        low = codes_kn[:, 0::2] & 0x0F
+        high = codes_kn[:, 1::2] & 0x0F
+        return ((high << 4) | low).contiguous()  # [K, N/2]
+
     def make_mxfp4_weights(self, weight, block_size=32):
         """Quantize one expert weight matrix [N, K] to MXFP4 (FP4 e2m1 + ue8m0 scales).
 
@@ -3988,9 +4371,10 @@ class Model:
                 kwargs.get("zero_points3", ""),
             ])
 
-        is_fp4 = self.moe_attrs.get("quant_type") == "fp4"
+        quant_type = self.moe_attrs.get("quant_type")
+        is_fp4 = quant_type in ("fp4", "nvfp4")
         if is_fp4:
-            # The FP4 (MXFP4) QMoE op consumes per-expert float32 global scales at
+            # The FP4 (MXFP4/NVFP4) QMoE op consumes per-expert float32 global scales at
             # fixed input positions 15 (fc1) and 16 (fc2). Positions 11-14 are the
             # optional zero_points (11-13) and router_weights (14). The zero_points
             # block above already appended inputs up to index 13 for non-TRT-RTX EPs
@@ -4011,8 +4395,8 @@ class Model:
             extra_kwargs["block_size"] = self.moe_attrs["block_size"]
 
         if is_fp4:
-            # Select the MXFP4 kernel path; integer QMoE leaves quant_type at its default.
-            extra_kwargs["quant_type"] = "fp4"
+            # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
+            extra_kwargs["quant_type"] = quant_type
 
         # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
         # (see make_qmoe_weights, which produces the matching bytes):
@@ -4391,10 +4775,44 @@ class Model:
         matmul_basename = f"{basename}/MatMul"
         root_input = self.layernorm_attrs["output_0"]
 
-        # Sequence dimension for shape annotations ("sequence_length" normally, 1 when pruned)
+        # Sequence dimension used for LM-head shape annotations.
         seq_dim = "sequence_length"
 
-        if self.prune_lm_head:
+        if self.use_paged_attention and self.prune_lm_head:
+            # Select the final packed token from every sequence before applying the LM head:
+            #
+            # cumulative_sequence_lengths --> Slice[1:] --> Sub(1) --+
+            # hidden_states -----------------------------------------> Gather(axis=0)
+            #
+            # This reduces the expensive LM-head projection from num_tokens rows to batch_size rows.
+            seq_dim = "batch_size"
+            indices_basename = f"{basename}/last_token_indices"
+            slice_name = f"{indices_basename}/Slice"
+            slice_inputs = [
+                self.input_names["cumulative_sequence_lengths"],
+                "/model/constants/INT64/[1]",
+                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+                "/model/constants/INT64/[0]",
+            ]
+            self.make_slice(slice_name, slice_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            sub_name = f"{indices_basename}/Sub"
+            sub_inputs = [f"{slice_name}/output_0", "/model/constants/INT32/1"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
+
+            gather_name = f"{basename}/last_hidden_state/Gather"
+            gather_inputs = [root_input, f"{sub_name}/output_0"]
+            self.make_gather(
+                gather_name,
+                gather_inputs,
+                dtype=self.io_dtype,
+                shape=["batch_size", self.hidden_size],
+                axis=0,
+            )
+            root_input = f"{gather_name}/output_0"
+            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
+
+        elif self.prune_lm_head:
             # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
             # hidden state before the LM head. This avoids the expensive MatMul for all S tokens
             # during prefill, reducing compute by ~S×.

@@ -65,6 +65,30 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
+struct OgaSpeculativeStats : OgaAbstract {
+  uint64_t GetCount(const char* name) const {
+    uint64_t value;
+    OgaCheckResult(OgaSpeculativeStatsGetCount(this, name, &value));
+    return value;
+  }
+
+  double GetNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaSpeculativeStatsGetNumber(this, name, &value));
+    return value;
+  }
+
+  bool GetBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaSpeculativeStatsGetBool(this, name, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroySpeculativeStats(reinterpret_cast<OgaSpeculativeStats*>(p));
+  }
+};
+
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
 
@@ -396,6 +420,14 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
+  OgaString ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                         const char* template_kwargs, bool add_generation_prompt) const {
+    const char* p{};
+    OgaCheckResult(OgaTokenizerApplyChatTemplateWithOptions(this, template_str, messages, tools, template_kwargs,
+                                                            add_generation_prompt, &p));
+    return p;
+  }
+
 #if OGA_USE_SPAN
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
@@ -471,6 +503,26 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
+  void SetSpeculativeNumber(const char* name, double value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeNumber(this, name, value));
+  }
+
+  double GetSpeculativeNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeNumber(this, name, &value));
+    return value;
+  }
+
+  void SetSpeculativeBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeBool(this, name, value));
+  }
+
+  bool GetSpeculativeBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeBool(this, name, &value));
+    return value;
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
@@ -539,6 +591,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
+  void SnapshotState() {
+    OgaCheckResult(OgaGenerator_SnapshotState(this));
+  }
+
+  void SetHiddenStates(OgaTensor& hidden_states) {
+    OgaCheckResult(OgaGenerator_SetHiddenStates(this, &hidden_states));
+  }
+
   void SetRuntimeOption(const char* key, const char* value) {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
@@ -549,6 +609,12 @@ struct OgaGenerator : OgaAbstract {
 
   const int32_t* GetSequenceData(size_t index) const {
     return OgaGenerator_GetSequenceData(this, index);
+  }
+
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaGenerator_GetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
   std::unique_ptr<OgaTensor> GetInput(const char* name) {
@@ -584,6 +650,49 @@ struct OgaGenerator : OgaAbstract {
   }
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
+};
+
+struct OgaMtpGenerator : OgaAbstract {
+  static std::unique_ptr<OgaMtpGenerator> Create(const OgaModel& main_model, const OgaModel& mtp_model, OgaGeneratorParams& params) {
+    OgaMtpGenerator* p;
+    OgaCheckResult(OgaCreateMtpGenerator(&main_model, &mtp_model, &params, &p));
+    return std::unique_ptr<OgaMtpGenerator>(p);
+  }
+
+  void AppendTokens(const int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaMtpGenerator_AppendTokens(this, input_ids, input_ids_count));
+  }
+
+  void GenerateNextToken() {
+    OgaCheckResult(OgaMtpGenerator_GenerateNextToken(this));
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaMtpGenerator_Reset(this));
+  }
+
+  bool IsDone() const {
+    return OgaMtpGenerator_IsDone(this);
+  }
+
+  size_t GetSequenceCount() const {
+    return OgaMtpGenerator_GetSequenceCount(this);
+  }
+
+  const int32_t* GetSequenceData() const {
+    return OgaMtpGenerator_GetSequenceData(this);
+  }
+
+  size_t GetForwardCount() const { return OgaMtpGenerator_GetForwardCount(this); }
+  size_t GetAcceptCount() const { return OgaMtpGenerator_GetAcceptCount(this); }
+  size_t GetTrialCount() const { return OgaMtpGenerator_GetTrialCount(this); }
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaMtpGenerator_GetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
+  }
+
+  static void operator delete(void* p) { OgaDestroyMtpGenerator(reinterpret_cast<OgaMtpGenerator*>(p)); }
 };
 
 struct OgaTensor : OgaAbstract {
@@ -812,10 +921,17 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestAddTokens(this, &tokens));
   }
 
-  bool IsDone() const {
-    bool is_done{};
-    OgaCheckResult(OgaRequestIsDone(this, &is_done));
-    return is_done;
+  void Continue(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestContinue(this, &tokens));
+  }
+
+  /**
+   * \brief Returns whether the current generation turn is complete.
+   */
+  bool IsTurnComplete() const {
+    bool is_turn_complete{};
+    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
+    return is_turn_complete;
   }
 
   bool HasUnseenTokens() const {
@@ -856,10 +972,21 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
+  /**
+   * \brief Submits a request to the engine.
+   *
+   * Ownership continues after the current turn completes. Remove() releases resources immediately;
+   * releasing the final external handle instead defers reclamation until the next Add() or Step().
+   */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
   }
 
+  /**
+   * \brief Removes a request and releases engine ownership.
+   *
+   * Repeated calls after the request has already been removed are successful no-ops.
+   */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));
   }

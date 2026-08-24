@@ -81,9 +81,10 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
     if (extra_inputs[i].name == Config::Defaults::ImageGridThwName) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-      if (!shape.empty()) {
-        return shape[0];  // num_images
-      }
+      const int64_t num_images = shape.empty() ? 0 : shape[0];
+      const size_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+      ValidateImageGridThwLayoutAndCount(shape, elem_count, num_images, "image_grid_thw");
+      return num_images;
     }
   }
 
@@ -196,6 +197,10 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   OrtValue* grid_full = inputs_[grid_idx];
   const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+
+  const auto grid_shape = grid_full->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
+  ValidateImageGridThwLayoutAndCount(grid_shape, grid_elem_count, num_images_, "image_grid_thw");
 
   // Check if the ONNX model accepts dynamic num_images.
   // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
@@ -694,8 +699,17 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
 
-  bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
-  State::Run(*model_.decoder_session_, graph_capture_this_run);
+  const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
+  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
+  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+
+  const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+    recurrent_state_->SaveForGraphCapture();
+    State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
+    recurrent_state_->RestoreAfterGraphCapture(graph_id);
+  }
+  State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
   return logits_.Get();
 }
 

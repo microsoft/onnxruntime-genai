@@ -4,11 +4,21 @@
 #include "model_executor.h"
 #include "decoders/simple_decoder.h"
 
+#include <string_view>
 #include <typeinfo>
 
 namespace Generators {
 
 namespace {
+
+ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
+  // ORT has no resource-exhaustion status code, so this is coupled to its BFC arena diagnostic.
+  if (message.find("Failed to allocate memory for requested buffer") !=
+      std::string_view::npos) {
+    return ExecutionFailureKind::CapacityExceeded;
+  }
+  return ExecutionFailureKind::Unknown;
+}
 
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
@@ -26,11 +36,38 @@ std::unique_ptr<ModelExecutor> ModelExecutor::Create(std::shared_ptr<Model> mode
 }
 
 DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model},
-      decoder_{CreateDecoder(model, cache_manager)} {}
+    : DecoderModelExecutor{model, cache_manager,
+                           CreateDecoder(model, cache_manager)} {}
 
-void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests) {
-  decoder_->Decode(scheduled_requests);
+DecoderModelExecutor::DecoderModelExecutor(
+    std::shared_ptr<Model> model,
+    std::shared_ptr<CacheManager> cache_manager,
+    std::unique_ptr<Decoder> decoder)
+    : model_{std::move(model)},
+      cache_manager_{std::move(cache_manager)},
+      decoder_{std::move(decoder)} {
+  if (!decoder_) {
+    throw std::invalid_argument("DecoderModelExecutor requires a decoder.");
+  }
+}
+
+void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
+                                  ExecutionContext& context) {
+  try {
+    cache_manager_->PrepareStep(scheduled_requests.Requests(), context);
+    context.block_table_columns = cache_manager_->BlockTableColumns();
+    decoder_->Decode(scheduled_requests, context);
+  } catch (const Ort::Exception& error) {
+    const auto failure_kind = ClassifyOrtExecutionFailure(error.what());
+    if (failure_kind == ExecutionFailureKind::CapacityExceeded) {
+      throw ModelExecutionError{
+          failure_kind,
+          std::string{"Model execution exceeded available memory. Cause: "} +
+              error.what(),
+      };
+    }
+    throw;
+  }
 }
 
 }  // namespace Generators

@@ -19,25 +19,14 @@ namespace Generators {
  * @brief Number of KV slots a request will have addressed once its pending step has run.
  *
  * The decoder writes a request's unprocessed tokens at absolute positions
- * [past, past + unprocessed), so the cache must own `past + unprocessed` slots after the step.
- * `sequence_length` (the request's current sequence length) already counts the unprocessed tokens
- * for a prefill request and excludes them for a generation (decode) request, hence the branch:
+ * [processed_sequence_length, processed_sequence_length + unprocessed_token_count).
  *
- * - prefill: every token in the sequence is unprocessed, so the sequence length is the slot count;
- * - decode: the sequence length counts only already-processed tokens, so the freshly generated
- *   `unprocessed_count` tokens must be added on top.
- *
- * Counting appended tokens instead would leave the cache exactly one slot short on every decode
- * step -- invisible while the last block still has room, but an out-of-bounds block-table entry the
- * moment a sequence length lands on a block boundary.
- *
- * @param sequence_length  Current sequence length of the request.
- * @param unprocessed_count Tokens not yet processed by the model (relevant only when decoding).
- * @param is_prefill        True while the request is still prefilling its prompt.
+ * @param processed_sequence_length Tokens already represented in the KV cache.
+ * @param unprocessed_token_count Tokens that will be written by the pending step.
  * @return The number of KV slots the request must own after its pending step.
  */
-inline size_t RequiredSlots(size_t sequence_length, size_t unprocessed_count, bool is_prefill) {
-  return is_prefill ? sequence_length : sequence_length + unprocessed_count;
+inline size_t RequiredSlots(size_t processed_sequence_length, size_t unprocessed_token_count) {
+  return processed_sequence_length + unprocessed_token_count;
 }
 
 }  // namespace Generators

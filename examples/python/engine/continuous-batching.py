@@ -84,7 +84,7 @@ class RequestPool:
                 token = request.get_unseen_token()
                 client_request.token_stream += client_request.streaming_tokenizer.decode(token)
 
-            if request.is_done():
+            if request.is_turn_complete():
                 assert client_request is not None, "Client request not found in the pool"
 
                 if self.debug:

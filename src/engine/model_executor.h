@@ -3,12 +3,30 @@
 
 #pragma once
 
+#include <stdexcept>
+#include <string>
+#include <utility>
+
 #include "../models/decoder_only.h"
 #include "decoders/decoder.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
+#include "execution_context.h"
+#include "step_plan.h"
 
 namespace Generators {
+
+class ModelExecutionError : public std::runtime_error {
+ public:
+  ModelExecutionError(ExecutionFailureKind failure_kind, std::string message)
+      : std::runtime_error{std::move(message)},
+        failure_kind_{failure_kind} {}
+
+  ExecutionFailureKind FailureKind() const { return failure_kind_; }
+
+ private:
+  ExecutionFailureKind failure_kind_;
+};
 
 /**
  * @struct ModelExecutor
@@ -26,7 +44,13 @@ struct ModelExecutor {
   static std::unique_ptr<ModelExecutor> Create(std::shared_ptr<Model> model,
                                                std::shared_ptr<CacheManager> cache_manager);
 
-  virtual void Decode(ScheduledRequests& scheduled_requests) = 0;
+  void Decode(ScheduledRequests& scheduled_requests) {
+    auto& context = scheduled_requests.CreateExecutionContext();
+    Decode(scheduled_requests, context);
+  }
+
+  virtual void Decode(ScheduledRequests& scheduled_requests,
+                      ExecutionContext& context) = 0;
 
   virtual ~ModelExecutor() = default;
 };
@@ -38,13 +62,18 @@ struct ModelExecutor {
  */
 struct DecoderModelExecutor : ModelExecutor {
   DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  DecoderModelExecutor(std::shared_ptr<Model> model,
+                       std::shared_ptr<CacheManager> cache_manager,
+                       std::unique_ptr<Decoder> decoder);
 
   void Encode(ScheduledRequests& scheduled_requests);
 
-  void Decode(ScheduledRequests& scheduled_requests) override;
+  void Decode(ScheduledRequests& scheduled_requests,
+              ExecutionContext& context) override;
 
  private:
   std::shared_ptr<Model> model_;
+  std::shared_ptr<CacheManager> cache_manager_;
   std::unique_ptr<Decoder> decoder_;
 };
 

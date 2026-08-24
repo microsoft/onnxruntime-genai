@@ -32,11 +32,198 @@ VOCAB_SIZE = 32001
 RNN_STATE_SLOTS = 3
 
 
-def make_graph(name, inputs, outputs, filename):
+def make_graph(
+    name,
+    inputs,
+    outputs,
+    filename,
+    logits_from_attention_mask=False,
+    logits_from_rnn_state=False,
+    logit_token_id=None,
+):
     """Builds a graph whose outputs are zero tensors of a fixed shape."""
     initializers = []
     nodes = []
     for out_name, dtype, shape in outputs:
+        if out_name == "logits" and logits_from_attention_mask:
+            sum_axes = numpy_helper.from_array(np.array([1], dtype=np.int64))
+            sum_axes.name = "attention_mask_sum_axes"
+            unsqueeze_axes = numpy_helper.from_array(np.array([1], dtype=np.int64))
+            unsqueeze_axes.name = "attention_mask_unsqueeze_axes"
+            batch_indices = numpy_helper.from_array(np.arange(shape[0], dtype=np.int64).reshape(shape[0], 1))
+            batch_indices.name = "batch_indices"
+            logits_shape = numpy_helper.from_array(np.array(shape, dtype=np.int64))
+            logits_shape.name = "logits_shape"
+            updates = numpy_helper.from_array(np.ones(shape[0], dtype=np.float32))
+            updates.name = "selected_logit_updates"
+            initializers.extend([sum_axes, unsqueeze_axes, batch_indices, logits_shape, updates])
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "ReduceSum",
+                        inputs=["encoder_attention_mask", sum_axes.name],
+                        outputs=["unmasked_token_counts"],
+                        keepdims=0,
+                    ),
+                    helper.make_node(
+                        "Unsqueeze",
+                        inputs=["unmasked_token_counts", unsqueeze_axes.name],
+                        outputs=["unmasked_token_counts_2d"],
+                    ),
+                    helper.make_node(
+                        "Cast",
+                        inputs=["unmasked_token_counts_2d"],
+                        outputs=["unmasked_token_counts_int64"],
+                        to=TensorProto.INT64,
+                    ),
+                    helper.make_node(
+                        "Concat",
+                        inputs=[batch_indices.name, "unmasked_token_counts_int64"],
+                        outputs=["selected_logit_indices"],
+                        axis=1,
+                    ),
+                    helper.make_node(
+                        "ConstantOfShape",
+                        inputs=[logits_shape.name],
+                        outputs=["zero_logits"],
+                        value=numpy_helper.from_array(np.zeros(1, dtype=np.float32)),
+                    ),
+                    helper.make_node(
+                        "ScatterND",
+                        inputs=["zero_logits", "selected_logit_indices", updates.name],
+                        outputs=[out_name],
+                    ),
+                ]
+            )
+            continue
+
+        if out_name == "logits" and logits_from_rnn_state:
+            sum_axes = numpy_helper.from_array(np.array([0, 2], dtype=np.int64))
+            sum_axes.name = "rnn_state_sum_axes"
+            one = numpy_helper.from_array(np.array(1.0, dtype=np.float32))
+            one.name = "token_offset"
+            unsqueeze_axes = numpy_helper.from_array(np.array([1], dtype=np.int64))
+            unsqueeze_axes.name = "token_unsqueeze_axes"
+            batch_indices = numpy_helper.from_array(np.arange(shape[0], dtype=np.int64).reshape(shape[0], 1))
+            batch_indices.name = "batch_indices"
+            logits_shape = numpy_helper.from_array(np.array(shape, dtype=np.int64))
+            logits_shape.name = "logits_shape"
+            base_indices = numpy_helper.from_array(
+                np.array([[batch, token] for batch in range(shape[0]) for token in (1, 2)], dtype=np.int64)
+            )
+            base_indices.name = "base_logit_indices"
+            base_updates = numpy_helper.from_array(np.ones(shape[0] * 2, dtype=np.float32))
+            base_updates.name = "base_logit_updates"
+            initializers.extend(
+                [sum_axes, one, unsqueeze_axes, batch_indices, logits_shape, base_indices, base_updates]
+            )
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "ReduceSum",
+                        inputs=["rnn_states_prev", sum_axes.name],
+                        outputs=["rnn_state_sums"],
+                        keepdims=0,
+                    ),
+                    helper.make_node(
+                        "Add",
+                        inputs=["rnn_state_sums", one.name],
+                        outputs=["selected_token_ids_float"],
+                    ),
+                    helper.make_node(
+                        "Cast",
+                        inputs=["selected_token_ids_float"],
+                        outputs=["selected_token_ids"],
+                        to=TensorProto.INT64,
+                    ),
+                    helper.make_node(
+                        "Unsqueeze",
+                        inputs=["selected_token_ids", unsqueeze_axes.name],
+                        outputs=["selected_token_ids_2d"],
+                    ),
+                    helper.make_node(
+                        "Concat",
+                        inputs=[batch_indices.name, "selected_token_ids_2d"],
+                        outputs=["selected_logit_indices"],
+                        axis=1,
+                    ),
+                    helper.make_node(
+                        "ConstantOfShape",
+                        inputs=[logits_shape.name],
+                        outputs=["zero_logits"],
+                        value=numpy_helper.from_array(np.zeros(1, dtype=np.float32)),
+                    ),
+                    helper.make_node(
+                        "ScatterND",
+                        inputs=["zero_logits", base_indices.name, base_updates.name],
+                        outputs=["base_logits"],
+                    ),
+                    helper.make_node(
+                        "ScatterND",
+                        inputs=["zero_logits", "selected_logit_indices", "rnn_state_sums"],
+                        outputs=["state_logits"],
+                    ),
+                    helper.make_node(
+                        "Add",
+                        inputs=["base_logits", "state_logits"],
+                        outputs=[out_name],
+                    ),
+                ]
+            )
+            continue
+
+        if out_name == "rnn_states" and logits_from_rnn_state:
+            shape_tensor = numpy_helper.from_array(np.array(shape, dtype=np.int64))
+            shape_tensor.name = "rnn_states_shape"
+            indices = numpy_helper.from_array(np.array([[0, beam, 0] for beam in range(shape[1])], dtype=np.int64))
+            indices.name = "rnn_state_marker_indices"
+            updates = numpy_helper.from_array(np.arange(1, shape[1] + 1, dtype=np.float32))
+            updates.name = "rnn_state_marker_values"
+            initializers.extend([shape_tensor, indices, updates])
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "ConstantOfShape",
+                        inputs=[shape_tensor.name],
+                        outputs=["zero_rnn_states"],
+                        value=numpy_helper.from_array(np.zeros(1, dtype=np.float32)),
+                    ),
+                    helper.make_node(
+                        "ScatterND",
+                        inputs=["zero_rnn_states", indices.name, updates.name],
+                        outputs=[out_name],
+                    ),
+                ]
+            )
+            continue
+
+        if out_name == "logits" and logit_token_id is not None:
+            shape_tensor = numpy_helper.from_array(np.array(shape, dtype=np.int64))
+            shape_tensor.name = "logits_shape"
+            indices = numpy_helper.from_array(
+                np.array([[batch, logit_token_id] for batch in range(shape[0])], dtype=np.int64)
+            )
+            indices.name = "selected_logit_indices"
+            updates = numpy_helper.from_array(np.ones(shape[0], dtype=np.float32))
+            updates.name = "selected_logit_updates"
+            initializers.extend([shape_tensor, indices, updates])
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "ConstantOfShape",
+                        inputs=[shape_tensor.name],
+                        outputs=["zero_logits"],
+                        value=numpy_helper.from_array(np.zeros(1, dtype=np.float32)),
+                    ),
+                    helper.make_node(
+                        "ScatterND",
+                        inputs=["zero_logits", indices.name, updates.name],
+                        outputs=[out_name],
+                    ),
+                ]
+            )
+            continue
+
         np_dtype = {
             TensorProto.FLOAT: np.float32,
             TensorProto.INT32: np.int32,
@@ -78,6 +265,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-beams", type=int, default=1)
     parser.add_argument("--prompt-length", type=int, default=1)
+    parser.add_argument("--logits-from-attention-mask", action="store_true")
+    parser.add_argument("--logits-from-rnn-state", action="store_true")
+    parser.add_argument("--logit-token-id", type=int)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -93,9 +283,7 @@ def main():
             ("input_ids", TensorProto.INT64, [batch_beam, seq]),
             ("attention_mask", TensorProto.INT32, [batch_beam, seq]),
         ],
-        outputs=[
-            ("encoder_outputs", TensorProto.FLOAT, [batch_beam, seq, HIDDEN_SIZE])
-        ],
+        outputs=[("encoder_outputs", TensorProto.FLOAT, [batch_beam, seq, HIDDEN_SIZE])],
         filename=os.path.join(args.output_dir, "encoder.onnx"),
     )
 
@@ -126,6 +314,9 @@ def main():
             ),
         ],
         filename=os.path.join(args.output_dir, "decoder.onnx"),
+        logits_from_attention_mask=args.logits_from_attention_mask,
+        logits_from_rnn_state=args.logits_from_rnn_state,
+        logit_token_id=args.logit_token_id,
     )
 
 
