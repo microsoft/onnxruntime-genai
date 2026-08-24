@@ -8,13 +8,17 @@
 #include "search_cuda.h"
 #include "kernels.h"
 #include "cuda_topk.h"
-#include "sampler_state_index_pool.h"
+#include <algorithm>
+#include <cassert>
 #include <charconv>
+#include <cstddef>
 #include <cstdarg>
 #include <cstring>
 #include <mutex>
 #include <random>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -89,6 +93,52 @@ template <typename T>
 DeviceSpan<T> AllocateCudaSpan(size_t count) {
   return DeviceSpan<T>{std::make_shared<GpuMemory>(count * sizeof(T))};
 }
+
+namespace {
+
+class SamplerStateIndexPool {
+ public:
+  template <typename Prepare, typename Create>
+  auto AcquireOwned(Prepare&& prepare, Create&& create) {
+    const bool reusing = !free_indices_.empty();
+    const int index = reusing ? free_indices_.back() : size_;
+    const int required_size = reusing ? size_ : size_ + 1;
+
+    // Release must remain allocation-free, so reserve its future slot before any external
+    // preparation can publish an acquired index.
+    free_indices_.reserve(static_cast<size_t>(required_size));
+    std::forward<Prepare>(prepare)(index, required_size);
+
+    if (reusing) {
+      free_indices_.pop_back();
+    } else {
+      size_ = required_size;
+    }
+
+    try {
+      return std::forward<Create>(create)(index);
+    } catch (...) {
+      Release(index);
+      throw;
+    }
+  }
+
+  void Release(int index) noexcept {
+    assert(index >= 0 && index < size_);
+    assert(std::find(free_indices_.begin(), free_indices_.end(), index) ==
+           free_indices_.end());
+    assert(free_indices_.size() < free_indices_.capacity());
+    free_indices_.push_back(index);
+  }
+
+  int Size() const noexcept { return size_; }
+
+ private:
+  std::vector<int> free_indices_;
+  int size_{};
+};
+
+}  // namespace
 
 struct CudaSamplerStatePool {
   explicit CudaSamplerStatePool(int initial_capacity) {
