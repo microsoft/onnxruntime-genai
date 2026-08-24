@@ -256,5 +256,181 @@ TEST(DecoderStateGroupsConfigTest, RejectsDuplicateExpandedBindings) {
       "resolves more than one binding to 'past.0'");
 }
 
+TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 2,
+    "state_groups": [
+      {
+        "kind": "fixed", "layer_ids": [0],
+        "checkpoint_count": 4, "checkpoint_alignment": "left",
+        "bindings": {"state": {
+          "input": "past.%d.conv", "output": "present.%d.conv",
+          "checkpoints": "checkpoints.%d.conv"
+        }},
+        "state_update": {
+          "enabled": false,
+          "kind": "causal_conv", "capacity": 3,
+          "capture_count": "state_update_capture_count",
+          "value": "state_update.%d.conv_value"
+        }
+      },
+      {
+        "kind": "fixed", "layer_ids": [1],
+        "bindings": {"state": {
+          "input": "past.%d.recurrent", "output": "present.%d.recurrent"
+        }},
+        "state_update": {
+          "enabled": false,
+          "kind": "gated_delta_net", "capacity": 3,
+          "capture_count": "state_update_capture_count",
+          "decay": "state_update.%d.decay",
+          "key": "state_update.%d.key",
+          "delta": "state_update.%d.delta"
+        }
+      }
+    ]
+  })");
+
+  const auto& groups = *config.model.decoder.state_groups;
+  ASSERT_EQ(groups.size(), 2u);
+  ASSERT_TRUE(groups[0].state_update);
+  EXPECT_FALSE(groups[0].state_update->enabled);
+  EXPECT_EQ(groups[0].state_update->kind,
+            Config::Model::Decoder::StateUpdateKind::CausalConv);
+  EXPECT_EQ(groups[0].state_update->capacity, 3);
+  EXPECT_EQ(groups[0].state_update->capture_count, "state_update_capture_count");
+  EXPECT_EQ(groups[0].state_update->value, "state_update.%d.conv_value");
+  EXPECT_EQ(groups[0].checkpoint_count, 4);
+  ASSERT_TRUE(groups[1].state_update);
+  EXPECT_FALSE(groups[1].state_update->enabled);
+  EXPECT_EQ(groups[1].state_update->kind,
+            Config::Model::Decoder::StateUpdateKind::GatedDeltaNet);
+  EXPECT_EQ(groups[1].state_update->decay, "state_update.%d.decay");
+  EXPECT_EQ(groups[1].state_update->key, "state_update.%d.key");
+  EXPECT_EQ(groups[1].state_update->delta, "state_update.%d.delta");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateKindAndFields) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "unknown", "capacity": 3,
+                         "capture_count": "capture", "value": "update.%d"}
+      }]})",
+      "Unsupported decoder state update kind 'unknown'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"capacity": 3, "capture_count": "capture", "value": "update.%d"}
+      }]})",
+      "state_update is missing kind");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "causal_conv", "capacity": 3, "value": "update.%d"}
+      }]})",
+      "state_update is missing capture_count");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "causal_conv", "capacity": 3,
+                         "capture_count": "capture", "decay": "update.%d"}
+      }]})",
+      "causal_conv state_update requires only value");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "gated_delta_net", "capacity": 3,
+                         "capture_count": "capture", "decay": "decay.%d", "key": "key.%d"}
+      }]})",
+      "requires decay, key, and delta and no value");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateCapacity) {
+  for (const auto* capacity : {"0", "9", "1.5"}) {
+    ExpectStateGroupError(
+        std::string{R"({"num_hidden_layers": 1, "state_groups": [{
+          "kind": "fixed", "layer_ids": [0],
+          "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+          "state_update": {"kind": "causal_conv", "capacity": )"} +
+            capacity + R"(, "capture_count": "capture", "value": "update.%d"}
+        }]})",
+        "capacity");
+  }
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsCompactStateUpdateOnPagedGroup) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "paged_kv", "layer_ids": [0],
+        "bindings": {
+          "key": {"input": "past.%d.key", "output": "present.%d.key"},
+          "value": {"input": "past.%d.value", "output": "present.%d.value"}
+        },
+        "state_update": {"kind": "causal_conv", "capacity": 3,
+                         "capture_count": "capture", "value": "update.%d"}
+      }]})",
+      "only fixed state groups support state_update");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsMalformedOrCollidingStateUpdateNames) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "causal_conv", "capacity": 3,
+                         "capture_count": "capture", "value": "update"}
+      }]})",
+      "expected exactly one %d");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
+        "state_update": {"kind": "causal_conv", "capacity": 3,
+                         "capture_count": "capture", "value": "present.%d"}
+      }]})",
+      "resolves more than one binding to 'present.0'");
+}
+
+TEST(DecoderStateGroupsConfigTest, RequiresSharedCompactStateUpdateInputAndCapacity) {
+  const auto decoder_with_second_group = [](std::string_view second_update) {
+    return std::string{R"({"num_hidden_layers": 1, "state_groups": [
+      {"kind": "fixed", "layer_ids": [0],
+       "bindings": {"state": {"input": "past_conv.%d", "output": "present_conv.%d"}},
+       "state_update": {"kind": "causal_conv", "capacity": 3,
+                        "capture_count": "capture", "value": "conv_update.%d"}},
+      {"kind": "fixed", "layer_ids": [0],
+       "bindings": {"state": {"input": "past_gdn.%d", "output": "present_gdn.%d"}},
+       "state_update": )"} +
+           std::string{second_update} + "]}";
+  };
+
+  ExpectStateGroupError(
+      decoder_with_second_group(
+          R"({"kind": "gated_delta_net", "capacity": 2, "capture_count": "capture",
+              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+      "same capacity and capture_count input");
+  ExpectStateGroupError(
+      decoder_with_second_group(
+          R"({"kind": "gated_delta_net", "capacity": 3, "capture_count": "other_capture",
+              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+      "same capacity and capture_count input");
+  ExpectStateGroupError(
+      decoder_with_second_group(
+          R"({"enabled": false, "kind": "gated_delta_net", "capacity": 3, "capture_count": "capture",
+              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+      "same enabled setting");
+}
+
 }  // namespace
 }  // namespace Generators::test

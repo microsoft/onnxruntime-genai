@@ -6,6 +6,8 @@
 #include "../models/utils.h"
 #include "interface.h"
 
+#include <cstring>
+
 namespace Generators {
 
 static Ort::Allocator* ort_allocator_{};
@@ -168,6 +170,61 @@ struct CpuInterface : DeviceInterface {
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
+
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+    for (size_t descriptor_index = 0; descriptor_index < count; ++descriptor_index) {
+      const auto& descriptor = descriptors[descriptor_index];
+      if (descriptor.kind == StateUpdateReplayKind::CausalConv) {
+        const auto* source = static_cast<const uint8_t*>(descriptor.source_state);
+        auto* destination = static_cast<uint8_t*>(descriptor.destination_state);
+        const auto* values = static_cast<const uint8_t*>(descriptor.value);
+        for (uint64_t channel = 0; channel < descriptor.channel_count; ++channel) {
+          for (uint64_t position = 0; position < descriptor.state_width; ++position) {
+            const uint64_t shifted_position = position + descriptor.kept_count;
+            const uint8_t* source_element{};
+            if (shifted_position < descriptor.state_width) {
+              source_element = source +
+                               (channel * descriptor.state_width + shifted_position) *
+                                   descriptor.element_size;
+            } else {
+              const uint64_t update_index = shifted_position - descriptor.state_width;
+              source_element = values +
+                               (update_index * descriptor.channel_count + channel) *
+                                   descriptor.element_size;
+            }
+            std::memcpy(
+                destination + (channel * descriptor.state_width + position) * descriptor.element_size,
+                source_element, descriptor.element_size);
+          }
+        }
+        continue;
+      }
+
+      const auto* source = static_cast<const float*>(descriptor.source_state);
+      auto* destination = static_cast<float*>(descriptor.destination_state);
+      for (uint64_t value_head = 0; value_head < descriptor.channel_count; ++value_head) {
+        const uint64_t key_head =
+            value_head * descriptor.key_head_count / descriptor.channel_count;
+        for (uint64_t value_index = 0; value_index < descriptor.state_width; ++value_index) {
+          for (uint64_t key_index = 0; key_index < descriptor.key_width; ++key_index) {
+            const uint64_t state_index =
+                (value_head * descriptor.state_width + value_index) * descriptor.key_width + key_index;
+            float state = source[state_index];
+            for (uint32_t transition = 0; transition < descriptor.kept_count; ++transition) {
+              state *= descriptor.decay[static_cast<uint64_t>(transition) * descriptor.channel_count + value_head];
+              state += descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
+                                          descriptor.key_width +
+                                      key_index] *
+                       descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
+                                            descriptor.state_width +
+                                        value_index];
+            }
+            destination[state_index] = state;
+          }
+        }
+      }
+    }
+  }
 
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
 };

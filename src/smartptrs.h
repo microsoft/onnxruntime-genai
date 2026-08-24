@@ -166,9 +166,37 @@ struct StateSlotDesc {
   }
 };
 
+enum class StateUpdateReplayKind : uint32_t {
+  CausalConv = 1,
+  GatedDeltaNet = 2,
+};
+
+// One compact fixed-state transition series. Pointers refer to one scheduled row on the provider
+// device. For convolution, channel_count/state_width describe [channels, pad] and value points to
+// [capacity, channels]. For GDN they describe [value_heads, value_size, key_size], key_head_count
+// resolves each value head's key head, and decay/key/delta point to their row's factor series.
+struct StateUpdateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  StateUpdateReplayKind kind;
+};
+
+static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
+
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 1;
+inline constexpr uint32_t kDeviceInterfaceVersion = 2;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -265,6 +293,12 @@ struct DeviceInterface {
   // Keep last for vtable/ABI stability.
   virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
                               int /*dst_slot*/) { return false; }
+  // Reconstruct compact fixed-state prefixes. Descriptors are host-resident and all referenced
+  // rows/tensors are disjoint. Implementations enqueue work on their existing stream and do not
+  // synchronize. Keep last for vtable/ABI stability.
+  virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
+    throw std::logic_error("Device does not support compact fixed-state replay.");
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

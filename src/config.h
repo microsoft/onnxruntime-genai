@@ -397,6 +397,23 @@ struct Config {
         Right,  // Slot count-1 is the state after the last token (GatedDeltaNet).
       };
 
+      enum class StateUpdateKind {
+        Invalid,
+        CausalConv,
+        GatedDeltaNet,
+      };
+
+      struct StateUpdate {
+        StateUpdateKind kind{StateUpdateKind::Invalid};
+        int capacity{0};
+        std::string capture_count;
+        std::string value;
+        std::string decay;
+        std::string key;
+        std::string delta;
+        bool enabled{true};
+      };
+
       struct StateGroup {
         StateGroupKind kind{StateGroupKind::Invalid};
         std::vector<int> layer_ids;
@@ -405,6 +422,7 @@ struct Config {
         std::optional<StateBinding> state;
         int checkpoint_count{0};
         CheckpointAlignment checkpoint_alignment{CheckpointAlignment::Right};
+        std::optional<StateUpdate> state_update;
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.

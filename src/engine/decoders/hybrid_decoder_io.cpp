@@ -52,6 +52,9 @@ void HybridDecoderIO::BindFixedState() {
     }
   }
 
+  const char* state_update_capture_count_name{};
+  OrtValue* state_update_capture_count{};
+  size_t state_update_capacity{};
   for (const auto& binding : execution_context_.fixed_state_bindings) {
     if (!binding.input_name || !binding.output_name || !binding.input || !binding.output ||
         !input_names.insert(binding.input_name).second ||
@@ -74,6 +77,63 @@ void HybridDecoderIO::BindFixedState() {
       output_names_.push_back(binding.checkpoints_name);
       outputs_.push_back(binding.checkpoints);
     }
+    if (binding.state_update_capacity == 0) {
+      continue;
+    }
+    if (!binding.state_update_capture_count_name || !binding.state_update_capture_count) {
+      throw std::runtime_error(
+          "Hybrid fixed state contains incomplete state_update capture-count metadata.");
+    }
+    if (!state_update_capture_count_name) {
+      if (!input_names.insert(binding.state_update_capture_count_name).second) {
+        throw std::runtime_error(
+            "Hybrid state_update capture_count collides with another decoder input.");
+      }
+      state_update_capture_count_name = binding.state_update_capture_count_name;
+      state_update_capture_count = binding.state_update_capture_count;
+      state_update_capacity = binding.state_update_capacity;
+      input_names_.push_back(state_update_capture_count_name);
+      inputs_.push_back(state_update_capture_count);
+    } else if (std::string_view{state_update_capture_count_name} !=
+                   binding.state_update_capture_count_name ||
+               state_update_capture_count != binding.state_update_capture_count ||
+               state_update_capacity != binding.state_update_capacity) {
+      throw std::runtime_error(
+          "Hybrid fixed state bindings disagree on the shared state_update contract.");
+    }
+
+    const bool has_state_update_outputs =
+        binding.state_update_value || binding.state_update_decay || binding.state_update_key ||
+        binding.state_update_delta;
+    if (!has_state_update_outputs) {
+      continue;
+    }
+    using StateUpdateKind = Config::Model::Decoder::StateUpdateKind;
+    const bool valid_outputs =
+        binding.state_update_kind == StateUpdateKind::CausalConv
+            ? binding.state_update_value && !binding.state_update_decay &&
+                  !binding.state_update_key && !binding.state_update_delta
+            : !binding.state_update_value && binding.state_update_decay &&
+                  binding.state_update_key && binding.state_update_delta;
+    if (!valid_outputs) {
+      throw std::runtime_error(
+          "Hybrid fixed state contains incomplete state_update output tensors.");
+    }
+    const auto bind_state_update_output = [&](const char* name, OrtValue* value) {
+      if (!value) {
+        return;
+      }
+      if (!name || !output_names.insert(name).second) {
+        throw std::runtime_error(
+            "Hybrid fixed state contains an invalid or duplicate state_update output.");
+      }
+      output_names_.push_back(name);
+      outputs_.push_back(value);
+    };
+    bind_state_update_output(binding.state_update_value_name, binding.state_update_value);
+    bind_state_update_output(binding.state_update_decay_name, binding.state_update_decay);
+    bind_state_update_output(binding.state_update_key_name, binding.state_update_key);
+    bind_state_update_output(binding.state_update_delta_name, binding.state_update_delta);
   }
 }
 

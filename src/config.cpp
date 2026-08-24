@@ -544,9 +544,53 @@ struct SharedInitializers_Element : JSON::Element {
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 using DecoderCheckpointAlignment = Config::Model::Decoder::CheckpointAlignment;
+using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
+using DecoderStateUpdateKind = Config::Model::Decoder::StateUpdateKind;
 
 // Both packed state operators cap their checkpoint window at eight slots.
 constexpr int kMaxStateCheckpoints = 8;
+
+struct StateUpdate_Element : JSON::Element {
+  explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "kind") {
+      const auto kind = JSON::Get<std::string_view>(value);
+      if (kind == "causal_conv") {
+        v_.kind = DecoderStateUpdateKind::CausalConv;
+      } else if (kind == "gated_delta_net") {
+        v_.kind = DecoderStateUpdateKind::GatedDeltaNet;
+      } else {
+        throw std::runtime_error("Unsupported decoder state update kind '" + std::string{kind} + "'");
+      }
+    } else if (name == "capacity") {
+      const auto capacity = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.capacity");
+      if (capacity < 1 || capacity > kMaxStateCheckpoints) {
+        throw std::runtime_error("Decoder state update capacity must be in [1, " +
+                                 std::to_string(kMaxStateCheckpoints) + "]");
+      }
+      v_.capacity = static_cast<int>(capacity);
+    } else if (name == "capture_count") {
+      v_.capture_count = JSON::Get<std::string_view>(value);
+    } else if (name == "value") {
+      v_.value = JSON::Get<std::string_view>(value);
+    } else if (name == "decay") {
+      v_.decay = JSON::Get<std::string_view>(value);
+    } else if (name == "key") {
+      v_.key = JSON::Get<std::string_view>(value);
+    } else if (name == "delta") {
+      v_.delta = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  DecoderStateUpdate& v_;
+};
 
 struct StateBinding_Element : JSON::Element {
   explicit StateBinding_Element(Config::Model::Decoder::StateBinding& v) : v_{v} {}
@@ -638,6 +682,13 @@ struct StateGroup_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "bindings") {
       return bindings_;
+    } else if (name == "state_update") {
+      if (v_.state_update) {
+        throw std::runtime_error("Duplicate decoder state_update declaration");
+      }
+      v_.state_update.emplace();
+      state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
+      return *state_update_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -653,6 +704,7 @@ struct StateGroup_Element : JSON::Element {
   DecoderStateGroup& v_;
   IntArray_Element layer_ids_{v_.layer_ids};
   StateBindings_Element bindings_{v_};
+  std::unique_ptr<StateUpdate_Element> state_update_;
 };
 
 struct StateGroups_Element : JSON::Element {

@@ -66,6 +66,7 @@ struct FixedStateSlotHandle {
 struct FixedStateReservationRequest {
   const void* request_id{};
   uint64_t target_tokens{};
+  size_t capture_count{};
 };
 
 struct FixedStateBinding {
@@ -79,6 +80,18 @@ struct FixedStateBinding {
   // shaped [checkpoint_count, row_count, row...]. CommitPrefix selects one slot of it to commit.
   const char* checkpoints_name{};
   OrtValue* checkpoints{};
+  Config::Model::Decoder::StateUpdateKind state_update_kind{};
+  size_t state_update_capacity{};
+  const char* state_update_capture_count_name{};
+  OrtValue* state_update_capture_count{};
+  const char* state_update_value_name{};
+  OrtValue* state_update_value{};
+  const char* state_update_decay_name{};
+  OrtValue* state_update_decay{};
+  const char* state_update_key_name{};
+  OrtValue* state_update_key{};
+  const char* state_update_delta_name{};
+  OrtValue* state_update_delta{};
 };
 
 enum class FixedStateReservationState {
@@ -124,12 +137,12 @@ class FixedStateReservation {
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
   bool CapturesCheckpoints() const;
+  bool CapturesStateUpdates() const;
 
-  // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
-  // by publishing the operator's own state checkpoint after that token instead of the step's final
-  // state, and lowering the row's committed token boundary by the rejected tokens. This is the
-  // speculative-decoding rollback: a rejected draft costs one device copy rather than a replay
-  // forward. `kept_tokens == step_tokens` is the default and needs no call.
+  // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed. A
+  // partial prefix selects the operator's dense checkpoint or replays its compact transitions from
+  // the gathered input state; a full prefix uses the step's final state. The row's committed token
+  // boundary is lowered by the rejected tokens as well.
   void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
@@ -196,13 +209,18 @@ class FixedStatePool {
   // Gather+output staging bytes a reservation of `row_count` scheduled rows will allocate. A pure
   // function of the pool's tensor geometry, so composite step planning can size the transaction
   // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
-  size_t PlannedStagingBytes(size_t row_count, bool capture_checkpoints = false) const;
+  size_t PlannedStagingBytes(size_t row_count, bool capture_checkpoints = false,
+                             bool capture_state_updates = false) const;
 
   // True when every fixed binding declares a checkpoints output, so reservations may capture the
   // per-token state series a speculative step rolls back through.
   bool SupportsCheckpoints() const;
   // Shared checkpoint window of every fixed binding, or 0 when the model declares none.
   size_t CheckpointCount() const;
+  // True when every fixed binding declares compact state-update outputs.
+  bool SupportsStateUpdates() const;
+  // Shared compact transition capacity, or 0 when the model declares none.
+  size_t StateUpdateCapacity() const;
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor
@@ -212,8 +230,9 @@ class FixedStatePool {
   // Admits a batch in scheduled row order. Ownership is inferred per request: an identity that
   // already owns a committed slot is treated as resident and keeps that slot; any other identity is
   // admitted provisionally and only becomes discoverable committed ownership on Commit.
-  // `capture_checkpoints` additionally binds each tensor's checkpoints output, which is what makes
-  // FixedStateReservation::CommitPrefix available.
+  // `capture_checkpoints` explicitly binds each tensor's dense checkpoint output. Nonzero request
+  // capture counts prefer compact state updates when the model supports them; either mechanism
+  // makes FixedStateReservation::CommitPrefix available.
   FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests,
                                 bool capture_checkpoints = false);
   void Release(const FixedStateSlotHandle& handle);

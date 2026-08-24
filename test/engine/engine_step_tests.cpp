@@ -61,6 +61,37 @@ void FillFixedOutputRow(const FixedStateBinding& binding, size_t row, float valu
   std::fill_n(data + row * row_elements, row_elements, value);
 }
 
+void FillCompactUpdateRow(const FixedStateBinding& binding, size_t row) {
+  const auto fill = [row](OrtValue* tensor, float value) {
+    if (!tensor) {
+      return;
+    }
+    const size_t row_elements = FixedRowElements(*tensor);
+    auto* data = tensor->GetTensorMutableData<float>();
+    std::fill_n(data + row * row_elements, row_elements, value);
+  };
+  fill(binding.state_update_value, 0.0f);
+  fill(binding.state_update_decay, 1.0f);
+  fill(binding.state_update_key, 0.0f);
+  fill(binding.state_update_delta, 0.0f);
+}
+
+void StripCompactStateUpdates(Model& model) {
+  for (auto& group : *model.config_->model.decoder.state_groups) {
+    group.state_update.reset();
+  }
+}
+
+void StripDenseCheckpoints(Model& model) {
+  for (auto& group : *model.config_->model.decoder.state_groups) {
+    if (group.kind != Config::Model::Decoder::StateGroupKind::Fixed) {
+      continue;
+    }
+    group.checkpoint_count = 0;
+    group.state->checkpoints.clear();
+  }
+}
+
 const FixedStateSlotSnapshot& FixedSlotFor(const FixedStatePoolSnapshot& snapshot,
                                            const void* request_id) {
   const auto slot = std::find_if(
@@ -1230,7 +1261,8 @@ TEST_F(EngineStepTest, CompositeReservationRequiredMismatchIsFatal) {
   // the divergence at the reservation boundary, treat it as fatal, and stay unhealthy afterwards.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 1, 1, 256}, /*slots=*/{}, /*staging_bytes=*/0);
+      FixedStateResourcePlan{true, 1, 1, 256, false, false},
+      /*slots=*/{}, /*staging_bytes=*/0);
   auto request = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(request);
 
@@ -1251,7 +1283,7 @@ TEST_F(EngineStepTest, CompositeReservationOverreportedRowsAreFatal) {
   // A buggy cache manager reports two fixed rows for a one-request plan. The Engine must reject the
   // row count before indexing the plan with either reservation row.
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 2, 1, 0},
+      FixedStateResourcePlan{true, 2, 1, 0, false, false},
       {
           FixedStateSlotHandle{nullptr, request.get(), 0, 0},
           FixedStateSlotHandle{nullptr, &extra_request_storage, 1, 0},
@@ -1274,7 +1306,7 @@ TEST_F(EngineStepTest, CompositeReservationRowOrderMismatchIsFatal) {
   // Row count and staging bytes match the plan, but the single fixed slot names a different request:
   // the per-row identity guard must fail fatally.
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 1, 1, 0},
+      FixedStateResourcePlan{true, 1, 1, 0, false, false},
       {FixedStateSlotHandle{nullptr, &other_storage, 0, 0}},
       /*staging_bytes=*/0);
 
@@ -1933,6 +1965,7 @@ TEST_F(EngineStepTest, SpeculativeStepEndsTheTurnOnADraftedStopToken) {
 
 TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
   model_ = LoadSyntheticCompositeModel();
+  StripCompactStateUpdates(*model_);
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeCompositeDoublesEngine(model_, filler);
@@ -2003,6 +2036,7 @@ TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
 
 TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
   model_ = LoadSyntheticCompositeModel();
+  StripCompactStateUpdates(*model_);
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
   auto decode = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(decode);
@@ -2043,6 +2077,7 @@ TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
 // row's drafts, because the prefill row's plan no longer decides for the whole batch.
 TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
   model_ = LoadSyntheticCompositeModel();
+  StripCompactStateUpdates(*model_);
   model_->config_->model.decoder.mixed_batch_checkpoints = true;
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
   auto decode = MintRequest(*model_, Prompt(10));
@@ -2081,6 +2116,66 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
   EXPECT_EQ(decode->PendingDraftTokenCount(), 0u);
   EXPECT_TRUE(decode->HasUnseenTokens());
   EXPECT_TRUE(prefill->HasUnseenTokens());
+}
+
+TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsInMixedBatchWithCompactUpdates) {
+  model_ = LoadSyntheticCompositeModel();
+  ASSERT_FALSE(model_->config_->model.decoder.mixed_batch_checkpoints);
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  EXPECT_EQ(engine.cache->MaxDraftTokensPerStep(), 3u);
+  auto decode = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(decode);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    EXPECT_FALSE(context.plan->fixed_state.capture_state_updates);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ASSERT_NE(binding.state_update_capture_count, nullptr);
+      EXPECT_EQ(binding.state_update_capture_count->GetTensorData<int32_t>()[0], 0);
+      FillFixedOutputRow(binding, 0, 10.0f);
+    }
+  });
+  ASSERT_EQ(engine.engine->Step(), decode);
+  while (decode->HasUnseenTokens()) decode->UnseenToken();
+
+  decode->SetDraftTokens(std::array<int32_t, 3>{11, 12, 13});
+  auto prefill = MintRequest(*model_, Prompt(20));
+  engine.engine->AddRequest(prefill);
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22, 21});
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 2u);
+    EXPECT_EQ(context.plan->requests[0].request, decode);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 3u);
+    EXPECT_EQ(context.plan->requests[1].request, prefill);
+    EXPECT_TRUE(context.plan->requests[1].is_prefill);
+    EXPECT_EQ(context.plan->requests[1].draft_token_count, 0u);
+    EXPECT_TRUE(context.plan->fixed_state.capture_state_updates);
+    EXPECT_FALSE(context.plan->fixed_state.capture_checkpoints);
+    EXPECT_EQ(context.fixed_state_staging_bytes, context.plan->fixed_state.staging_bytes);
+    for (const auto& binding : context.fixed_state_bindings) {
+      EXPECT_EQ(binding.checkpoints, nullptr);
+      ASSERT_NE(binding.state_update_capture_count, nullptr);
+      const auto* capture_counts =
+          binding.state_update_capture_count->GetTensorData<int32_t>();
+      EXPECT_EQ(capture_counts[0], 3);
+      EXPECT_EQ(capture_counts[1], 0);
+      for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+        FillFixedOutputRow(binding, row, 20.0f + static_cast<float>(row));
+        FillCompactUpdateRow(binding, row);
+      }
+    }
+  });
+
+  ASSERT_EQ(engine.engine->Step(), decode);
+  EXPECT_EQ(decode->PendingDraftTokenCount(), 0u);
+  EXPECT_TRUE(decode->HasUnseenTokens());
+  EXPECT_TRUE(prefill->HasUnseenTokens());
+}
+
+TEST_F(EngineStepTest, CompositeDraftLimitUsesCompactCapacityWithoutCheckpoints) {
+  model_ = LoadSyntheticCompositeModel();
+  StripDenseCheckpoints(*model_);
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+
+  EXPECT_EQ(engine.cache->MaxDraftTokensPerStep(), 3u);
 }
 
 TEST_F(EngineStepTest, CompositeCompletionRemovalFreesSlotForReadmission) {

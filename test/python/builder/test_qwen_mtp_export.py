@@ -36,6 +36,47 @@ def _external_info(tensor):
     return values["location"], int(values["offset"]), int(values["length"])
 
 
+def test_mtp_head_does_not_inherit_dflash2_target_options():
+    captured_options = {}
+
+    class RecordingMtpHead:
+        def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, options):
+            captured_options.update(options)
+
+        def make_model(self, input_path):
+            pass
+
+    model = Qwen35MoeTextModel.__new__(Qwen35MoeTextModel)
+    model.enable_mtp = True
+    model._mtp_config = object()
+    model._mtp_io_dtype = object()
+    model._mtp_onnx_dtype = object()
+    model._mtp_ep = "cuda"
+    model._mtp_cache_dir = None
+    model._mtp_extra_options = {
+        "enable_mtp": "true",
+        "include_hidden_states": "true",
+        "aux_hidden_state_layers": "5,19,33,47,61",
+        "dflash2_path": "/model/dflash2",
+        "dflash2_num_draft_tokens": "7",
+    }
+    model._mtp_head_class = lambda: RecordingMtpHead
+
+    model._make_mtp_head("/model/target")
+
+    assert captured_options["filename"] == "mtp.onnx"
+    assert captured_options["exclude_embeds"] is False
+    assert "aux_hidden_state_layers" not in captured_options
+    assert "dflash2_path" not in captured_options
+    assert "dflash2_num_draft_tokens" not in captured_options
+
+
+def test_dflash2_save_hook_is_optional_for_auxiliary_heads(tmp_path):
+    model = Qwen35MoeTextModel.__new__(Qwen35MoeTextModel)
+
+    model._save_dflash2_head(tmp_path)
+
+
 def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"

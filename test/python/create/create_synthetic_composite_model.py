@@ -25,7 +25,7 @@ Layer assignment (disjoint cover of 6 layers):
 
     fixed convolution: layer_ids [0, 3], state shape [batch, 2, 3]
     paged_kv:          layer_ids [1, 4]
-    fixed recurrent:   layer_ids [2, 5], state shape [batch, 2, 2]
+    fixed recurrent:   layer_ids [2, 5], state shape [batch, 2, 2, 2]
 
 Both fixed groups declare a dynamic (symbolic) batch axis 0, so the pool admits
 any batch size up to capacity.
@@ -45,7 +45,7 @@ PAGED_LAYERS = [1, 4]
 CONV_LAYERS = [0, 3]
 RECURRENT_LAYERS = [2, 5]
 CONV_ROW = [2, 3]
-RECURRENT_ROW = [2, 2]
+RECURRENT_ROW = [2, 2, 2]
 BLOCK_SIZE = 4
 NUM_BLOCKS = 128
 MAX_BATCH_SIZE = 8
@@ -56,6 +56,7 @@ EOS_TOKEN_ID = 1
 # the last CHECKPOINT_COUNT tokens of a step, so a partially accepted draft can roll back to it.
 # The two groups use opposite slot alignments, mirroring the real packed operators.
 CHECKPOINT_COUNT = 4
+STATE_UPDATE_CAPACITY = 3
 
 
 def _const(name, array):
@@ -81,6 +82,11 @@ def _decoder_graph():
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
         _const("state_one", np.asarray(1.0, dtype=np.float32)),
         _const("checkpoint_axis", i64([0])),
+        _const("state_update_axis", i64([1])),
+        _const("gdn_decay_axes", i64([2, 3])),
+        _const("gdn_key_axes", i64([1, 2])),
+        _const("gdn_key_unsqueeze_axes", i64([1, 2])),
+        _const("gdn_delta_axes", i64([3])),
     ]
 
     nodes = []
@@ -165,6 +171,7 @@ def _decoder_graph():
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
         helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["num_tokens"]),
         helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
+        helper.make_tensor_value_info("state_update_capture_count", TensorProto.INT32, ["batch"]),
         helper.make_tensor_value_info("past_key_values.1.key", TensorProto.FLOAT, cache_shape),
         helper.make_tensor_value_info("past_key_values.1.value", TensorProto.FLOAT, cache_shape),
         helper.make_tensor_value_info("past_key_values.4.key", TensorProto.FLOAT, cache_shape),
@@ -206,6 +213,73 @@ def _decoder_graph():
                 helper.make_node(
                     "Concat", [unsqueezed] * CHECKPOINT_COUNT, [checkpoints_name], axis=0
                 )
+            )
+            if prefix == "conv":
+                update_name = f"state_update.{layer}.conv_value"
+                outputs.append(
+                    helper.make_tensor_value_info(
+                        update_name,
+                        TensorProto.FLOAT,
+                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0]],
+                    )
+                )
+                nodes.append(
+                    helper.make_node("Transpose", [in_name], [update_name], perm=[0, 2, 1])
+                )
+                continue
+
+            decay_name = f"state_update.{layer}.recurrent_decay"
+            key_name = f"state_update.{layer}.recurrent_key"
+            delta_name = f"state_update.{layer}.recurrent_delta"
+            outputs.extend(
+                [
+                    helper.make_tensor_value_info(
+                        decay_name,
+                        TensorProto.FLOAT,
+                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0]],
+                    ),
+                    helper.make_tensor_value_info(
+                        key_name,
+                        TensorProto.FLOAT,
+                        ["batch_size", STATE_UPDATE_CAPACITY, 1, row_dims[2]],
+                    ),
+                    helper.make_tensor_value_info(
+                        delta_name,
+                        TensorProto.FLOAT,
+                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0], row_dims[1]],
+                    ),
+                ]
+            )
+            decay_base = f"{decay_name}/base"
+            key_base = f"{key_name}/base"
+            delta_base = f"{delta_name}/base"
+            decay_step = f"{decay_name}/step"
+            key_step = f"{key_name}/step"
+            delta_step = f"{delta_name}/step"
+            nodes.extend(
+                [
+                    helper.make_node(
+                        "ReduceSum", [in_name, "gdn_decay_axes"], [decay_base], keepdims=0
+                    ),
+                    helper.make_node("Unsqueeze", [decay_base, "state_update_axis"], [decay_step]),
+                    helper.make_node(
+                        "Concat", [decay_step] * STATE_UPDATE_CAPACITY, [decay_name], axis=1
+                    ),
+                    helper.make_node(
+                        "ReduceSum", [in_name, "gdn_key_axes"], [key_base], keepdims=0
+                    ),
+                    helper.make_node("Unsqueeze", [key_base, "gdn_key_unsqueeze_axes"], [key_step]),
+                    helper.make_node(
+                        "Concat", [key_step] * STATE_UPDATE_CAPACITY, [key_name], axis=1
+                    ),
+                    helper.make_node(
+                        "ReduceSum", [in_name, "gdn_delta_axes"], [delta_base], keepdims=0
+                    ),
+                    helper.make_node("Unsqueeze", [delta_base, "state_update_axis"], [delta_step]),
+                    helper.make_node(
+                        "Concat", [delta_step] * STATE_UPDATE_CAPACITY, [delta_name], axis=1
+                    ),
+                ]
             )
 
     add_fixed_group("conv", CONV_LAYERS, CONV_ROW)
@@ -275,6 +349,12 @@ def create_config(output_dir):
                                 "checkpoints": "checkpoints_conv.%d",
                             },
                         },
+                        "state_update": {
+                            "kind": "causal_conv",
+                            "capacity": STATE_UPDATE_CAPACITY,
+                            "capture_count": "state_update_capture_count",
+                            "value": "state_update.%d.conv_value",
+                        },
                     },
                     {
                         "kind": "paged_kv",
@@ -301,6 +381,14 @@ def create_config(output_dir):
                                 "output": "present_recurrent.%d",
                                 "checkpoints": "checkpoints_recurrent.%d",
                             },
+                        },
+                        "state_update": {
+                            "kind": "gated_delta_net",
+                            "capacity": STATE_UPDATE_CAPACITY,
+                            "capture_count": "state_update_capture_count",
+                            "decay": "state_update.%d.recurrent_decay",
+                            "key": "state_update.%d.recurrent_key",
+                            "delta": "state_update.%d.recurrent_delta",
                         },
                     },
                 ],

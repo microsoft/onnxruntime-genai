@@ -28,8 +28,9 @@ const void* const kRequestC = &kRequestStorageC;
 using Request = FixedStateReservationRequest;
 
 // Builds a one-request reservation input in scheduled row order.
-std::array<Request, 1> One(const void* id, uint64_t target_tokens = 1) {
-  return {Request{id, target_tokens}};
+std::array<Request, 1> One(const void* request_id, uint64_t target_tokens = 1,
+                           size_t capture_count = 0) {
+  return {Request{request_id, target_tokens, capture_count}};
 }
 
 size_t RowElements(const OrtValue& tensor) {
@@ -58,6 +59,16 @@ void ExpectInputRow(const FixedStateBinding& binding, size_t row, float expected
   const auto* data = binding.input->GetTensorData<float>();
   for (size_t index = 0; index < row_elements; ++index) {
     EXPECT_FLOAT_EQ(data[row * row_elements + index], expected);
+  }
+}
+
+void ExpectInputRow(const FixedStateBinding& binding, size_t row,
+                    std::span<const float> expected) {
+  const auto row_elements = RowElements(*binding.input);
+  ASSERT_EQ(expected.size(), row_elements);
+  const auto* data = binding.input->GetTensorData<float>() + row * row_elements;
+  for (size_t index = 0; index < row_elements; ++index) {
+    EXPECT_FLOAT_EQ(data[index], expected[index]) << "element " << index;
   }
 }
 
@@ -90,6 +101,34 @@ void FillCheckpointSeries(FixedStateReservation& reservation, size_t row_count, 
       FillCheckpointRow(binding, slot, row_count, row, base + static_cast<float>(slot));
     }
   }
+}
+
+void FillConvUpdates(const FixedStateBinding& binding, size_t row,
+                     std::span<const float> values) {
+  ASSERT_NE(binding.state_update_value, nullptr);
+  const auto shape = binding.state_update_value->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t row_elements = static_cast<size_t>(shape[1] * shape[2]);
+  ASSERT_EQ(values.size(), row_elements);
+  auto* data = binding.state_update_value->GetTensorMutableData<float>();
+  std::copy(values.begin(), values.end(), data + row * row_elements);
+}
+
+void FillGdnUpdates(const FixedStateBinding& binding, size_t row,
+                    std::span<const float> decay,
+                    std::span<const float> key,
+                    std::span<const float> delta) {
+  ASSERT_NE(binding.state_update_decay, nullptr);
+  ASSERT_NE(binding.state_update_key, nullptr);
+  ASSERT_NE(binding.state_update_delta, nullptr);
+  const auto copy_row = [row](OrtValue& tensor, std::span<const float> values) {
+    const size_t row_elements = RowElements(tensor);
+    ASSERT_EQ(values.size(), row_elements);
+    auto* data = tensor.GetTensorMutableData<float>();
+    std::copy(values.begin(), values.end(), data + row * row_elements);
+  };
+  copy_row(*binding.state_update_decay, decay);
+  copy_row(*binding.state_update_key, key);
+  copy_row(*binding.state_update_delta, delta);
 }
 
 // ONNX element type shorthands for the direct geometry tests.
@@ -150,7 +189,7 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
   EXPECT_EQ(reservation.Bindings()[0].input->GetTensorTypeAndShapeInfo()->GetShape(),
             (std::vector<int64_t>{1, 2, 3}));
   EXPECT_EQ(reservation.Bindings()[2].output->GetTensorTypeAndShapeInfo()->GetShape(),
-            (std::vector<int64_t>{1, 2, 2}));
+            (std::vector<int64_t>{1, 2, 2, 2}));
   EXPECT_EQ(reservation.Handles()[0].request_id, kRequestA);
   ASSERT_EQ(reservation.TargetTokens().size(), 1u);
   EXPECT_EQ(reservation.TargetTokens()[0], 1u);
@@ -392,8 +431,8 @@ TEST_F(FixedStatePoolTest, MoveTransfersLiveReservationOwnership) {
 TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   auto pool = MakePool(3);
   constexpr size_t bytes_per_request =
-      2 * (2 * 3) * sizeof(float) +   // convolution: 2 layers, row [2, 3]
-      2 * (2 * 2) * sizeof(float);    // recurrent: 2 layers, row [2, 2]
+      2 * (2 * 3) * sizeof(float) +     // convolution: 2 layers, row [2, 3]
+      2 * (2 * 2 * 2) * sizeof(float);  // recurrent: 2 layers, row [2, 2, 2]
   // Two persistent banks per tensor so publish is a bank flip with no device copy.
   EXPECT_EQ(pool->PersistentBytes(), 2 * 3 * bytes_per_request);
   EXPECT_EQ(pool->ZeroingScratchBytes(), bytes_per_request);
@@ -403,8 +442,10 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   {
     const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};  // A resident, B provisional.
     auto reservation = pool->Reserve(requests);
-    EXPECT_EQ(reservation.PlannedStagingBytes(), 4 * bytes_per_request);  // gather + staged over 2 rows.
-    EXPECT_EQ(pool->ActiveStagingBytes(), 4 * bytes_per_request);
+    const size_t expected_staging =
+        4 * bytes_per_request + 2 * sizeof(int32_t);  // gather + output + count input
+    EXPECT_EQ(reservation.PlannedStagingBytes(), expected_staging);
+    EXPECT_EQ(pool->ActiveStagingBytes(), expected_staging);
     const auto snapshot = pool->Snapshot();
     EXPECT_EQ(snapshot.free_slots, 1u);
     EXPECT_EQ(snapshot.reserved_slots, 1u);
@@ -664,6 +705,291 @@ TEST_F(FixedStatePoolTest, ReportsCheckpointSupport) {
   EXPECT_EQ(pool->CheckpointCount(), 4u);
 }
 
+TEST_F(FixedStatePoolTest, ReportsCompactStateUpdateSupport) {
+  auto pool = MakePool();
+  EXPECT_TRUE(pool->SupportsStateUpdates());
+  EXPECT_EQ(pool->StateUpdateCapacity(), 3u);
+}
+
+TEST_F(FixedStatePoolTest, DisabledCompactStateUpdatesBindZeroAndCaptureCheckpoints) {
+  for (auto& group : model_->config_->model.decoder.state_groups.value()) {
+    if (group.state_update) {
+      group.state_update->enabled = false;
+    }
+  }
+  manifest_ = std::make_unique<ModelStateManifest>(model_->config_->model.decoder);
+  auto pool = MakePool();
+  EXPECT_FALSE(pool->SupportsStateUpdates());
+  EXPECT_EQ(pool->StateUpdateCapacity(), 0u);
+
+  const auto requests = One(kRequestA, 4, 3);
+  auto reservation = pool->Reserve(requests, true);
+  EXPECT_TRUE(reservation.CapturesCheckpoints());
+  EXPECT_FALSE(reservation.CapturesStateUpdates());
+  for (const auto& binding : reservation.Bindings()) {
+    EXPECT_STREQ(binding.state_update_capture_count_name, "state_update_capture_count");
+    ASSERT_NE(binding.state_update_capture_count, nullptr);
+    EXPECT_EQ(binding.state_update_capture_count->GetTensorData<int32_t>()[0], 0);
+    EXPECT_NE(binding.checkpoints, nullptr);
+    EXPECT_EQ(binding.state_update_value, nullptr);
+    EXPECT_EQ(binding.state_update_decay, nullptr);
+    EXPECT_EQ(binding.state_update_key, nullptr);
+    EXPECT_EQ(binding.state_update_delta, nullptr);
+  }
+  reservation.Discard();
+}
+
+TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditional) {
+  auto pool = MakePool(2);
+  {
+    auto requests = One(kRequestA);
+    auto reservation = pool->Reserve(requests);
+    EXPECT_FALSE(reservation.CapturesStateUpdates());
+    OrtValue* shared_count{};
+    for (const auto& binding : reservation.Bindings()) {
+      EXPECT_STREQ(binding.state_update_capture_count_name, "state_update_capture_count");
+      ASSERT_NE(binding.state_update_capture_count, nullptr);
+      EXPECT_EQ(binding.state_update_capacity, 3u);
+      if (!shared_count) {
+        shared_count = binding.state_update_capture_count;
+      }
+      EXPECT_EQ(binding.state_update_capture_count, shared_count);
+      EXPECT_EQ(binding.state_update_capture_count->GetTensorData<int32_t>()[0], 0);
+      EXPECT_EQ(binding.state_update_value, nullptr);
+      EXPECT_EQ(binding.state_update_decay, nullptr);
+      EXPECT_EQ(binding.state_update_key, nullptr);
+      EXPECT_EQ(binding.state_update_delta, nullptr);
+    }
+    reservation.Discard();
+  }
+
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
+  auto reservation = pool->Reserve(requests);
+  EXPECT_TRUE(reservation.CapturesStateUpdates());
+  const auto& conv = reservation.Bindings()[0];
+  const auto& recurrent = reservation.Bindings()[2];
+  EXPECT_EQ(conv.state_update_capture_count->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2}));
+  EXPECT_EQ(conv.state_update_capture_count->GetTensorData<int32_t>()[0], 3);
+  EXPECT_EQ(conv.state_update_capture_count->GetTensorData<int32_t>()[1], 0);
+  ASSERT_NE(conv.state_update_value, nullptr);
+  EXPECT_EQ(conv.state_update_value->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 3, 2}));
+  ASSERT_NE(recurrent.state_update_decay, nullptr);
+  ASSERT_NE(recurrent.state_update_key, nullptr);
+  ASSERT_NE(recurrent.state_update_delta, nullptr);
+  EXPECT_EQ(recurrent.state_update_decay->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 3, 2}));
+  EXPECT_EQ(recurrent.state_update_key->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 3, 1, 2}));
+  EXPECT_EQ(recurrent.state_update_delta->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 3, 2, 2}));
+  EXPECT_EQ(reservation.PlannedStagingBytes(),
+            pool->PlannedStagingBytes(2, false, true));
+}
+
+TEST_F(FixedStatePoolTest, CompactCaptureAddsExactFactorStagingBytes) {
+  auto pool = MakePool();
+  const size_t plain = pool->PlannedStagingBytes(2);
+  const size_t captured = pool->PlannedStagingBytes(2, false, true);
+  constexpr size_t compact_bytes_per_row =
+      2 * (3 * 2) * sizeof(float) +                         // two conv update tensors
+      2 * (3 * 2 + 3 * 1 * 2 + 3 * 2 * 2) * sizeof(float);  // two GDN factor sets
+  EXPECT_EQ(captured, plain + 2 * compact_bytes_per_row);
+
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
+  auto reservation = pool->Reserve(requests);
+  EXPECT_EQ(reservation.PlannedStagingBytes(), captured);
+}
+
+TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdnFromGatheredInput) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/2);
+    reservation.Commit();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  const std::array<float, 6> expected_conv{4.0f, 10.0f, 20.0f, 4.0f, 11.0f, 21.0f};
+  const std::array<float, 8> expected_gdn{
+      24.0f, 30.0f, 30.0f, 38.0f, 31.5f, 40.0f, 36.5f, 46.5f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[1], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
+  ExpectInputRow(reservation.Bindings()[3], 0, expected_gdn);
+}
+
+TEST_F(FixedStatePoolTest, CompactAnchorOnlyReplayUsesFirstTransition) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const std::array<float, 6> key{};
+    const std::array<float, 12> delta{};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_value) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/1);
+    reservation.Commit();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  const std::array<float, 6> expected_conv{4.0f, 4.0f, 10.0f, 4.0f, 4.0f, 11.0f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[1], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, 4.0f);
+  ExpectInputRow(reservation.Bindings()[3], 0, 4.0f);
+}
+
+TEST_F(FixedStatePoolTest, CompactFullAcceptanceUsesFinalState) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/4);
+    reservation.Commit();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  ExpectInputRows(reservation, 0, 99.0f);
+}
+
+TEST_F(FixedStatePoolTest, CompactReplayIsInvisibleBeforePublish) {
+  auto pool = MakePool(1);
+  MakeResident(*pool, kRequestA, 4.0f, /*target_tokens=*/2);
+  {
+    auto requests = One(kRequestA, /*target_tokens=*/5, /*capture_count=*/3);
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const std::array<float, 6> key{};
+    const std::array<float, 12> delta{};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_value) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/1);
+    reservation.PrepareCommit();
+    EXPECT_EQ(pool->CommittedTokens(pool->HandleFor(kRequestA)), 2u);
+    reservation.Discard();
+  }
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  ExpectInputRows(reservation, 0, 4.0f);
+}
+
+TEST_F(FixedStatePoolTest, CompactReplayChangesOnlyTheRequestedRow) {
+  auto pool = MakePool(2);
+  MakeResident(*pool, kRequestA, 4.0f);
+  MakeResident(*pool, kRequestB, 5.0f);
+  {
+    const std::array<Request, 2> requests{
+        Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 99.0f);
+    FillStagedRows(reservation, 1, 98.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const std::array<float, 6> key{};
+    const std::array<float, 12> delta{};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_value) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/1);
+    reservation.Commit();
+  }
+
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 1, 0}, Request{kRequestB, 1, 0}};
+  auto reservation = pool->Reserve(requests);
+  const std::array<float, 6> expected_conv{4.0f, 4.0f, 10.0f, 4.0f, 4.0f, 11.0f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, 4.0f);
+  ExpectInputRows(reservation, 1, 98.0f);
+}
+
+TEST_F(FixedStatePoolTest, RejectsInvalidCompactCaptureRequests) {
+  auto pool = MakePool(1);
+  auto overflow = One(kRequestA, /*target_tokens=*/5, /*capture_count=*/4);
+  EXPECT_THROW(pool->Reserve(overflow), std::runtime_error);
+
+  auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+  EXPECT_THROW(pool->Reserve(requests, /*capture_checkpoints=*/true), std::runtime_error);
+}
+
+TEST_F(FixedStatePoolTest, CompactCommitPrefixRequiresCapturedStepGeometry) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+  auto reservation = pool->Reserve(requests);
+  EXPECT_THROW(
+      reservation.CommitPrefix(0, /*step_tokens=*/3, /*kept_tokens=*/2),
+      std::runtime_error);
+}
+
+TEST_F(FixedStatePoolTest, DenseCheckpointFallbackWorksWithCompactConfigStripped) {
+  for (auto& group : *model_->config_->model.decoder.state_groups) {
+    group.state_update.reset();
+  }
+  manifest_ = std::make_unique<ModelStateManifest>(model_->config_->model.decoder);
+  auto pool = MakePool(1);
+  EXPECT_FALSE(pool->SupportsStateUpdates());
+  EXPECT_EQ(pool->StateUpdateCapacity(), 0u);
+
+  auto requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
+  auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
+  EXPECT_TRUE(reservation.CapturesCheckpoints());
+  EXPECT_FALSE(reservation.CapturesStateUpdates());
+  for (const auto& binding : reservation.Bindings()) {
+    EXPECT_EQ(binding.state_update_capture_count, nullptr);
+  }
+  FillStagedRows(reservation, 0, 99.0f);
+  FillCheckpointSeries(reservation, /*row_count=*/1, /*row=*/0, /*base=*/10.0f);
+  reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/1);
+  reservation.Commit();
+}
+
 TEST_F(FixedStatePoolTest, CheckpointsAreBoundOnlyWhenCaptured) {
   auto pool = MakePool();
   {
@@ -686,15 +1012,18 @@ TEST_F(FixedStatePoolTest, CheckpointsAreBoundOnlyWhenCaptured) {
   EXPECT_EQ(reservation.Bindings()[0].checkpoints->GetTensorTypeAndShapeInfo()->GetShape(),
             (std::vector<int64_t>{4, 1, 2, 3}));
   EXPECT_EQ(reservation.Bindings()[2].checkpoints->GetTensorTypeAndShapeInfo()->GetShape(),
-            (std::vector<int64_t>{4, 1, 2, 2}));
+            (std::vector<int64_t>{4, 1, 2, 2, 2}));
 }
 
 TEST_F(FixedStatePoolTest, CapturingCheckpointsAddsWindowStagingBytes) {
   auto pool = MakePool();
   const auto plain = pool->PlannedStagingBytes(2);
   const auto captured = pool->PlannedStagingBytes(2, /*capture_checkpoints=*/true);
-  // Two staging copies per tensor become two plus the four-slot window.
-  EXPECT_EQ(captured, plain * 3);
+  constexpr size_t fixed_row_bytes =
+      2 * (2 * 3) * sizeof(float) + 2 * (2 * 2 * 2) * sizeof(float);
+  // The shared count input is present in both plans; checkpoint capture adds four tensor rows per
+  // scheduled row without duplicating that input.
+  EXPECT_EQ(captured, plain + 2 * 4 * fixed_row_bytes);
 
   auto requests = std::array<Request, 2>{Request{kRequestA, 1}, Request{kRequestB, 1}};
   auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);

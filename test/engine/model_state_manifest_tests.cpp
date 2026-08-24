@@ -37,6 +37,14 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
         TensorMetadata{data_type, std::move(shape)});
   }
 
+  void RemoveOutput(const std::string& name) {
+    outputs_.erase(name);
+  }
+
+  void RemoveInput(const std::string& name) {
+    inputs_.erase(name);
+  }
+
   bool HasInput(const std::string& name) const override {
     return inputs_.contains(name);
   }
@@ -146,6 +154,82 @@ FakeModelStateMetadata MakeCheckpointMetadata(int checkpoint_count = 4) {
   return metadata;
 }
 
+Config::Model::Decoder MakeCompactConvDecoder() {
+  using Decoder = Config::Model::Decoder;
+  auto decoder = MakeCheckpointDecoder();
+  auto& fixed = decoder.state_groups->back();
+  fixed.state_update = Decoder::StateUpdate{
+      Decoder::StateUpdateKind::CausalConv,
+      3,
+      "state_update_capture_count",
+      "state_update.%d.conv_value"};
+  return decoder;
+}
+
+FakeModelStateMetadata MakeCompactConvMetadata() {
+  auto metadata = MakeCheckpointMetadata();
+  metadata.AddInput(
+      "state_update_capture_count",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {-1});
+  for (const int layer_id : {0, 2}) {
+    metadata.AddOutput(
+        "state_update." + std::to_string(layer_id) + ".conv_value",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+        {-1, 3, 8192});
+  }
+  return metadata;
+}
+
+Config::Model::Decoder MakeCompactGdnDecoder() {
+  using Decoder = Config::Model::Decoder;
+  Decoder decoder;
+  decoder.num_hidden_layers = 1;
+  Decoder::StateGroup group;
+  group.kind = Decoder::StateGroupKind::Fixed;
+  group.layer_ids = {0};
+  group.state = Decoder::StateBinding{"past.%d.recurrent", "present.%d.recurrent"};
+  group.state_update = Decoder::StateUpdate{
+      Decoder::StateUpdateKind::GatedDeltaNet,
+      3,
+      "state_update_capture_count",
+      "",
+      "state_update.%d.decay",
+      "state_update.%d.key",
+      "state_update.%d.delta"};
+  decoder.state_groups = std::vector<Decoder::StateGroup>{std::move(group)};
+  return decoder;
+}
+
+FakeModelStateMetadata MakeCompactGdnMetadata() {
+  FakeModelStateMetadata metadata;
+  metadata.AddInput(
+      "past.0.recurrent",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 48, 128, 128});
+  metadata.AddOutput(
+      "present.0.recurrent",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 48, 128, 128});
+  metadata.AddInput(
+      "state_update_capture_count",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {-1});
+  metadata.AddOutput(
+      "state_update.0.decay",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 48});
+  metadata.AddOutput(
+      "state_update.0.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 16, 128});
+  metadata.AddOutput(
+      "state_update.0.delta",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 48, 128});
+  return metadata;
+}
+
 TEST(ModelStateManifestTest, ValidatesCheckpointOutputs) {
   const ModelStateManifest manifest{MakeCheckpointDecoder()};
 
@@ -208,6 +292,145 @@ TEST(ModelStateManifestTest, RejectsCheckpointTemplateColliding) {
   decoder.state_groups->back().state->checkpoints = "present.%d.conv";
 
   EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, ValidatesCompactConvUpdatesAlongsideCheckpoints) {
+  const ModelStateManifest manifest{MakeCompactConvDecoder()};
+
+  EXPECT_NO_THROW(manifest.ValidateSession(MakeCompactConvMetadata()));
+}
+
+TEST(ModelStateManifestTest, RejectsPartialCompactStateUpdateCoverage) {
+  auto decoder = MakeCompactConvDecoder();
+  auto fixed_without_update = decoder.state_groups->back();
+  fixed_without_update.layer_ids = {3};
+  fixed_without_update.state_update.reset();
+  decoder.state_groups->push_back(std::move(fixed_without_update));
+
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, ValidatesCompactGdnUpdatesWithDynamicBatch) {
+  const ModelStateManifest manifest{MakeCompactGdnDecoder()};
+
+  EXPECT_NO_THROW(manifest.ValidateSession(MakeCompactGdnMetadata()));
+}
+
+TEST(ModelStateManifestTest, RejectsInvalidCompactCaptureCountMetadata) {
+  const ModelStateManifest manifest{MakeCompactConvDecoder()};
+  auto metadata = MakeCompactConvMetadata();
+  metadata.RemoveInput("state_update_capture_count");
+  auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("capture_count input was not found"), std::string::npos) << message;
+
+  metadata = MakeCompactConvMetadata();
+  metadata.AddInput(
+      "state_update_capture_count",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+      {-1});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("must have int32 dtype"), std::string::npos) << message;
+
+  metadata.AddInput(
+      "state_update_capture_count",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {-1, 1});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("must have rank 1"), std::string::npos) << message;
+
+  metadata.AddInput(
+      "state_update_capture_count",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+      {2});
+  metadata.AddOutput(
+      "present.0.conv",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {3, 8192, 3});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("batch dimension incompatible"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsMissingCompactStateUpdateOutput) {
+  const ModelStateManifest manifest{MakeCompactGdnDecoder()};
+  auto metadata = MakeCompactGdnMetadata();
+  metadata.RemoveOutput("state_update.0.key");
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("key output was not found: state_update.0.key"),
+            std::string::npos)
+      << message;
+}
+
+TEST(ModelStateManifestTest, RejectsInvalidCompactConvUpdateMetadata) {
+  const ModelStateManifest manifest{MakeCompactConvDecoder()};
+  auto metadata = MakeCompactConvMetadata();
+  metadata.AddOutput(
+      "state_update.0.conv_value",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 8192});
+  auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("same dtype as state output"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.conv_value",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 2, 8192});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("capacity dimension must be 3"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.conv_value",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 3, 4096});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("channel dimensions are incompatible"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, RejectsInvalidCompactGdnDtypeAndShapeMetadata) {
+  const ModelStateManifest manifest{MakeCompactGdnDecoder()};
+  auto metadata = MakeCompactGdnMetadata();
+  metadata.AddOutput(
+      "state_update.0.decay",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+      {-1, 3, 48});
+  auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("must have float dtype"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.decay",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 48});
+  metadata.AddOutput(
+      "state_update.0.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 0, 128});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("positive key-head dimension"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 16, 64});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("key dimensions are incompatible"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.key",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 16, 128});
+  metadata.AddOutput(
+      "state_update.0.delta",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 24, 128});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("value-head dimensions are incompatible"), std::string::npos) << message;
+
+  metadata.AddOutput(
+      "state_update.0.delta",
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+      {-1, 3, 48, 64});
+  message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("value dimensions are incompatible"), std::string::npos) << message;
 }
 
 TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {

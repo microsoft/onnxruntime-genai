@@ -1004,6 +1004,29 @@ class Qwen35TextModel(Model):
             raise ValueError(f"Unsupported Qwen3.5 layer_types: {unknown_layer_types}")
         return layer_types
 
+    @staticmethod
+    def _validate_state_update_options(capacity, use_paged_attention, linear_attn_op, state_window):
+        if capacity < 0 or capacity > 8:
+            raise ValueError("state_update_capacity must be between 0 and 8")
+        if capacity and not use_paged_attention:
+            raise ValueError("state_update_capacity requires use_paged_attention=true")
+        if capacity and linear_attn_op != "gated_delta_net":
+            raise ValueError("state_update_capacity requires linear_attn_op=gated_delta_net")
+        if capacity and state_window < capacity + 1:
+            raise ValueError("state_window must be at least state_update_capacity + 1")
+
+    @staticmethod
+    def _parse_state_update_capacity(value):
+        if isinstance(value, bool):
+            raise ValueError("state_update_capacity must be an integer")
+        try:
+            capacity = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("state_update_capacity must be an integer") from None
+        if not isinstance(value, str) and capacity != value:
+            raise ValueError("state_update_capacity must be an integer")
+        return capacity
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
@@ -1153,6 +1176,17 @@ class Qwen35TextModel(Model):
             # The window becomes the operator's checkpoint output, which it caps at 8 slots.
             raise ValueError("linear_attn_op=gated_delta_net supports state_window up to 8")
 
+        self.state_update_capacity = self._parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
+        self.state_update_keep_checkpoints = str(
+            extra_options.get("state_update_keep_checkpoints", "true")
+        ).lower() in ("1", "true", "yes")
+        self._validate_state_update_options(
+            self.state_update_capacity,
+            self.use_paged_attention,
+            self.linear_attn_op,
+            self._state_window,
+        )
+
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
 
@@ -1160,8 +1194,11 @@ class Qwen35TextModel(Model):
         """Window extent for the packed operators' speculative-rollback checkpoint outputs.
 
         Zero when the export is dense (the window is folded into the committed state instead) or
-        when no window was requested.
+        when no window was requested. Compact deployment can omit the dense checkpoint outputs;
+        a separate export with state_update_keep_checkpoints=true remains the fallback and oracle.
         """
+        if getattr(self, "state_update_capacity", 0) and not getattr(self, "state_update_keep_checkpoints", True):
+            return 0
         return self._state_window if self.use_paged_attention else 0
 
     def _setup_hybrid_cache_io(self):
@@ -1180,6 +1217,12 @@ class Qwen35TextModel(Model):
         filtered_value_inputs = []
         filtered_key_outputs = []
         filtered_value_outputs = []
+
+        state_update_capacity = getattr(self, "state_update_capacity", 0)
+        if state_update_capacity:
+            self.input_names["state_update.capture_count"] = "state_update_capture_count"
+            self.input_types["state_update.capture_count"] = ir.DataType.INT32
+            self.input_shapes["state_update.capture_count"] = ["batch_size"]
 
         for i, lt in enumerate(self.layer_types):
             if lt == "full_attention":
@@ -1242,6 +1285,36 @@ class Qwen35TextModel(Model):
                     self.output_names[f"checkpoint_state.{i}.recurrent"] = f"checkpoints.{i}.recurrent_state"
                     self.output_types[f"checkpoint_state.{i}.recurrent"] = recurrent_state_dtype
                     self.output_shapes[f"checkpoint_state.{i}.recurrent"] = [window, *recurrent_state_shape]
+
+                if state_update_capacity:
+                    self.output_names[f"state_update.{i}.conv_value"] = f"state_update.{i}.conv_value"
+                    self.output_types[f"state_update.{i}.conv_value"] = conv_state_dtype
+                    self.output_shapes[f"state_update.{i}.conv_value"] = [
+                        "batch_size",
+                        state_update_capacity,
+                        self.linear_conv_dim,
+                    ]
+
+                    state_update_specs = {
+                        "recurrent_decay": ["batch_size", state_update_capacity, self.linear_num_value_heads],
+                        "recurrent_key": [
+                            "batch_size",
+                            state_update_capacity,
+                            self.linear_num_key_heads,
+                            self.linear_key_head_dim,
+                        ],
+                        "recurrent_delta": [
+                            "batch_size",
+                            state_update_capacity,
+                            self.linear_num_value_heads,
+                            self.linear_value_head_dim,
+                        ],
+                    }
+                    for update_name, update_shape in state_update_specs.items():
+                        key = f"state_update.{i}.{update_name}"
+                        self.output_names[key] = key
+                        self.output_types[key] = ir.DataType.FLOAT
+                        self.output_shapes[key] = update_shape
 
         self.input_names["past_key_values.key"] = filtered_key_inputs
         self.input_names["past_key_values.value"] = filtered_value_inputs
@@ -2020,6 +2093,7 @@ class Qwen35TextModel(Model):
 
         if packed:
             checkpoints = self._packed_state_checkpoints()
+            state_update_capacity = getattr(self, "state_update_capacity", 0)
             conv_op_name = f"{basename}/VarlenCausalConvWithState"
             self.make_varlen_causal_conv_with_state(
                 conv_op_name,
@@ -2034,6 +2108,10 @@ class Qwen35TextModel(Model):
                 output_shape=["num_tokens", conv_dim],
                 present_conv_shape=present_conv_shape,
                 prefix_conv_shape=[checkpoints, *present_conv_shape],
+                state_update_capture_count="state_update_capture_count",
+                state_update_capacity=state_update_capacity,
+                state_update_value=f"state_update.{layer_id}.conv_value",
+                state_update_value_shape=["batch_size", state_update_capacity, conv_dim],
             )
             conv_out = f"{conv_op_name}/output_0"
         else:
@@ -2103,6 +2181,7 @@ class Qwen35TextModel(Model):
             v_thd = reshape_thd(v_out, "v", n_kv, hv)
             present_recurrent_shape = ["batch_size", n_kv, hv, hk]
             checkpoints = self._packed_state_checkpoints()
+            state_update_capacity = getattr(self, "state_update_capacity", 0)
             la_op_name = f"{basename}/GatedDeltaNet"
             self.make_varlen_gated_delta_net(
                 la_op_name,
@@ -2124,6 +2203,16 @@ class Qwen35TextModel(Model):
                 output_shape=["num_tokens", n_kv, hv],
                 present_recurrent_shape=present_recurrent_shape,
                 checkpoints_shape=[checkpoints, *present_recurrent_shape],
+                state_update_capture_count="state_update_capture_count",
+                state_update_capacity=state_update_capacity,
+                state_update_decay=f"state_update.{layer_id}.recurrent_decay",
+                state_update_key=f"state_update.{layer_id}.recurrent_key",
+                state_update_delta=f"state_update.{layer_id}.recurrent_delta",
+                state_update_shapes=[
+                    ["batch_size", state_update_capacity, n_kv],
+                    ["batch_size", state_update_capacity, n_k, hk],
+                    ["batch_size", state_update_capacity, n_kv, hv],
+                ],
             )
             la_flatten_name = f"{basename}/linear_attention_output/Reshape"
             self.make_reshape(
@@ -2637,6 +2726,24 @@ class Qwen35TextModel(Model):
                     binding["checkpoints"] = f"checkpoints.%d.{state_name}"
                     group["checkpoint_count"] = checkpoints
                     group["checkpoint_alignment"] = "left" if state_name == "conv_state" else "right"
+                state_update_capacity = getattr(self, "state_update_capacity", 0)
+                if state_update_capacity:
+                    state_update = {
+                        "kind": "causal_conv" if state_name == "conv_state" else "gated_delta_net",
+                        "capacity": state_update_capacity,
+                        "capture_count": "state_update_capture_count",
+                    }
+                    if state_name == "conv_state":
+                        state_update["value"] = "state_update.%d.conv_value"
+                    else:
+                        state_update.update(
+                            {
+                                "decay": "state_update.%d.recurrent_decay",
+                                "key": "state_update.%d.recurrent_key",
+                                "delta": "state_update.%d.recurrent_delta",
+                            }
+                        )
+                    group["state_update"] = state_update
                 state_groups.append(group)
 
         return state_groups
@@ -2993,6 +3100,9 @@ class Qwen35MoeTextModel(Qwen35TextModel):
             # lm_head, creating a graph cycle.
             mtp_extra_options.pop("include_hidden_states", None)
             mtp_extra_options.pop("exclude_lm_head", None)
+            mtp_extra_options.pop("aux_hidden_state_layers", None)
+            mtp_extra_options.pop("dflash2_path", None)
+            mtp_extra_options.pop("dflash2_num_draft_tokens", None)
             self.mtp_head = self._mtp_head_class()(
                 self._mtp_config,
                 self._mtp_io_dtype,
@@ -3009,7 +3119,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self._save_dflash2_head(out_dir)
 
     def _save_dflash2_head(self, out_dir):
-        if self.dflash2_head is None:
+        if getattr(self, "dflash2_head", None) is None:
             return
         self.dflash2_head.save_model(out_dir)
         self.dflash2_shared_initializers = self._share_mtp_embedding_lm_head(

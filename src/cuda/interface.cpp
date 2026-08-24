@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstdarg>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <system_error>
@@ -501,6 +502,22 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return true;
   }
 
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+    if (count == 0) return;
+    if (count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error("Compact state replay descriptor count exceeds CUDA launch limits.");
+    }
+    if (state_update_replay_capacity_ < count) {
+      state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
+      state_update_replay_capacity_ = count;
+    }
+    CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(), descriptors,
+                               count * sizeof(StateUpdateReplayDesc), cudaMemcpyHostToDevice,
+                               GetStream()));
+    cuda::LaunchReplayStateUpdates(
+        state_update_replay_descriptors_.get(), static_cast<int>(count), GetStream());
+  }
+
   bool TopKScores(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
                   int k, int32_t* out_tokens, float* out_scores) override {
     std::scoped_lock lock{topk_mutex_};
@@ -614,6 +631,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_host_unique_ptr<int32_t> topk_indices_host_;  // pinned host buffer for the top-k index copy
   cuda_host_unique_ptr<float> topk_scores_host_;     // pinned host buffer for the top-k score copy
   size_t topk_host_count_{0};
+  cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
+  size_t state_update_replay_capacity_{0};
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {

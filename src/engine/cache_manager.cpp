@@ -51,6 +51,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id,
             entry.target_cache_slots,
+            entry.draft_token_count,
         });
       }
       if (entry.newly_admitted) {
@@ -97,8 +98,8 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       throw std::logic_error(
           "Composite cache step reservation no longer accepts prefix commits.");
     }
-    // Fixed first: it is the only one of the two that can reject the request (no checkpoints, or a
-    // step longer than the checkpoint window), so the paged boundary is never lowered on its own.
+    // Fixed first: it is the only one of the two that can reject an invalid rollback contract, so
+    // the paged boundary is never lowered on its own.
     if (fixed_reservation_) {
       fixed_reservation_->CommitPrefix(row, step_tokens, kept_tokens);
     }
@@ -446,8 +447,12 @@ size_t PagedCacheManager::MaxDraftTokensPerStep() const {
   // alone decides, and any tail slot can be left uncommitted.
   size_t limit = kMaxDraftTokensPerStep;
   if (fixed_state_pool_) {
-    const size_t window = fixed_state_pool_->CheckpointCount();
-    limit = std::min(limit, window == 0 ? size_t{0} : window - 1);
+    if (fixed_state_pool_->SupportsStateUpdates()) {
+      limit = std::min(limit, fixed_state_pool_->StateUpdateCapacity());
+    } else {
+      const size_t window = fixed_state_pool_->CheckpointCount();
+      limit = std::min(limit, window == 0 ? size_t{0} : window - 1);
+    }
   }
   if (const size_t query_cap = MaxQueryTokensPerRequest(); query_cap != 0) {
     limit = std::min(limit, query_cap - 1);
@@ -477,7 +482,8 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   const bool has_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-  if (has_prefill && has_drafts && !model_->config_->model.decoder.mixed_batch_checkpoints) {
+  if (has_prefill && has_drafts && !fixed_state_pool_->SupportsStateUpdates() &&
+      !model_->config_->model.decoder.mixed_batch_checkpoints) {
     // Packed recurrent operators choose one execution plan for the whole batch. A long prefill
     // selects the chunked GDN path, which only publishes final state and cannot provide the
     // intermediate checkpoints needed to reject a draft. Keep every selected request progressing
@@ -521,11 +527,14 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         "Paged planning selected more admissions than fixed state can reserve.");
   }
 
-  // Rolling a rejected draft back needs the operators' per-token state series, which costs a
-  // window's worth of extra staging, so only a step that actually verifies drafts asks for it.
-  const bool capture_checkpoints = std::any_of(
+  // Rolling a rejected draft back needs compact transitions when available, otherwise the dense
+  // per-token checkpoint series. Only a step that actually verifies drafts captures either form.
+  const bool captures_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  const bool capture_state_updates =
+      captures_drafts && fixed_state_pool_->SupportsStateUpdates();
+  const bool capture_checkpoints = captures_drafts && !capture_state_updates;
   if (capture_checkpoints && !fixed_state_pool_->SupportsCheckpoints()) {
     throw std::logic_error(
         "Planned draft verification on a model whose fixed state declares no checkpoints.");
@@ -535,8 +544,10 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
       true,
       plan.requests.size(),
       new_slot_count,
-      fixed_state_pool_->PlannedStagingBytes(plan.requests.size(), capture_checkpoints),
+      fixed_state_pool_->PlannedStagingBytes(
+          plan.requests.size(), capture_checkpoints, capture_state_updates),
       capture_checkpoints,
+      capture_state_updates,
   };
   return result;
 }

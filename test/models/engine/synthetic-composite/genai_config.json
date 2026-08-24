@@ -46,6 +46,12 @@
               "output": "present_conv.%d",
               "checkpoints": "checkpoints_conv.%d"
             }
+          },
+          "state_update": {
+            "kind": "causal_conv",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "value": "state_update.%d.conv_value"
           }
         },
         {
@@ -79,6 +85,14 @@
               "output": "present_recurrent.%d",
               "checkpoints": "checkpoints_recurrent.%d"
             }
+          },
+          "state_update": {
+            "kind": "gated_delta_net",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "decay": "state_update.%d.recurrent_decay",
+            "key": "state_update.%d.recurrent_key",
+            "delta": "state_update.%d.recurrent_delta"
           }
         }
       ]

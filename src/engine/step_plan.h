@@ -71,11 +71,12 @@ struct RequestStepPlan {
 // mirrors StepPlan::requests exactly. `required` is false (and every count zero) when the model has
 // no fixed groups, which keeps the dense paged path unchanged.
 struct FixedStateResourcePlan {
-  bool required{};          // The plan needs fixed slots this step (the model has fixed groups).
-  size_t row_count{};       // Fixed rows the reservation must expose, one per scheduled request.
-  size_t new_slot_count{};  // Rows that admit a fresh request and consume a free fixed slot.
-  size_t staging_bytes{};   // Gather+output staging bytes the reservation must allocate.
-  bool capture_checkpoints{};  // Some request verifies drafts, so the step needs the state series.
+  bool required{};               // The plan needs fixed slots this step (the model has fixed groups).
+  size_t row_count{};            // Fixed rows the reservation must expose, one per scheduled request.
+  size_t new_slot_count{};       // Rows that admit a fresh request and consume a free fixed slot.
+  size_t staging_bytes{};        // Gather+output staging bytes the reservation must allocate.
+  bool capture_checkpoints{};    // Some request verifies drafts, so the step needs the state series.
+  bool capture_state_updates{};  // Draft rows capture compact transitions instead of checkpoints.
 };
 
 struct StepPlan {
