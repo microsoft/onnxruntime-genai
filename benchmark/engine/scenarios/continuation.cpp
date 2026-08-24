@@ -55,20 +55,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
             << ", prompt_length_k=" << config.prompt_length_k
             << ", generation_tokens=" << config.generation_tokens << std::endl;
 
-  const std::string resolved_model_path = ResolveModelPath(config.model_path);
-
   MemorySampler memory;
   memory.Start();
-
-  auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
-  oga_config->ClearProviders();
-  oga_config->AppendProvider(config.execution_provider.c_str());
-  auto model = OgaModel::Create(*oga_config);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto engine = OgaEngine::Create(*model);
+  auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto base_prompt = BuildRulerPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
+  auto base_prompt = BuildRulerPromptTokens(config.prompt_length_k, *engineResources.tokenizer, prompt_random);
   const size_t base_prompt_count = base_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;
@@ -114,7 +106,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       for (int i = 0; i < config.concurrency; ++i) {
         const size_t request_index = static_cast<size_t>(i);
         prompt_counts[request_index] = session_tokens[request_index].size();
-        params.emplace_back(OgaGeneratorParams::Create(*model));
+        params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
         params.back()->SetSearchOption(
             "max_length", static_cast<double>(prompt_counts[request_index] + config.generation_tokens));
         params.back()->SetSearchOption("random_seed", kRandomSeed + turn);
@@ -123,12 +115,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
         requests.emplace_back(OgaRequest::Create(*params.back()));
         requests.back()->AddTokens(*prompts.back());
         requests.back()->SetOpaqueData(&request_tokens[request_index]);
-        engine->Add(*requests.back());
+        engineResources.engine->Add(*requests.back());
       }
 
       // Drain the engine for this turn. Opaque data maps each ready request back to its
       // per-session token vector so unseen tokens can be appended as they arrive.
-      while (auto ready_request = engine->Step()) {
+      while (auto ready_request = engineResources.engine->Step()) {
         const auto now = std::chrono::steady_clock::now();
         auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
         if (tokens == nullptr) {
@@ -200,14 +192,13 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
     ++measured_run_index;
   }
 
+  // Summaries aggregate all measured turns; scenario_metrics keeps continuation-specific context.
+  memory.Stop();
   output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
-  memory.Stop();
-
-  // Summaries aggregate all measured turns; scenario_metrics keeps continuation-specific context.
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
   output.scenario_metrics = {

@@ -16,6 +16,8 @@ set(engine_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/utils.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.h
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/scenario_base.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/capacity_pressure.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/capacity_pressure.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/decode_baseline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/decode_baseline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/continuation.h

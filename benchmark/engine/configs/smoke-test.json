@@ -27,6 +27,15 @@
     "generation_tokens": 256
   },
   {
+    "scenario": "capacity_pressure",
+    "concurrency": 8,
+    "prompt_length_k": 128,
+    "model_path": "~/models/qwen2.5-0.5b-instruct",
+    "execution_provider": "cuda",
+    "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
+    "generation_tokens": 1
+  },
+  {
     "scenario": "continuation",
     "concurrency": 4,
     "prompt_length_k": 4,
