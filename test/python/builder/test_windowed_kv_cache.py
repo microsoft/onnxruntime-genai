@@ -102,7 +102,7 @@ def _make_gqa_model(ep, window_size):
     model.extra_options = {}
     model.context_length_attrs["window_kv_cache"] = True
     model.use_paged_attention = False
-    model.kv_cache_attrs = {"quant_type": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
+    model.kv_cache_attrs = {"quant_scheme": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16

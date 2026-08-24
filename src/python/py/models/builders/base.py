@@ -838,7 +838,7 @@ class Model:
         # `layer_ids` maps sparse scale entries to their original model layers; without it,
         # the scale arrays use the legacy dense 0..num_layers-1 order.
         if self.kv_cache_attrs["scales_path"] == "":
-            return
+            raise ValueError("kv_cache_scale_file is required when kv_cache_quant_scheme is enabled.")
 
         # Load JSON file
         with open(self.kv_cache_attrs["scales_path"], encoding="utf-8") as file:
@@ -3571,7 +3571,7 @@ class Model:
     def get_kv_cache_scale_inputs(self, **kwargs):
         # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
         # initializer names, or empty placeholders when the KV cache is not quantized.
-        if self.kv_cache_attrs["quant_type"] == "none":
+        if self.kv_cache_attrs["quant_scheme"] == "none":
             return "", ""
         layer_id = kwargs.get("layer_id")
         if layer_id is None:
@@ -3593,7 +3593,7 @@ class Model:
         if kwargs.get("q_norm_weight", ""):
             attributes["qk_norm_epsilon"] = kwargs.get("qk_norm_epsilon", self.attention_attrs["qk_norm_epsilon"])
 
-        if self.kv_cache_attrs["quant_type"] != "none":
+        if self.kv_cache_attrs["quant_scheme"] != "none":
             attributes["k_quant_type"] = self.kv_cache_attrs["quant_mode"]
             attributes["v_quant_type"] = self.kv_cache_attrs["quant_mode"]
 
@@ -3642,7 +3642,7 @@ class Model:
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         attributes = self.get_attention_op_attributes(**kwargs)
-        if self.kv_cache_attrs["quant_type"] != "none":
+        if self.kv_cache_attrs["quant_scheme"] != "none":
             attributes["kv_cache_bit_width"] = self.kv_cache_attrs["bit_width"]
         self.make_node(
             "GroupQueryAttention",

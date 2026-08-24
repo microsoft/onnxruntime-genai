@@ -5,11 +5,11 @@
 
 The quantized KV cache stores the past/present key and value tensors in a
 compressed integer/FP8 encoding instead of the model's floating-point I/O dtype.
-It is selected via the ``kv_cache_quant_type`` extra option and is only valid
+It is selected via the ``kv_cache_quant_scheme`` extra option and is only valid
 with ``GroupQueryAttention``. These tests exercise the builder plumbing
 standalone (no model download):
 
-* ``check_extra_options`` validation of ``kv_cache_quant_type``.
+* ``check_extra_options`` validation of ``kv_cache_quant_scheme``.
 * ``make_kv_cache_init`` (cache dtype, bit width, quant granularity,
   int4 head-size packing, past/present buffer sharing).
 * ``make_kv_cache_scale_initializers`` (per-tensor vs per-channel scale sizes,
@@ -84,7 +84,7 @@ def _check_extra_options(extra_options, precision, execution_provider):
 
 
 # ===========================================================================
-# check_extra_options: kv_cache_quant_type validation
+# check_extra_options: kv_cache_quant_scheme validation
 # ===========================================================================
 
 
@@ -100,42 +100,42 @@ def _check_extra_options(extra_options, precision, execution_provider):
         "fp8_per_channel",
     ],
 )
-def test_valid_kv_cache_quant_types_are_accepted(quant_type):
-    kv = {"kv_cache_quant_type": quant_type}
+def test_valid_kv_cache_quant_schemes_are_accepted(quant_type):
+    kv = {"kv_cache_quant_scheme": quant_type}
     _check_extra_options(kv, "fp16", "cuda")
-    assert kv["kv_cache_quant_type"] == quant_type
+    assert kv["kv_cache_quant_scheme"] == quant_type
 
 
-def test_invalid_kv_cache_quant_type_is_rejected():
-    with pytest.raises(ValueError, match="kv_cache_quant_type must be one of"):
-        _check_extra_options({"kv_cache_quant_type": "int3_per_tensor"}, "fp16", "cuda")
+def test_invalid_kv_cache_quant_scheme_is_rejected():
+    with pytest.raises(ValueError, match="kv_cache_quant_scheme must be one of"):
+        _check_extra_options({"kv_cache_quant_scheme": "int3_per_tensor"}, "fp16", "cuda")
 
 
-def test_kv_cache_quant_type_is_lowercased():
-    kv = {"kv_cache_quant_type": "INT8_Per_Tensor"}
+def test_kv_cache_quant_scheme_is_lowercased():
+    kv = {"kv_cache_quant_scheme": "INT8_Per_Tensor"}
     _check_extra_options(kv, "fp16", "cuda")
-    assert kv["kv_cache_quant_type"] == "int8_per_tensor"
+    assert kv["kv_cache_quant_scheme"] == "int8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["cpu", "cuda"])
 def test_quantized_kv_cache_allowed_on_cpu_and_cuda(execution_provider):
-    kv = {"kv_cache_quant_type": "fp8_per_tensor"}
+    kv = {"kv_cache_quant_scheme": "fp8_per_tensor"}
     _check_extra_options(kv, "fp16", execution_provider)
-    assert kv["kv_cache_quant_type"] == "fp8_per_tensor"
+    assert kv["kv_cache_quant_scheme"] == "fp8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "rocm"])
 def test_quantized_kv_cache_rejected_on_unsupported_ep(execution_provider):
     with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
-        _check_extra_options({"kv_cache_quant_type": "int8_per_tensor"}, "fp16", execution_provider)
+        _check_extra_options({"kv_cache_quant_scheme": "int8_per_tensor"}, "fp16", execution_provider)
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "cpu", "cuda"])
-def test_none_kv_cache_quant_type_allowed_on_any_ep(execution_provider):
+def test_none_kv_cache_quant_scheme_allowed_on_any_ep(execution_provider):
     # `none` is a no-op and must not be restricted to the CPU/CUDA EPs.
-    kv = {"kv_cache_quant_type": "none"}
+    kv = {"kv_cache_quant_scheme": "none"}
     _check_extra_options(kv, "fp16", execution_provider)
-    assert kv["kv_cache_quant_type"] == "none"
+    assert kv["kv_cache_quant_scheme"] == "none"
 
 
 # ===========================================================================
@@ -160,8 +160,8 @@ def _make_kv_model(
     model.num_layers = num_layers
     model.extra_options = extra_options if extra_options is not None else {}
     model.kv_cache_attrs = {
-        "quant_type": kv_cache_quant_type,
-        "quant_dtype": (
+        "quant_scheme": kv_cache_quant_type,
+        "quant_type": (
             ir.DataType.INT8
             if kv_cache_quant_type.startswith("int8")
             else ir.DataType.INT4
@@ -245,10 +245,10 @@ def test_quantized_kv_cache_init_rejects_unsupported_ep(ep):
         _initialize_kv_cache(model)
 
 
-def test_kv_cache_quant_types_constant_matches_builder_validation():
+def test_kv_cache_quant_schemes_constant_matches_builder_validation():
     # `check_extra_options` in builder.py is the single place that validates the option and
     # reads this constant from `quantization`, which is the source of truth.
-    assert set(builder_module.KV_CACHE_QUANT_TYPES) == {
+    assert set(builder_module.KV_CACHE_QUANT_SCHEMES) == {
         "none",
         "int8_per_tensor",
         "int8_per_channel",
@@ -445,7 +445,11 @@ def test_graph_named_scale_section_is_selected(tmp_path):
         )
     )
     model = Model.__new__(Model)
-    model.kv_cache_attrs = {"quant_mode": "PER_CHANNEL", "scales_path": str(scale_file)}
+    model.kv_cache_attrs = {
+        "quant_scheme": "int8_per_channel",
+        "quant_mode": "PER_CHANNEL",
+        "scales_path": str(scale_file),
+    }
     model.use_paged_attention = True
     model.filename = "mtp.onnx"
     model.num_kv_heads = 2
@@ -694,7 +698,7 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
     model.rope_attrs = {"interleaved": 0}
     model.io_dtype = ir.DataType.FLOAT16
     model.kv_cache_attrs = {
-        "quant_type": kv_cache_quant_type,
+        "quant_scheme": kv_cache_quant_type,
         "quant_mode": kv_quant_type,
         "bit_width": kv_cache_bit_width,
     }
