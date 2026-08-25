@@ -158,25 +158,19 @@ def register_plugin_ep(provider_name: str, log: logging.Logger | None = None) ->
     if package_name is None:
         raise ValueError(f"Unknown plug-in execution provider: {provider_name!r}")
 
-    try:
-        ep_module = importlib.import_module(package_name)
-    except ImportError:
+    if importlib.util.find_spec(package_name) is None:
         if log:
             log.info("Skipping plug-in EP '%s': package '%s' is not installed.", provider_name, package_name)
         return False
 
+    ep_module = importlib.import_module(package_name)
     import onnxruntime_genai as og  # noqa: PLC0415 - imported lazily so tests that don't need an EP don't pay for it
 
-    try:
-        og.register_execution_provider_library(ep_module.get_ep_name(), ep_module.get_library_path())
-        _registered_plugin_eps.add(provider_name)
-        if log:
-            log.info("Registered plug-in EP '%s' from package '%s'.", provider_name, package_name)
-        return True
-    except Exception as exc:
-        if log:
-            log.warning("Failed to register plug-in EP '%s': %s", provider_name, exc)
-        return False
+    og.register_execution_provider_library(ep_module.get_ep_name(), ep_module.get_library_path())
+    _registered_plugin_eps.add(provider_name)
+    if log:
+        log.info("Registered plug-in EP '%s' from package '%s'.", provider_name, package_name)
+    return True
 
 
 def register_webgpu_plugin(log: logging.Logger | None = None) -> bool:
@@ -191,8 +185,8 @@ def register_webgpu_plugin(log: logging.Logger | None = None) -> bool:
 def register_plugin_providers(log: logging.Logger | None = None) -> None:
     """Registers every available plug-in execution provider library with ONNX Runtime GenAI.
 
-    A provider is skipped if its package is not installed; other failures are logged but not raised
-    so the absence of an optional EP never blocks the test session.
+    A provider is skipped if its package is not installed. Import and registration failures from
+    installed packages are propagated so plugin-enabled CI fails at registration.
     """
     for provider_name in PLUGIN_EP_PACKAGES:
         register_plugin_ep(provider_name, log)
