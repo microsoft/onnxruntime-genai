@@ -10,10 +10,8 @@ import os
 import onnx_ir as ir
 from quantization import QuantConfig
 
-from .base import Model
 
-
-class MTPModel(Model):
+class MTPModel:
     """Base class for composite models with an optional MTP graph."""
 
     def make_mtp_init(self, config, extra_options):

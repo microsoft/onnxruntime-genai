@@ -76,8 +76,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
         "present.key": "present.%d.key",
         "present.value": "present.%d.value",
     }
-    if layer_types is not None:
-        model.layer_types = layer_types
+    model.layer_types = layer_types if layer_types is not None else ["full_attention"] * model.num_layers
     return model
 
 
@@ -90,10 +89,12 @@ def _write_config(monkeypatch, tmp_path, model):
     return json.loads((tmp_path / "genai_config.json").read_text())
 
 
-def test_common_paged_builder_preserves_legacy_manifest_absence(monkeypatch, tmp_path):
+def test_common_paged_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(monkeypatch, tmp_path, _make_config_model(Model))
 
-    assert "state_groups" not in config["model"]["decoder"]
+    assert config["model"]["decoder"]["state_groups"] == [
+        {"kind": "paged_kv", "layer_ids": list(range(64))}
+    ]
 
 
 def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_path):
@@ -106,14 +107,36 @@ def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_pat
     assert "state_groups" not in config["model"]["decoder"]
 
 
-def test_qwen_all_attention_builder_preserves_legacy_manifest_absence(monkeypatch, tmp_path):
+def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(
         monkeypatch,
         tmp_path,
         _make_config_model(Qwen35TextModel, layer_types=["full_attention"] * 64),
     )
 
-    assert "state_groups" not in config["model"]["decoder"]
+    assert config["model"]["decoder"]["state_groups"] == [
+        {"kind": "paged_kv", "layer_ids": list(range(64))}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected"),
+    [
+        (["sliding_attention"], [{"kind": "paged_kv", "layer_ids": [0]}]),
+        (["conv"], [{"kind": "fixed_conv", "layer_ids": [0]}]),
+        (
+            ["linear_attention"],
+            [
+                {"kind": "fixed_conv", "layer_ids": [0]},
+                {"kind": "fixed_recurrent", "layer_ids": [0]},
+            ],
+        ),
+    ],
+)
+def test_state_groups_are_added_only_for_matching_layers(layer_types, expected):
+    model = _make_config_model(Model, layer_types=layer_types)
+
+    assert model.make_decoder_state_groups({}, {}) == expected
 
 
 def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_path):

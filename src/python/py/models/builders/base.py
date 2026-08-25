@@ -1270,6 +1270,34 @@ class Model:
             and self.ep in {"cpu", "cuda", "trt-rtx"}
         )
 
+    def make_decoder_state_groups(self, inputs, outputs):
+        """Group paged decoder layers by the runtime state they maintain."""
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
+        ]
+        recurrent_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append({"kind": "paged_kv", "layer_ids": full_attention_layers})
+        if conv_layers:
+            state_groups.append({"kind": "fixed_conv", "layer_ids": conv_layers})
+        if recurrent_layers:
+            state_groups.append({"kind": "fixed_recurrent", "layer_ids": recurrent_layers})
+        return state_groups
+
     def make_key_value_cache_names(self, layer_id):
         """
         Make input and output names for key/value cache based on layer id
