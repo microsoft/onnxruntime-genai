@@ -89,7 +89,11 @@ class Model:
             if hasattr(config, "num_hidden_layers")
             else config.num_layers
         )
-        self.layer_types = getattr(config, "layer_types", ["full_attention"] * self.num_layers)
+        self.layer_types = (
+            list(config.layer_types[: self.num_layers])
+            if getattr(config, "layer_types", None) is not None
+            else ["full_attention"] * self.num_layers
+        )
         self.vocab_size = config.vocab_size
         self.activation = (
             config.hidden_activation
