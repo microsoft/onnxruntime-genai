@@ -502,11 +502,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
       }
       spec.zero_row = OrtValue::CreateTensor(
           impl_->device->GetAllocator(), zero_shape, spec.data_type);
-      // Only the reusable zero row is zeroed: it is the gather source for freshly admitted rows. A
-      // slot's active bank is written by the commit that publishes it before it is ever gathered,
-      // and the inactive bank is only ever written (never read) before it becomes active, so the
-      // persistent banks never need construction-time zeroing.
-      ByteWrapTensor(*impl_->device, *spec.zero_row).Zero();
 
       impl_->tensors.push_back(std::move(spec));
     }
@@ -523,7 +518,26 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     throw std::runtime_error(
         "Fixed state pool capacity is smaller than the session's fixed batch dimension.");
   }
-  impl_->device->Synchronize();
+
+  // Allocate and validate every tensor before enqueueing device work. Once the first asynchronous
+  // zero is submitted, any failure must drain the stream before constructor unwinding releases the
+  // zero rows. Persistent banks are not zeroed: a commit writes a bank before it becomes visible.
+  bool device_work_enqueued = false;
+  try {
+    for (auto& spec : impl_->tensors) {
+      device_work_enqueued = true;
+      ByteWrapTensor(*impl_->device, *spec.zero_row).Zero();
+    }
+    impl_->device->Synchronize();
+  } catch (...) {
+    if (device_work_enqueued) {
+      try {
+        impl_->device->Synchronize();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
 }
 
 FixedStatePool::~FixedStatePool() {
