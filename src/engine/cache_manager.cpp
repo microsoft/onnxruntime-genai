@@ -32,10 +32,6 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       : allocated_requests_{allocated_requests} {
     std::vector<PagedCacheReservationRequest> paged_requests;
     paged_requests.reserve(plan.requests.size());
-    std::vector<FixedStateReservationRequest> fixed_requests;
-    if (fixed_state_pool) {
-      fixed_requests.reserve(plan.requests.size());
-    }
     newly_admitted_.reserve(plan.requests.size());
     for (const auto& entry : plan.requests) {
       paged_requests.push_back(PagedCacheReservationRequest{
@@ -44,16 +40,6 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
           entry.newly_admitted,
           entry.whole_sequence_cache_slots,
       });
-      if (fixed_state_pool) {
-        // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
-        // mirror the paged target so both commit at one token boundary. The pool infers resident
-        // vs. new ownership itself, so no newly_admitted flag is passed.
-        fixed_requests.push_back(FixedStateReservationRequest{
-            entry.request_id,
-            entry.target_cache_slots,
-            entry.draft_token_count,
-        });
-      }
       if (entry.newly_admitted) {
         newly_admitted_.push_back(entry.request);
       }
@@ -65,8 +51,12 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     // its blocks, so no half-built reservation escapes.
     paged_reservation_.emplace(cache.Reserve(paged_requests));
     if (fixed_state_pool) {
-      fixed_reservation_.emplace(
-          fixed_state_pool->Reserve(fixed_requests, plan.fixed_state.capture_checkpoints));
+      if (!plan.fixed_state.reservation_plan) {
+        throw std::logic_error(
+            "Fixed state resources have no immutable reservation plan.");
+      }
+      fixed_reservation_.emplace(fixed_state_pool->Reserve(
+          *plan.fixed_state.reservation_plan));
     }
   }
 
@@ -527,8 +517,17 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         "Paged planning selected more admissions than fixed state can reserve.");
   }
 
-  // Rolling a rejected draft back needs compact transitions when available, otherwise the dense
-  // per-token checkpoint series. Only a step that actually verifies drafts captures either form.
+  return result;
+}
+
+void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
+  if (!fixed_state_pool_) {
+    return;
+  }
+
+  // Draft counts and target cache boundaries become final only after the scheduler distributes its
+  // token budget. Freeze fixed-state rows here so reservation consumes those final values rather
+  // than the provisional one-token candidate values used during cache feasibility selection.
   const bool captures_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
@@ -542,20 +541,24 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
 
   std::vector<FixedStateReservationRequest> fixed_requests;
   fixed_requests.reserve(plan.requests.size());
+  size_t new_slot_count = 0;
   for (const auto& entry : plan.requests) {
     fixed_requests.push_back(FixedStateReservationRequest{
         entry.request_id, entry.target_cache_slots, entry.draft_token_count});
+    new_slot_count += entry.newly_admitted ? 1 : 0;
   }
 
-  plan.fixed_state = FixedStateResourcePlan{
+    const auto fixed_step_plan =
+      fixed_state_pool_->PlanStep(fixed_requests, capture_checkpoints);
+    plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),
       new_slot_count,
-      fixed_state_pool_->PlannedStagingBytes(fixed_requests, capture_checkpoints),
+      fixed_step_plan->staging_bytes,
       capture_checkpoints,
       capture_state_updates,
+      std::move(fixed_step_plan),
   };
-  return result;
 }
 
 std::unique_ptr<CacheStepReservation> PagedCacheManager::ReserveStep(const StepPlan& plan) {

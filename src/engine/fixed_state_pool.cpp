@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -42,6 +43,14 @@ size_t CheckedAdd(size_t left, size_t right, std::string_view description) {
         "Fixed state " + std::string{description} + " exceeds addressable memory.");
   }
   return left + right;
+}
+
+bool ByteRangesOverlap(const void* left, const void* right, size_t bytes) {
+  const auto left_address = reinterpret_cast<uintptr_t>(left);
+  const auto right_address = reinterpret_cast<uintptr_t>(right);
+  return left_address <= right_address
+             ? right_address - left_address < bytes
+             : left_address - right_address < bytes;
 }
 
 std::vector<int64_t> StorageShape(size_t rows,
@@ -179,6 +188,11 @@ struct FixedStatePool::Impl {
   struct DirectBankSpan {
     size_t first_slot{};
     uint8_t active_bank{};
+  };
+
+  struct BindingDecision {
+    std::optional<DirectBankSpan> direct_span;
+    FixedStateGatherFallbackReason fallback_reason{FixedStateGatherFallbackReason::None};
   };
 
   struct StateUpdateOutputSpec {
@@ -356,26 +370,38 @@ struct FixedStatePool::Impl {
     return locations;
   }
 
-  std::optional<DirectBankSpan> FindDirectBankSpan(
+  BindingDecision SelectBinding(
       std::span<const PlannedRowLocation> locations) const {
     if (locations.empty()) {
-      return std::nullopt;
+      return {};
     }
-    std::optional<uint8_t> resident_bank;
     for (size_t row = 0; row < locations.size(); ++row) {
       const auto& location = locations[row];
       if (location.slot_index != locations.front().slot_index + row) {
-        return std::nullopt;
+        return BindingDecision{
+          std::nullopt, FixedStateGatherFallbackReason::NoncontiguousSlots};
       }
+    }
+    std::optional<uint8_t> resident_bank;
+    for (const auto& location : locations) {
       if (!location.provisional) {
         const uint8_t active_bank = slots[location.slot_index].active_bank;
         if (resident_bank && *resident_bank != active_bank) {
-          return std::nullopt;
+          return BindingDecision{
+              std::nullopt, FixedStateGatherFallbackReason::MixedActiveBanks};
         }
         resident_bank = active_bank;
       }
     }
-    return DirectBankSpan{locations.front().slot_index, resident_bank.value_or(0)};
+    return BindingDecision{
+        DirectBankSpan{locations.front().slot_index, resident_bank.value_or(0)},
+        FixedStateGatherFallbackReason::None};
+  }
+
+  static void SaturatingAdd(uint64_t& counter, size_t increment) noexcept {
+    const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+    const uint64_t amount = static_cast<uint64_t>(increment);
+    counter = amount > maximum - counter ? maximum : counter + amount;
   }
 
   size_t CalculateStagingBytes(size_t row_count, bool binds_direct_banks,
@@ -478,6 +504,13 @@ struct FixedStatePool::Impl {
   std::string state_update_active_name;
   uint64_t next_reservation_id{1};
   uint64_t active_reservation_id{};
+  uint64_t pool_epoch{};
+  uint64_t direct_span_reservations{};
+  uint64_t direct_span_rows{};
+  uint64_t gathered_reservations{};
+  uint64_t gathered_rows{};
+  uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t mixed_active_bank_fallbacks{};
   bool healthy{true};
   FixedStateReservation* active_reservation{};
   std::vector<TensorSpec> tensors;
@@ -908,6 +941,14 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
   size_t FixedStatePool::PlannedStagingBytes(
       std::span<const FixedStateReservationRequest> requests,
       bool capture_checkpoints) const {
+    return PlanStep(requests, capture_checkpoints)->staging_bytes;
+  }
+
+  std::shared_ptr<const FixedStateStepPlan> FixedStatePool::PlanStep(
+      std::span<const FixedStateReservationRequest> requests,
+      bool capture_checkpoints) const {
+    impl_->EnsureHealthy();
+    impl_->EnsureIdle();
     if (requests.empty()) {
       throw std::invalid_argument(
           "Fixed state planning must contain at least one request.");
@@ -917,13 +958,84 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
         [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
     const bool capture_state_updates = has_capture_counts && SupportsStateUpdates();
     if (capture_checkpoints && capture_state_updates) {
-      throw std::invalid_argument(
+      throw std::runtime_error(
           "Fixed state planning cannot capture checkpoints and compact updates together.");
     }
+    if (capture_checkpoints && impl_->checkpoint_count == 0) {
+      throw std::runtime_error(
+          "This model's fixed state bindings declare no checkpoints output.");
+    }
+    if (has_capture_counts && !SupportsStateUpdates() && !capture_checkpoints) {
+      throw std::runtime_error(
+          "This model's fixed state bindings declare no compact state_update outputs.");
+    }
+    if (requests.size() > impl_->capacity) {
+      throw std::runtime_error(
+          "Fixed state reservation exceeds pool capacity.");
+    }
+    if (impl_->fixed_session_batch_size != 0 &&
+        impl_->fixed_session_batch_size != requests.size()) {
+      throw std::runtime_error(
+          "Fixed state reservation does not match the session's fixed batch dimension.");
+    }
+    if (SupportsStateUpdates()) {
+      for (const auto& request : requests) {
+        if (request.capture_count > impl_->state_update_capacity ||
+            request.capture_count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+          throw std::runtime_error(
+              "Fixed state reservation capture_count exceeds state_update capacity.");
+        }
+      }
+    }
+
     const auto locations = impl_->PlanRowLocations(requests);
-    return impl_->CalculateStagingBytes(
-        requests.size(), impl_->FindDirectBankSpan(locations).has_value(),
-        capture_checkpoints, capture_state_updates);
+    const auto binding = impl_->SelectBinding(locations);
+    auto plan = std::make_shared<FixedStateStepPlan>();
+    plan->pool = this;
+    plan->pool_epoch = impl_->pool_epoch;
+    plan->binding_mode = binding.direct_span
+                             ? FixedStateBindingMode::DirectSpan
+                             : FixedStateBindingMode::Gathered;
+    plan->fallback_reason = binding.fallback_reason;
+    if (binding.direct_span) {
+      plan->direct_first_slot = binding.direct_span->first_slot;
+      plan->direct_active_bank = binding.direct_span->active_bank;
+    }
+    if (capture_checkpoints) {
+      plan->capture_mode = FixedStateCaptureMode::DenseCheckpoints;
+    } else if (capture_state_updates) {
+      const bool uses_legacy_factors = std::any_of(
+          impl_->tensors.begin(), impl_->tensors.end(),
+          [](const Impl::TensorSpec& spec) {
+            return spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet &&
+                   spec.state_update_capsule.name.empty();
+          });
+      plan->capture_mode = uses_legacy_factors
+                               ? FixedStateCaptureMode::LegacyFactors
+                               : FixedStateCaptureMode::Capsule;
+    }
+    plan->staging_bytes = impl_->CalculateStagingBytes(
+        requests.size(), binding.direct_span.has_value(), capture_checkpoints,
+        capture_state_updates);
+    plan->rows.reserve(requests.size());
+    for (size_t row = 0; row < requests.size(); ++row) {
+      const auto& location = locations[row];
+      const auto& slot = impl_->slots[location.slot_index];
+      if (location.provisional && slot.generation == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error(
+            "Fixed state slot generation is exhausted.");
+      }
+      plan->rows.push_back(FixedStateStepPlanRow{
+          requests[row].request_id,
+          location.slot_index,
+          location.provisional,
+          slot.generation,
+          slot.state_generation,
+          requests[row].target_tokens,
+          requests[row].capture_count,
+      });
+    }
+    return plan;
 }
 
 bool FixedStatePool::SupportsCheckpoints() const {
@@ -967,45 +1079,90 @@ bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
 FixedStateReservation FixedStatePool::Reserve(
     std::span<const FixedStateReservationRequest> requests,
     bool capture_checkpoints) {
+  return Reserve(*PlanStep(requests, capture_checkpoints));
+}
+
+FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
   impl_->EnsureHealthy();
   impl_->EnsureIdle();
-  if (requests.empty()) {
+  if (plan.pool != this) {
+    throw std::logic_error(
+        "Fixed state step plan belongs to a different pool.");
+  }
+  if (plan.pool_epoch != impl_->pool_epoch) {
+    throw std::logic_error(
+        "Fixed state step plan is stale.");
+  }
+  if (plan.rows.empty()) {
     throw std::invalid_argument(
-        "Fixed state reservation must contain at least one request.");
+        "Fixed state step plan must contain at least one row.");
   }
-  const bool has_capture_counts = std::any_of(
-      requests.begin(), requests.end(),
-      [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
-  const bool capture_state_updates = has_capture_counts && SupportsStateUpdates();
-  if (capture_checkpoints && capture_state_updates) {
-    throw std::runtime_error(
-        "Fixed state reservation cannot capture checkpoints and compact updates together.");
-  }
-  if (capture_checkpoints && impl_->checkpoint_count == 0) {
-    throw std::runtime_error(
-        "This model's fixed state bindings declare no checkpoints output.");
-  }
-  if (has_capture_counts && !SupportsStateUpdates() && !capture_checkpoints) {
-    throw std::runtime_error(
-        "This model's fixed state bindings declare no compact state_update outputs.");
-  }
-  if (SupportsStateUpdates()) {
-    for (const auto& request : requests) {
-      if (request.capture_count > impl_->state_update_capacity ||
-          request.capture_count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-        throw std::runtime_error(
-            "Fixed state reservation capture_count exceeds state_update capacity.");
-      }
-    }
-  }
-  if (requests.size() > impl_->capacity) {
+  if (plan.rows.size() > impl_->capacity) {
     throw std::runtime_error(
         "Fixed state reservation exceeds pool capacity.");
   }
   if (impl_->fixed_session_batch_size != 0 &&
-      impl_->fixed_session_batch_size != requests.size()) {
+      impl_->fixed_session_batch_size != plan.rows.size()) {
     throw std::runtime_error(
         "Fixed state reservation does not match the session's fixed batch dimension.");
+  }
+
+  const bool capture_checkpoints =
+      plan.capture_mode == FixedStateCaptureMode::DenseCheckpoints;
+  const bool capture_state_updates =
+      plan.capture_mode == FixedStateCaptureMode::Capsule ||
+      plan.capture_mode == FixedStateCaptureMode::LegacyFactors;
+  if (capture_checkpoints && impl_->checkpoint_count == 0) {
+    throw std::logic_error(
+        "Fixed state step plan requires unavailable checkpoints.");
+  }
+  if (capture_state_updates && !SupportsStateUpdates()) {
+    throw std::logic_error(
+        "Fixed state step plan requires unavailable compact updates.");
+  }
+  const bool binds_direct_banks =
+      plan.binding_mode == FixedStateBindingMode::DirectSpan;
+  if (plan.staging_bytes != impl_->CalculateStagingBytes(
+                                plan.rows.size(), binds_direct_banks,
+                                capture_checkpoints, capture_state_updates)) {
+    throw std::logic_error(
+        "Fixed state step plan staging bytes do not match its row layout.");
+  }
+
+  std::unordered_set<const void*> request_ids;
+  request_ids.reserve(plan.rows.size());
+  for (size_t row = 0; row < plan.rows.size(); ++row) {
+    const auto& planned_row = plan.rows[row];
+    if (!planned_row.request_id ||
+        !request_ids.insert(planned_row.request_id).second ||
+        planned_row.slot >= impl_->slots.size()) {
+      throw std::logic_error(
+          "Fixed state step plan contains an invalid row.");
+    }
+    const auto& slot = impl_->slots[planned_row.slot];
+    const auto expected_ownership = planned_row.provisional
+                                        ? FixedStateSlotOwnership::Free
+                                        : FixedStateSlotOwnership::Committed;
+    if (slot.ownership != expected_ownership ||
+        slot.generation != planned_row.expected_generation ||
+        slot.state_generation != planned_row.expected_state_generation ||
+        (!planned_row.provisional && slot.request_id != planned_row.request_id)) {
+      throw std::logic_error(
+          "Fixed state changed after the step was planned.");
+    }
+    if (capture_state_updates &&
+      (planned_row.capture_count > impl_->state_update_capacity ||
+       planned_row.capture_count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))) {
+      throw std::logic_error(
+          "Fixed state step plan capture count exceeds state_update capacity.");
+    }
+    if (binds_direct_banks) {
+      if (planned_row.slot != plan.direct_first_slot + row ||
+          (!planned_row.provisional && slot.active_bank != plan.direct_active_bank)) {
+        throw std::logic_error(
+            "Fixed state direct binding no longer matches the step plan.");
+      }
+    }
   }
 
   const uint64_t reservation_id = impl_->next_reservation_id;
@@ -1015,64 +1172,21 @@ FixedStateReservation FixedStatePool::Reserve(
         "Fixed state reservation generation is exhausted.");
   }
 
-  // Phase 1: host-only planning. Infer per-request ownership, choose provisional slots, and build
-  // handles. No device work is enqueued and no visible slot state is mutated yet, so any exception
-  // here leaves the pool exactly as it was.
-  struct RowPlan {
-    const void* request_id{};
-    size_t slot_index{};
-    bool provisional{};
-    uint64_t handle_generation{};
-    uint64_t expected_state_generation{};
-    uint64_t target_tokens{};
-  };
-  std::vector<RowPlan> plan;
-  plan.reserve(requests.size());
-  const auto locations = impl_->PlanRowLocations(requests);
-  for (size_t request_index = 0; request_index < requests.size(); ++request_index) {
-    const auto& request = requests[request_index];
-    const auto& location = locations[request_index];
-    const void* request_id = request.request_id;
-    const Impl::Slot* slot = location.provisional ? nullptr : &impl_->slots[location.slot_index];
-    RowPlan row;
-    row.request_id = request_id;
-    row.target_tokens = request.target_tokens;
-    if (slot) {
-      row.slot_index = location.slot_index;
-      row.provisional = false;
-      row.handle_generation = slot->generation;
-      row.expected_state_generation = slot->state_generation;
-    } else {
-      const size_t slot_index = location.slot_index;
-      const auto& free_slot = impl_->slots[slot_index];
-      if (free_slot.generation == std::numeric_limits<uint64_t>::max()) {
-        throw std::overflow_error(
-            "Fixed state slot generation is exhausted.");
-      }
-      row.slot_index = slot_index;
-      row.provisional = true;
-      row.handle_generation = free_slot.generation + 1;
-      row.expected_state_generation = 0;
-    }
-    plan.push_back(row);
-  }
-  const auto direct_bank_span = impl_->FindDirectBankSpan(locations);
-
-  // Phase 2: allocate staging tensors and record binding metadata (host allocations only).
+  // Allocate staging tensors and record binding metadata (host allocations only).
   auto storage = std::make_unique<FixedStateReservation::Storage>();
   storage->model_keepalive = impl_->model;
-  storage->handles.resize(requests.size());
-  storage->provisional.resize(requests.size());
-  storage->expected_state_generations.resize(requests.size());
-  storage->target_tokens.resize(requests.size());
-  storage->capture_counts.resize(requests.size());
-  storage->commit_step_tokens.assign(requests.size(), 0);
-  storage->commit_kept_tokens.assign(requests.size(), 0);
-  storage->batch_rows = requests.size();
-  storage->binds_direct_banks = direct_bank_span.has_value();
-  if (direct_bank_span) {
-    storage->direct_first_slot = direct_bank_span->first_slot;
-    storage->direct_active_bank = direct_bank_span->active_bank;
+  storage->handles.resize(plan.rows.size());
+  storage->provisional.resize(plan.rows.size());
+  storage->expected_state_generations.resize(plan.rows.size());
+  storage->target_tokens.resize(plan.rows.size());
+  storage->capture_counts.resize(plan.rows.size());
+  storage->commit_step_tokens.assign(plan.rows.size(), 0);
+  storage->commit_kept_tokens.assign(plan.rows.size(), 0);
+  storage->batch_rows = plan.rows.size();
+  storage->binds_direct_banks = binds_direct_banks;
+  if (binds_direct_banks) {
+    storage->direct_first_slot = plan.direct_first_slot;
+    storage->direct_active_bank = plan.direct_active_bank;
   }
   storage->captures_checkpoints = capture_checkpoints;
   storage->captures_state_updates = capture_state_updates;
@@ -1096,7 +1210,7 @@ FixedStateReservation FixedStatePool::Reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
   storage->bindings.reserve(impl_->tensors.size());
 
-  const size_t batch_rows = requests.size();
+  const size_t batch_rows = plan.rows.size();
   if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{
@@ -1128,14 +1242,20 @@ FixedStateReservation FixedStatePool::Reserve(
       OrtValue& input_owner = *spec.banks[storage->direct_active_bank];
       OrtValue& output_owner = *spec.banks[storage->direct_active_bank ^ 1u];
       const size_t span_offset = storage->direct_first_slot * spec.row_bytes;
+      const size_t span_bytes = CheckedMultiply(
+          batch_rows, spec.row_bytes, "direct bank span");
+      auto* input_data = static_cast<uint8_t*>(input_owner.GetTensorMutableRawData()) + span_offset;
+      auto* output_data = static_cast<uint8_t*>(output_owner.GetTensorMutableRawData()) + span_offset;
+      if (ByteRangesOverlap(input_data, output_data, span_bytes)) {
+        throw std::logic_error(
+            "Fixed state direct input and output bank spans overlap.");
+      }
       gathered = OrtValue::CreateTensor(
-        input_owner.GetTensorMemoryInfo(),
-        static_cast<uint8_t*>(input_owner.GetTensorMutableRawData()) + span_offset,
-        batch_rows * spec.row_bytes, shape, spec.data_type);
+        input_owner.GetTensorMemoryInfo(), input_data,
+        span_bytes, shape, spec.data_type);
       staged = OrtValue::CreateTensor(
-        output_owner.GetTensorMemoryInfo(),
-        static_cast<uint8_t*>(output_owner.GetTensorMutableRawData()) + span_offset,
-        batch_rows * spec.row_bytes, shape, spec.data_type);
+        output_owner.GetTensorMemoryInfo(), output_data,
+        span_bytes, shape, spec.data_type);
     } else {
       gathered = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), shape, spec.data_type);
@@ -1239,15 +1359,18 @@ FixedStateReservation FixedStatePool::Reserve(
     }
   }
 
-  for (size_t row = 0; row < plan.size(); ++row) {
+  for (size_t row = 0; row < plan.rows.size(); ++row) {
+    const auto& planned_row = plan.rows[row];
+    const uint64_t handle_generation = planned_row.provisional
+                                           ? planned_row.expected_generation + 1
+                                           : planned_row.expected_generation;
     storage->handles[row] = FixedStateSlotHandle{
-        this, plan[row].request_id, plan[row].slot_index,
-        plan[row].handle_generation};
-    storage->provisional[row] = plan[row].provisional;
+        this, planned_row.request_id, planned_row.slot, handle_generation};
+    storage->provisional[row] = planned_row.provisional;
     storage->expected_state_generations[row] =
-        plan[row].expected_state_generation;
-    storage->target_tokens[row] = plan[row].target_tokens;
-    storage->capture_counts[row] = requests[row].capture_count;
+        planned_row.expected_state_generation;
+    storage->target_tokens[row] = planned_row.target_tokens;
+    storage->capture_counts[row] = planned_row.capture_count;
   }
 
   // Phase 3: enqueue the gather copies, then synchronize. Once device work is in flight the staging
@@ -1258,9 +1381,9 @@ FixedStateReservation FixedStatePool::Reserve(
       auto capture_count_span =
           WrapTensor<int32_t>(*impl_->device, *storage->state_update_capture_count);
       auto host_counts = capture_count_span.CpuSpan();
-      for (size_t row = 0; row < requests.size(); ++row) {
+      for (size_t row = 0; row < plan.rows.size(); ++row) {
         host_counts[row] = capture_state_updates
-                               ? static_cast<int32_t>(requests[row].capture_count)
+                               ? static_cast<int32_t>(plan.rows[row].capture_count)
                                : 0;
       }
       capture_count_span.CopyCpuToDevice();
@@ -1269,12 +1392,13 @@ FixedStateReservation FixedStatePool::Reserve(
          ++tensor_index) {
       const auto& spec = impl_->tensors[tensor_index];
       auto& gathered = *storage->gathered_inputs[tensor_index];
-      for (size_t row = 0; row < plan.size(); ++row) {
-        if (plan[row].provisional) {
+      for (size_t row = 0; row < plan.rows.size(); ++row) {
+        const auto& planned_row = plan.rows[row];
+        if (planned_row.provisional) {
           impl_->GatherZeroRow(spec, row, gathered);
         } else if (!storage->binds_direct_banks) {
-          impl_->GatherResidentRow(spec, plan[row].slot_index,
-                                   impl_->slots[plan[row].slot_index].active_bank,
+          impl_->GatherResidentRow(spec, planned_row.slot,
+                                   impl_->slots[planned_row.slot].active_bank,
                                    row, gathered);
         }
       }
@@ -1293,25 +1417,42 @@ FixedStateReservation FixedStatePool::Reserve(
   }
 
   // Phase 4: publish provisional ownership. This is host bookkeeping only; the gather is complete.
-  for (size_t row = 0; row < plan.size(); ++row) {
-    if (!plan[row].provisional) {
+  bool published_provisional_rows = false;
+  for (const auto& planned_row : plan.rows) {
+    if (!planned_row.provisional) {
       continue;
     }
-    auto& slot = impl_->slots[plan[row].slot_index];
+    auto& slot = impl_->slots[planned_row.slot];
     if (storage->binds_direct_banks) {
       slot.active_bank = storage->direct_active_bank;
     }
-    slot.request_id = plan[row].request_id;
+    slot.request_id = planned_row.request_id;
     ++slot.generation;
     slot.state_generation = 0;
     slot.committed_tokens = 0;
     slot.reservation_id = reservation_id;
     slot.ownership = FixedStateSlotOwnership::Reserved;
+    published_provisional_rows = true;
+  }
+  if (published_provisional_rows) {
+    ++impl_->pool_epoch;
   }
 
   ++impl_->next_reservation_id;
   impl_->active_reservation_id = reservation_id;
   impl_->active_staging_bytes = storage->staging_bytes;
+  if (storage->binds_direct_banks) {
+    Impl::SaturatingAdd(impl_->direct_span_reservations, 1);
+    Impl::SaturatingAdd(impl_->direct_span_rows, plan.rows.size());
+  } else {
+    Impl::SaturatingAdd(impl_->gathered_reservations, 1);
+    Impl::SaturatingAdd(impl_->gathered_rows, plan.rows.size());
+    if (plan.fallback_reason == FixedStateGatherFallbackReason::NoncontiguousSlots) {
+      Impl::SaturatingAdd(impl_->noncontiguous_slot_fallbacks, 1);
+    } else if (plan.fallback_reason == FixedStateGatherFallbackReason::MixedActiveBanks) {
+      Impl::SaturatingAdd(impl_->mixed_active_bank_fallbacks, 1);
+    }
+  }
   return FixedStateReservation{*this, reservation_id, std::move(storage)};
 }
 
@@ -1333,6 +1474,7 @@ void FixedStatePool::Release(const FixedStateSlotHandle& handle) {
   slot.committed_tokens = 0;
   slot.reservation_id = 0;
   slot.ownership = FixedStateSlotOwnership::Free;
+  ++impl_->pool_epoch;
 }
 
 uint64_t FixedStatePool::StateGeneration(
@@ -1348,6 +1490,12 @@ uint64_t FixedStatePool::CommittedTokens(
 FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
   FixedStatePoolSnapshot snapshot;
   snapshot.capacity = impl_->capacity;
+  snapshot.direct_span_reservations = impl_->direct_span_reservations;
+  snapshot.direct_span_rows = impl_->direct_span_rows;
+  snapshot.gathered_reservations = impl_->gathered_reservations;
+  snapshot.gathered_rows = impl_->gathered_rows;
+  snapshot.noncontiguous_slot_fallbacks = impl_->noncontiguous_slot_fallbacks;
+  snapshot.mixed_active_bank_fallbacks = impl_->mixed_active_bank_fallbacks;
   snapshot.persistent_bytes = impl_->persistent_bytes;
   snapshot.zeroing_scratch_bytes = impl_->zeroing_scratch_bytes;
   snapshot.active_staging_bytes = impl_->active_staging_bytes;
@@ -1547,6 +1695,7 @@ void FixedStatePool::PublishCommit(FixedStateReservation& reservation) noexcept 
       slot.ownership = FixedStateSlotOwnership::Committed;
     }
   }
+  ++impl_->pool_epoch;
   reservation.state_ = FixedStateReservationState::Committed;
 }
 
@@ -1556,6 +1705,7 @@ void FixedStatePool::ReleaseProvisionalSlots(
       impl_->active_reservation_id != reservation.reservation_id_) {
     return;
   }
+  bool released_provisional_rows = false;
   for (size_t row = 0; row < reservation.storage_->handles.size(); ++row) {
     if (!reservation.storage_->provisional[row]) {
       continue;
@@ -1571,7 +1721,11 @@ void FixedStatePool::ReleaseProvisionalSlots(
       slot.committed_tokens = 0;
       slot.reservation_id = 0;
       slot.ownership = FixedStateSlotOwnership::Free;
+      released_provisional_rows = true;
     }
+  }
+  if (released_provisional_rows) {
+    ++impl_->pool_epoch;
   }
 }
 

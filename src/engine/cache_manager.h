@@ -110,6 +110,8 @@ struct CacheManager {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
 
+  virtual void FinalizeStepResources(StepPlan&) const {}
+
   virtual std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan&) {
     throw std::logic_error("Cache manager does not support transactional reservation.");
   }
@@ -195,6 +197,8 @@ struct PagedCacheManager : CacheManager {
   }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override;
+
+  void FinalizeStepResources(StepPlan& plan) const override;
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 

@@ -14,6 +14,7 @@
 namespace Generators {
 
 struct Request;
+struct FixedStateStepPlan;
 
 using StepTransactionId = uint64_t;
 
@@ -77,6 +78,7 @@ struct FixedStateResourcePlan {
   size_t staging_bytes{};        // Gather+output staging bytes the reservation must allocate.
   bool capture_checkpoints{};    // Some request verifies drafts, so the step needs the state series.
   bool capture_state_updates{};  // Draft rows capture compact transitions instead of checkpoints.
+  std::shared_ptr<const FixedStateStepPlan> reservation_plan;
 };
 
 struct StepPlan {

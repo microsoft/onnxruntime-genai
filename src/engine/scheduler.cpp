@@ -292,6 +292,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     plan.graph_capture_eligible &=
         !entry.is_prefill && entry.unprocessed_token_count == 1;
   }
+  cache_manager_->FinalizeStepResources(plan);
   return result;
 }
 

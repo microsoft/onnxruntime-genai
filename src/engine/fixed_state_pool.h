@@ -69,6 +69,46 @@ struct FixedStateReservationRequest {
   size_t capture_count{};
 };
 
+enum class FixedStateBindingMode {
+  DirectSpan,
+  Gathered,
+};
+
+enum class FixedStateGatherFallbackReason {
+  None,
+  NoncontiguousSlots,
+  MixedActiveBanks,
+};
+
+enum class FixedStateCaptureMode {
+  None,
+  Capsule,
+  LegacyFactors,
+  DenseCheckpoints,
+};
+
+struct FixedStateStepPlanRow {
+  const void* request_id{};
+  size_t slot{};
+  bool provisional{};
+  uint64_t expected_generation{};
+  uint64_t expected_state_generation{};
+  uint64_t target_tokens{};
+  size_t capture_count{};
+};
+
+struct FixedStateStepPlan {
+  const FixedStatePool* pool{};
+  uint64_t pool_epoch{};
+  std::vector<FixedStateStepPlanRow> rows;
+  FixedStateBindingMode binding_mode{FixedStateBindingMode::Gathered};
+  size_t direct_first_slot{};
+  uint8_t direct_active_bank{};
+  FixedStateGatherFallbackReason fallback_reason{FixedStateGatherFallbackReason::None};
+  FixedStateCaptureMode capture_mode{FixedStateCaptureMode::None};
+  size_t staging_bytes{};
+};
+
 struct FixedStateBinding {
   Config::Model::Decoder::StateGroupKind kind{};
   int layer_id{};
@@ -120,6 +160,12 @@ struct FixedStatePoolSnapshot {
   size_t free_slots{};
   size_t reserved_slots{};
   size_t committed_slots{};
+  uint64_t direct_span_reservations{};
+  uint64_t direct_span_rows{};
+  uint64_t gathered_reservations{};
+  uint64_t gathered_rows{};
+  uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t mixed_active_bank_fallbacks{};
   size_t persistent_bytes{};
   size_t zeroing_scratch_bytes{};
   size_t active_staging_bytes{};
@@ -219,6 +265,9 @@ class FixedStatePool {
   size_t PlannedStagingBytes(
       std::span<const FixedStateReservationRequest> requests,
       bool capture_checkpoints = false) const;
+    std::shared_ptr<const FixedStateStepPlan> PlanStep(
+      std::span<const FixedStateReservationRequest> requests,
+      bool capture_checkpoints = false) const;
 
   // True when every fixed binding declares a checkpoints output, so reservations may capture the
   // per-token state series a speculative step rolls back through.
@@ -243,6 +292,7 @@ class FixedStatePool {
   // makes FixedStateReservation::CommitPrefix available.
   FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests,
                                 bool capture_checkpoints = false);
+  FixedStateReservation Reserve(const FixedStateStepPlan& plan);
   void Release(const FixedStateSlotHandle& handle);
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;

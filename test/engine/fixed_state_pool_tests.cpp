@@ -191,8 +191,15 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
 
   for (const auto& binding : reservation.Bindings()) {
     EXPECT_NE(binding.input, binding.output);
-    EXPECT_NE(binding.input->GetTensorMutableData<float>(),
-              binding.output->GetTensorMutableData<float>());
+    const auto* input = binding.input->GetTensorData<float>();
+    const auto* output = binding.output->GetTensorData<float>();
+    const size_t bytes = RowElements(*binding.input) * sizeof(float);
+    const auto input_address = reinterpret_cast<uintptr_t>(input);
+    const auto output_address = reinterpret_cast<uintptr_t>(output);
+    const bool overlaps = input_address <= output_address
+                              ? output_address - input_address < bytes
+                              : input_address - output_address < bytes;
+    EXPECT_FALSE(overlaps);
   }
 
   EXPECT_EQ(reservation.Bindings()[0].input->GetTensorTypeAndShapeInfo()->GetShape(),
@@ -487,6 +494,14 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
   MakeResident(*pool, kRequestA, 1.0f);
   MakeResident(*pool, kRequestB, 2.0f);
 
+  {
+    const auto snapshot = pool->Snapshot();
+    EXPECT_EQ(snapshot.direct_span_reservations, 2u);
+    EXPECT_EQ(snapshot.direct_span_rows, 2u);
+    EXPECT_EQ(snapshot.gathered_reservations, 0u);
+    EXPECT_EQ(snapshot.gathered_rows, 0u);
+  }
+
   constexpr size_t bytes_per_request =
       2 * (2 * 3) * sizeof(float) + 2 * (2 * 2 * 2) * sizeof(float);
   constexpr size_t gathered_staging = 4 * bytes_per_request + 3 * sizeof(int32_t);
@@ -499,6 +514,13 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
     ExpectInputRows(reservation, 0, 2.0f);
     ExpectInputRows(reservation, 1, 1.0f);
     reservation.Discard();
+  }
+  {
+    const auto snapshot = pool->Snapshot();
+    EXPECT_EQ(snapshot.gathered_reservations, 1u);
+    EXPECT_EQ(snapshot.gathered_rows, 2u);
+    EXPECT_EQ(snapshot.noncontiguous_slot_fallbacks, 1u);
+    EXPECT_EQ(snapshot.mixed_active_bank_fallbacks, 0u);
   }
 
   {
@@ -514,6 +536,13 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
   EXPECT_EQ(reservation.PlannedStagingBytes(), gathered_staging);
   ExpectInputRows(reservation, 0, 3.0f);
   ExpectInputRows(reservation, 1, 2.0f);
+  const auto snapshot = pool->Snapshot();
+  EXPECT_EQ(snapshot.direct_span_reservations, 3u);
+  EXPECT_EQ(snapshot.direct_span_rows, 3u);
+  EXPECT_EQ(snapshot.gathered_reservations, 2u);
+  EXPECT_EQ(snapshot.gathered_rows, 4u);
+  EXPECT_EQ(snapshot.noncontiguous_slot_fallbacks, 1u);
+  EXPECT_EQ(snapshot.mixed_active_bank_fallbacks, 1u);
 }
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
@@ -527,7 +556,57 @@ TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
   EXPECT_EQ(snapshot.reserved_slots, 0u);
   EXPECT_EQ(snapshot.committed_slots, 0u);
   EXPECT_EQ(snapshot.active_staging_bytes, 0u);
+  EXPECT_EQ(snapshot.direct_span_reservations, 0u);
+  EXPECT_EQ(snapshot.direct_span_rows, 0u);
+  EXPECT_EQ(snapshot.gathered_reservations, 0u);
+  EXPECT_EQ(snapshot.gathered_rows, 0u);
+  EXPECT_EQ(snapshot.noncontiguous_slot_fallbacks, 0u);
+  EXPECT_EQ(snapshot.mixed_active_bank_fallbacks, 0u);
   EXPECT_THROW(pool->HandleFor(kRequestA), std::runtime_error);
+}
+
+TEST_F(FixedStatePoolTest, ImmutableStepPlanRejectsStalePoolEpoch) {
+  auto pool = MakePool(2);
+  const auto requests_a = One(kRequestA, /*target_tokens=*/3);
+  const auto plan = pool->PlanStep(requests_a);
+  ASSERT_EQ(plan->rows.size(), 1u);
+  EXPECT_EQ(plan->rows[0].request_id, kRequestA);
+  EXPECT_TRUE(plan->rows[0].provisional);
+  EXPECT_EQ(plan->rows[0].target_tokens, 3u);
+  EXPECT_EQ(plan->binding_mode, FixedStateBindingMode::DirectSpan);
+  EXPECT_EQ(plan->capture_mode, FixedStateCaptureMode::None);
+
+  {
+    auto requests_b = One(kRequestB);
+    auto reservation = pool->Reserve(requests_b);
+    FillStagedRows(reservation, 0, 4.0f);
+    reservation.Commit();
+  }
+
+  EXPECT_THROW(pool->Reserve(*plan), std::logic_error);
+  const auto snapshot = pool->Snapshot();
+  EXPECT_EQ(snapshot.committed_slots, 1u);
+  EXPECT_EQ(snapshot.reserved_slots, 0u);
+  EXPECT_EQ(snapshot.direct_span_reservations, 1u);
+}
+
+TEST_F(FixedStatePoolTest, ImmutableStepPlanRejectsGenerationMismatchWithoutMutation) {
+  auto pool = MakePool(1);
+  auto requests = One(kRequestA);
+  const auto plan = pool->PlanStep(requests);
+  auto invalid_plan = *plan;
+  ++invalid_plan.rows[0].expected_generation;
+
+  EXPECT_THROW(pool->Reserve(invalid_plan), std::logic_error);
+  auto snapshot = pool->Snapshot();
+  EXPECT_EQ(snapshot.free_slots, 1u);
+  EXPECT_EQ(snapshot.reserved_slots, 0u);
+  EXPECT_EQ(snapshot.direct_span_reservations, 0u);
+
+  auto reservation = pool->Reserve(*plan);
+  snapshot = pool->Snapshot();
+  EXPECT_EQ(snapshot.reserved_slots, 1u);
+  EXPECT_EQ(snapshot.direct_span_reservations, 1u);
 }
 
 TEST_F(FixedStatePoolTest, RejectsEmptyReservation) {
