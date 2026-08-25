@@ -5,13 +5,30 @@
 
 #include "models/model.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
-#include "models/utils.h"
 #include "ortx_tokenizer.h"
 #include "tensor.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace Generators {
+
+namespace {
+
+template <typename T>
+struct OrtxPtr {
+  ~OrtxPtr() { OrtxDispose(&p_); }
+  T** Address() {
+    assert(!p_);
+    return &p_;
+  }
+  operator T*() { return p_; }
+  operator const T*() const { return p_; }
+
+  T* p_{};
+};
+
+}  // namespace
 
 struct Tokenizer::Impl {
   OrtxPtr<OrtxTokenizer> tokenizer;

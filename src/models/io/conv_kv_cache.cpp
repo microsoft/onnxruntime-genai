@@ -12,7 +12,7 @@
 namespace Generators {
 
 bool HasConvKeyValueCache(const Model& model) {
-  return !model.config_->model.decoder.layer_types.empty();
+  return ModelType::IsLFM2(model.config_->model.type) || !model.config_->model.decoder.layer_types.empty();
 }
 
 ConvKeyValueCache::ConvKeyValueCache(State& state)
