@@ -303,6 +303,15 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if "num_hidden_layers" in extra_options:
+        num_hidden_layers = int(extra_options["num_hidden_layers"])
+        layer_types = getattr(config, "layer_types", None)
+        if layer_types is not None and len(layer_types) < num_hidden_layers:
+            raise ValueError(
+                f"layer_types has {len(layer_types)} entries, but {num_hidden_layers} layers were requested"
+            )
+        extra_options["num_hidden_layers"] = num_hidden_layers
+
     quantization_config = getattr(config, "quantization_config", {})
     if quantization_config.get("quant_method") == "modelopt":
         if execution_provider != "cuda":

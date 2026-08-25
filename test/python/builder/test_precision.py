@@ -93,34 +93,6 @@ def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     assert model.layer_types == ["linear_attention", "linear_attention"]
 
 
-def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):
-    base = _load_base_module()
-    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
-    config = types.SimpleNamespace(
-        architectures=["TestModel"],
-        hidden_act="silu",
-        hidden_size=64,
-        intermediate_size=128,
-        layer_types=["full_attention"],
-        max_position_embeddings=1024,
-        num_attention_heads=8,
-        num_hidden_layers=1,
-        num_key_value_heads=2,
-        vocab_size=256,
-        _name_or_path="test",
-    )
-
-    with pytest.raises(ValueError, match="layer_types has 1 entries"):
-        base.Model(
-            config,
-            ir.DataType.FLOAT16,
-            ir.DataType.FLOAT16,
-            "cuda",
-            None,
-            {"num_hidden_layers": 2},
-        )
-
-
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
@@ -309,9 +281,10 @@ def _run_check_extra_options(
     precision="int4",
     execution_provider="cpu",
     tie_word_embeddings=True,
+    layer_types=None,
 ):
     # Avoid Hugging Face network/config loading and provide only the config fields needed.
-    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings)
+    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings, layer_types=layer_types)
 
     def _fake_get_hf_details(*_args, **_kwargs):
         return {
@@ -407,6 +380,23 @@ def test_state_window_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_window"] == 3
+
+
+def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):
+    with pytest.raises(ValueError, match="layer_types has 1 entries"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"num_hidden_layers": "2"},
+            layer_types=["full_attention"],
+        )
+
+
+def test_num_hidden_layers_is_normalized(monkeypatch):
+    options = {"num_hidden_layers": "1"}
+
+    _run_check_extra_options(monkeypatch, options, layer_types=["full_attention"])
+
+    assert options["num_hidden_layers"] == 1
 
 
 # ---------------------------------------------------------------------------
