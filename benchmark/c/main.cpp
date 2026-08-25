@@ -218,7 +218,11 @@ void RunBenchmark(const benchmark::Options& opts) {
                   << " (-l/--prompt_length); using all " << encoded_count << " tokens.\n";
       }
     }
-    prompt_tokens.assign(encoded_data, encoded_data + effective_count);
+    if (effective_count > 0) {
+      prompt_tokens.assign(encoded_data, encoded_data + effective_count);
+    } else {
+      prompt_tokens.clear();
+    }
     num_prompt_tokens = effective_count;
     // Reflect the tokens actually used (after truncation) in the displayed prompt.
     prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
@@ -316,9 +320,12 @@ void RunBenchmark(const benchmark::Options& opts) {
       }
       // Print only the generated tokens, not the prompt echoed back.
       const auto total_len = gen->TokenCount();
-      const auto* output_sequence_data = gen->GetSequenceData(0);
       const size_t gen_len = total_len > num_prompt_tokens ? total_len - num_prompt_tokens : 0;
-      const auto output = tokenizer->Decode(output_sequence_data + num_prompt_tokens, gen_len);
+      std::string output;
+      if (gen_len > 0) {
+        const auto* output_sequence_data = gen->GetSequenceData(0);
+        output = std::string{tokenizer->Decode(output_sequence_data + num_prompt_tokens, gen_len)};
+      }
       std::cout << "[OUTPUT BEGIN]" << output << "[OUTPUT END]\n";
     }
   }
