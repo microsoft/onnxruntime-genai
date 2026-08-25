@@ -594,6 +594,7 @@ class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__()
         decoder_options = self.make_mtp_init(config, extra_options)
         self.decoder = Qwen35MoETextModel(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
