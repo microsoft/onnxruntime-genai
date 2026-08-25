@@ -6,6 +6,7 @@
 #include "models/model.h"
 #include "models/preprocessing/gemma4_multimodal_processor.h"
 #include "models/preprocessing/gemma_image_processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/mistral3_image_processor.h"
 #include "models/preprocessing/parakeet_processor.h"
 #include "models/preprocessing/phi_image_processor.h"
