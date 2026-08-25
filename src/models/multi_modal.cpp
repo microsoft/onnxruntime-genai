@@ -3,6 +3,8 @@
 
 #include "generator/generators.h"
 #include "multi_modal.h"
+#include "models/io/default_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 #include <cstring>
 #include <algorithm>
 #include <numeric>
@@ -751,7 +753,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 
     if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
     position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
-    kv_cache_.Update(next_indices, length);
+    kv_cache_->Update(next_indices, length);
     if (recurrent_state_)
       recurrent_state_->Update();
     logits_.Update(chunk_tokens, current_chunk_size);
