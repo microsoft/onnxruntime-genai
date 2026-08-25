@@ -50,6 +50,7 @@ def test_moe_model_emits_portable_gated_add_for_dml():
     name = "/model/layers.3/moe/GatedAdd"
     shape = ["batch_size", "sequence_length", model.hidden_size]
 
+    model.make_ep_expansions_init()
     model.make_gated_add(name, "routed", "shared", "gate", shape)
 
     assert [call[0] for call in model.calls] == ["make_mul", "make_add"]

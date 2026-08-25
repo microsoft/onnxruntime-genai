@@ -538,6 +538,11 @@ class Model:
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
 
+        elif self.ep == "dml":
+            from .expansions import DML
+
+            self.make_gated_add = DML.make_gated_add.__get__(self, self.__class__)
+
         elif self.ep == "webgpu":
             from .expansions import WebGPU
 
@@ -2006,7 +2011,7 @@ class Model:
         self.make_value(output, self.io_dtype, shape=shape)
 
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
-        if getattr(self, "ep", "cpu") not in {"cpu", "cuda", "webgpu"}:
+        if getattr(self, "ep", "cpu") not in {"cpu", "cuda", "dml", "webgpu"}:
             mul_name = f"{name}/Mul"
             self.make_mul(mul_name, [scaled_input, gate], self.io_dtype, shape=shape)
             self.make_add(name, [root_input, f"{mul_name}/output_0"], self.io_dtype, shape=shape)
