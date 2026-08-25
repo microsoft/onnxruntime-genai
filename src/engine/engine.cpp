@@ -216,9 +216,8 @@ void Engine::BeginTurn(const std::shared_ptr<Request>& request,
       request->status_ = RequestStatus::Assigned;
     }
     request->search_->CommitStateForTransaction();
-    // Reset turn-scoped publication state only after every validating, allocating, appending, and
-    // scheduler operation has succeeded. The caller-owned options storage is represented only by
-    // this copied value.
+    // Install the new turn's generation budget only after turn admission succeeds. This keeps
+    // BeginTurn transactional and copies the caller-owned options before they may go out of scope.
     request->turn_max_generated_tokens_ = max_generated_tokens;
     request->turn_generated_tokens_ = 0;
   } catch (...) {

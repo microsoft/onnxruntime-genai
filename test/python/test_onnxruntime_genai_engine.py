@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -273,6 +274,39 @@ def test_zero_turn_budget_is_rejected_without_starting_request(model):
     assert engine.run() is request
     assert request.is_turn_complete()
     request.close()
+
+
+def test_request_opaque_data_is_python_owned_and_persists(model):
+    class Metadata:
+        pass
+
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(_PROMPT_A) + 1)
+    request = engine.create_request(params)
+
+    assert request.get_opaque_data() is None
+    metadata = Metadata()
+    metadata_ref = weakref.ref(metadata)
+    request.set_opaque_data(metadata)
+    del metadata
+    gc.collect()
+    assert request.get_opaque_data() is metadata_ref()
+
+    request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
+    assert engine.run() is request
+    assert request.is_turn_complete()
+    request.close()
+    assert request.get_opaque_data() is metadata_ref()
+
+    replacement = Metadata()
+    request.set_opaque_data(replacement)
+    gc.collect()
+    assert metadata_ref() is None
+    assert request.get_opaque_data() is replacement
+
+    request.set_opaque_data(None)
+    assert request.get_opaque_data() is None
 
 
 def test_completion_isolation(model):

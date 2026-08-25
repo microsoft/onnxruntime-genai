@@ -1232,8 +1232,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
 /**
  * \brief Creates a Request permanently bound to an Engine.
  *
- * Generation parameters are snapshotted and remain fixed for every turn. The parameters must belong
- * to the same model as the Engine. Creation does not queue work; call OgaRequestBeginTurn.
+ * Generation parameters are snapshotted and remain fixed for every turn. The parameters must have
+ * been created from the same OgaModel instance used to create the Engine. Creation does not queue
+ * work; call OgaRequestBeginTurn.
  *
  * \param[in] engine The owning Engine.
  * \param[in] params The fixed request-level generation parameters.

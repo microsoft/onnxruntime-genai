@@ -731,7 +731,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
-  pybind11::class_<OgaRequest>(m, "Request")
+  pybind11::class_<OgaRequest>(m, "Request", pybind11::dynamic_attr())
       .def(
           "begin_turn",
           [](OgaRequest& request,
@@ -749,6 +749,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
+      .def("set_opaque_data", [](pybind11::object request, pybind11::object data) {
+        request.attr("_opaque_data") = std::move(data);
+      })
+      .def("get_opaque_data", [](pybind11::object request) -> pybind11::object {
+        return pybind11::getattr(request, "_opaque_data", pybind11::none());
+      })
       .def("close", &OgaRequest::Close);
 
   pybind11::class_<OgaEngine>(m, "Engine")
