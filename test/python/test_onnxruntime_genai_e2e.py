@@ -80,7 +80,8 @@ def run_whisper():
         "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
     )
 
-    for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
+    # TODO: Re-enable the FP32 CUDA case when its plugin EP memory usage fits the CI GPU.
+    for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
         built_model = os.path.join(cwd, "..", "models", f"whisper-tiny-{precision}-{execution_provider}")
         download_model(
