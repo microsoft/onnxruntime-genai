@@ -6,19 +6,17 @@
 #pragma once
 #include "model_state_manifest.h"
 #include "model_type.h"
-#include "ortx_tokenizer.h"
 #include "generator/generators.h"
 #include "utils.h"
 #include <map>
 #include <optional>
-#include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/multi_modal_processor.h"
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
 namespace Generators {
 
 struct Tokenizer;
+struct MultiModalProcessor;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);

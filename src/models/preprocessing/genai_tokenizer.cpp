@@ -123,30 +123,30 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
 }
 
 std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
-  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+  OrtxPtr<OrtxTensorResult> templated_text;
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.Address(), add_generation_prompt, false /*tokenize*/));
 
-  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
-  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
+  OrtxPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(templated_text, 0, tensor.Address()));
 
   const char* text_ptr{};
-  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
 
   return text_ptr;
 }
 
 std::string Tokenizer::ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
                                                     const char* template_kwargs, bool add_generation_prompt) const {
-  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
+  OrtxPtr<OrtxTensorResult> templated_text;
   CheckResult(OrtxApplyChatTemplateWithOptions(tokenizer_, template_str, messages, tools, template_kwargs,
-                                               templated_text.ToBeAssigned(), add_generation_prompt,
+                                               templated_text.Address(), add_generation_prompt,
                                                false /*tokenize*/));
 
-  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
-  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
+  OrtxPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(templated_text, 0, tensor.Address()));
 
   const char* text_ptr{};
-  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
 
   return text_ptr;
 }
