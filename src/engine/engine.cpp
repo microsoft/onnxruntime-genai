@@ -135,7 +135,8 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params) {
 }
 
 void Engine::BeginTurn(const std::shared_ptr<Request>& request,
-                       std::span<const int32_t> tokens) {
+                       std::span<const int32_t> tokens,
+                       std::optional<size_t> max_generated_tokens) {
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
@@ -143,6 +144,10 @@ void Engine::BeginTurn(const std::shared_ptr<Request>& request,
   if (!request || request->engine_.lock().get() != this) {
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
+  }
+  if (max_generated_tokens && *max_generated_tokens == 0) {
+    throw std::runtime_error(
+        "max_generated_tokens must be greater than zero.");
   }
   if (tokens.empty()) {
     throw std::runtime_error(
@@ -189,6 +194,10 @@ void Engine::BeginTurn(const std::shared_ptr<Request>& request,
   const int64_t seen_length_before = request->seen_sequence_length_;
   const int64_t processed_length_before =
       request->processed_sequence_length_;
+  const auto turn_max_generated_tokens_before =
+      request->turn_max_generated_tokens_;
+  const size_t turn_generated_tokens_before =
+      request->turn_generated_tokens_;
   bool added_to_scheduler = false;
 
   request->search_->SaveStateForTransaction();
@@ -207,6 +216,11 @@ void Engine::BeginTurn(const std::shared_ptr<Request>& request,
       request->status_ = RequestStatus::Assigned;
     }
     request->search_->CommitStateForTransaction();
+    // Reset turn-scoped publication state only after every validating, allocating, appending, and
+    // scheduler operation has succeeded. The caller-owned options storage is represented only by
+    // this copied value.
+    request->turn_max_generated_tokens_ = max_generated_tokens;
+    request->turn_generated_tokens_ = 0;
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
@@ -218,6 +232,10 @@ void Engine::BeginTurn(const std::shared_ptr<Request>& request,
       request->prompt_sequence_length_ = prompt_length_before;
       request->seen_sequence_length_ = seen_length_before;
       request->processed_sequence_length_ = processed_length_before;
+      request->turn_max_generated_tokens_ =
+          turn_max_generated_tokens_before;
+      request->turn_generated_tokens_ =
+          turn_generated_tokens_before;
       request->search_->RestoreStateForTransaction();
     } catch (...) {
       HandleContinuationRestoreFailure(

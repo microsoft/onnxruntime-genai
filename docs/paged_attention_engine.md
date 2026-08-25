@@ -11,9 +11,10 @@ The `Engine` can use either static batching or dynamic batching. This document f
 The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed_conv` and `fixed_recurrent` manifest groups, but the dynamic Engine still rejects those groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
 
 > **Experimental low-level API:** An Engine creates model-bound Requests. `BeginTurn()` queues both
-> initial input and later continuation input, `Run()` performs synchronous progress and returns one
-> borrowed ready Request, and `Close()` releases Engine resources. Generated output remains
-> Request-owned and is read through the token-at-a-time unseen-output accessors.
+> initial input and later continuation input and can snapshot a positive per-turn generated-token
+> limit. `Run()` performs synchronous progress and returns one borrowed ready Request, and `Close()`
+> releases Engine resources. Generated output remains Request-owned and is read through the
+> token-at-a-time unseen-output accessors.
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
 > including request creation, `BeginTurn()`, `Run()`, output reads, completion queries, `Close()`, and
@@ -124,10 +125,10 @@ The engine creates throughput by batching several independent requests, not by p
 The important request states are:
 
 ```text
-Unassigned (Created) -- BeginTurn(tokens) --> Assigned (Queued) -- schedule --> Active
+Unassigned (Created) -- BeginTurn(tokens, options) --> Assigned (Queued) -- schedule --> Active
                               ^                                           |
                               |                                           | turn stops
-                              +----------- BeginTurn(tokens) -------- TurnComplete
+                              +-------- BeginTurn(tokens, options) ---- TurnComplete
 
 Unassigned (Created) -+
 Assigned (Queued) ----+
@@ -138,8 +139,9 @@ TurnComplete ---------+
 ### `Unassigned`
 
 The request is already bound to its creating Engine but has no scheduler or cache membership.
-`BeginTurn()` copies the initial input and establishes submission order. Request-level generation
-parameters were snapshotted at creation and cannot change between turns.
+`BeginTurn()` copies the initial input, snapshots the turn options, and establishes submission
+order. Request-level generation parameters were snapshotted at creation and cannot change between
+turns. The caller does not need to keep either the input or options storage alive after the call.
 
 ### `Assigned`
 
@@ -151,6 +153,13 @@ must leave room for at least one generated token below `max_length`.
 generated output, and every continuation input all count against the same limit. `BeginTurn()` does
 not reset it, and it is not a per-turn generation budget.
 
+The nullable turn options are separate. Null means that no per-turn limit applies beyond cumulative
+`max_length`. A non-null options object must specify a positive `max_generated_tokens`; zero is
+rejected before mutation. The current turn counts only generated tokens appended as output. Initial
+input, continuation input, and the previously generated token replayed during continuation prefill
+do not count. A later turn may begin whenever its input still leaves room for at least one generated
+token under cumulative `max_length`, and it may choose a different per-turn limit.
+
 ### `Active`
 
 The current turn is executable and owned by the Engine. It normally has one unprocessed token at
@@ -158,18 +167,28 @@ the beginning of a decode step: the token sampled by the previous step.
 
 ### `TurnComplete`
 
-The current generation turn reached an end condition, such as EOS or maximum length. Generated
-output remains available. `IsTurnComplete()` is the API for testing this state; it does not mean permanent request termination or removal.
+The current generation turn reached an end condition: EOS, its positive
+`max_generated_tokens`, or cumulative `max_length`. Generated output remains available.
+`IsTurnComplete()` is the API for testing this state; it does not mean permanent request
+termination or removal. The current public API reports completion but does not expose which
+condition ended the turn.
 
 A generated EOS/stop token is not appended to the logical sequence or returned as unseen output.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by
 the model's chat template.
 
-`BeginTurn(tokens)` appends the next input fragment and moves a resident request back to `Assigned`.
+`BeginTurn(tokens, options)` appends the next input fragment and moves a resident request back to `Assigned`.
 The completed turn's ready notification must first have been returned by `Run()`; calling
 `BeginTurn()` while that notification is still pending fails without mutation. Generated tokens do
 not need to be consumed first. Older unread output remains ahead of later-turn output in the
-Request-owned FIFO, and continuation input is never reported as generated output.
+Request-owned FIFO, and continuation input is never reported as generated output. Turn-scoped
+generated count and limit reset only after all validation, input allocation, Search append, and
+scheduler preparation succeeds.
+
+Every completed turn publishes exactly one terminal ready notification, in addition to any earlier
+per-token ready notifications from that turn. Its final model step may also publish a visible token,
+or it may publish completion alone when EOS is not appended. Draining that notification does not
+consume output.
 
 A turn-complete request remains Engine-owned and resident. `Close()` ends logical ownership
 immediately and releases dynamic cache resources; static batch storage may remain until batch
@@ -207,6 +226,12 @@ Three views of request progress are important:
 | `CurrentSequenceLength()` | Number of tokens currently held by the request's search sequence |
 | `processed_sequence_length_` | Number of sequence tokens already represented in the committed KV cache |
 | `seen_sequence_length_` | High-water sequence index of generated output consumed by the API caller; copied into invariant snapshots rather than used to select the next output token |
+| `turn_generated_tokens_` | Generated output tokens committed during the current turn; reset only by a successful `BeginTurn()` |
+
+The turn also snapshots an optional `max_generated_tokens`. This is Request bookkeeping, not
+Search's cumulative sequence limit. Transaction staging computes whether the next generated count
+completes the turn without changing committed Request state; `CommitStep()` publishes the count
+together with the token, request status, and processed length.
 
 Generated-output delivery uses separate bookkeeping because continuation input creates gaps in the
 logical sequence:
@@ -274,6 +299,16 @@ for several requests, but `Run()` returns only one borrowed canonical `Request` 
 continues to own only the handle returned by `CreateRequest()` and must not release the borrowed
 alias. Remaining ready requests stay in the ready queue and are returned by later `Run()` calls
 without another model execution.
+
+A ready entry is a notification, not a separate token or event object. On the dynamic path, each
+committed request step queues that request once when it appended a generated token or completed the
+turn. A normally decoding request is therefore returned once per generated token. The caller then
+reads the token from the Request-owned unseen-output FIFO; returning the borrowed pointer does not
+consume it. If the appended token also reaches a length boundary, that same ready return is the
+turn's one terminal notification. If EOS completes the turn without an appended token, `Run()`
+still returns the request once with no new unseen token and with `IsTurnComplete()` already
+committed. Thus “exactly once terminal” does not mean a turn has only one ready return: it means
+exactly one of that turn's ready returns observes the newly committed terminal state.
 
 This distinction is important:
 
@@ -479,9 +514,10 @@ The result records:
 
 - The sampled token, if a token was appended.
 - Whether a token was appended.
-- Whether generation is complete.
+- Whether the turn is complete.
 
-These results are staged. The request's host token mirror, processed-length counter, and internal lifecycle state are not updated yet.
+These results are staged. The request's host token mirror, processed-length counter, per-turn
+generated count, and internal lifecycle state are not updated yet.
 
 Requests that appended a token or became complete are placed in a staged ready list. The list is not exposed until the complete transaction commits.
 
@@ -504,6 +540,7 @@ Committing the cache reservation:
 Committing request bookkeeping:
 
 - Appends the staged token to the host token mirror.
+- Increments the current turn's generated-token count only when that output token was appended.
 - Sets `processed_sequence_length_` to the sequence length that existed before sampling.
 - Changes the status to `Active` or `TurnComplete`.
 
@@ -548,6 +585,10 @@ Rollback performs both parts:
 2. Release every block held by the paged-cache reservation.
 
 After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Run()` again with unchanged memory availability and workload composition may produce the same capacity failure.
+
+In particular, rollback does not change the turn's generated-token count, lifecycle status,
+unseen-output queue, ready-notification queue, or continuation state. A retry therefore observes
+the same turn boundary and output stream as if the failed attempt had not run.
 
 The model may have written data into reserved cache memory before the failure. Releasing the reservation is still safe because those blocks were never added to committed block tables. Future users of those blocks overwrite the relevant slots before treating them as valid cache contents.
 
@@ -845,7 +886,8 @@ The static engine path is intentionally separate.
 A resident static request queued by `BeginTurn()` returns to `Active` without reallocating the
 batch. Static cache rows still cannot be released independently, and an all-turn-complete batch may
 be recycled for new work. Static continuation is therefore valid only while the original
-single-request batch remains resident.
+single-request batch remains resident. The per-turn generated-token budget applies on this path
+too, although static execution does not use the dynamic reservation/checkpoint transaction.
 
 A closed request that is already resident in a static batch remains physically retained until that shared batch is recycled. It is not sampled or returned again, but its Request/Search storage can remain alive for the lifetime of the batch.
 
@@ -857,7 +899,7 @@ The language bindings currently expose the same basic low-level loop. Production
 
 ```python
 request = engine.create_request(generation_params)
-request.begin_turn(initial_tokens)
+request.begin_turn(initial_tokens, max_generated_tokens=128)
 
 while engine.has_pending_requests():
     ready_request = engine.run()  # Borrowed canonical Request; do not destroy separately.
@@ -867,7 +909,7 @@ while engine.has_pending_requests():
 
 if request.is_turn_complete():
     # The completed turn's ready notification was returned by the loop above.
-    request.begin_turn(next_turn_tokens)
+    request.begin_turn(next_turn_tokens, max_generated_tokens=64)
 
 # Repeat engine.run(), then close when continuation is no longer needed.
 request.close()
@@ -875,7 +917,12 @@ request.close()
 
 One ready request may be returned several times over its lifetime as new tokens become available. A
 turn-complete dynamic request remains cache-resident until explicit close, which releases dynamic
-cache ownership immediately. The unseen-output accessors return generated tokens one at a time in global request order without turn tags.
+cache ownership immediately. The unseen-output accessors return generated tokens one at a time in
+global request order without turn tags.
+
+`Request` also stores one application-owned opaque `void*` for native C and C++ hosts. GenAI never
+uses, dereferences, or frees it. It remains attached across turns and `Close()` until the Request
+handle is destroyed; the host is solely responsible for the pointed-to object's lifetime.
 
 ## Keeping this document current
 

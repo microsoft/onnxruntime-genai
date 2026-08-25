@@ -137,7 +137,9 @@ void Request::CompleteClose() {
   status_ = RequestStatus::Closed;
 }
 
-void Request::BeginTurn(std::span<const int32_t> tokens) {
+void Request::BeginTurn(
+    std::span<const int32_t> tokens,
+    std::optional<size_t> max_generated_tokens) {
   if (IsClosed(status_)) {
     throw std::runtime_error("Cannot begin a turn for a closed request.");
   }
@@ -146,7 +148,8 @@ void Request::BeginTurn(std::span<const int32_t> tokens) {
     throw std::runtime_error(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  engine->BeginTurn(shared_from_this(), tokens);
+  engine->BeginTurn(
+      shared_from_this(), tokens, max_generated_tokens);
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -233,6 +236,14 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
 
 bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
+}
+
+void Request::SetOpaqueData(void* data) noexcept {
+  opaque_data_ = data;
+}
+
+void* Request::GetOpaqueData() const noexcept {
+  return opaque_data_;
 }
 
 bool Request::IsPrefill() const {
@@ -346,6 +357,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
     const size_t token_index = tokens_host_.size();
     tokens_host_.push_back(result.token);
     unseen_token_indices_.push_back(token_index);
+    ++turn_generated_tokens_;
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
@@ -379,12 +391,18 @@ void Request::SelectNextToken() {
 
 RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   search_->CompleteGeneration();
-  const bool done = search_->IsDone();
+  const bool search_done = search_->IsDone();
   const bool token_appended = CurrentSequenceLength() > sequence_length_before;
   int32_t token = 0;
   if (token_appended) {
     token = search_->GetNextTokens().CpuSpan().back();
   }
+  const size_t generated_tokens_after_step =
+      turn_generated_tokens_ + static_cast<size_t>(token_appended);
+  const bool turn_limit_reached =
+      turn_max_generated_tokens_ &&
+      generated_tokens_after_step >= *turn_max_generated_tokens_;
+  const bool done = search_done || turn_limit_reached;
   RequestStepResult result{
       token,
       token_appended,
@@ -450,9 +468,13 @@ void Request::CompleteGeneration() {
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }
+    turn_generated_tokens_ += new_token_count;
   }
 
-  if (search_->IsDone()) {
+  const bool turn_limit_reached =
+      turn_max_generated_tokens_ &&
+      turn_generated_tokens_ >= *turn_max_generated_tokens_;
+  if (search_->IsDone() || turn_limit_reached) {
     status_ = RequestStatus::TurnComplete;
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();

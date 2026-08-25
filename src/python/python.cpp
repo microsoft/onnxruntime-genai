@@ -7,6 +7,7 @@
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
 #include <iostream>
+#include <optional>
 
 using namespace pybind11::literals;
 
@@ -731,9 +732,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("load", &OgaAdapters::LoadAdapter);
 
   pybind11::class_<OgaRequest>(m, "Request")
-      .def("begin_turn", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
-        request.BeginTurn(ToSpan(tokens));
-      })
+      .def(
+          "begin_turn",
+          [](OgaRequest& request,
+             pybind11::array_t<int32_t> tokens,
+             std::optional<size_t> max_generated_tokens) {
+            if (max_generated_tokens) {
+              const OgaTurnOptions options{*max_generated_tokens};
+              request.BeginTurn(ToSpan(tokens), &options);
+            } else {
+              request.BeginTurn(ToSpan(tokens));
+            }
+          },
+          pybind11::arg("tokens"),
+          pybind11::arg("max_generated_tokens") = pybind11::none())
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)

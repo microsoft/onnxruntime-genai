@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -141,6 +142,7 @@ TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
   ASSERT_NE(ready, nullptr);
   EXPECT_EQ(ready, request);
   EXPECT_TRUE(request->IsTurnComplete());
+  EXPECT_FALSE(request->HasUnseenTokens());
   EXPECT_EQ(engine.executor->decode_calls, 1);
   ASSERT_EQ(engine.executor->decoded_batch_sizes.size(), 1u);
   EXPECT_EQ(engine.executor->decoded_batch_sizes[0], 1u);
@@ -150,6 +152,9 @@ TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
   ASSERT_GE(allocate_at, 0);
   ASSERT_GE(decode_at, 0);
   EXPECT_LT(decode_at, allocate_at);
+  // EOS completes without a visible token, but its terminal ready notification is still published
+  // exactly once.
+  EXPECT_EQ(engine.engine->Run(), nullptr);
 }
 
 // Several requests that all fit are decoded together in a single batch, and the remaining ready
@@ -374,6 +379,48 @@ TEST_F(EngineRunTest, ContinuedUnreadOutputPreservesOrder) {
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 
+TEST_F(EngineRunTest, PerTurnBudgetsPublishOneTerminalNotificationAcrossContinuations) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
+  const auto prompt = Prompt(10);
+  auto params = MakeGreedyParams(*model_);
+  params->search.max_length =
+      static_cast<int>(prompt.size() + 9);
+  auto request = CreateEngineRequest(engine.engine, *params);
+
+  const auto run_turn = [&](std::span<const int32_t> input,
+                            size_t max_generated_tokens) {
+    request->BeginTurn(
+        input,
+        std::optional<size_t>{max_generated_tokens});
+
+    size_t terminal_notifications = 0;
+    while (!request->IsTurnComplete()) {
+      auto ready = engine.engine->Run();
+      ASSERT_EQ(ready, request);
+      if (ready->IsTurnComplete()) {
+        ++terminal_notifications;
+      }
+    }
+
+    EXPECT_EQ(terminal_notifications, 1u);
+    EXPECT_EQ(engine.engine->Run(), nullptr);
+  };
+
+  run_turn(prompt, /*max_generated_tokens=*/2);
+  const std::vector<int32_t> second_input{6};
+  run_turn(second_input, /*max_generated_tokens=*/1);
+  const std::vector<int32_t> third_input{7};
+  run_turn(third_input, /*max_generated_tokens=*/1);
+
+  request->Close();
+  std::vector<int32_t> output;
+  while (request->HasUnseenTokens()) {
+    output.push_back(request->UnseenToken());
+  }
+  EXPECT_EQ(output, (std::vector<int32_t>{5, 5, 5, 5}));
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+}
+
 // Under capacity backpressure Run decodes only the requests that fit, then forms a fresh batch for
 // the deferred request on a later run -- one decode per internal cycle, never an over-capacity run.
 //
@@ -436,14 +483,15 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
       model_, /*capacity=*/4, trace, /*supports_dynamic_batching=*/false);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, EosToken(*model_), trace);
+      model_, cache, /*forced_token=*/5, trace);
   auto* cache_observer = cache.get();
   auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine, *model_, prompt);
+  auto request = CreateEngineRequest(engine, *model_);
+  request->BeginTurn(prompt, std::optional<size_t>{1});
 
   EXPECT_EQ(engine->Run(), request);
   EXPECT_EQ(executor_observer->decode_calls, 1);
@@ -451,7 +499,7 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
 
   const int allocations_before = cache_observer->allocate_calls;
   const std::vector<int32_t> continuation{5, 6};
-  request->BeginTurn(continuation);
+  request->BeginTurn(continuation, std::optional<size_t>{1});
   ASSERT_EQ(request->status_, RequestStatus::Assigned);
 
   EXPECT_EQ(engine->Run(), request);
@@ -546,10 +594,11 @@ TEST_F(EngineRunTest, StaticContinuationRejectsMultiRowBatchAfterPeerCloses) {
 }
 
 TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   engine.cache->SetCanAllocate(false);
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  request->BeginTurn(prompt, std::optional<size_t>{1});
 
   try {
     EXPECT_NE(engine.engine->Run(), nullptr);
@@ -560,12 +609,17 @@ TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
 
   EXPECT_TRUE(engine.engine->HasPendingRequests());
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_FALSE(request->HasUnseenTokens());
+
+  engine.cache->SetCanAllocate(true);
+  EXPECT_EQ(engine.engine->Run(), request);
 }
 
 TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
-  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  request->BeginTurn(prompt, std::optional<size_t>{1});
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(
       ScriptedExecutionFailure::RetryableDuringExecution);
@@ -582,10 +636,14 @@ TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   EXPECT_EQ(rolled_back.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   EXPECT_TRUE(engine.engine->HasPendingRequests());
+  EXPECT_FALSE(request->HasUnseenTokens());
 
   auto ready = engine.engine->Run();
   EXPECT_EQ(ready, request);
   EXPECT_TRUE(request->IsTurnComplete());
+  ASSERT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), 5);
+  EXPECT_EQ(engine.engine->Run(), nullptr);
 }
 
 TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {

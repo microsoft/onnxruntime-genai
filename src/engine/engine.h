@@ -111,7 +111,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
  private:
   void BeginTurn(const std::shared_ptr<Request>& request,
-                 std::span<const int32_t> tokens);
+                 std::span<const int32_t> tokens,
+                 std::optional<size_t> max_generated_tokens);
   void CloseRequest(const std::shared_ptr<Request>& request);
   void ReclaimAbandonedRequests();
   std::shared_ptr<Request> DrainReadyRequest();

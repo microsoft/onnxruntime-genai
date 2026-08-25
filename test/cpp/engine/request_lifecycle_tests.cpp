@@ -8,6 +8,7 @@
 // TurnComplete, and Closed.
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -236,6 +237,21 @@ TEST_F(RequestLifecycleTest, EmptyBeginTurnIsRejected) {
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
 }
 
+TEST_F(RequestLifecycleTest, ZeroGeneratedTokenBudgetIsRejectedWithoutMutation) {
+  auto request = NewRequest();
+  const auto prompt = Prompt();
+
+  EXPECT_THROW(
+      request->BeginTurn(
+          prompt, std::optional<size_t>{0}),
+      std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+
+  EXPECT_NO_THROW(request->BeginTurn(
+      prompt, std::optional<size_t>{1}));
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+}
+
 TEST_F(RequestLifecycleTest, NewRequestIsUnassignedUntilBeginTurn) {
   auto request = NewRequest();
 
@@ -358,6 +374,38 @@ TEST_F(RequestLifecycleTest, ContinuationBeyondContextIsRejectedBeforeMutation) 
   EXPECT_EQ(after.status, before.status);
   EXPECT_EQ(after.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(after.processed_sequence_length, before.processed_sequence_length);
+}
+
+TEST_F(RequestLifecycleTest, FailedContinuationAppendPreservesCompletedTurnState) {
+  auto params = MakeGreedyParams(*model_);
+  auto control = std::make_shared<FailingContinuationControl>();
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = CreateEngineRequest(engine_.engine, *params);
+  engine_.executor->SetForcedToken(/*token=*/5);
+  request->BeginTurn(Prompt(), std::optional<size_t>{1});
+  ASSERT_EQ(engine_.engine->Run(), request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_TRUE(request->HasUnseenTokens());
+  const auto before = request->Snapshot();
+
+  control->fail_append = true;
+  EXPECT_THROW(
+      request->BeginTurn(
+          std::vector<int32_t>{6},
+          std::optional<size_t>{2}),
+      std::runtime_error);
+
+  EXPECT_EQ(request->Snapshot().status, before.status);
+  EXPECT_EQ(request->Snapshot().current_sequence_length,
+            before.current_sequence_length);
+  EXPECT_TRUE(request->HasUnseenTokens());
+
+  control->fail_append = false;
+  EXPECT_NO_THROW(request->BeginTurn(
+      std::vector<int32_t>{6},
+      std::optional<size_t>{2}));
+  EXPECT_TRUE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEngine) {
@@ -529,6 +577,36 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   EXPECT_EQ(request->UnseenToken(), next_token);
 }
 
+TEST_F(RequestLifecycleTest, PerTurnLimitStagesUntilTransactionCommit) {
+  auto request = NewRequest();
+  const auto prompt = Prompt();
+  request->BeginTurn(prompt, std::optional<size_t>{1});
+  const auto before = request->Snapshot();
+  RequestStepPlan plan;
+  plan.request = request;
+  plan.request_id = request.get();
+  plan.sequence_length_before = before.current_sequence_length;
+  plan.target_cache_slots =
+      static_cast<size_t>(before.current_sequence_length);
+  auto logits = LogitsForToken(*model_, /*token=*/5);
+
+  PrepareRequestStep(model_, plan);
+  request->SaveStateForTransaction();
+  const auto result = request->ApplyLogitsForTransaction(logits);
+
+  EXPECT_TRUE(result.token_appended);
+  EXPECT_TRUE(result.done);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_FALSE(request->HasUnseenTokens());
+
+  request->CommitStateForTransaction();
+  request->CommitStep(plan, result);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  ASSERT_TRUE(request->HasUnseenTokens());
+  EXPECT_EQ(request->UnseenToken(), 5);
+}
+
 TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
@@ -600,7 +678,7 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   EXPECT_FALSE(request->HasUnseenTokens());
 }
 
-TEST_F(RequestLifecycleTest, FirstTransactionCanCommitDirectlyToTurnComplete) {
+TEST_F(RequestLifecycleTest, EosCompletesWithoutAppendingVisibleToken) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
   const auto before = request->Snapshot();
@@ -618,7 +696,9 @@ TEST_F(RequestLifecycleTest, FirstTransactionCanCommitDirectlyToTurnComplete) {
   request->CommitStep(plan, result);
 
   EXPECT_TRUE(result.done);
+  EXPECT_FALSE(result.token_appended);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_FALSE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {

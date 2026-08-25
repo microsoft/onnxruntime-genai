@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generator/generators.h"
@@ -1406,16 +1407,21 @@ OgaResult* OgaRequestBeginTurn(
     const int32_t* input_ids,
     size_t input_ids_count) {
   OGA_TRY
-  if (options && options->struct_size < sizeof(OgaTurnOptions)) {
-    throw std::runtime_error(
-        "OgaTurnOptions.struct_size is smaller than the V1 structure.");
+  std::optional<size_t> max_generated_tokens;
+  if (options) {
+    if (options->max_generated_tokens == 0) {
+      throw std::runtime_error(
+          "OgaTurnOptions.max_generated_tokens must be greater than zero.");
+    }
+    max_generated_tokens = options->max_generated_tokens;
   }
   if (!input_ids && input_ids_count != 0) {
     throw std::runtime_error(
         "input_ids must not be null when input_ids_count is nonzero.");
   }
   request->BeginTurn(
-      std::span<const int32_t>{input_ids, input_ids_count});
+      std::span<const int32_t>{input_ids, input_ids_count},
+      max_generated_tokens);
   return nullptr;
   OGA_CATCH
 }
@@ -1437,6 +1443,20 @@ OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {
 OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
   OGA_TRY
   *token = request->UnseenToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestSetOpaqueData(OgaRequest* request, void* data) {
+  OGA_TRY
+  request->SetOpaqueData(data);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestGetOpaqueData(OgaRequest* request, void** data) {
+  OGA_TRY
+  *data = request->GetOpaqueData();
   return nullptr;
   OGA_CATCH
 }

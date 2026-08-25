@@ -937,6 +937,16 @@ struct OgaRequest : OgaAbstract {
     return token;
   }
 
+  void SetOpaqueData(void* data) {
+    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
+  }
+
+  void* GetOpaqueData() {
+    void* data{};
+    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
+    return data;
+  }
+
   void Close() {
     OgaCheckResult(OgaRequestClose(this));
   }

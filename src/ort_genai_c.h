@@ -83,7 +83,7 @@ typedef struct OgaRequest OgaRequest;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 typedef struct OgaTurnOptions {
-  size_t struct_size;
+  size_t max_generated_tokens;
 } OgaTurnOptions;
 
 //! @}
@@ -1252,8 +1252,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
  * while the resident static batch contains one request.
  *
  * \param[in] request The Request to queue.
- * \param[in] options Nullable turn-scoped options. V1 accepts nullptr or a structure whose
- *                    struct_size is at least sizeof(OgaTurnOptions).
+ * \param[in] options Nullable turn-scoped options. nullptr applies no per-turn generation limit
+ *                    beyond the Request's retained cumulative max_length. A non-null object must
+ *                    specify max_generated_tokens greater than zero. Its value is copied before
+ *                    this function returns.
  * \param[in] input_ids A non-empty token array.
  * \param[in] input_ids_count Number of tokens in input_ids.
  * \return OgaResult containing the error message if the turn could not be queued, or nullptr on success.
@@ -1281,6 +1283,30 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
+
+/**
+ * \brief Sets application-owned data that is opaque to GenAI.
+ *
+ * GenAI stores the pointer value but never dereferences or frees it. The caller owns the pointed-to
+ * object and must keep it alive whenever the pointer is accessed. Setting nullptr clears the
+ * association. The value is not used by the Engine and remains attached across turns and Close.
+ *
+ * \param[in] request The request on which to store the pointer.
+ * \param[in] opaque_data The caller-owned pointer value, or nullptr.
+ * \return OgaResult containing an error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetOpaqueData(
+    OgaRequest* request, void* opaque_data);
+
+/**
+ * \brief Gets the application-owned opaque data pointer stored on the request.
+ *
+ * \param[in] request The request whose pointer should be returned.
+ * \param[out] opaque_data Receives the stored pointer, or nullptr if none was set.
+ * \return OgaResult containing an error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(
+    OgaRequest* request, void** opaque_data);
 
 /**
  * \brief Checks if the request has any unseen tokens.

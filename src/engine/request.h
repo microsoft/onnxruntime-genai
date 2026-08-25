@@ -60,7 +60,9 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void Schedule();
 
-  void BeginTurn(std::span<const int32_t> tokens);
+  void BeginTurn(
+      std::span<const int32_t> tokens,
+      std::optional<size_t> max_generated_tokens = std::nullopt);
 
   /**
    * @brief Retrieves the next unseen token in the request.
@@ -144,6 +146,20 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStatus Status() const noexcept { return status_; }
 
   void Close();
+
+  /**
+   * @brief Stores application-owned data that is opaque to the Request and Engine.
+   *
+   * The pointer is never dereferenced or freed by GenAI. The application must keep the pointed-to
+   * object alive for every access and may replace or clear the pointer at any request lifecycle
+   * state.
+   */
+  void SetOpaqueData(void* data) noexcept;
+
+  /**
+   * @brief Returns the application-owned opaque pointer, or nullptr if none was set.
+   */
+  void* GetOpaqueData() const noexcept;
 
   /**
    * @brief Checks if the request is in prefill mode.
@@ -274,6 +290,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  std::optional<size_t> turn_max_generated_tokens_;
+  size_t turn_generated_tokens_{};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
@@ -283,6 +301,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
+  void* opaque_data_{nullptr};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();

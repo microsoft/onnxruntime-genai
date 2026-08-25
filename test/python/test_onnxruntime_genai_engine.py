@@ -233,6 +233,48 @@ def test_eos_terminates_before_max_length(model):
     assert next_token == _EOS_TOKEN_ID
 
 
+def test_per_turn_budget_is_independent_and_snapshotted(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=32)
+    request = engine.create_request(params)
+    sink = _Sink()
+    sinks = {request: sink}
+    prompt = np.asarray(_PROMPT_LONG, dtype=np.int32)
+
+    request.begin_turn(prompt, max_generated_tokens=3)
+    _run(engine, sinks, close_completed=False)
+
+    assert sink.tokens == predicted_tokens(_PROMPT_LONG, 3)
+    assert request.is_turn_complete()
+
+    continuation = np.asarray([12], dtype=np.int32)
+    request.begin_turn(continuation, max_generated_tokens=2)
+    assert not request.is_turn_complete()
+    _run(engine, sinks, close_completed=False)
+
+    assert len(sink.tokens) == 5
+    assert request.is_turn_complete()
+    request.close()
+
+
+def test_zero_turn_budget_is_rejected_without_starting_request(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=16)
+    request = engine.create_request(params)
+    prompt = np.asarray(_PROMPT_A, dtype=np.int32)
+
+    with pytest.raises(RuntimeError, match="greater than zero"):
+        request.begin_turn(prompt, max_generated_tokens=0)
+
+    assert not engine.has_pending_requests()
+    request.begin_turn(prompt, max_generated_tokens=1)
+    assert engine.run() is request
+    assert request.is_turn_complete()
+    request.close()
+
+
 def test_completion_isolation(model):
     short_new, long_new = 5, 20
     long_isolated = _generate_isolated(model, _PROMPT_LONG, long_new)

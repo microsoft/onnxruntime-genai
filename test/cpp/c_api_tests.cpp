@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
@@ -881,6 +882,48 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineRequestTurnOptionsAndOpaqueDataContracts) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest(*params);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  int application_state = 42;
+  OgaCheckResult(OgaRequestSetOpaqueData(
+      request.get(), &application_state));
+  EXPECT_EQ(request->GetOpaqueData(), &application_state);
+
+  OgaTurnOptions zero_budget{};
+  std::unique_ptr<OgaResult> zero_budget_result{
+      OgaRequestBeginTurn(
+          request.get(), &zero_budget,
+          input_tokens.data(), input_tokens.size())};
+  ASSERT_NE(zero_budget_result, nullptr);
+  EXPECT_NE(std::string(zero_budget_result->GetError()).find(
+                "greater than zero"),
+            std::string::npos);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  OgaTurnOptions one_token_turn{
+      /*max_generated_tokens=*/1};
+  EXPECT_NO_THROW(request->BeginTurn(
+      std::span<const int32_t>{input_tokens},
+      &one_token_turn));
+  one_token_turn.max_generated_tokens = 8;
+  EXPECT_TRUE(engine->HasPendingRequests());
+
+  OgaRequest* ready = engine->Run();
+  ASSERT_EQ(ready, request.get());
+  EXPECT_TRUE(ready->IsTurnComplete());
+  EXPECT_TRUE(ready->HasUnseenTokens());
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  request->Close();
+  EXPECT_EQ(request->GetOpaqueData(), &application_state);
+}
+
 // DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
@@ -1001,7 +1044,7 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   auto input_tokens = std::span<const int32_t>{
       input_sequences->SequenceData(0), input_sequences->SequenceCount(0)};
   params->SetSearchOption(
-      "max_length", static_cast<int>(input_tokens.size() + 1));
+      "max_length", static_cast<int>(input_tokens.size() + 4));
 
   auto expect_options_accepted = [&](const OgaTurnOptions* options) {
     auto request = engine->CreateRequest(*params);
@@ -1012,28 +1055,35 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
 
   expect_options_accepted(nullptr);
 
-  OgaTurnOptions exact_options{sizeof(OgaTurnOptions)};
+  OgaTurnOptions exact_options{/*max_generated_tokens=*/1};
   expect_options_accepted(&exact_options);
 
-  struct LargerTurnOptions {
-    OgaTurnOptions v1;
-    size_t reserved;
-  };
-  LargerTurnOptions larger_options{{sizeof(LargerTurnOptions)}, 0};
-  expect_options_accepted(&larger_options.v1);
-
-  auto undersized_request = engine->CreateRequest(*params);
-  OgaTurnOptions undersized_options{sizeof(OgaTurnOptions) - 1};
-  std::unique_ptr<OgaResult> undersized_result{OgaRequestBeginTurn(
-      undersized_request.get(), &undersized_options,
+  auto zero_budget_request = engine->CreateRequest(*params);
+  OgaTurnOptions zero_budget_options{};
+  std::unique_ptr<OgaResult> zero_budget_result{OgaRequestBeginTurn(
+      zero_budget_request.get(), &zero_budget_options,
       input_tokens.data(), input_tokens.size())};
-  ASSERT_NE(undersized_result, nullptr);
-  EXPECT_NE(std::string(undersized_result->GetError()).find("smaller"),
+  ASSERT_NE(zero_budget_result, nullptr);
+  EXPECT_NE(std::string(zero_budget_result->GetError()).find("greater than zero"),
             std::string::npos);
-  EXPECT_NO_THROW(undersized_request->Close());
+  // A rejected options object leaves the request new and reusable.
+  EXPECT_NO_THROW(zero_budget_request->BeginTurn(
+      input_tokens, &exact_options));
+  EXPECT_NO_THROW(zero_budget_request->Close());
 
   auto owned_request = engine->CreateRequest(*params);
-  owned_request->BeginTurn(input_tokens);
+  EXPECT_EQ(owned_request->GetOpaqueData(), nullptr);
+  int application_state = 42;
+  owned_request->SetOpaqueData(&application_state);
+  void* c_opaque_data{};
+  OgaCheckResult(OgaRequestGetOpaqueData(
+      owned_request.get(), &c_opaque_data));
+  EXPECT_EQ(c_opaque_data, &application_state);
+
+  OgaTurnOptions one_token_turn{/*max_generated_tokens=*/1};
+  owned_request->BeginTurn(input_tokens, &one_token_turn);
+  // BeginTurn snapshots the scalar; it never retains caller-owned options storage.
+  one_token_turn.max_generated_tokens = 3;
   ASSERT_TRUE(engine->HasPendingRequests());
 
   OgaRequest* borrowed_request = engine->Run();
@@ -1043,6 +1093,7 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
 
   EXPECT_NO_THROW(borrowed_request->Close());
   EXPECT_NO_THROW(borrowed_request->Close());
+  EXPECT_EQ(owned_request->GetOpaqueData(), &application_state);
   EXPECT_TRUE(owned_request->HasUnseenTokens());
   static_cast<void>(owned_request->GetUnseenToken());
   EXPECT_FALSE(owned_request->HasUnseenTokens());

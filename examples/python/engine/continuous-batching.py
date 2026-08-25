@@ -68,7 +68,10 @@ class RequestPool:
         )
         request = self.engine.create_request(params)
         self.requests[request] = client_request
-        request.begin_turn(np.asarray(tokens, dtype=np.int32))
+        request.begin_turn(
+            np.asarray(tokens, dtype=np.int32),
+            max_generated_tokens=128,
+        )
 
     def admit_initial_requests(self):
         for prompt in self.prompts[: int(self.num_requests * self.load_factor)]:
