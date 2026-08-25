@@ -107,7 +107,8 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+  const bool share_buffers_configured =
+      state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
 
   // WebGPU prohibits binding the same buffer as both read-only (input) and
   // read-write (output) storage in the same compute pass, so it must use
@@ -117,16 +118,18 @@ RecurrentState::RecurrentState(State& state)
   // LinearAttention kernel with native past/present buffer sharing support.
   const bool is_webgpu = model_.p_device_kvcache_->GetType() == DeviceType::WEBGPU;
 
-  // Under CUDA-graph capture the recurrent (conv + linear-attention) state MUST be
-  // double-buffered, not shared in place. Unlike GroupQueryAttention's KV share-buffer,
-  // the LinearAttention / CausalConvWithState kernels update the recurrent state in place
-  // (present_state aliased onto past_state); capturing that in-place update in a CUDA graph
-  // produces a small but systematic per-step logit bias on replay that derails greedy
-  // decoding (observed MMLU-Pro collapse ~85% -> ~21% with graph on). Double-buffering
-  // (distinct past/present with a per-step swap and two captured graph variants) is proven
-  // bit-faithful to eager, so it is always used when graph capture is enabled.
-  graph_double_buffer_ = !is_webgpu && state_.params_->use_graph_capture;
-  share_buffers_ = !is_webgpu && !graph_double_buffer_;
+  // Under CUDA-graph capture the recurrent (conv + linear-attention) state is updated in
+  // place (present_state aliased onto past_state), and ORT re-runs the model several times
+  // inside the first Run() of each captured shape to warm up and capture. Save/restore around
+  // that first capture (see ShouldFixUpGraphCapture) keeps the update correct while using half
+  // the recurrent-state memory and one graph variant. The environment override can disable
+  // sharing to retain double buffering as a diagnostic fallback.
+  bool share_under_graph_capture = true;
+  GetEnv("ORTGENAI_SHARE_RECURRENT_STATE_UNDER_GRAPH_CAPTURE", share_under_graph_capture);
+  const bool graph_capture_enabled = !is_webgpu && state_.params_->use_graph_capture;
+  share_buffers_ = !is_webgpu &&
+                   (graph_capture_enabled ? share_under_graph_capture : share_buffers_configured);
+  graph_double_buffer_ = graph_capture_enabled && !share_buffers_;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);
@@ -328,6 +331,34 @@ void RecurrentState::RestoreSnapshot() {
   // Copy back into the live buffers in place so their addresses stay stable
   // (required by CUDA-graph replay, which captures fixed buffer pointers).
   CopyStates(snapshot_, presents_);
+}
+
+bool RecurrentState::ShouldFixUpGraphCapture(int graph_id) const {
+  if (layer_indices_.empty() || !share_buffers_ || !state_.params_->use_graph_capture)
+    return false;
+  return std::find(graph_capture_fixed_up_.begin(), graph_capture_fixed_up_.end(), graph_id) ==
+         graph_capture_fixed_up_.end();
+}
+
+void RecurrentState::SaveForGraphCapture() {
+  auto& device = *model_.p_device_kvcache_;
+  graph_capture_backup_.clear();
+  graph_capture_backup_.reserve(presents_.size());
+  for (auto& present : presents_) {
+    auto span = ByteWrapTensor(device, *present);
+    span.CopyDeviceToCpu();
+    graph_capture_backup_.push_back(std::move(span));
+  }
+}
+
+void RecurrentState::RestoreAfterGraphCapture(int graph_id) {
+  auto& device = *model_.p_device_kvcache_;
+  for (auto& span : graph_capture_backup_) {
+    span.CopyCpuToDevice();
+  }
+  device.Synchronize();
+  graph_capture_backup_.clear();
+  graph_capture_fixed_up_.push_back(graph_id);
 }
 
 std::unique_ptr<RecurrentState> CreateRecurrentState(State& state) {
