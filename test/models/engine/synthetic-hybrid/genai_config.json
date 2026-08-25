@@ -1,0 +1,54 @@
+{
+  "model": {
+    "type": "gpt2",
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "pad_token_id": 0,
+    "vocab_size": 16,
+    "context_length": 128,
+    "decoder": {
+      "session_options": {
+        "log_id": "onnxruntime-genai",
+        "provider_options": []
+      },
+      "filename": "decoder.onnx",
+      "num_attention_heads": 1,
+      "num_key_value_heads": 1,
+      "head_size": 1,
+      "hidden_size": 1,
+      "num_hidden_layers": 6,
+      "inputs": {
+        "input_ids": "input_ids",
+        "attention_mask": "attention_mask",
+        "position_ids": "position_ids",
+        "past_conv_names": "past_conv.%d",
+        "past_recurrent_names": "past_recurrent.%d"
+      },
+      "outputs": {
+        "logits": "logits",
+        "present_conv_names": "present_conv.%d",
+        "present_recurrent_names": "present_recurrent.%d"
+      },
+      "state_groups": [
+        {
+          "kind": "fixed_conv",
+          "layer_ids": [
+            0,
+            3
+          ]
+        },
+        {
+          "kind": "fixed_recurrent",
+          "layer_ids": [
+            2,
+            5
+          ]
+        }
+      ]
+    }
+  },
+  "search": {
+    "max_length": 128,
+    "do_sample": false
+  }
+}
