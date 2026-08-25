@@ -203,7 +203,11 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
-  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+  auto empty_shape = shape_;
+  if (Device().ShouldClampZeroLengthKeyValueCacheTensors()) {
+    empty_shape[2] = std::max<int64_t>(1, empty_shape[2]);
+  }
+  empty_past_ = OrtValue::CreateTensor(Allocator(), empty_shape, type_);
 
   // Auto-detect per-layer KV cache shape from ONNX session input shapes.
   // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
@@ -262,9 +266,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       // Create per-layer empty past tensors since the KV shape varies across layers
       empty_pasts_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
-        std::array<int64_t, 4> empty_shape = layer_shapes_[i];
-        empty_shape[2] = 0;  // sequence length = 0 for empty past
-        empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), empty_shape, type_);
+        std::array<int64_t, 4> layer_empty_shape = layer_shapes_[i];
+        layer_empty_shape[2] = 0;  // sequence length = 0 for empty past
+        if (Device().ShouldClampZeroLengthKeyValueCacheTensors()) {
+          layer_empty_shape[2] = 1;
+        }
+        empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), layer_empty_shape, type_);
       }
     }
   }

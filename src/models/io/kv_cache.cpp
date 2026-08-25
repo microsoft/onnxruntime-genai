@@ -8,6 +8,7 @@
 #include "ep_managed_sliding_kv_cache.h"
 #include "kv_cache.h"
 #include "model_managed_kv_cache.h"
+#include "quantized_regular_kv_cache.h"
 #include "regular_kv_cache.h"
 #include "shared_kv_cache.h"
 #include "static_kv_cache.h"
@@ -65,15 +66,24 @@ std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }
 
+  const int kv_cache_quantization_bits =
+      state.model_.p_device_kvcache_->GetKeyValueCacheQuantizationBits(state.model_.config_->model.decoder.session_options);
+
   if (ShouldUseSharedPastPresentKeyValueCache(state)) {
     const int windowed_cache_size = state.model_.p_device_kvcache_->GetWindowedKeyValueCacheSize(
         state.model_.config_->model.decoder, state.params_->search, state.params_->search.max_length);
     if (windowed_cache_size > 0) {
       return std::make_unique<EpManagedSlidingKeyValueCache>(state);
     }
+    if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+      return std::make_unique<QuantizedSharedKeyValueCache>(state);
+    }
     return std::make_unique<SharedKeyValueCache>(state);
   }
 
+  if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
+    return std::make_unique<QuantizedRegularKeyValueCache>(state);
+  }
   return std::make_unique<RegularKeyValueCache>(state);
 }
 
