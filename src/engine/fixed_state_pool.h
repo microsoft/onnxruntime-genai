@@ -19,7 +19,6 @@ struct OrtValue;
 namespace Generators {
 
 struct Model;
-class ModelStateManifest;
 class FixedStatePool;
 
 // Per-request row geometry derived from a fixed-state binding's session metadata.
@@ -159,9 +158,7 @@ class FixedStateReservation {
 
 class FixedStatePool {
  public:
-  FixedStatePool(std::shared_ptr<Model> model,
-                 const ModelStateManifest& manifest,
-                 size_t capacity);
+  FixedStatePool(std::shared_ptr<Model> model, size_t capacity);
   ~FixedStatePool();
 
   FixedStatePool(const FixedStatePool&) = delete;

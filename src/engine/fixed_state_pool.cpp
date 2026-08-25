@@ -28,6 +28,18 @@ std::string ExpandBinding(const std::string& binding, int layer_id) {
   return name;
 }
 
+std::pair<const std::string&, const std::string&> FixedStateTemplates(
+    const Config::Model::Decoder& decoder,
+    StateGroupKind kind) {
+  if (kind == StateGroupKind::FixedConv) {
+    return {decoder.inputs.past_conv_names, decoder.outputs.present_conv_names};
+  }
+  if (kind == StateGroupKind::FixedRecurrent) {
+    return {decoder.inputs.past_recurrent_names, decoder.outputs.present_recurrent_names};
+  }
+  throw std::logic_error("Fixed state pool received a non-fixed state group.");
+}
+
 size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
   if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
     throw std::runtime_error(
@@ -141,6 +153,7 @@ struct FixedStateReservation::Storage {
 
 struct FixedStatePool::Impl {
   struct TensorSpec {
+    StateGroupKind kind{};
     int layer_id{};
     std::string input_name;
     std::string output_name;
@@ -370,8 +383,9 @@ void FixedStateReservation::PrepareCommit() {
 
 void FixedStateReservation::PublishCommit() noexcept {
   if (!pool_) {
-    // The pool was destroyed after PrepareCommit; there is nothing left to publish into.
-    return;
+    // Losing the pool before publication is a caller lifecycle bug. Silently succeeding here
+    // would let a composite transaction publish its other resources without fixed state.
+    std::terminate();
   }
   // PublishCommit must only be reached after a successful PrepareCommit. Anything else is a caller
   // sequencing bug that would silently diverge fixed state from the rest of a composite commit.
@@ -405,9 +419,7 @@ void FixedStateReservation::Discard() {
   pool_->Discard(*this);
 }
 
-FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
-                               const ModelStateManifest& manifest,
-                               size_t capacity)
+FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     : impl_{std::make_unique<Impl>(std::move(model), capacity)} {
   if (!impl_->model) {
     throw std::invalid_argument("Fixed state pool requires a model.");
@@ -431,17 +443,23 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
   }
 
   impl_->owner = this;
+  const ModelStateManifest manifest{impl_->model->config_->model.decoder};
   manifest.ValidateSession(impl_->model->session_info_);
 
+  const auto& decoder = impl_->model->config_->model.decoder;
   for (const auto& group : manifest.StateGroups()) {
-    if (group.kind != StateGroupKind::Fixed) {
+    if (group.kind != StateGroupKind::FixedConv &&
+        group.kind != StateGroupKind::FixedRecurrent) {
       continue;
     }
+    const auto [input_template, output_template] =
+        FixedStateTemplates(decoder, group.kind);
     for (const int layer_id : group.layer_ids) {
       Impl::TensorSpec spec;
+      spec.kind = group.kind;
       spec.layer_id = layer_id;
-      spec.input_name = ExpandBinding(group.state->input, layer_id);
-      spec.output_name = ExpandBinding(group.state->output, layer_id);
+      spec.input_name = ExpandBinding(input_template, layer_id);
+      spec.output_name = ExpandBinding(output_template, layer_id);
       spec.data_type =
           impl_->model->session_info_.GetInputDataType(spec.input_name);
       spec.session_shape =
@@ -675,7 +693,7 @@ FixedStateReservation FixedStatePool::Reserve(
     storage->input_names.push_back(spec.input_name);
     storage->output_names.push_back(spec.output_name);
     storage->bindings.push_back(FixedStateBinding{
-        StateGroupKind::Fixed,
+        spec.kind,
         spec.layer_id,
         storage->input_names.back().c_str(),
         gathered.get(),

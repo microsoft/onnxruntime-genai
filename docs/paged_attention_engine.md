@@ -8,7 +8,7 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
-The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed` manifest groups (recurrent or convolutional state), but the dynamic Engine still rejects `fixed` groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed_conv` and `fixed_recurrent` manifest groups, but the dynamic Engine still rejects those groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
@@ -101,7 +101,7 @@ When an explicit manifest is present, model loading resolves each group's decode
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-Fixed groups remain unsupported by the dynamic Engine: `ValidateDynamicEngineCompatibility` rejects any `fixed` group until request-owned fixed-state transactions are integrated. A standalone `FixedStatePool` (below) can already validate, allocate, and transactionally stage `fixed` groups, but the Engine does not construct it or bind it to model execution, so a `fixed` group still only describes graph state.
+Fixed groups remain unsupported by the dynamic Engine: `ValidateDynamicEngineCompatibility` rejects `fixed_conv` and `fixed_recurrent` until request-owned fixed-state transactions are integrated. A standalone `FixedStatePool` (below) can already validate, allocate, and transactionally stage those groups, but the Engine does not construct it or bind it to model execution, so they still only describe graph state.
 
 ## Request lifecycle
 
@@ -625,8 +625,8 @@ shape as the full-context table.
 
 ## Fixed request-state pools
 
-`FixedStatePool` is a model-independent owner for the manifest's `fixed` state
-groups (recurrent or convolutional per-request state). It validates the manifest
+`FixedStatePool` is a model-independent owner for the manifest's `fixed_conv` and
+`fixed_recurrent` groups. It validates the manifest
 against session metadata and, for every fixed binding, additionally checks that
 the input and output describe one per-request row of identical, statically known,
 non-batch geometry with a batch axis (axis 0) that is either dynamic or a positive
@@ -667,12 +667,12 @@ double buffering lets the commit be split into three phases so that a composite
 Engine transaction can validate and stage all of its resources, synchronize once,
 and then publish them at a single infallible boundary:
 
-- **`ValidateCommit()`** is `const`, mutates nothing, and is the only fallible part
-  of the commit. It proves every checkpointed slot is exactly where the reservation
+- **`ValidateCommit()`** is the fallible host-side preflight. It is `const`, mutates
+  nothing, and proves every checkpointed slot is exactly where the reservation
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
-- **`PrepareCommit()`** performs all fallible and device work: it re-validates, then
+- **`PrepareCommit()`** is the fallible device-staging phase: it re-validates, then
   copies each staged output row into the slot's **inactive** bank and synchronizes.
   The active (visible) bank is never touched, so a failure leaves committed state
   exactly as it was; it drains the device and marks the pool unhealthy because the
@@ -712,7 +712,7 @@ the persistent footprint for a publish that is a host-only bank flip with no dev
 copy, which is what lets `PublishCommit()` be `noexcept`.
 
 This pool is not yet part of the Engine transaction, scheduler capacity model, or
-decoder bindings, and the dynamic Engine still rejects `fixed` groups. Those
+decoder bindings, and the dynamic Engine still rejects fixed-state groups. Those
 integrations must commit paged KV, fixed state, request/search state, and ready
 events at one boundary before hybrid execution is enabled.
 

@@ -121,30 +121,22 @@ def create_config(output_dir):
                     "input_ids": "input_ids",
                     "attention_mask": "attention_mask",
                     "position_ids": "position_ids",
+                    "past_conv_names": "past_conv.%d",
+                    "past_recurrent_names": "past_recurrent.%d",
                 },
                 "outputs": {
                     "logits": "logits",
+                    "present_conv_names": "present_conv.%d",
+                    "present_recurrent_names": "present_recurrent.%d",
                 },
                 "state_groups": [
                     {
-                        "kind": "fixed",
+                        "kind": "fixed_conv",
                         "layer_ids": CONV_LAYERS,
-                        "bindings": {
-                            "state": {
-                                "input": "past_conv.%d",
-                                "output": "present_conv.%d",
-                            },
-                        },
                     },
                     {
-                        "kind": "fixed",
+                        "kind": "fixed_recurrent",
                         "layer_ids": RECURRENT_LAYERS,
-                        "bindings": {
-                            "state": {
-                                "input": "past_recurrent.%d",
-                                "output": "present_recurrent.%d",
-                            },
-                        },
                     },
                 ],
             },
@@ -161,9 +153,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-hybrid"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-hybrid"),
     )
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)

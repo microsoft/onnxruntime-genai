@@ -20,37 +20,29 @@
       "inputs": {
         "input_ids": "input_ids",
         "attention_mask": "attention_mask",
-        "position_ids": "position_ids"
+        "position_ids": "position_ids",
+        "past_conv_names": "past_conv.%d",
+        "past_recurrent_names": "past_recurrent.%d"
       },
       "outputs": {
-        "logits": "logits"
+        "logits": "logits",
+        "present_conv_names": "present_conv.%d",
+        "present_recurrent_names": "present_recurrent.%d"
       },
       "state_groups": [
         {
-          "kind": "fixed",
+          "kind": "fixed_conv",
           "layer_ids": [
             0,
             3
-          ],
-          "bindings": {
-            "state": {
-              "input": "past_conv.%d",
-              "output": "present_conv.%d"
-            }
-          }
+          ]
         },
         {
-          "kind": "fixed",
+          "kind": "fixed_recurrent",
           "layer_ids": [
             2,
             5
-          ],
-          "bindings": {
-            "state": {
-              "input": "past_recurrent.%d",
-              "output": "present_recurrent.%d"
-            }
-          }
+          ]
         }
       ]
     }

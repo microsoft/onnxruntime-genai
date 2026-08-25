@@ -75,11 +75,10 @@ class FixedStatePoolTest : public ::testing::Test {
  protected:
   void SetUp() override {
     model_ = LoadSyntheticHybridModel();
-    manifest_ = std::make_unique<ModelStateManifest>(model_->config_->model.decoder);
   }
 
   std::unique_ptr<FixedStatePool> MakePool(size_t capacity = 4) {
-    return std::make_unique<FixedStatePool>(model_, *manifest_, capacity);
+    return std::make_unique<FixedStatePool>(model_, capacity);
   }
 
   // Admits a fresh request and commits it with every state row filled with `value`, returning the
@@ -95,7 +94,6 @@ class FixedStatePoolTest : public ::testing::Test {
   }
 
   std::shared_ptr<Model> model_;
-  std::unique_ptr<ModelStateManifest> manifest_;
 };
 
 TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
@@ -105,9 +103,10 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
 
   ASSERT_EQ(reservation.Bindings().size(), 4u);
   using Kind = Config::Model::Decoder::StateGroupKind;
-  for (const auto& binding : reservation.Bindings()) {
-    EXPECT_EQ(binding.kind, Kind::Fixed);
-  }
+  EXPECT_EQ(reservation.Bindings()[0].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[1].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[2].kind, Kind::FixedRecurrent);
+  EXPECT_EQ(reservation.Bindings()[3].kind, Kind::FixedRecurrent);
   // Convolution group first, then recurrent group, each in layer order.
   EXPECT_EQ(reservation.Bindings()[0].layer_id, 0);
   EXPECT_STREQ(reservation.Bindings()[0].input_name, "past_conv.0");
@@ -484,7 +483,7 @@ TEST_F(FixedStatePoolTest, DiscardRejectsCommittedButNotTerminalReservations) {
   EXPECT_EQ(reservation.State(), FixedStateReservationState::Committed);
 }
 
-TEST_F(FixedStatePoolTest, PublishCommitAfterPoolDestructionIsANoOp) {
+TEST_F(FixedStatePoolTest, PublishCommitAfterPoolDestructionFailsFast) {
   std::optional<FixedStateReservation> reservation;
   {
     auto pool = MakePool(1);
@@ -494,9 +493,9 @@ TEST_F(FixedStatePoolTest, PublishCommitAfterPoolDestructionIsANoOp) {
     reservation->PrepareCommit();
     ASSERT_EQ(reservation->State(), FixedStateReservationState::Prepared);
   }
-  // The pool is gone. PublishCommit must not touch freed pool state; it is a silent no-op and the
-  // reservation is left in its pool-neutralized Failed state.
-  reservation->PublishCommit();
+  // The pool is gone. Publication cannot succeed without fixed state while a composite transaction
+  // continues publishing its other resources, so this lifecycle violation terminates.
+  EXPECT_DEATH_IF_SUPPORTED(reservation->PublishCommit(), "");
   EXPECT_EQ(reservation->State(), FixedStateReservationState::Failed);
   reservation.reset();
 }
