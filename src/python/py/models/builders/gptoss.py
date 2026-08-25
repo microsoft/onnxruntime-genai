@@ -27,9 +27,9 @@ class GPTOSSModel(Model):
         except ImportError:
             from onnxruntime_genai.models.loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
 
-        if not hasattr(self, "_mxfp4_loader"):
-            self._mxfp4_loader = GptOssMXFP4Loader(self.model_name_or_path, self.cache_dir, self.hf_token)
-        return self._mxfp4_loader.prepare_experts(layer_id)
+        if not hasattr(self, "mxfp4_loader"):
+            self.mxfp4_loader = GptOssMXFP4Loader(self.model_name_or_path, self.cache_dir, self.hf_token)
+        return self.mxfp4_loader.prepare_experts(layer_id)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
