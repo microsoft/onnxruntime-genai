@@ -573,6 +573,12 @@ struct FixedStatePool::Impl {
   uint64_t direct_span_rows{};
   uint64_t gathered_reservations{};
   uint64_t gathered_rows{};
+  uint64_t prefill_direct_rows{};
+  uint64_t prefill_gathered_rows{};
+  uint64_t decode_direct_rows{};
+  uint64_t decode_gathered_rows{};
+  uint64_t speculative_direct_rows{};
+  uint64_t speculative_gathered_rows{};
   uint64_t noncontiguous_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   bool healthy{true};
@@ -1010,12 +1016,17 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
 
   std::shared_ptr<const FixedStateStepPlan> FixedStatePool::PlanStep(
       std::span<const FixedStateReservationRequest> requests,
-      bool capture_checkpoints) const {
+      bool capture_checkpoints,
+      std::span<const FixedStateStepPhase> phases) const {
     impl_->EnsureHealthy();
     impl_->EnsureIdle();
     if (requests.empty()) {
       throw std::invalid_argument(
           "Fixed state planning must contain at least one request.");
+    }
+    if (!phases.empty() && phases.size() != requests.size()) {
+      throw std::invalid_argument(
+          "Fixed state planning phases must match the request row count.");
     }
     const bool has_capture_counts = std::any_of(
         requests.begin(), requests.end(),
@@ -1097,6 +1108,7 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
           slot.state_generation,
           requests[row].target_tokens,
           requests[row].capture_count,
+            phases.empty() ? FixedStateStepPhase::Unspecified : phases[row],
       });
     }
     return plan;
@@ -1517,6 +1529,31 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
       Impl::SaturatingAdd(impl_->mixed_active_bank_fallbacks, 1);
     }
   }
+  for (const auto& row : plan.rows) {
+    uint64_t* counter = nullptr;
+    switch (row.phase) {
+      case FixedStateStepPhase::Prefill:
+        counter = storage->binds_direct_banks
+                      ? &impl_->prefill_direct_rows
+                      : &impl_->prefill_gathered_rows;
+        break;
+      case FixedStateStepPhase::Decode:
+        counter = storage->binds_direct_banks
+                      ? &impl_->decode_direct_rows
+                      : &impl_->decode_gathered_rows;
+        break;
+      case FixedStateStepPhase::SpeculativeVerification:
+        counter = storage->binds_direct_banks
+                      ? &impl_->speculative_direct_rows
+                      : &impl_->speculative_gathered_rows;
+        break;
+      case FixedStateStepPhase::Unspecified:
+        break;
+    }
+    if (counter) {
+      Impl::SaturatingAdd(*counter, 1);
+    }
+  }
   return FixedStateReservation{*this, reservation_id, std::move(storage)};
 }
 
@@ -1551,6 +1588,17 @@ uint64_t FixedStatePool::CommittedTokens(
   return impl_->ValidateCommittedHandle(handle).committed_tokens;
 }
 
+FixedStateBindingMetrics FixedStatePool::BindingMetrics() const noexcept {
+  return FixedStateBindingMetrics{
+      impl_->prefill_direct_rows,
+      impl_->prefill_gathered_rows,
+      impl_->decode_direct_rows,
+      impl_->decode_gathered_rows,
+      impl_->speculative_direct_rows,
+      impl_->speculative_gathered_rows,
+  };
+}
+
 FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
   FixedStatePoolSnapshot snapshot;
   snapshot.capacity = impl_->capacity;
@@ -1558,6 +1606,7 @@ FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
   snapshot.direct_span_rows = impl_->direct_span_rows;
   snapshot.gathered_reservations = impl_->gathered_reservations;
   snapshot.gathered_rows = impl_->gathered_rows;
+  snapshot.binding_metrics = BindingMetrics();
   snapshot.noncontiguous_slot_fallbacks = impl_->noncontiguous_slot_fallbacks;
   snapshot.mixed_active_bank_fallbacks = impl_->mixed_active_bank_fallbacks;
   snapshot.persistent_bytes = impl_->persistent_bytes;

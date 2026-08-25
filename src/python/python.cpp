@@ -260,7 +260,11 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "target_reconciliation_forward_passes", "ngram_lookup_hits",
                           "ngram_lookup_misses", "ngram_lookup_tokens_proposed",
                           "ngram_chained_tokens_proposed", "ngram_grammar_candidate_rejections",
-                          "ngram_history_syncs", "ngram_history_tokens_synced"})
+                          "ngram_history_syncs", "ngram_history_tokens_synced",
+                          "fixed_state_prefill_direct_rows", "fixed_state_prefill_gathered_rows",
+                          "fixed_state_decode_direct_rows", "fixed_state_decode_gathered_rows",
+                          "fixed_state_speculative_direct_rows",
+                          "fixed_state_speculative_gathered_rows"})
     d[key] = stats.GetCount(key);
   d["formula_supported"] = stats.GetBool("formula_supported");
   for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",

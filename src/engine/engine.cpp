@@ -1276,6 +1276,13 @@ size_t Engine::MaxDraftTokensPerStep() const {
 
 SpeculativeStats Engine::GetSpeculativeStats() const noexcept {
   auto stats = speculative_stats_;
+  const auto fixed_state = cache_manager_->FixedStateMetrics();
+  stats.fixed_state_prefill_direct_rows = fixed_state.prefill_direct_rows;
+  stats.fixed_state_prefill_gathered_rows = fixed_state.prefill_gathered_rows;
+  stats.fixed_state_decode_direct_rows = fixed_state.decode_direct_rows;
+  stats.fixed_state_decode_gathered_rows = fixed_state.decode_gathered_rows;
+  stats.fixed_state_speculative_direct_rows = fixed_state.speculative_direct_rows;
+  stats.fixed_state_speculative_gathered_rows = fixed_state.speculative_gathered_rows;
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
                             static_cast<float>(stats.draft_tokens_evaluated);

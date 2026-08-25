@@ -49,6 +49,12 @@ struct SpeculativeStats {
   size_t ngram_grammar_candidate_rejections{};
   size_t ngram_history_syncs{};
   size_t ngram_history_tokens_synced{};
+  size_t fixed_state_prefill_direct_rows{};
+  size_t fixed_state_prefill_gathered_rows{};
+  size_t fixed_state_decode_direct_rows{};
+  size_t fixed_state_decode_gathered_rows{};
+  size_t fixed_state_speculative_direct_rows{};
+  size_t fixed_state_speculative_gathered_rows{};
   std::array<size_t, kSpeculativeAcceptanceLengthBins> acceptance_length_histogram{};
   size_t formula_supported{};
   float total_draft_ms{};

@@ -865,6 +865,18 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->ngram_history_syncs;
   else if (key == "ngram_history_tokens_synced")
     *value = stats->ngram_history_tokens_synced;
+  else if (key == "fixed_state_prefill_direct_rows")
+    *value = stats->fixed_state_prefill_direct_rows;
+  else if (key == "fixed_state_prefill_gathered_rows")
+    *value = stats->fixed_state_prefill_gathered_rows;
+  else if (key == "fixed_state_decode_direct_rows")
+    *value = stats->fixed_state_decode_direct_rows;
+  else if (key == "fixed_state_decode_gathered_rows")
+    *value = stats->fixed_state_decode_gathered_rows;
+  else if (key == "fixed_state_speculative_direct_rows")
+    *value = stats->fixed_state_speculative_direct_rows;
+  else if (key == "fixed_state_speculative_gathered_rows")
+    *value = stats->fixed_state_speculative_gathered_rows;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;

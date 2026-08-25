@@ -1166,6 +1166,13 @@ TEST_F(EngineStepTest, CompositeReservationExposesRowsAndCommitsBothStates) {
   EXPECT_EQ(FixedSlotFor(*fixed, first.get()).committed_tokens, 3u);
   EXPECT_EQ(FixedSlotFor(*fixed, second.get()).state_generation, 1u);
   EXPECT_EQ(FixedSlotFor(*fixed, second.get()).committed_tokens, 3u);
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 2u);
+  EXPECT_EQ(fixed->binding_metrics.prefill_gathered_rows, 0u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 0u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 0u);
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.fixed_state_prefill_direct_rows, 2u);
+  EXPECT_EQ(stats.fixed_state_prefill_gathered_rows, 0u);
   EXPECT_TRUE(ValidateCompositeStateInvariants(
                   engine.cache->Snapshot(), *fixed,
                   {first->Snapshot(), second->Snapshot()})
@@ -1212,6 +1219,9 @@ TEST_F(EngineStepTest, CompositeExecutionFailureDiscardsBothAndRetryMatches) {
   EXPECT_EQ(fixed->committed_slots, 1u);
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 1u);
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 3u);
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 2u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 0u);
+  EXPECT_EQ(fixed->binding_metrics.decode_gathered_rows, 0u);
 }
 
 TEST_F(EngineStepTest, CompositePostProcessingFailurePreservesResidentState) {
@@ -1247,6 +1257,9 @@ TEST_F(EngineStepTest, CompositePostProcessingFailurePreservesResidentState) {
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 3u);
   ASSERT_EQ(engine.cache->Snapshot().requests.size(), 1u);
   EXPECT_EQ(engine.cache->Snapshot().requests[0].used_slots, 3u);
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.decode_gathered_rows, 0u);
 
   staged_output = 6.0f;  // the retry still gathers 5.0 and now publishes 6.0
   EXPECT_EQ(engine.engine->Step(), request);
@@ -1254,6 +1267,8 @@ TEST_F(EngineStepTest, CompositePostProcessingFailurePreservesResidentState) {
   ASSERT_TRUE(fixed.has_value());
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 2u);
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 4u);
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 2u);
 }
 
 TEST_F(EngineStepTest, CompositeReservationRequiredMismatchIsFatal) {
@@ -2015,6 +2030,9 @@ TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
   // Two accepted drafts plus the token the step started from: both states stop at the same token.
   const auto fixed = engine.cache->FixedStateSnapshot();
   ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_gathered_rows, 0u);
   const auto expected_boundary = static_cast<uint64_t>(length_after_prefill + 2);
   EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, expected_boundary);
   const auto paged = engine.cache->Snapshot();
@@ -2071,6 +2089,11 @@ TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
   EXPECT_EQ(decode->PendingDraftTokenCount(), 0u);
   EXPECT_TRUE(decode->HasUnseenTokens());
   EXPECT_TRUE(prefill->HasUnseenTokens());
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 2u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 0u);
 }
 
 // The inverse: a model whose operators emit the checkpoint series per request keeps the decode
@@ -2116,6 +2139,11 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
   EXPECT_EQ(decode->PendingDraftTokenCount(), 0u);
   EXPECT_TRUE(decode->HasUnseenTokens());
   EXPECT_TRUE(prefill->HasUnseenTokens());
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 2u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 1u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 0u);
 }
 
 TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsInMixedBatchWithCompactUpdates) {

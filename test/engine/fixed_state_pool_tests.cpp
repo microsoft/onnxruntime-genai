@@ -508,8 +508,11 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
   {
     const std::array<Request, 2> reordered{
         Request{kRequestB, 2}, Request{kRequestA, 2}};
+    const std::array<FixedStateStepPhase, 2> phases{
+      FixedStateStepPhase::Prefill, FixedStateStepPhase::Decode};
     EXPECT_EQ(pool->PlannedStagingBytes(reordered), gathered_staging);
-    auto reservation = pool->Reserve(reordered);
+    const auto plan = pool->PlanStep(reordered, false, phases);
+    auto reservation = pool->Reserve(*plan);
     EXPECT_EQ(reservation.PlannedStagingBytes(), gathered_staging);
     ExpectInputRows(reservation, 0, 2.0f);
     ExpectInputRows(reservation, 1, 1.0f);
@@ -521,6 +524,9 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
     EXPECT_EQ(snapshot.gathered_rows, 2u);
     EXPECT_EQ(snapshot.noncontiguous_slot_fallbacks, 1u);
     EXPECT_EQ(snapshot.mixed_active_bank_fallbacks, 0u);
+    EXPECT_EQ(snapshot.binding_metrics.prefill_gathered_rows, 1u);
+    EXPECT_EQ(snapshot.binding_metrics.decode_gathered_rows, 1u);
+    EXPECT_EQ(snapshot.binding_metrics.speculative_gathered_rows, 0u);
   }
 
   {
@@ -671,6 +677,21 @@ TEST_F(FixedStatePoolTest, RejectsEmptyReservation) {
   const std::span<const Request> empty;
   EXPECT_THROW(pool->Reserve(empty), std::invalid_argument);
   EXPECT_EQ(pool->AvailableSlots(), 1u);
+}
+
+TEST_F(FixedStatePoolTest, RejectsMismatchedStepPhaseRows) {
+  auto pool = MakePool(2);
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 1}, Request{kRequestB, 1}};
+  const std::array<FixedStateStepPhase, 1> phases{
+      FixedStateStepPhase::Prefill};
+
+  EXPECT_THROW(pool->PlanStep(requests, false, phases), std::invalid_argument);
+  const auto snapshot = pool->Snapshot();
+  EXPECT_EQ(snapshot.free_slots, 2u);
+  EXPECT_EQ(snapshot.direct_span_reservations, 0u);
+  EXPECT_EQ(snapshot.binding_metrics.prefill_direct_rows, 0u);
+  EXPECT_EQ(snapshot.binding_metrics.prefill_gathered_rows, 0u);
 }
 
 TEST_F(FixedStatePoolTest, NotEnoughFreeSlotsForNewAdmissions) {

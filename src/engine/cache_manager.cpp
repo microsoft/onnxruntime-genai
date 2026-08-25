@@ -541,15 +541,23 @@ void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
 
   std::vector<FixedStateReservationRequest> fixed_requests;
   fixed_requests.reserve(plan.requests.size());
+  std::vector<FixedStateStepPhase> fixed_phases;
+  fixed_phases.reserve(plan.requests.size());
   size_t new_slot_count = 0;
   for (const auto& entry : plan.requests) {
     fixed_requests.push_back(FixedStateReservationRequest{
         entry.request_id, entry.target_cache_slots, entry.draft_token_count});
+      fixed_phases.push_back(
+        entry.is_prefill
+          ? FixedStateStepPhase::Prefill
+          : entry.draft_token_count != 0
+              ? FixedStateStepPhase::SpeculativeVerification
+              : FixedStateStepPhase::Decode);
     new_slot_count += entry.newly_admitted ? 1 : 0;
   }
 
-    const auto fixed_step_plan =
-      fixed_state_pool_->PlanStep(fixed_requests, capture_checkpoints);
+    const auto fixed_step_plan = fixed_state_pool_->PlanStep(
+      fixed_requests, capture_checkpoints, fixed_phases);
     plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),

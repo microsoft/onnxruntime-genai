@@ -87,6 +87,13 @@ enum class FixedStateCaptureMode {
   DenseCheckpoints,
 };
 
+enum class FixedStateStepPhase {
+  Unspecified,
+  Prefill,
+  Decode,
+  SpeculativeVerification,
+};
+
 struct FixedStateStepPlanRow {
   const void* request_id{};
   size_t slot{};
@@ -95,6 +102,7 @@ struct FixedStateStepPlanRow {
   uint64_t expected_state_generation{};
   uint64_t target_tokens{};
   size_t capture_count{};
+  FixedStateStepPhase phase{FixedStateStepPhase::Unspecified};
 };
 
 struct FixedStateStepPlan {
@@ -155,6 +163,15 @@ struct FixedStateSlotSnapshot {
   FixedStateSlotOwnership ownership{FixedStateSlotOwnership::Free};
 };
 
+struct FixedStateBindingMetrics {
+  uint64_t prefill_direct_rows{};
+  uint64_t prefill_gathered_rows{};
+  uint64_t decode_direct_rows{};
+  uint64_t decode_gathered_rows{};
+  uint64_t speculative_direct_rows{};
+  uint64_t speculative_gathered_rows{};
+};
+
 struct FixedStatePoolSnapshot {
   size_t capacity{};
   size_t free_slots{};
@@ -164,6 +181,7 @@ struct FixedStatePoolSnapshot {
   uint64_t direct_span_rows{};
   uint64_t gathered_reservations{};
   uint64_t gathered_rows{};
+  FixedStateBindingMetrics binding_metrics;
   uint64_t noncontiguous_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   size_t persistent_bytes{};
@@ -267,7 +285,8 @@ class FixedStatePool {
       bool capture_checkpoints = false) const;
     std::shared_ptr<const FixedStateStepPlan> PlanStep(
       std::span<const FixedStateReservationRequest> requests,
-      bool capture_checkpoints = false) const;
+        bool capture_checkpoints = false,
+        std::span<const FixedStateStepPhase> phases = {}) const;
 
   // True when every fixed binding declares a checkpoints output, so reservations may capture the
   // per-token state series a speculative step rolls back through.
@@ -297,6 +316,7 @@ class FixedStatePool {
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;
   uint64_t CommittedTokens(const FixedStateSlotHandle& handle) const;
+  FixedStateBindingMetrics BindingMetrics() const noexcept;
   FixedStatePoolSnapshot Snapshot() const;
 
  private:

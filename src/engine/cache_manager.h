@@ -105,6 +105,7 @@ struct CacheManager {
   // Immutable snapshot of the fixed decoder-state pool, or nullopt when the model has no fixed
   // groups (so the composite manager owns no pool).
   virtual std::optional<FixedStatePoolSnapshot> FixedStateSnapshot() const { return std::nullopt; }
+  virtual FixedStateBindingMetrics FixedStateMetrics() const noexcept { return {}; }
 
   virtual StepPlanningResult PlanStepResources(StepPlan&) const {
     throw std::logic_error("Cache manager does not support transactional step planning.");
@@ -194,6 +195,11 @@ struct PagedCacheManager : CacheManager {
     return fixed_state_pool_
                ? std::optional<FixedStatePoolSnapshot>{fixed_state_pool_->Snapshot()}
                : std::nullopt;
+  }
+
+  FixedStateBindingMetrics FixedStateMetrics() const noexcept override {
+    return fixed_state_pool_ ? fixed_state_pool_->BindingMetrics()
+                             : FixedStateBindingMetrics{};
   }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override;
