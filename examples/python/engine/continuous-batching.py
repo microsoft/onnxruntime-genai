@@ -2,10 +2,9 @@
 # Licensed under the MIT License.
 
 import argparse
+from collections import deque
 import json
-import queue
 import random
-import threading
 import time
 
 import numpy as np
@@ -44,9 +43,10 @@ class RequestPool:
         self.requests: dict[og.Request, ClientRequest] = {}
         self.prompts = get_random_prompts(num_requests)
         self.load_factor = load_factor
-        self.commands = queue.Queue()
-        self.stop_producer = threading.Event()
-        self.producer_done = False
+        initial_count = int(self.num_requests * self.load_factor)
+        self.initial_prompts = self.prompts[:initial_count]
+        self.delayed_prompts = deque(self.prompts[initial_count:])
+        self.next_admission_time = time.monotonic()
         self.bar = tqdm.tqdm(total=len(self.prompts))
         self.debug = debug
 
@@ -74,18 +74,14 @@ class RequestPool:
         )
 
     def admit_initial_requests(self):
-        for prompt in self.prompts[: int(self.num_requests * self.load_factor)]:
+        for prompt in self.initial_prompts:
             self.admit(prompt)
 
-    def produce(self):
-        try:
-            delayed_prompts = self.prompts[int(len(self.prompts) * self.load_factor) :]
-            for index, prompt in enumerate(delayed_prompts):
-                if index > 0 and self.stop_producer.wait(1):
-                    break
-                self.commands.put(("admit", prompt))
-        finally:
-            self.commands.put(("producer-done", None))
+    def admit_due_request(self):
+        if not self.delayed_prompts or time.monotonic() < self.next_admission_time:
+            return
+        self.admit(self.delayed_prompts.popleft())
+        self.next_admission_time = time.monotonic() + 1
 
     def drain(self, request: og.Request):
         client_request = self.requests.get(request)
@@ -106,20 +102,9 @@ class RequestPool:
 
         return token_count
 
-    def handle_command(self, command):
-        action, prompt = command
-        if action == "admit":
-            self.admit(prompt)
-        else:
-            self.producer_done = True
-
-    def drain_commands(self):
-        while True:
-            try:
-                command = self.commands.get_nowait()
-            except queue.Empty:
-                return
-            self.handle_command(command)
+    def wait_for_next_admission(self):
+        if self.delayed_prompts:
+            time.sleep(max(0, self.next_admission_time - time.monotonic()))
 
 
 class Engine:
@@ -135,29 +120,19 @@ class Engine:
         self.tokens_decoded = 0
 
     def run(self, request_pool: RequestPool):
-        producer_thread = threading.Thread(target=request_pool.produce)
-        producer_started = False
-
+        request_pool.admit_initial_requests()
+        start = time.time()
         try:
-            request_pool.admit_initial_requests()
-            producer_thread.start()
-            producer_started = True
-            start = time.time()
-            while True:
-                request_pool.drain_commands()
+            while self.engine.has_pending_requests() or request_pool.delayed_prompts:
+                request_pool.admit_due_request()
                 if self.engine.has_pending_requests():
                     request = self.engine.run()
                     if request is None:
                         raise RuntimeError("Engine returned no request while work remained")
                     self.tokens_decoded += request_pool.drain(request)
                     continue
-                if request_pool.producer_done:
-                    break
-                request_pool.handle_command(request_pool.commands.get())
+                request_pool.wait_for_next_admission()
         finally:
-            request_pool.stop_producer.set()
-            if producer_started:
-                producer_thread.join()
             for request in list(request_pool.requests):
                 request.close()
                 del request_pool.requests[request]
