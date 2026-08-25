@@ -5,6 +5,8 @@
 
 #include <optional>
 
+#include "../models/model_state_manifest.h"
+
 namespace Generators {
 
 namespace {

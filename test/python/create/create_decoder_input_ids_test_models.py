@@ -34,19 +34,6 @@ def _logits_weight() -> onnx.TensorProto:
     return numpy_helper.from_array(np.zeros((HIDDEN_SIZE, VOCAB_SIZE), dtype=np.float32), name="logits_weight")
 
 
-def _kv_pad_constant() -> onnx.TensorProto:
-    """Pad descriptor that appends exactly 1 zero element on axis-2 (sequence axis).
-
-    For a 4-D KV tensor [B, H, P, D] the pad vector layout is:
-      [begin_B, begin_H, begin_P, begin_D, end_B, end_H, end_P, end_D]
-    = [0, 0, 0, 0, 0, 0, 1, 0]
-
-    This makes present.key.shape[2] == past.key.shape[2] + 1 each step,
-    which satisfies ORT-GenAI's KV-cache shape validation.
-    """
-    return numpy_helper.from_array(np.array([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.int64), name="kv_pad")
-
-
 # ---------------------------------------------------------------------------
 # Shared decoder building block
 # ---------------------------------------------------------------------------
@@ -76,8 +63,16 @@ def _build_decoder_graph(extra_graph_inputs: list) -> tuple:
     """
     nodes = [
         helper.make_node("MatMul", ["inputs_embeds", "logits_weight"], ["logits"]),
+        helper.make_node("Shape", ["inputs_embeds"], ["inputs_embeds_shape"]),
+        helper.make_node("Gather", ["inputs_embeds_shape", "sequence_axis"], ["sequence_length"]),
+        helper.make_node("Concat", ["six_zeros", "sequence_length", "one_zero"], ["kv_pad"], axis=0),
     ]
-    initializers = [_logits_weight(), _kv_pad_constant()]
+    initializers = [
+        _logits_weight(),
+        numpy_helper.from_array(np.array([1], dtype=np.int64), name="sequence_axis"),
+        numpy_helper.from_array(np.zeros(6, dtype=np.int64), name="six_zeros"),
+        numpy_helper.from_array(np.zeros(1, dtype=np.int64), name="one_zero"),
+    ]
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", "seq", VOCAB_SIZE]),
     ]
@@ -147,13 +142,18 @@ def make_embedding_model() -> onnx.ModelProto:
                             session_info_.GetInputDataType("image_features") succeeds
                             when MultiModalFeatures allocates an empty features tensor
                             for text-only generation)
-    Outputs: inputs_embeds  [batch, seq, HIDDEN_SIZE]  (fixed zero initializer)
+    Outputs: inputs_embeds  [batch, seq, HIDDEN_SIZE]
     """
-    embeds_init = numpy_helper.from_array(np.zeros((1, 1, HIDDEN_SIZE), dtype=np.float32), name="inputs_embeds")
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT32, ["batch", "seq"])
     image_features = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", HIDDEN_SIZE])
     embeds_out = helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE])
-    graph = helper.make_graph([], "embedding", [input_ids, image_features], [embeds_out], [embeds_init])
+    nodes = [
+        helper.make_node("Shape", ["input_ids"], ["input_ids_shape"]),
+        helper.make_node("Concat", ["input_ids_shape", "hidden_size"], ["embeddings_shape"], axis=0),
+        helper.make_node("ConstantOfShape", ["embeddings_shape"], ["inputs_embeds"]),
+    ]
+    initializers = [numpy_helper.from_array(np.array([HIDDEN_SIZE], dtype=np.int64), name="hidden_size")]
+    graph = helper.make_graph(nodes, "embedding", [input_ids, image_features], [embeds_out], initializers)
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
 

@@ -25,6 +25,10 @@ inline std::shared_ptr<Model> LoadDummyDecoderModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+}
+
 // Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request
 // advances deterministically (SelectTop) when fed scripted logits.
 inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {

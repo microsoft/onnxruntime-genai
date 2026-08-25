@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -70,19 +71,24 @@ Config::Model::Decoder MakeSparseDecoder() {
 
   Decoder decoder;
   decoder.num_hidden_layers = 4;
+  decoder.inputs.past_key_names = "past.%d.key";
+  decoder.inputs.past_value_names = "past.%d.value";
+  decoder.inputs.past_conv_names = "past.%d.conv";
+  decoder.inputs.past_recurrent_names = "past.%d.recurrent";
+  decoder.outputs.present_key_names = "present.%d.key";
+  decoder.outputs.present_value_names = "present.%d.value";
+  decoder.outputs.present_conv_names = "present.%d.conv";
+  decoder.outputs.present_recurrent_names = "present.%d.recurrent";
   decoder.state_groups = std::vector<Decoder::StateGroup>{
       Decoder::StateGroup{
           Decoder::StateGroupKind::PagedKeyValue,
-          {1, 3},
-          Decoder::StateBinding{"past.%d.key", "present.%d.key"},
-          Decoder::StateBinding{"past.%d.value", "present.%d.value"},
-          std::nullopt},
+          {1, 3}},
       Decoder::StateGroup{
-          Decoder::StateGroupKind::Fixed,
-          {0, 2},
-          std::nullopt,
-          std::nullopt,
-          Decoder::StateBinding{"past.%d.conv", "present.%d.conv"}}};
+          Decoder::StateGroupKind::FixedConv,
+          {0, 2}},
+      Decoder::StateGroup{
+          Decoder::StateGroupKind::FixedRecurrent,
+          {0, 2}}};
   return decoder;
 }
 
@@ -109,6 +115,14 @@ FakeModelStateMetadata MakeValidMetadata() {
         "present." + std::to_string(layer_id) + ".conv",
         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
         {-1, 8192, 3});
+    metadata.AddInput(
+        "past." + std::to_string(layer_id) + ".recurrent",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+        {-1, 16, 128, 128});
+    metadata.AddOutput(
+        "present." + std::to_string(layer_id) + ".recurrent",
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+        {-1, 16, 128, 128});
   }
   return metadata;
 }
@@ -193,63 +207,60 @@ TEST(ModelStateManifestTest, RejectsIncompatiblePagedGeometry) {
   EXPECT_NE(message.find("incompatible paged geometry"), std::string::npos) << message;
 }
 
-TEST(ModelStateManifestTest, DecoderModelLoadValidatesExplicitBindings) {
+TEST(ModelStateManifestTest, RejectsMissingFixedConvDecoderBinding) {
+  auto decoder = MakeSparseDecoder();
+  decoder.inputs.past_conv_names = "missing.%d.conv";
+  const ModelStateManifest manifest{decoder};
+  const auto metadata = MakeValidMetadata();
+
+  const auto message = CaptureValidationError(manifest, metadata);
+  EXPECT_NE(message.find("input was not found: missing.0.conv"), std::string::npos) << message;
+}
+
+TEST(ModelStateManifestTest, DecoderModelLoadValidatesDecoderBindings) {
   const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const auto invalid_overlay = R"({
-    "model": {"decoder": {"state_groups": [{
-      "kind": "paged_kv",
-      "layer_ids": [0],
-      "bindings": {
-        "key": {"input": "past_key_values.%d.key", "output": "missing.%d.key"},
-        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
-      }
-    }]}}
+    "model": {"decoder": {
+      "outputs": {"present_key_names": "missing.%d.key"},
+      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+    }}
   })";
   auto invalid_config = std::make_unique<Config>(model_path, invalid_overlay);
   EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(invalid_config)), std::runtime_error);
 }
 
-TEST(ModelStateManifestTest, DecoderModelLoadsWithValidExplicitBindings) {
+TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const auto valid_overlay = R"({
-    "model": {"decoder": {"state_groups": [{
-      "kind": "paged_kv",
-      "layer_ids": [0],
-      "bindings": {
-        "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
-        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
-      }
-    }]}}
+    "model": {"decoder": {
+      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+    }}
   })";
   auto valid_config = std::make_unique<Config>(model_path, valid_overlay);
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
 }
 
-TEST(ModelStateManifestTest, RejectsSparsePagedDynamicEngineContract) {
+TEST(ModelStateManifestTest, RejectsFixedDynamicEngineContract) {
   auto decoder = MakeSparseDecoder();
   try {
     ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
-    FAIL() << "Expected the sparse state contract to be rejected";
+    FAIL() << "Expected the fixed state contract to be rejected";
   } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string{error.what()}.find("dense paged_kv"), std::string::npos) << error.what();
+    EXPECT_NE(std::string{error.what()}.find("fixed decoder state"), std::string::npos) << error.what();
   }
 }
 
-TEST(ModelStateManifestTest, RejectsDynamicEngineBindingsThatDifferFromLegacyNames) {
-  using Decoder = Config::Model::Decoder;
-  Decoder decoder;
-  decoder.num_hidden_layers = 1;
-  decoder.state_groups = std::vector<Decoder::StateGroup>{
-      Decoder::StateGroup{
-          Decoder::StateGroupKind::PagedKeyValue,
-          {0},
-          Decoder::StateBinding{"custom.%d.key", "present.%d.key"},
-          Decoder::StateBinding{"custom.%d.value", "present.%d.value"},
-          std::nullopt}};
+TEST(ModelStateManifestTest, AcceptsSparsePagedDynamicEngineContract) {
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->erase(
+      std::remove_if(decoder.state_groups->begin(), decoder.state_groups->end(),
+                     [](const auto& group) {
+                       return group.kind == Config::Model::Decoder::StateGroupKind::FixedConv ||
+                              group.kind == Config::Model::Decoder::StateGroupKind::FixedRecurrent;
+                     }),
+      decoder.state_groups->end());
 
-  EXPECT_THROW(
-      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder),
-      std::runtime_error);
+  EXPECT_NO_THROW(ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
 }
 
 TEST(ModelStateManifestTest, AcceptsLegacyDynamicEngineContract) {

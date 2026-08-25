@@ -48,6 +48,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.ep_attrs = {"cuda": {}}
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
+    model.use_windowed_paged_kv_cache = False
     model.past_present_share_buffer = False
     model.context_length = 262144
     model.filename = "model.onnx"
@@ -126,20 +127,17 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     groups = config["model"]["decoder"]["state_groups"]
     assert [group["kind"] for group in groups] == [
         "paged_kv",
-        "fixed",
-        "fixed",
+        "fixed_conv",
+        "fixed_recurrent",
     ]
     assert groups[0]["layer_ids"] == list(range(3, 64, 4))
     assert groups[1]["layer_ids"] == [i for i in range(64) if (i + 1) % 4 != 0]
     assert groups[2]["layer_ids"] == groups[1]["layer_ids"]
-    assert groups[1]["bindings"]["state"] == {
-        "input": "past_key_values.%d.conv_state",
-        "output": "present.%d.conv_state",
-    }
-    assert groups[2]["bindings"]["state"] == {
-        "input": "past_key_values.%d.recurrent_state",
-        "output": "present.%d.recurrent_state",
-    }
+    decoder = config["model"]["decoder"]
+    assert decoder["inputs"]["past_conv_names"] == "past_key_values.%d.conv_state"
+    assert decoder["inputs"]["past_recurrent_names"] == "past_key_values.%d.recurrent_state"
+    assert decoder["outputs"]["present_conv_names"] == "present.%d.conv_state"
+    assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent_state"
 
 
 def test_qwen38_layer_types_support_reduced_official_fixture():

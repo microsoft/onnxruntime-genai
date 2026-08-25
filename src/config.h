@@ -379,20 +379,13 @@ struct Config {
       enum class StateGroupKind {
         Invalid,
         PagedKeyValue,
-        Fixed,
-      };
-
-      struct StateBinding {
-        std::string input;
-        std::string output;
+        FixedConv,
+        FixedRecurrent,
       };
 
       struct StateGroup {
         StateGroupKind kind{StateGroupKind::Invalid};
         std::vector<int> layer_ids;
-        std::optional<StateBinding> key;
-        std::optional<StateBinding> value;
-        std::optional<StateBinding> state;
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.
@@ -424,6 +417,7 @@ struct Config {
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+        std::string past_recurrent_names;
 
         // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
         // Empty unless the model graph takes a hidden_states input.
@@ -449,7 +443,8 @@ struct Config {
         std::string output_cross_qk_names{"output_cross_qk_%d"};
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
-        std::string hidden_states;                          // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        std::string present_recurrent_names;
+        std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;

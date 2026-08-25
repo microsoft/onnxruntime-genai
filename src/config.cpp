@@ -363,6 +363,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_names") {
+      v_.past_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
@@ -402,6 +404,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_names") {
+      v_.present_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
@@ -502,57 +506,6 @@ struct SharedInitializers_Element : JSON::Element {
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 
-struct StateBinding_Element : JSON::Element {
-  explicit StateBinding_Element(Config::Model::Decoder::StateBinding& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "input") {
-      v_.input = JSON::Get<std::string_view>(value);
-    } else if (name == "output") {
-      v_.output = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  Config::Model::Decoder::StateBinding& v_;
-};
-
-struct StateBindings_Element : JSON::Element {
-  explicit StateBindings_Element(DecoderStateGroup& v) : v_{v} {}
-
-  Element& OnObject(std::string_view name) override {
-    std::optional<Config::Model::Decoder::StateBinding>* binding{};
-    std::unique_ptr<StateBinding_Element>* element{};
-    if (name == "key") {
-      binding = &v_.key;
-      element = &key_;
-    } else if (name == "value") {
-      binding = &v_.value;
-      element = &value_;
-    } else if (name == "state") {
-      binding = &v_.state;
-      element = &state_;
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-
-    if (binding->has_value()) {
-      throw std::runtime_error("Duplicate decoder state binding semantic '" + std::string{name} + "'");
-    }
-    binding->emplace();
-    *element = std::make_unique<StateBinding_Element>(binding->value());
-    return **element;
-  }
-
- private:
-  DecoderStateGroup& v_;
-  std::unique_ptr<StateBinding_Element> key_;
-  std::unique_ptr<StateBinding_Element> value_;
-  std::unique_ptr<StateBinding_Element> state_;
-};
-
 struct StateGroup_Element : JSON::Element {
   explicit StateGroup_Element(DecoderStateGroup& v) : v_{v} {}
 
@@ -563,18 +516,13 @@ struct StateGroup_Element : JSON::Element {
     const auto kind = JSON::Get<std::string_view>(value);
     if (kind == "paged_kv") {
       v_.kind = DecoderStateGroupKind::PagedKeyValue;
-    } else if (kind == "fixed") {
-      v_.kind = DecoderStateGroupKind::Fixed;
+    } else if (kind == "fixed_conv") {
+      v_.kind = DecoderStateGroupKind::FixedConv;
+    } else if (kind == "fixed_recurrent") {
+      v_.kind = DecoderStateGroupKind::FixedRecurrent;
     } else {
       throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
     }
-  }
-
-  Element& OnObject(std::string_view name) override {
-    if (name == "bindings") {
-      return bindings_;
-    }
-    throw JSON::unknown_value_error{};
   }
 
   Element& OnArray(std::string_view name) override {
@@ -587,7 +535,6 @@ struct StateGroup_Element : JSON::Element {
  private:
   DecoderStateGroup& v_;
   IntArray_Element layer_ids_{v_.layer_ids};
-  StateBindings_Element bindings_{v_};
 };
 
 struct StateGroups_Element : JSON::Element {

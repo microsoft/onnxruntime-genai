@@ -45,6 +45,8 @@ void Embeddings::Add() {
 }
 
 void Embeddings::UpdateSequenceLength(size_t new_length) {
+  RestoreFullView();
+
   if (static_cast<size_t>(shape_[1]) != new_length) {
     shape_[1] = new_length;
 
@@ -52,6 +54,39 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
       embeddings_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
       state_.inputs_[index_] = embeddings_.get();
     }
+  }
+}
+
+void Embeddings::UseChunkView(size_t offset, size_t length) {
+  if (mode_ != Embeddings::Mode::Input) {
+    throw std::runtime_error("Embeddings::UseChunkView is only valid for input embeddings.");
+  }
+  if (shape_[0] != 1) {
+    throw std::runtime_error("Prefill chunking requires a batch size of 1 for the embeddings input.");
+  }
+  if (offset + length > static_cast<size_t>(shape_[1])) {
+    throw std::runtime_error("Embeddings::UseChunkView - requested chunk exceeds the embeddings sequence length.");
+  }
+
+  const size_t element_size = Ort::SizeOf(type_);
+  const size_t hidden_size = static_cast<size_t>(shape_[2]);
+  auto* raw = static_cast<uint8_t*>(embeddings_->GetTensorMutableRawData());
+
+  std::array<int64_t, 3> chunk_shape{shape_[0], static_cast<int64_t>(length), shape_[2]};
+  chunk_view_ = OrtValue::CreateTensor(embeddings_->GetTensorMemoryInfo(),
+                                       raw + offset * hidden_size * element_size,
+                                       length * hidden_size * element_size,
+                                       std::span<const int64_t>(chunk_shape), type_);
+  state_.inputs_[index_] = chunk_view_.get();
+}
+
+void Embeddings::RestoreFullView() {
+  if (!chunk_view_)
+    return;
+
+  chunk_view_ = nullptr;
+  if (mode_ == Embeddings::Mode::Input) {
+    state_.inputs_[index_] = embeddings_.get();
   }
 }
 

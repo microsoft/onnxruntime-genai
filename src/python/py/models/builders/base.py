@@ -1140,20 +1140,10 @@ class Model:
     def make_decoder_state_groups(self, inputs, outputs):
         return []
 
-    def make_paged_key_value_state_group(self, layer_ids, inputs, outputs):
+    def make_paged_key_value_state_group(self, layer_ids):
         return {
             "kind": "paged_kv",
             "layer_ids": list(layer_ids),
-            "bindings": {
-                "key": {
-                    "input": inputs["past_key_names"],
-                    "output": outputs["present_key_names"],
-                },
-                "value": {
-                    "input": inputs["past_value_names"],
-                    "output": outputs["present_value_names"],
-                },
-            },
         }
 
     def make_key_value_cache_names(self, layer_id):
