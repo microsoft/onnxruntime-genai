@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -15,6 +16,9 @@ struct Options {
   std::string model_path;
   std::string execution_provider{"cpu"};
   PromptNumberOfTokensOrContent prompt_num_tokens_or_content{size_t{16}};
+  // When a text prompt (--prompt/--prompt_file) is combined with -l/--prompt_length,
+  // holds the number of tokens to truncate the encoded prompt to.
+  std::optional<size_t> prompt_truncate_tokens{};
   size_t num_tokens_to_generate{128};
   size_t batch_size{1};
   size_t num_iterations{5};

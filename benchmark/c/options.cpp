@@ -36,6 +36,8 @@ namespace {
     << "    Prompt options:\n"
     << "      -l,--prompt_length <number>\n"
     << "        Number of tokens in the generated prompt. Default: " << default_prompt_num_tokens << "\n"
+    << "        When combined with --prompt or --prompt_file, the encoded prompt is truncated\n"
+    << "        to this many tokens (or all tokens, with a warning, if the prompt is shorter).\n"
     << "      --prompt <prompt text>\n"
     << "        Prompt text to use. Default: See --prompt_length.\n"
     << "      --prompt_file <file containing prompt text>\n"
@@ -127,7 +129,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       return std::string_view{argv[++idx]};
     };
 
-    std::optional<PromptNumberOfTokensOrContent> prompt_num_tokens_or_content{};
+    // -l/--prompt_length is parsed separately from --prompt/--prompt_file so the two
+    // can be combined (truncate a text prompt to a given number of tokens).
+    std::optional<size_t> prompt_length{};
+    std::optional<std::string> prompt_content{};
 
     for (int i = 1; i < argc; ++i) {
       std::string_view arg{argv[i]};
@@ -139,17 +144,15 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
-        if (prompt_num_tokens_or_content.has_value())
-          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
-        prompt_num_tokens_or_content = ParseNumber<size_t>(next_arg(i));
+        prompt_length = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "--prompt") {
-        if (prompt_num_tokens_or_content.has_value())
-          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
-        prompt_num_tokens_or_content = std::string{next_arg(i)};
+        if (prompt_content.has_value())
+          throw std::runtime_error("--prompt and --prompt_file are mutually exclusive.");
+        prompt_content = std::string{next_arg(i)};
       } else if (arg == "--prompt_file") {
-        if (prompt_num_tokens_or_content.has_value())
-          throw std::runtime_error("--prompt_length, --prompt, and --prompt_file are mutually exclusive.");
-        prompt_num_tokens_or_content = ReadFileContent(next_arg(i));
+        if (prompt_content.has_value())
+          throw std::runtime_error("--prompt and --prompt_file are mutually exclusive.");
+        prompt_content = ReadFileContent(next_arg(i));
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-r" || arg == "--repetitions") {
@@ -175,16 +178,24 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       }
     }
 
-    if (prompt_num_tokens_or_content.has_value()) {
-      opts.prompt_num_tokens_or_content = std::move(*prompt_num_tokens_or_content);
+    // Reconcile the prompt source. A text prompt takes precedence; if -l is also
+    // given it becomes a token-truncation length. Otherwise -l alone selects the
+    // synthetic (generated) prompt of that many tokens.
+    if (prompt_content.has_value()) {
+      opts.prompt_num_tokens_or_content = std::move(*prompt_content);
+      if (prompt_length.has_value()) {
+        opts.prompt_truncate_tokens = *prompt_length;
+      }
+    } else if (prompt_length.has_value()) {
+      opts.prompt_num_tokens_or_content = *prompt_length;
     }
 
     if (opts.use_random_tokens) {
-      if (!prompt_num_tokens_or_content.has_value() ||
-          !std::holds_alternative<size_t>(*prompt_num_tokens_or_content)) {
-        throw std::runtime_error(!prompt_num_tokens_or_content.has_value()
-                                     ? "--use_random_tokens requires -l/--prompt_length."
-                                     : "--use_random_tokens cannot be used with --prompt or --prompt_file.");
+      if (prompt_content.has_value()) {
+        throw std::runtime_error("--use_random_tokens cannot be used with --prompt or --prompt_file.");
+      }
+      if (!prompt_length.has_value()) {
+        throw std::runtime_error("--use_random_tokens requires -l/--prompt_length.");
       }
     }
 
