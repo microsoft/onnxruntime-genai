@@ -300,13 +300,12 @@ TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
   EXPECT_EQ(reservation.ReservedBlockCount(), 3u);
 }
 
-TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingTheirExactBindings) {
+TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecoderBindings) {
   auto model = LoadSyntheticPagedModel();
   ASSERT_TRUE(model->config_->model.decoder.state_groups.has_value());
   ASSERT_EQ(model->config_->model.decoder.state_groups->size(), 1u);
   EXPECT_EQ(model->config_->model.decoder.state_groups->front().layer_ids,
             std::vector<int>({1, 4}));
-  EXPECT_EQ(model->config_->model.decoder.inputs.past_key_names, "legacy_past.%d.key");
 
   auto cache = MakePagedCache(model);
 
@@ -479,10 +478,8 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMultiplePagedGroups) {
 TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
   auto model = LoadSyntheticPagedModel();
   Config::Model::Decoder::StateGroup fixed_group;
-  fixed_group.kind = Config::Model::Decoder::StateGroupKind::Fixed;
+  fixed_group.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
   fixed_group.layer_ids = {0};
-  fixed_group.state = Config::Model::Decoder::StateBinding{
-      "past_fixed.%d", "present_fixed.%d"};
   model->config_->model.decoder.state_groups->push_back(std::move(fixed_group));
 
   EXPECT_THROW(
@@ -502,7 +499,7 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
 
 TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
   auto model = LoadSyntheticPagedModel();
-  model->config_->model.decoder.state_groups->front().key.reset();
+  model->config_->model.decoder.state_groups->front().layer_ids.clear();
 
   EXPECT_THROW(
       {
@@ -510,7 +507,7 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
           auto cache = MakePagedCache(model);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find("with key and value bindings"),
+              std::string{error.what()}.find("requires a non-empty paged_kv decoder state group"),
               std::string::npos);
           throw;
         }

@@ -2231,26 +2231,20 @@ class Qwen35TextModel(Model):
         if not linear_attention_layers:
             return []
 
+        inputs["past_conv_names"] = "past_key_values.%d.conv_state"
+        inputs["past_recurrent_names"] = "past_key_values.%d.recurrent_state"
+        outputs["present_conv_names"] = "present.%d.conv_state"
+        outputs["present_recurrent_names"] = "present.%d.recurrent_state"
+
         state_groups = []
-
         if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
-
-        if linear_attention_layers:
-            for state_name in ("conv_state", "recurrent_state"):
-                state_groups.append(
-                    {
-                        "kind": "fixed",
-                        "layer_ids": linear_attention_layers,
-                        "bindings": {
-                            "state": {
-                                "input": f"past_key_values.%d.{state_name}",
-                                "output": f"present.%d.{state_name}",
-                            }
-                        },
-                    }
-                )
-
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
+        state_groups.extend(
+            [
+                {"kind": "fixed_conv", "layer_ids": linear_attention_layers},
+                {"kind": "fixed_recurrent", "layer_ids": linear_attention_layers},
+            ]
+        )
         return state_groups
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
