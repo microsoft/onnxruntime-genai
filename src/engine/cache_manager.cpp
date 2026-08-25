@@ -540,12 +540,18 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         "Planned draft verification on a model whose fixed state declares no checkpoints.");
   }
 
+  std::vector<FixedStateReservationRequest> fixed_requests;
+  fixed_requests.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    fixed_requests.push_back(FixedStateReservationRequest{
+        entry.request_id, entry.target_cache_slots, entry.draft_token_count});
+  }
+
   plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),
       new_slot_count,
-      fixed_state_pool_->PlannedStagingBytes(
-          plan.requests.size(), capture_checkpoints, capture_state_updates),
+      fixed_state_pool_->PlannedStagingBytes(fixed_requests, capture_checkpoints),
       capture_checkpoints,
       capture_state_updates,
   };

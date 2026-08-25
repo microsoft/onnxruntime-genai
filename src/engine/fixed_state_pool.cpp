@@ -163,11 +163,24 @@ struct FixedStateReservation::Storage {
   std::vector<FixedStateBinding> bindings;
   size_t staging_bytes{};
   size_t batch_rows{};
+  bool binds_direct_banks{};
+  size_t direct_first_slot{};
+  uint8_t direct_active_bank{};
   bool captures_checkpoints{};
   bool captures_state_updates{};
 };
 
 struct FixedStatePool::Impl {
+  struct PlannedRowLocation {
+    size_t slot_index{};
+    bool provisional{};
+  };
+
+  struct DirectBankSpan {
+    size_t first_slot{};
+    uint8_t active_bank{};
+  };
+
   struct StateUpdateOutputSpec {
     std::string name;
     ONNXTensorElementDataType data_type{};
@@ -301,6 +314,100 @@ struct FixedStatePool::Impl {
         slots.begin(), slots.end(), [](const Slot& slot) {
           return slot.ownership == FixedStateSlotOwnership::Free;
         }));
+  }
+
+  std::vector<PlannedRowLocation> PlanRowLocations(
+      std::span<const FixedStateReservationRequest> requests) const {
+    std::vector<PlannedRowLocation> locations;
+    locations.reserve(requests.size());
+    std::unordered_set<const void*> request_ids;
+    request_ids.reserve(requests.size());
+    std::vector<char> slot_taken(slots.size(), 0);
+    for (const auto& slot : slots) {
+      if (slot.ownership != FixedStateSlotOwnership::Free) {
+        slot_taken[SlotIndex(slot)] = 1;
+      }
+    }
+
+    const auto next_free_slot = [&]() -> size_t {
+      for (size_t index = 0; index < slots.size(); ++index) {
+        if (!slot_taken[index]) {
+          return index;
+        }
+      }
+      throw std::runtime_error(
+          "Not enough free slots for the complete fixed state reservation.");
+    };
+
+    for (const auto& request : requests) {
+      if (!request.request_id || !request_ids.insert(request.request_id).second) {
+        throw std::runtime_error(
+            "Fixed state reservation contains an invalid or duplicate request.");
+      }
+      const Slot* slot = FindSlot(request.request_id);
+      if (slot && slot->ownership == FixedStateSlotOwnership::Committed) {
+        locations.push_back(PlannedRowLocation{SlotIndex(*slot), false});
+      } else {
+        const size_t slot_index = next_free_slot();
+        slot_taken[slot_index] = 1;
+        locations.push_back(PlannedRowLocation{slot_index, true});
+      }
+    }
+    return locations;
+  }
+
+  std::optional<DirectBankSpan> FindDirectBankSpan(
+      std::span<const PlannedRowLocation> locations) const {
+    if (locations.empty()) {
+      return std::nullopt;
+    }
+    std::optional<uint8_t> resident_bank;
+    for (size_t row = 0; row < locations.size(); ++row) {
+      const auto& location = locations[row];
+      if (location.slot_index != locations.front().slot_index + row) {
+        return std::nullopt;
+      }
+      if (!location.provisional) {
+        const uint8_t active_bank = slots[location.slot_index].active_bank;
+        if (resident_bank && *resident_bank != active_bank) {
+          return std::nullopt;
+        }
+        resident_bank = active_bank;
+      }
+    }
+    return DirectBankSpan{locations.front().slot_index, resident_bank.value_or(0)};
+  }
+
+  size_t CalculateStagingBytes(size_t row_count, bool binds_direct_banks,
+                               bool capture_checkpoints,
+                               bool capture_state_updates) const {
+    const size_t copies_per_tensor =
+        (binds_direct_banks ? 0 : 2) + (capture_checkpoints ? checkpoint_count : 0);
+    size_t bytes = 0;
+    for (const auto& spec : tensors) {
+      bytes = CheckedAdd(
+          bytes,
+          CheckedMultiply(
+              CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
+              copies_per_tensor, "staging allocation"),
+          "staging allocation");
+      if (capture_state_updates) {
+        bytes = CheckedAdd(
+            bytes,
+            CheckedMultiply(row_count, spec.state_update_row_bytes,
+                            "state_update staging allocation"),
+            "state_update staging allocation");
+      }
+    }
+    if (state_update_capacity != 0) {
+      bytes = CheckedAdd(
+          bytes, CheckedMultiply(row_count, sizeof(int32_t), "capture_count staging allocation"),
+          "capture_count staging allocation");
+      if (!state_update_active_name.empty()) {
+        bytes = CheckedAdd(bytes, sizeof(int32_t), "state_update active staging allocation");
+      }
+    }
+    return bytes;
   }
 
   // Copies a resident slot's visible (active-bank) state into contiguous batch row `batch_row` of
@@ -792,36 +899,31 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
     throw std::invalid_argument(
         "Fixed state planning requested compact updates from a model without them.");
   }
-  // One gather input and one staged output per fixed tensor, each `row_count` rows wide, plus the
-  // checkpoint series when the step captures it. This mirrors the accumulation in Reserve() so the
-  // plan and the resulting reservation agree exactly.
-  const size_t copies_per_tensor =
-      capture_checkpoints ? 2 + impl_->checkpoint_count : 2;
-  size_t bytes = 0;
-  for (const auto& spec : impl_->tensors) {
-    bytes = CheckedAdd(
-        bytes,
-        CheckedMultiply(
-            CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
-            copies_per_tensor, "staging allocation"),
-        "staging allocation");
-    if (capture_state_updates) {
-      bytes = CheckedAdd(
-          bytes,
-          CheckedMultiply(row_count, spec.state_update_row_bytes,
-                          "state_update staging allocation"),
-          "state_update staging allocation");
-    }
+    // Without request identities only a single row is guaranteed to be directly bindable. Engine
+    // planning uses the request-aware overload below to recognize larger contiguous cohorts.
+    return impl_->CalculateStagingBytes(row_count, row_count == 1, capture_checkpoints,
+                                        capture_state_updates);
   }
-  if (impl_->state_update_capacity != 0) {
-    bytes = CheckedAdd(
-        bytes, CheckedMultiply(row_count, sizeof(int32_t), "capture_count staging allocation"),
-        "capture_count staging allocation");
-    if (!impl_->state_update_active_name.empty()) {
-      bytes = CheckedAdd(bytes, sizeof(int32_t), "state_update active staging allocation");
+
+  size_t FixedStatePool::PlannedStagingBytes(
+      std::span<const FixedStateReservationRequest> requests,
+      bool capture_checkpoints) const {
+    if (requests.empty()) {
+      throw std::invalid_argument(
+          "Fixed state planning must contain at least one request.");
     }
-  }
-  return bytes;
+    const bool has_capture_counts = std::any_of(
+        requests.begin(), requests.end(),
+        [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
+    const bool capture_state_updates = has_capture_counts && SupportsStateUpdates();
+    if (capture_checkpoints && capture_state_updates) {
+      throw std::invalid_argument(
+          "Fixed state planning cannot capture checkpoints and compact updates together.");
+    }
+    const auto locations = impl_->PlanRowLocations(requests);
+    return impl_->CalculateStagingBytes(
+        requests.size(), impl_->FindDirectBankSpan(locations).has_value(),
+        capture_checkpoints, capture_state_updates);
 }
 
 bool FixedStatePool::SupportsCheckpoints() const {
@@ -926,48 +1028,27 @@ FixedStateReservation FixedStatePool::Reserve(
   };
   std::vector<RowPlan> plan;
   plan.reserve(requests.size());
-  std::unordered_set<const void*> request_ids;
-  request_ids.reserve(requests.size());
-  std::vector<char> slot_taken(impl_->slots.size(), 0);
-  for (const auto& slot : impl_->slots) {
-    if (slot.ownership != FixedStateSlotOwnership::Free) {
-      slot_taken[impl_->SlotIndex(slot)] = 1;
-    }
-  }
-
-  const auto next_free_slot = [&]() -> size_t {
-    for (size_t index = 0; index < impl_->slots.size(); ++index) {
-      if (!slot_taken[index]) {
-        return index;
-      }
-    }
-    throw std::runtime_error(
-        "Not enough free slots for the complete fixed state reservation.");
-  };
-
-  for (const auto& request : requests) {
+  const auto locations = impl_->PlanRowLocations(requests);
+  for (size_t request_index = 0; request_index < requests.size(); ++request_index) {
+    const auto& request = requests[request_index];
+    const auto& location = locations[request_index];
     const void* request_id = request.request_id;
-    if (!request_id || !request_ids.insert(request_id).second) {
-      throw std::runtime_error(
-          "Fixed state reservation contains an invalid or duplicate request.");
-    }
-    const Impl::Slot* slot = impl_->FindSlot(request_id);
+    const Impl::Slot* slot = location.provisional ? nullptr : &impl_->slots[location.slot_index];
     RowPlan row;
     row.request_id = request_id;
     row.target_tokens = request.target_tokens;
-    if (slot && slot->ownership == FixedStateSlotOwnership::Committed) {
-      row.slot_index = impl_->SlotIndex(*slot);
+    if (slot) {
+      row.slot_index = location.slot_index;
       row.provisional = false;
       row.handle_generation = slot->generation;
       row.expected_state_generation = slot->state_generation;
     } else {
-      const size_t slot_index = next_free_slot();
+      const size_t slot_index = location.slot_index;
       const auto& free_slot = impl_->slots[slot_index];
       if (free_slot.generation == std::numeric_limits<uint64_t>::max()) {
         throw std::overflow_error(
             "Fixed state slot generation is exhausted.");
       }
-      slot_taken[slot_index] = 1;
       row.slot_index = slot_index;
       row.provisional = true;
       row.handle_generation = free_slot.generation + 1;
@@ -975,6 +1056,7 @@ FixedStateReservation FixedStatePool::Reserve(
     }
     plan.push_back(row);
   }
+  const auto direct_bank_span = impl_->FindDirectBankSpan(locations);
 
   // Phase 2: allocate staging tensors and record binding metadata (host allocations only).
   auto storage = std::make_unique<FixedStateReservation::Storage>();
@@ -987,6 +1069,11 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->commit_step_tokens.assign(requests.size(), 0);
   storage->commit_kept_tokens.assign(requests.size(), 0);
   storage->batch_rows = requests.size();
+  storage->binds_direct_banks = direct_bank_span.has_value();
+  if (direct_bank_span) {
+    storage->direct_first_slot = direct_bank_span->first_slot;
+    storage->direct_active_bank = direct_bank_span->active_bank;
+  }
   storage->captures_checkpoints = capture_checkpoints;
   storage->captures_state_updates = capture_state_updates;
   storage->gathered_inputs.reserve(impl_->tensors.size());
@@ -1035,10 +1122,26 @@ FixedStateReservation FixedStatePool::Reserve(
   }
   for (auto& spec : impl_->tensors) {
     const auto shape = StorageShape(batch_rows, spec.session_shape);
-    auto gathered = OrtValue::CreateTensor(
+    std::unique_ptr<OrtValue> gathered;
+    std::unique_ptr<OrtValue> staged;
+    if (storage->binds_direct_banks) {
+      OrtValue& input_owner = *spec.banks[storage->direct_active_bank];
+      OrtValue& output_owner = *spec.banks[storage->direct_active_bank ^ 1u];
+      const size_t span_offset = storage->direct_first_slot * spec.row_bytes;
+      gathered = OrtValue::CreateTensor(
+        input_owner.GetTensorMemoryInfo(),
+        static_cast<uint8_t*>(input_owner.GetTensorMutableRawData()) + span_offset,
+        batch_rows * spec.row_bytes, shape, spec.data_type);
+      staged = OrtValue::CreateTensor(
+        output_owner.GetTensorMemoryInfo(),
+        static_cast<uint8_t*>(output_owner.GetTensorMutableRawData()) + span_offset,
+        batch_rows * spec.row_bytes, shape, spec.data_type);
+    } else {
+      gathered = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), shape, spec.data_type);
-    auto staged = OrtValue::CreateTensor(
+      staged = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), shape, spec.data_type);
+    }
     std::unique_ptr<OrtValue> checkpoints;
     if (capture_checkpoints) {
       auto checkpoint_shape = shape;
@@ -1066,7 +1169,9 @@ FixedStateReservation FixedStatePool::Reserve(
         storage->staging_bytes,
         CheckedMultiply(
             CheckedMultiply(batch_rows, spec.row_bytes, "staging allocation"),
-            capture_checkpoints ? 2 + spec.checkpoint_count : 2, "staging allocation"),
+        (storage->binds_direct_banks ? 0 : 2) +
+          (capture_checkpoints ? spec.checkpoint_count : 0),
+        "staging allocation"),
         "staging allocation");
     if (capture_state_updates) {
       storage->staging_bytes = CheckedAdd(
@@ -1167,7 +1272,7 @@ FixedStateReservation FixedStatePool::Reserve(
       for (size_t row = 0; row < plan.size(); ++row) {
         if (plan[row].provisional) {
           impl_->GatherZeroRow(spec, row, gathered);
-        } else {
+        } else if (!storage->binds_direct_banks) {
           impl_->GatherResidentRow(spec, plan[row].slot_index,
                                    impl_->slots[plan[row].slot_index].active_bank,
                                    row, gathered);
@@ -1193,6 +1298,9 @@ FixedStateReservation FixedStatePool::Reserve(
       continue;
     }
     auto& slot = impl_->slots[plan[row].slot_index];
+    if (storage->binds_direct_banks) {
+      slot.active_bank = storage->direct_active_bank;
+    }
     slot.request_id = plan[row].request_id;
     ++slot.generation;
     slot.state_generation = 0;
@@ -1337,8 +1445,10 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
         const size_t kept_tokens = storage.commit_kept_tokens[row];
         if (kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row]) {
-          impl_->StageRowIntoInactiveBank(
-              spec, storage.handles[row].slot, inactive_bank, row, staged);
+          if (!storage.binds_direct_banks) {
+            impl_->StageRowIntoInactiveBank(
+                spec, storage.handles[row].slot, inactive_bank, row, staged);
+          }
           continue;
         }
         if (storage.captures_state_updates) {

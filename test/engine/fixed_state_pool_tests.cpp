@@ -450,9 +450,9 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   const auto handle_a = MakeResident(*pool, kRequestA, 1.0f);
   {
     const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};  // A resident, B provisional.
+    const size_t expected_staging = 3 * sizeof(int32_t);  // capture counts and activity
+    EXPECT_EQ(pool->PlannedStagingBytes(requests), expected_staging);
     auto reservation = pool->Reserve(requests);
-    const size_t expected_staging =
-      4 * bytes_per_request + 3 * sizeof(int32_t);  // gather + output + counts + activity
     EXPECT_EQ(reservation.PlannedStagingBytes(), expected_staging);
     EXPECT_EQ(pool->ActiveStagingBytes(), expected_staging);
     const auto snapshot = pool->Snapshot();
@@ -469,6 +469,51 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   EXPECT_EQ(snapshot.free_slots, 3u);
   EXPECT_EQ(snapshot.reserved_slots, 0u);
   EXPECT_EQ(snapshot.committed_slots, 0u);
+}
+
+TEST_F(FixedStatePoolTest, BatchOneBindsPersistentStateBanksWithoutFullStateStaging) {
+  auto pool = MakePool(1);
+  constexpr size_t metadata_bytes = 2 * sizeof(int32_t);  // capture count and activity
+  EXPECT_EQ(pool->PlannedStagingBytes(1), metadata_bytes);
+
+  auto requests = One(kRequestA);
+  auto reservation = pool->Reserve(requests);
+  EXPECT_EQ(reservation.PlannedStagingBytes(), metadata_bytes);
+  EXPECT_EQ(pool->ActiveStagingBytes(), metadata_bytes);
+}
+
+TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBanks) {
+  auto pool = MakePool(2);
+  MakeResident(*pool, kRequestA, 1.0f);
+  MakeResident(*pool, kRequestB, 2.0f);
+
+  constexpr size_t bytes_per_request =
+      2 * (2 * 3) * sizeof(float) + 2 * (2 * 2 * 2) * sizeof(float);
+  constexpr size_t gathered_staging = 4 * bytes_per_request + 3 * sizeof(int32_t);
+  {
+    const std::array<Request, 2> reordered{
+        Request{kRequestB, 2}, Request{kRequestA, 2}};
+    EXPECT_EQ(pool->PlannedStagingBytes(reordered), gathered_staging);
+    auto reservation = pool->Reserve(reordered);
+    EXPECT_EQ(reservation.PlannedStagingBytes(), gathered_staging);
+    ExpectInputRows(reservation, 0, 2.0f);
+    ExpectInputRows(reservation, 1, 1.0f);
+    reservation.Discard();
+  }
+
+  {
+    auto requests = One(kRequestA, 2);
+    auto reservation = pool->Reserve(requests);
+    FillStagedRows(reservation, 0, 3.0f);
+    reservation.Commit();
+  }
+  const std::array<Request, 2> mixed_banks{
+      Request{kRequestA, 3}, Request{kRequestB, 2}};
+  EXPECT_EQ(pool->PlannedStagingBytes(mixed_banks), gathered_staging);
+  auto reservation = pool->Reserve(mixed_banks);
+  EXPECT_EQ(reservation.PlannedStagingBytes(), gathered_staging);
+  ExpectInputRows(reservation, 0, 3.0f);
+  ExpectInputRows(reservation, 1, 2.0f);
 }
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
@@ -783,6 +828,7 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
 
   const std::array<Request, 2> requests{
       Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
+  const size_t planned_staging = pool->PlannedStagingBytes(requests);
   auto reservation = pool->Reserve(requests);
   EXPECT_TRUE(reservation.CapturesStateUpdates());
   const auto& conv = reservation.Bindings()[0];
@@ -807,21 +853,22 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
   EXPECT_STREQ(recurrent.state_update_capsule_name, "state_update.2.recurrent_capsule");
   EXPECT_EQ(recurrent.state_update_capsule->GetTensorTypeAndShapeInfo()->GetShape(),
             (std::vector<int64_t>{2, 24}));
-  EXPECT_EQ(reservation.PlannedStagingBytes(),
-            pool->PlannedStagingBytes(2, false, true));
+  EXPECT_EQ(reservation.PlannedStagingBytes(), planned_staging);
 }
 
 TEST_F(FixedStatePoolTest, CompactCaptureAddsExactFactorStagingBytes) {
   auto pool = MakePool();
-  const size_t plain = pool->PlannedStagingBytes(2);
-  const size_t captured = pool->PlannedStagingBytes(2, false, true);
+    const std::array<Request, 2> plain_requests{
+      Request{kRequestA, 1, 0}, Request{kRequestB, 1, 0}};
+    const std::array<Request, 2> requests{
+      Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
+    const size_t plain = pool->PlannedStagingBytes(plain_requests);
+    const size_t captured = pool->PlannedStagingBytes(requests);
   constexpr size_t compact_bytes_per_row =
       2 * (3 * 2) * sizeof(float) +                         // two conv update tensors
       2 * (3 * 2 + 3 * 1 * 2 + 3 * 2 * 2) * sizeof(float);  // two GDN factor sets
   EXPECT_EQ(captured, plain + 2 * compact_bytes_per_row);
 
-  const std::array<Request, 2> requests{
-      Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
   auto reservation = pool->Reserve(requests);
   EXPECT_EQ(reservation.PlannedStagingBytes(), captured);
 }
@@ -1039,15 +1086,15 @@ TEST_F(FixedStatePoolTest, CheckpointsAreBoundOnlyWhenCaptured) {
 
 TEST_F(FixedStatePoolTest, CapturingCheckpointsAddsWindowStagingBytes) {
   auto pool = MakePool();
-  const auto plain = pool->PlannedStagingBytes(2);
-  const auto captured = pool->PlannedStagingBytes(2, /*capture_checkpoints=*/true);
+  const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};
+  const auto plain = pool->PlannedStagingBytes(requests);
+  const auto captured = pool->PlannedStagingBytes(requests, /*capture_checkpoints=*/true);
   constexpr size_t fixed_row_bytes =
       2 * (2 * 3) * sizeof(float) + 2 * (2 * 2 * 2) * sizeof(float);
   // The shared count input is present in both plans; checkpoint capture adds four tensor rows per
   // scheduled row without duplicating that input.
   EXPECT_EQ(captured, plain + 2 * 4 * fixed_row_bytes);
 
-  auto requests = std::array<Request, 2>{Request{kRequestA, 1}, Request{kRequestB, 1}};
   auto reservation = pool->Reserve(requests, /*capture_checkpoints=*/true);
   EXPECT_EQ(reservation.PlannedStagingBytes(), captured);
 }

@@ -210,11 +210,15 @@ class FixedStatePool {
   size_t PersistentBytes() const;
   size_t ZeroingScratchBytes() const;
   size_t ActiveStagingBytes() const;
-  // Gather+output staging bytes a reservation of `row_count` scheduled rows will allocate. A pure
-  // function of the pool's tensor geometry, so composite step planning can size the transaction
-  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
+  // Fixed-state staging bytes a reservation of `row_count` scheduled rows will allocate. A
+  // single row is always directly bindable; the request-aware overload also recognizes contiguous
+  // multi-row cohorts with one active bank. The conservative row-count overload includes gather
+  // and output staging for larger batches.
   size_t PlannedStagingBytes(size_t row_count, bool capture_checkpoints = false,
                              bool capture_state_updates = false) const;
+  size_t PlannedStagingBytes(
+      std::span<const FixedStateReservationRequest> requests,
+      bool capture_checkpoints = false) const;
 
   // True when every fixed binding declares a checkpoints output, so reservations may capture the
   // per-token state series a speculative step rolls back through.
