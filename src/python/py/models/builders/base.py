@@ -2011,12 +2011,6 @@ class Model:
         self.make_value(output, self.io_dtype, shape=shape)
 
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
-        if getattr(self, "ep", "cpu") not in {"cpu", "cuda", "dml", "webgpu"}:
-            mul_name = f"{name}/Mul"
-            self.make_mul(mul_name, [scaled_input, gate], self.io_dtype, shape=shape)
-            self.make_add(name, [root_input, f"{mul_name}/output_0"], self.io_dtype, shape=shape)
-            return
-
         output = f"{name}/output_0"
         self.make_node(
             "GatedAdd",
