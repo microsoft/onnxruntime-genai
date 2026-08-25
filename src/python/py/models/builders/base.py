@@ -643,10 +643,11 @@ class Model:
                 "ntk_beta": beta_fast,
             }
 
-        elif config.rope_parameters["rope_type"] == "default" and "mrope_section" in config.rope_parameters and config.rope_parameters["mrope_section"] is not None:
-            # For models that use MRoPE (e.g. Qwen-2.5 VL, Qwen-3 VL)
-            self.rope_attrs["op_type"] = "MRotaryEmbedding"
-            self.rope_attrs["mrope_section"] = config.rope_parameters["mrope_section"]  # Sections for MRoPE
+        elif config.rope_parameters["rope_type"] == "default":
+            if config.rope_parameters.get("mrope_section") is not None:
+                # For models that use MRoPE (e.g. Qwen-2.5 VL, Qwen-3 VL)
+                self.rope_attrs["op_type"] = "MRotaryEmbedding"
+                self.rope_attrs["mrope_section"] = config.rope_parameters["mrope_section"]  # Sections for MRoPE
 
         elif config.rope_parameters["rope_type"] == "linear":
             # For models that use linear scaling (e.g. NeuTTS Nano)

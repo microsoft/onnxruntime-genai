@@ -716,6 +716,16 @@ class TestYarnRopeCacheParity:
         model.make_rope_init(config)  # no-op, must not raise on `"beta_fast" in None`
         assert "rescale_inv_freq" not in model.rope_attrs
 
+    def test_make_rope_init_accepts_default_rope(self):
+        """Explicit default RoPE keeps the standard RotaryEmbedding configuration."""
+        model = object.__new__(Model)
+        model.rope_attrs = {"op_type": "RotaryEmbedding", "mrope_section": []}
+        config = types.SimpleNamespace(rope_parameters={"rope_type": "default"})
+
+        model.make_rope_init(config)
+
+        assert model.rope_attrs == {"op_type": "RotaryEmbedding", "mrope_section": []}
+
     def test_rope_parameters_only_config_matches_rope_scaling(self):
         """A config exposing only rope_parameters (transformers v5) yields the same
         caches as the legacy rope_scaling shape and matches the HF reference."""
