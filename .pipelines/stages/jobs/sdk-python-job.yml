@@ -48,7 +48,9 @@ jobs:
   ${{ if eq(parameters.os, 'win') }}:
     pool:
       ${{ if eq(parameters.arch, 'arm64') }}:
-        name: 'onnxruntime-genai-windows-vs-2022-arm64'
+        name: 'onnxruntime-qnn-windows-vs-2022-arm64'
+        demands:
+          - ImageOverride -equals onnxruntime-Win2025-arm64
         hostArchitecture: Arm64
       ${{ else }}:
         name: 'onnxruntime-Win-CPU-2022'
