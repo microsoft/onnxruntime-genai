@@ -367,11 +367,11 @@ TEST_F(SchedulerContractTest, DecodeFirstOrderingUsesTheExactGlobalBudget) {
   EXPECT_EQ(plan.requests[0].unprocessed_token_count, 1u);
   EXPECT_EQ(plan.requests[0].packed_token_offset, 0u);
   EXPECT_EQ(plan.requests[1].request, resident_prefill);
-  EXPECT_EQ(plan.requests[1].unprocessed_token_count, 3u);
+  EXPECT_EQ(plan.requests[1].unprocessed_token_count, 2u);
   EXPECT_EQ(plan.requests[1].packed_token_offset, 1u);
   EXPECT_EQ(plan.requests[2].request, new_prefill);
-  EXPECT_EQ(plan.requests[2].unprocessed_token_count, 1u);
-  EXPECT_EQ(plan.requests[2].packed_token_offset, 4u);
+  EXPECT_EQ(plan.requests[2].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.requests[2].packed_token_offset, 3u);
   EXPECT_EQ(plan.token_count, 5u);
   EXPECT_FALSE(plan.graph_capture_eligible);
 }

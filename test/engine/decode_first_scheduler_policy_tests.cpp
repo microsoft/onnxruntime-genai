@@ -32,7 +32,7 @@ TEST(DecodeFirstSchedulerPolicyTest, AccountsForEveryTokenExactly) {
 
   const auto counts = AllocateDecodeFirstTokenBudget(selected, 7);
 
-  EXPECT_EQ(counts, (std::vector<size_t>{1, 1, 4, 1}));
+  EXPECT_EQ(counts, (std::vector<size_t>{1, 1, 3, 2}));
 }
 
 TEST(DecodeFirstSchedulerPolicyTest, DecodeDemandExhaustsTheBudget) {
@@ -57,6 +57,22 @@ TEST(DecodeFirstSchedulerPolicyTest, PrefillsRespectPendingCapAndGlobalBudget) {
 
   EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 7),
             (std::vector<size_t>{2, 3, 2}));
+}
+
+TEST(DecodeFirstSchedulerPolicyTest, EqualPrefillsReceiveEqualChunks) {
+  const std::array selected{
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 2048, std::nullopt},
+  };
+
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 2048),
+            (std::vector<size_t>{256, 256, 256, 256, 256, 256, 256, 256}));
 }
 
 TEST(DecodeFirstSchedulerPolicyTest, RequestLimitUsesBothIndependentCaps) {

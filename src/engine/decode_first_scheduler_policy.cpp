@@ -40,6 +40,7 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     throw std::invalid_argument("The selected requests exceed the scheduled token budget.");
 
   std::vector<size_t> token_counts(selected_candidates.size(), 1);
+  std::vector<size_t> prefill_limits(selected_candidates.size(), 1);
   size_t remaining_budget = max_scheduled_tokens - selected_candidates.size();
   for (size_t i = 0; i < selected_candidates.size(); ++i) {
     const auto& candidate = selected_candidates[i];
@@ -51,10 +52,27 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     size_t prefill_limit = candidate.pending_token_count;
     if (candidate.prefill_token_cap.value_or(0) != 0)
       prefill_limit = std::min(prefill_limit, *candidate.prefill_token_cap);
-    const size_t additional_tokens =
-        std::min(prefill_limit - 1, remaining_budget);
-    token_counts[i] += additional_tokens;
-    remaining_budget -= additional_tokens;
+    prefill_limits[i] = prefill_limit;
+  }
+
+  while (remaining_budget > 0) {
+    size_t active_prefills = 0;
+    for (size_t i = 0; i < selected_candidates.size(); ++i) {
+      active_prefills += selected_candidates[i].is_prefill &&
+                         token_counts[i] < prefill_limits[i];
+    }
+    if (active_prefills == 0)
+      break;
+
+    const size_t fair_share = std::max<size_t>(1, remaining_budget / active_prefills);
+    for (size_t i = 0; i < selected_candidates.size() && remaining_budget > 0; ++i) {
+      if (!selected_candidates[i].is_prefill || token_counts[i] == prefill_limits[i])
+        continue;
+      const size_t additional_tokens = std::min(
+          {prefill_limits[i] - token_counts[i], fair_share, remaining_budget});
+      token_counts[i] += additional_tokens;
+      remaining_budget -= additional_tokens;
+    }
   }
   return token_counts;
 }
