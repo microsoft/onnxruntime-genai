@@ -72,7 +72,7 @@ void DynamicKeyValueCache::RewindTo(size_t index) {
 }
 
 template <typename T>
-void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
+void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && !past_present_share_buffer_);
 
   if (!layer_shapes_.empty()) {

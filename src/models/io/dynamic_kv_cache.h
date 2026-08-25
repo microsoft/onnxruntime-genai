@@ -7,8 +7,8 @@
 
 namespace Generators {
 
-struct DynamicKeyValueCache : DefaultKeyValueCache {
-  using DefaultKeyValueCache::DefaultKeyValueCache;
+struct DynamicKeyValueCache : DefaultKeyValueCacheBase {
+  using DefaultKeyValueCacheBase::DefaultKeyValueCacheBase;
 
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;

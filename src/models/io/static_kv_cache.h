@@ -15,10 +15,18 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                                        bool& past_present_share_buffer,
                                        const char* cache_name);
 
-struct DefaultKeyValueCache : KeyValueCache {
-  DefaultKeyValueCache(State& state);
+// Abstract base for exposed past/present KV-cache variants. It owns the common
+// layer-name discovery, shape planning, tensor binding, beam-reorder, and rewind
+// copy helpers; concrete variants implement their own update/rewind policy.
+struct DefaultKeyValueCacheBase : KeyValueCache {
+  DefaultKeyValueCacheBase(State& state);
+
+  virtual ~DefaultKeyValueCacheBase() = default;
 
   void Add() override;
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override = 0;
+  void RewindTo(size_t index) override = 0;
+
   auto& GetShape() const { return shape_; }
   auto& GetType() const { return type_; }
   auto& GetPresents() { return presents_; }
@@ -62,6 +70,8 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
+
+using DefaultKeyValueCache = DefaultKeyValueCacheBase;
 
 bool ShouldUseSharedPastPresentKeyValueCache(State& state);
 

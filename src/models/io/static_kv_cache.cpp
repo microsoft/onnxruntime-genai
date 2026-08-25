@@ -38,7 +38,7 @@ namespace Generators {
 // sliding-window layers with distinct static caps) fall through to dynamic
 // handling. Lifting this restriction would extend the existing layer_shapes_
 // infrastructure used for per-layer head_dim detection in
-// DefaultKeyValueCache: store the per-layer detected seq_len into
+// DefaultKeyValueCacheBase: store the per-layer detected seq_len into
 // layer_shapes_[i][2] instead of a single scalar, and let the share-buffer
 // branch's per-layer loop do the rest. Deferred until a model in the wild
 // actually needs it.
@@ -132,7 +132,7 @@ bool ShouldUseSharedPastPresentKeyValueCache(State& state) {
   return past_present_share_buffer;
 }
 
-DefaultKeyValueCache::DefaultKeyValueCache(State& state)
+DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
@@ -183,7 +183,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
     }
     if (!is_sequential) {
-      Log("info", "DefaultKeyValueCache: Auto-discovered " + std::to_string(layer_count_) +
+      Log("info", "DefaultKeyValueCacheBase: Auto-discovered " + std::to_string(layer_count_) +
                       " KV cache layers at non-sequential indices");
     }
   }
@@ -198,7 +198,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
     shape_[3] = ComputeQuantizedKvCacheHeadSize(model_.config_->model.decoder.head_size, kv_cache_quantization_bits, type_);
     if (g_log.enabled) {
-      Log("info", "DefaultKeyValueCache: KV cache quantization " + std::to_string(kv_cache_quantization_bits) +
+      Log("info", "DefaultKeyValueCacheBase: KV cache quantization " + std::to_string(kv_cache_quantization_bits) +
                       "-bit enabled, compressed kv_cache head_size=" + std::to_string(shape_[3]));
     }
   }
@@ -258,7 +258,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
       if (g_log.enabled) {
         Log("info",
-            "DefaultKeyValueCache: Detected per-layer KV shape variation "
+            "DefaultKeyValueCacheBase: Detected per-layer KV shape variation "
             "(num_kv_heads/head_dim) across " +
                 std::to_string(layer_count_) + " KV cache layers");
       }
@@ -388,7 +388,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 }
 
-void DefaultKeyValueCache::Add() {
+void DefaultKeyValueCacheBase::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();
 
@@ -414,7 +414,7 @@ void DefaultKeyValueCache::Add() {
 
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
-void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
+void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
 
   std::array<int64_t, 4> tensor_shape;
@@ -445,7 +445,7 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   pasts_[index] = std::move(past_value);
 }
 
-void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
+void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else if (type_ == Ort::TypeToTensorType<int8_t>) {
