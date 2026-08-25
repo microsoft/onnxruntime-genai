@@ -162,6 +162,10 @@ def _make_kv_model(
     model.extra_options = extra_options if extra_options is not None else {}
     model.attention_attrs = {"op_type": op_type}
     model.use_paged_attention = use_paged_attention
+    model.input_names = {
+        "past_key_values.key": [f"past_key_values.{layer_id}.key" for layer_id in range(num_layers)],
+        "past_key_values.value": [f"past_key_values.{layer_id}.value" for layer_id in range(num_layers)],
+    }
     model.input_types = {}
     model.output_types = {}
     model.input_shapes = {
@@ -497,6 +501,104 @@ def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):
     np.testing.assert_allclose(captured["model.layers.1.attn.k_scale"], 0.2)
     np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 0.3)
     np.testing.assert_allclose(captured["model.layers.1.attn.v_scale"], 0.4)
+
+
+def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [0.1, 0.2],
+                    "v_scales": [0.3, 0.4],
+                },
+                "layer_ids": [1, 3],
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=4,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    model.kv_quant_type = "PER_TENSOR"
+    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
+    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    assert set(captured) == {
+        "model.layers.1.attn.k_scale",
+        "model.layers.1.attn.v_scale",
+        "model.layers.3.attn.k_scale",
+        "model.layers.3.attn.v_scale",
+    }
+    np.testing.assert_allclose(captured["model.layers.1.attn.k_scale"], 0.1)
+    np.testing.assert_allclose(captured["model.layers.3.attn.k_scale"], 0.2)
+    np.testing.assert_allclose(captured["model.layers.1.attn.v_scale"], 0.3)
+    np.testing.assert_allclose(captured["model.layers.3.attn.v_scale"], 0.4)
+
+
+def test_sparse_layer_ids_must_match_model_kv_layers(tmp_path):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [0.1, 0.2],
+                    "v_scales": [0.3, 0.4],
+                },
+                "layer_ids": [0, 2],
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=4,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    model.kv_quant_type = "PER_TENSOR"
+    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
+    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match="must match the model's KV-cache layers"):
+        model.make_kv_cache_scale_initializers()
+
+
+@pytest.mark.parametrize(
+    "layer_ids,error",
+    [
+        ([], "must not be empty"),
+        ([1, 1], "must not contain duplicates"),
+        ([True], "must be a list of integer"),
+        ([4], r"must be in \[0, 4\)"),
+    ],
+)
+def test_invalid_sparse_layer_ids_are_rejected(tmp_path, layer_ids, error):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(
+        json.dumps(
+            {
+                "scales": {
+                    "k_scales": [0.1] * len(layer_ids),
+                    "v_scales": [0.2] * len(layer_ids),
+                },
+                "layer_ids": layer_ids,
+            }
+        )
+    )
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=4,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    model.kv_quant_type = "PER_TENSOR"
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match=error):
+        model.make_kv_cache_scale_initializers()
 
 
 def test_calibrated_per_channel_scales_are_loaded_from_file(tmp_path):

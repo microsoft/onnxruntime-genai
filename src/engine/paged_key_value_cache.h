@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <algorithm>
 #include <stdint.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <list>
 
@@ -14,6 +16,32 @@
 #include "step_plan.h"
 
 namespace Generators {
+
+inline constexpr size_t kMinGraphBlockTableColumns = 8;
+
+inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
+  if (max_columns == 0) {
+    throw std::runtime_error("Graph block-table capacity must be non-zero.");
+  }
+
+  size_t columns = std::min(kMinGraphBlockTableColumns, max_columns);
+  while (columns < max_blocks) {
+    if (columns > max_columns / 2) {
+      return max_columns;
+    }
+    columns *= 2;
+  }
+  return columns;
+}
+
+size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
+                                 float gpu_utilization_factor,
+                                 size_t reserved_memory_bytes,
+                                 size_t block_size,
+                                 size_t num_key_value_heads,
+                                 size_t head_size,
+                                 size_t full_layer_count,
+                                 size_t element_size);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -27,7 +55,7 @@ namespace Generators {
  */
 struct PagedKeyValueCache {
  public:
-  PagedKeyValueCache(std::shared_ptr<Model> model);
+  explicit PagedKeyValueCache(std::shared_ptr<Model> model);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 

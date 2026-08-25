@@ -18,6 +18,7 @@
 #include <numeric>
 #include <optional>
 #include <queue>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -73,6 +74,7 @@ using TokenSequences = std::vector<std::vector<int32_t>>;
 
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
+bool SupportsContinuousDecoding(DeviceType device_type) noexcept;
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
@@ -90,6 +92,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool GetSearchBool(std::string_view name) const;
   void SetSpeculativeNumber(std::string_view name, double value);
   double GetSpeculativeNumber(std::string_view name) const;
+  void SetSpeculativeBool(std::string_view name, bool value);
+  bool GetSpeculativeBool(std::string_view name) const;
 
   int max_batch_size{0};
   bool use_graph_capture{};
@@ -184,6 +188,7 @@ struct Generator : LeakChecked<Generator> {
                               kTopP,
                               kTopKTopP };
   SamplingMethod sampling_method_{SamplingMethod::kGreedy};
+  std::mt19937 rng_;
   void InitializeSamplingMethod(const GeneratorParams& params);
   void InitializePhi3RopeThreshold(const GeneratorParams& params);
 
@@ -191,6 +196,8 @@ struct Generator : LeakChecked<Generator> {
   friend struct StandardDecodingStrategy;
   friend struct TransducerDecodingStrategy;
   friend struct SpeculativeDecodingStrategy;
+  friend struct BaseSpeculativeStrategy;
+  friend void RunStandardDecodingStep(Generator& g);
 };
 
 // Defined in generators.cpp; owned by OrtGlobals so genai add-on libraries (e.g. the CUDA
@@ -273,5 +280,6 @@ void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source,
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
+std::mt19937 CreateRandomGenerator(int random_seed);
 
 }  // namespace Generators

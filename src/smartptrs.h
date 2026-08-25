@@ -6,8 +6,10 @@
 #include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <type_traits>  // for std::remove_const_t
+#include <utility>
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
@@ -33,6 +35,12 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
+  virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
+    assert(size_in_bytes == size_in_bytes_);
+    AllocateCpu();
+    std::memcpy(p_cpu_, source, size_in_bytes);
+    CopyCpuToDevice();
+  }
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -74,6 +82,11 @@ struct DeviceSpan {
 
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+
+  void CopyFromCpu(std::span<const T> source) {
+    assert(source.size() == size());
+    p_device_memory_->CopyFromCpu(source.data(), source.size_bytes());
+  }
 
   // Zero out the device memory
   void Zero() { p_device_memory_->Zero(); }
@@ -258,14 +271,32 @@ struct DeviceInterface {
 // ExternalAddRef must be called when returning an object through the C API
 // ExternalRelease must be called on the C API destroy method
 template <typename T>
+struct ExternalRefCountedTraits {
+  static constexpr bool notify_external_reference_changes = false;
+};
+
+template <typename T>
 struct ExternalRefCounted {
   void ExternalAddRef() {
-    if (++ref_count_ == 1)  // First reference?
+    if (++ref_count_ == 1) {  // First reference?
       external_owner_ = static_cast<T*>(this)->shared_from_this();
+      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+        static_assert(noexcept(std::declval<T&>().OnFirstExternalReference()));
+        static_cast<T*>(this)->OnFirstExternalReference();
+      }
+    }
   }
-  void ExternalRelease() {
-    if (--ref_count_ == 0)
+
+  void ExternalRelease() noexcept {
+    if (--ref_count_ == 0) {
+      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+        static_assert(noexcept(std::declval<T&>().OnLastExternalReference()));
+        // Notify before releasing the self-owner so a type-specific last-release hook can only mark
+        // deferred work while the object is guaranteed to still be alive.
+        static_cast<T*>(this)->OnLastExternalReference();
+      }
       external_owner_ = nullptr;
+    }
   }
 
  private:

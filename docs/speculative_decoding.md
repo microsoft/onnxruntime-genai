@@ -236,14 +236,14 @@ stream costs one main forward and one head forward per two tokens.
 
 The single head module is chained `N` times, feeding its own post-norm hidden forward
 (`head_out_hidden_`), the way vLLM's `AutoRegressiveSpeculator` does. Then `[t, d_0 .. d_{N-1}]` is
-verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of four
+verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of three
 finalize branches runs:
 
 | Branch | Condition | Cost |
 |---|---|---|
 | All accepted | `a == N` | No extra forward; bonus is verify row `N` |
-| Lossless crop + `M=1` replay | `a >= 1` and windowed recurrent state | Crop to `L+a`, replay the last committed token (1-wide, decode-consistent bonus) |
-| Snapshot rewind + replay | otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
+| Windowed direct commit | `a < N` and windowed recurrent state | Crop to `L+a+1`; bonus is verify row `a` |
+| Snapshot rewind + replay | `a < N` otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
 
 Re-materializing the `a` accepted drafts in the head's KV and drafting the next round's first token
 both consume *main-model* hidden states over consecutive positions, so they are **deferred and
@@ -263,9 +263,10 @@ forward, the reject path can crop instead of replaying whenever the recurrent st
 
 A wide (`M = N+1`) verify forward is numerically close to, but not bit-identical to, `M = 1` decode
 (different GEMM tiling; XQA vs. Flash attention). Only the **last** row of a forward matches a
-1-token decode. Greedy MTP is therefore "lossless modulo near-ties": the finalize branches are
-ordered so that the bonus token comes from a decode-consistent row wherever that is affordable.
-Under sampling this is a non-issue by construction.
+1-token decode. Greedy MTP is therefore "lossless modulo near-ties." On a partial accept, a
+windowed model commits verify row `a` directly because replaying from recurrent state produced by
+the same wide verify is not more decode-consistent; a non-windowed model restores its pre-verify
+snapshot and replays the committed prefix. Under sampling this is a non-issue by construction.
 
 ### Device offloads
 
@@ -296,7 +297,7 @@ absorbed every token of the forward. `RecurrentState`
 - **Snapshot / restore** — `Snapshot(position)` copies the live conv + recurrent buffers before a
   speculative forward; `RewindTo` restores them in place (in place, so buffer addresses stay stable
   for CUDA-graph replay). Always available, but costs `2 * num_layers` device copies per step.
-- **Windowed state** — when the model is exported with `recurrent_state_window = W`, the state
+- **Windowed state** — when the model is exported with `state_window = W`, the state
   tensors carry a window axis of `W` per-token states, right-aligned: slot `j` holds the state after
   token `seq_len - W + j`, and slot `W-1` is the one the ops read. `CropToPosition(position)` then
   commits a partial accept by promoting the slot for `position` into slot `W-1` — one batched kernel
@@ -324,7 +325,7 @@ shape, so `GeneratorParams::max_graph_capture_length` is set to `num_speculative
   `(length, recurrent variant)` pair, so ORT captures and replays an independent graph per shape.
 
 `HiddenStatesInputs` / `HiddenStatesOutputs`
-([src/models/hidden_states_inputs.h](../src/models/hidden_states_inputs.h)) keep one dedicated
+([src/models/hidden_states.h](../src/models/hidden_states.h)) keep one dedicated
 static buffer per captured length and a single shared dynamic buffer for everything else (prompt
 prefill), so the prompt does not leave a per-length buffer behind. `HiddenStatesInputs::Update`
 validates the source element type and byte count, then prefers a stream-ordered device-to-device
@@ -432,10 +433,10 @@ draft-model speculative path uses.
 
 | Parameter | Set with | Default | Effect |
 |---|---|---|---|
-| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. For `N > 1`, `model.mtp.outputs.hidden_states` must name the feedback output exported with `mtp_emit_hidden=true`. `N` is capped at `recurrent_state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide. |
+| `speculative.max_draft_tokens` | `SetSpeculativeNumber("max_draft_tokens", N)` | `4` | `N`, the number of chained draft tokens per round. For `N > 1`, `model.mtp.outputs.hidden_states` must name the feedback output exported with `mtp_emit_hidden=true`. `N` is capped at `state_window - 1` on a windowed-state model, whose verify forward is `N + 1` wide. |
 | `search.chunk_size` | `SetSearchNumber("chunk_size", n)` | `256` on windowed-state models, `0` otherwise | Max tokens per prompt forward. Bounds the ORT activation arena (measured 54 GB chunked vs. 94 GB unchunked on a 2.8k-token prompt). `0` = single forward |
 
-On a windowed-state model (`recurrent_state_window > 1`) with at least one accepted draft, the
+On a windowed-state model (`state_window > 1`) with at least one accepted draft, the
 greedy path crops to the last accepted state and replays only that token with an `M=1` forward.
 When no draft is accepted, it restores the snapshot and replays the committed token.
 

@@ -94,7 +94,6 @@ struct StaticBatchScheduler : Scheduler {
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
-  std::set<std::shared_ptr<Request>> to_be_removed_requests_;
 };
 
 struct DynamicBatchScheduler : Scheduler {
@@ -111,8 +110,6 @@ struct DynamicBatchScheduler : Scheduler {
   bool HasPendingRequests() const override;
 
  private:
-  void ReapCompletedRequests();
-
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;

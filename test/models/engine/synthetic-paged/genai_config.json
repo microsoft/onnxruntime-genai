@@ -16,12 +16,13 @@
       "num_key_value_heads": 1,
       "head_size": 1,
       "hidden_size": 1,
-      "num_hidden_layers": 1,
+      "num_hidden_layers": 6,
       "inputs": {
         "input_ids": "input_ids",
         "block_table": "block_table",
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
+        "attention_metadata": "attention_metadata",
         "past_key_names": "past_key_values.%d.key",
         "past_value_names": "past_key_values.%d.value"
       },
@@ -29,7 +30,16 @@
         "logits": "logits",
         "present_key_names": "present.%d.key",
         "present_value_names": "present.%d.value"
-      }
+      },
+      "state_groups": [
+        {
+          "kind": "paged_kv",
+          "layer_ids": [
+            1,
+            4
+          ]
+        }
+      ]
     }
   },
   "search": {

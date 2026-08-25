@@ -420,6 +420,14 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
+  OgaString ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                         const char* template_kwargs, bool add_generation_prompt) const {
+    const char* p{};
+    OgaCheckResult(OgaTokenizerApplyChatTemplateWithOptions(this, template_str, messages, tools, template_kwargs,
+                                                            add_generation_prompt, &p));
+    return p;
+  }
+
 #if OGA_USE_SPAN
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
@@ -502,6 +510,16 @@ struct OgaGeneratorParams : OgaAbstract {
   double GetSpeculativeNumber(const char* name) const {
     double value;
     OgaCheckResult(OgaGeneratorParamsGetSpeculativeNumber(this, name, &value));
+    return value;
+  }
+
+  void SetSpeculativeBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeBool(this, name, value));
+  }
+
+  bool GetSpeculativeBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeBool(this, name, &value));
     return value;
   }
 
@@ -647,6 +665,10 @@ struct OgaMtpGenerator : OgaAbstract {
 
   void GenerateNextToken() {
     OgaCheckResult(OgaMtpGenerator_GenerateNextToken(this));
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaMtpGenerator_Reset(this));
   }
 
   bool IsDone() const {
@@ -899,10 +921,17 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestAddTokens(this, &tokens));
   }
 
-  bool IsDone() const {
-    bool is_done{};
-    OgaCheckResult(OgaRequestIsDone(this, &is_done));
-    return is_done;
+  void Continue(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestContinue(this, &tokens));
+  }
+
+  /**
+   * \brief Returns whether the current generation turn is complete.
+   */
+  bool IsTurnComplete() const {
+    bool is_turn_complete{};
+    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
+    return is_turn_complete;
   }
 
   bool HasUnseenTokens() const {
@@ -943,10 +972,21 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
+  /**
+   * \brief Submits a request to the engine.
+   *
+   * Ownership continues after the current turn completes. Remove() releases resources immediately;
+   * releasing the final external handle instead defers reclamation until the next Add() or Step().
+   */
   void Add(OgaRequest& request) {
     OgaCheckResult(OgaEngineAddRequest(this, &request));
   }
 
+  /**
+   * \brief Removes a request and releases engine ownership.
+   *
+   * Repeated calls after the request has already been removed are successful no-ops.
+   */
   void Remove(OgaRequest& request) {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));
   }

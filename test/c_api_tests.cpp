@@ -243,6 +243,21 @@ TEST(CAPITests, ChatTemplate) {
   auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, nullptr, true);
   ASSERT_STREQ(expected_output, out_string);
 
+  const char* kwargs_template =
+      "{% if enable_thinking is defined and not enable_thinking %}NO_THINK{% else %}THINK{% endif %}"
+      "|{{ reasoning_effort }}|{{ level }}";
+  const char* template_kwargs =
+      R"({"enable_thinking":false,"reasoning_effort":"low","level":2})";
+  auto kwargs_output = tokenizer->ApplyChatTemplateWithOptions(
+      kwargs_template, messages_json, nullptr, template_kwargs, true);
+  ASSERT_STREQ("NO_THINK|low|2", kwargs_output);
+
+  auto legacy_output = tokenizer->ApplyChatTemplate(
+      "{{ messages[0].content }}", messages_json, nullptr, true);
+  auto null_options_output = tokenizer->ApplyChatTemplateWithOptions(
+      "{{ messages[0].content }}", messages_json, nullptr, nullptr, true);
+  ASSERT_STREQ(legacy_output, null_options_output);
+
 #endif
 }
 
@@ -931,6 +946,11 @@ struct Phi2Test {
     }
 
     for (size_t i = 0; i < batch_size_; i++) {
+      EXPECT_TRUE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+      EXPECT_FALSE(requests_[i]->IsTurnComplete());
+      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+
       auto out_string = tokenizer_->Decode(generated_tokens[i].data(), generated_tokens[i].size());
       std::cout << "Decoded string:" << out_string << std::endl;
     }

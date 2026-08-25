@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "speculative_sampling.h"
+#include "speculative_decoding_strategy.h"
 
 #include <array>
 #include <cmath>
@@ -13,6 +13,335 @@
 #include <gtest/gtest.h>
 
 namespace Generators::test {
+
+namespace {
+void RecordAdaptiveRound(AdaptiveKController& controller, int accepted,
+                         size_t committed_tokens, float total_ms,
+                         bool filled_proposal_budget = true, int evaluated = -1) {
+  const int k = controller.GetK();
+  controller.RecordCompletedRound(
+      k, evaluated < 0 ? k : evaluated, accepted, committed_tokens,
+      filled_proposal_budget, total_ms * 0.25f, total_ms * 0.75f);
+}
+
+void EstablishK3AsFaster(AdaptiveKController& controller) {
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+}
+}  // namespace
+
+TEST(AdaptiveKControllerTest, DisabledUsesConfiguredMaximumAndNeverUpdates) {
+  AdaptiveKController controller{/*fixed_k=*/8, /*min_adaptive_k=*/0};
+
+  EXPECT_EQ(controller.GetK(), 8);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/8.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/8, /*committed_tokens=*/9, /*total_ms=*/8.0f);
+
+  EXPECT_EQ(controller.GetK(), 8);
+  EXPECT_EQ(controller.Increases(), 0u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Observations(), 0u);
+  EXPECT_EQ(controller.Probes(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, StartsAtTwoAndProbesUpAfterSmoothedEvidence) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+
+  EXPECT_EQ(controller.GetK(), 2);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 2);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 3);
+  EXPECT_EQ(controller.Probes(), 1u);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_FLOAT_EQ(controller.CurrentThroughput(), 1.0f);
+}
+
+TEST(AdaptiveKControllerTest, KeepsFasterProbeAndContinuesGrowing) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+  EstablishK3AsFaster(controller);
+
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 3);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  EXPECT_EQ(controller.GetK(), 4);
+  RecordAdaptiveRound(controller, /*accepted=*/4, /*committed_tokens=*/5, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/4, /*committed_tokens=*/5, /*total_ms=*/3.0f);
+
+  EXPECT_EQ(controller.GetK(), 4);
+  EXPECT_EQ(controller.Increases(), 2u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Probes(), 2u);
+}
+
+TEST(AdaptiveKControllerTest, HighAcceptanceCanGrowToHardLimitSixteen) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+
+  for (int round = 0; round < 100 && controller.GetK() < 16; round++) {
+    const int k = controller.GetK();
+    RecordAdaptiveRound(
+        controller, /*accepted=*/k,
+        /*committed_tokens=*/static_cast<size_t>(k + 1),
+        /*total_ms=*/1.0f);
+  }
+
+  EXPECT_EQ(controller.GetK(), 16);
+  EXPECT_EQ(controller.Increases(), 14u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, UserFloorOneStartsAtOneAndCanGrow) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/1};
+
+  EXPECT_EQ(controller.GetK(), 1);
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Probes(), 1u);
+}
+
+TEST(AdaptiveKControllerTest, NeverDecreasesBelowUserFloor) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/1};
+
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/2.0f);
+
+  EXPECT_EQ(controller.GetK(), 1);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, RejectsProbeThatReducesMeasuredThroughput) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/4.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 1u);
+  EXPECT_EQ(controller.Probes(), 1u);
+}
+
+TEST(AdaptiveKControllerTest, PartialAcceptanceCanWinWhenThroughputImproves) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+  EstablishK3AsFaster(controller);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 4);
+
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/2.5f);
+  RecordAdaptiveRound(controller, /*accepted=*/3, /*committed_tokens=*/4, /*total_ms=*/2.5f);
+
+  EXPECT_EQ(controller.GetK(), 4);
+  EXPECT_GT(controller.CurrentThroughput(), 1.5f);
+}
+
+TEST(AdaptiveKControllerTest, PoorUsefulWidthProbesDownAndKeepsFasterNeighbor) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+  EstablishK3AsFaster(controller);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/1, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 2);
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/1.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/1.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_GT(controller.CurrentThroughput(), 1.0f);
+}
+
+TEST(AdaptiveKControllerTest, IneligibleRoundsDoNotTrainOrProbe) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+
+  RecordAdaptiveRound(controller, /*accepted=*/1, /*committed_tokens=*/2, /*total_ms=*/2.0f,
+                      /*filled_proposal_budget=*/false);
+  RecordAdaptiveRound(controller, /*accepted=*/0, /*committed_tokens=*/2, /*total_ms=*/2.0f,
+                      /*filled_proposal_budget=*/true, /*evaluated=*/0);
+  controller.RecordCompletedRound(
+      controller.GetK(), /*evaluated=*/2, /*accepted=*/2, /*committed_tokens=*/0,
+      /*filled_proposal_budget=*/true, /*propose_ms=*/1.0f, /*target_ms=*/1.0f);
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Observations(), 0u);
+  EXPECT_EQ(controller.Probes(), 0u);
+  EXPECT_EQ(controller.Increases(), 0u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+}
+
+TEST(AdaptiveKControllerTest, ResetClearsLearnedRatesButPreservesCumulativeCounts) {
+  AdaptiveKController controller{/*fixed_k=*/4, /*min_adaptive_k=*/2};
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  RecordAdaptiveRound(controller, /*accepted=*/2, /*committed_tokens=*/3, /*total_ms=*/3.0f);
+  ASSERT_EQ(controller.GetK(), 3);
+
+  controller.Reset();
+
+  EXPECT_EQ(controller.GetK(), 2);
+  EXPECT_EQ(controller.Increases(), 1u);
+  EXPECT_EQ(controller.Decreases(), 0u);
+  EXPECT_EQ(controller.Observations(), 2u);
+  EXPECT_EQ(controller.Probes(), 1u);
+  EXPECT_FLOAT_EQ(controller.CurrentThroughput(), 0.0f);
+}
+
+TEST(SpeculativeCooldownControllerTest, DisabledNeverEntersCooldown) {
+  SpeculativeCooldownController controller{/*enabled=*/false};
+
+  for (int round = 0; round < 6; round++)
+    controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+  EXPECT_EQ(controller.Steps(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, ThreeZeroAcceptRoundsAtMinimumSkipOneStep) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/2, /*accepted=*/0);
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  ASSERT_TRUE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 1u);
+  EXPECT_EQ(controller.Remaining(), 1);
+
+  controller.CompleteStandardStep();
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Steps(), 1u);
+  EXPECT_EQ(controller.Remaining(), 0);
+}
+
+TEST(SpeculativeCooldownControllerTest, UsefulRoundResetsFailureStreak) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/2, /*accepted=*/1);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, AboveMinimumAndForcedOnlyRoundsDoNotAccumulate) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+
+  controller.RecordCompletedRound(/*k=*/3, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/3, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/0, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Entries(), 0u);
+}
+
+TEST(SpeculativeCooldownControllerTest, ResetClearsPendingPolicyButPreservesCounts) {
+  SpeculativeCooldownController controller{/*enabled=*/true};
+  for (int round = 0; round < 3; round++)
+    controller.RecordCompletedRound(/*k=*/2, /*minimum_k=*/2, /*evaluated=*/1, /*accepted=*/0);
+  ASSERT_TRUE(controller.ShouldRunStandardStep());
+
+  controller.Reset();
+
+  EXPECT_FALSE(controller.ShouldRunStandardStep());
+  EXPECT_EQ(controller.Remaining(), 0);
+  EXPECT_EQ(controller.Entries(), 1u);
+  EXPECT_EQ(controller.Steps(), 0u);
+}
+
+TEST(SpeculativeProposalTest, ModeDoesNotDependOnProbabilityStorage) {
+  // These intentionally inconsistent buffers prove that mode, not storage shape, selects behavior.
+  // Runtime proposal validation rejects such inconsistencies before verification.
+  SpeculativeDecodingStrategy::Proposal greedy{
+      SpeculativeDecodingStrategy::ProposalMode::kGreedyMatch};
+  greedy.distributions.resize(1);
+  EXPECT_FALSE(greedy.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal sampling{
+      SpeculativeDecodingStrategy::ProposalMode::kDraftSampling};
+  EXPECT_TRUE(sampling.UsesDraftProbabilities());
+
+  SpeculativeDecodingStrategy::Proposal deterministic{
+      SpeculativeDecodingStrategy::ProposalMode::kDeterministic};
+  deterministic.distributions.resize(1);
+  EXPECT_FALSE(deterministic.UsesDraftProbabilities());
+}
+
+TEST(SpeculativeRoundStateTest, AcceptsOneRngCheckpointPerPendingToken) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states.emplace_back(11);
+  round.pending_rng_states.emplace_back(12);
+
+  EXPECT_NO_THROW(round.ValidateRngCheckpoints());
+}
+
+TEST(SpeculativeRoundStateTest, RejectsMissingRngCheckpoint) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states.emplace_back(11);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, RejectsExtraRngCheckpoint) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1};
+  round.pending_rng_states.emplace_back(11);
+  round.pending_rng_states.emplace_back(12);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, RejectsCheckpointForNonSamplingRound) {
+  SpeculativeDecodingStrategy::RoundState round;
+  round.pending = {1};
+  round.pending_rng_states.emplace_back(11);
+
+  EXPECT_THROW(round.ValidateRngCheckpoints(), std::runtime_error);
+}
+
+TEST(SpeculativeRoundStateTest, AppliesOnlyVisibleTokenCheckpoint) {
+  std::mt19937 canonical_rng{42};
+  std::mt19937 round_rng = canonical_rng;
+  (void)round_rng();
+  const std::mt19937 first_visible_state = round_rng;
+  (void)round_rng();
+  const std::mt19937 discarded_state = round_rng;
+
+  SpeculativeDecodingStrategy::RoundState round;
+  round.uses_rng_checkpoints = true;
+  round.pending = {1, 2};
+  round.pending_rng_states = {first_visible_state, discarded_state};
+
+  round.ApplyNextRngCheckpoint(canonical_rng);
+  round.pending.pop_front();
+  EXPECT_EQ(canonical_rng, first_visible_state);
+
+  round.pending.clear();
+  round.pending_rng_states.clear();
+  round.uses_rng_checkpoints = false;
+  EXPECT_EQ(canonical_rng, first_visible_state);
+  EXPECT_NE(canonical_rng, discarded_state);
+}
 
 // ComputeAcceptProb
 
@@ -222,6 +551,112 @@ TEST(SpeculativeSamplingTest, TargetSamplingSelectionDensifiesSparseCategorical)
   EXPECT_GT(dense[1], dense[2]);
   EXPECT_FLOAT_EQ(dense[3], 0.0f);
   EXPECT_NEAR(std::accumulate(dense.begin(), dense.end(), 0.0f), 1.0f, 1e-6f);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalAcceptsMatchingSampleAndDrawsBonus) {
+  TargetTokenSelection first;
+  first.indices = {7};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 9);
+  EXPECT_TRUE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalCapturesRngStateAfterEachQueuedToken) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 2};
+  std::mt19937 actual_rng{42};
+  std::mt19937 expected_rng{42};
+  std::vector<std::mt19937> states_after_draw;
+
+  const auto result = VerifyDeterministicProposal(
+      proposal, first, subsequent, actual_rng, &states_after_draw);
+
+  ASSERT_TRUE(result.used_bonus);
+  ASSERT_EQ(states_after_draw.size(), 3u);
+  SampleTargetToken(first, expected_rng);
+  EXPECT_EQ(states_after_draw[0], expected_rng);
+  SampleTargetToken(subsequent[0], expected_rng);
+  EXPECT_EQ(states_after_draw[1], expected_rng);
+  SampleTargetToken(subsequent[1], expected_rng);
+  EXPECT_EQ(states_after_draw[2], expected_rng);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalMismatchCommitsSampledTarget) {
+  TargetTokenSelection first;
+  first.indices = {5};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 1> subsequent;
+  subsequent[0].indices = {9};
+  subsequent[0].probs = {1.0f};
+  std::array<int32_t, 1> proposal{7};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 0);
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_EQ(result.final_token, 5);
+  EXPECT_FALSE(result.used_bonus);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalStopsDrawingAfterFirstMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1, 2};
+  first.probs = {0.4f, 0.6f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {3, 4};
+  subsequent[0].probs = {0.3f, 0.7f};
+  subsequent[1].indices = {5, 6};
+  subsequent[1].probs = {0.2f, 0.8f};
+  std::array<int32_t, 2> proposal{99, 4};
+  std::mt19937 actual_rng{1234};
+  std::mt19937 expected_rng{1234};
+  SampleTargetToken(first, expected_rng);
+
+  const auto result =
+      VerifyDeterministicProposal(proposal, first, subsequent, actual_rng);
+
+  EXPECT_EQ(result.evaluated_count, 1);
+  EXPECT_FALSE(result.used_bonus);
+  EXPECT_EQ(actual_rng, expected_rng);
+}
+
+TEST(SpeculativeSamplingTest, DeterministicProposalDoesNotDrawBonusAfterLaterMismatch) {
+  TargetTokenSelection first;
+  first.indices = {1};
+  first.probs = {1.0f};
+  std::array<TargetTokenSelection, 2> subsequent;
+  subsequent[0].indices = {2};
+  subsequent[0].probs = {1.0f};
+  subsequent[1].indices = {3};
+  subsequent[1].probs = {1.0f};
+  std::array<int32_t, 2> proposal{1, 9};
+  std::mt19937 rng{42};
+
+  const auto result = VerifyDeterministicProposal(proposal, first, subsequent, rng);
+
+  EXPECT_EQ(result.accepted_count, 1);
+  EXPECT_EQ(result.evaluated_count, 2);
+  EXPECT_EQ(result.final_token, 2);
+  EXPECT_FALSE(result.used_bonus);
 }
 
 // ---------------------------------------------------------------------------

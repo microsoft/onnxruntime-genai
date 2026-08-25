@@ -4,6 +4,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #pragma once
+#include "model_state_manifest.h"
 #include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
@@ -42,7 +43,7 @@ struct State {
   virtual void SnapshotState(size_t position) { (void)position; }
 
   // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
-  // state (recurrent_state_window > 1), the accepted prefix can be committed WITHOUT a replay
+  // state (state_window > 1), the accepted prefix can be committed WITHOUT a replay
   // forward. HasCroppableRecurrentState() reports availability; CropToAccepted() rolls the
   // attention KV cache + position to `new_length` and crops the recurrent state to the state
   // AFTER verify token `recurrent_position` (that token's window slot).
@@ -132,6 +133,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
   std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
+  std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                           const char* template_kwargs, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
@@ -177,21 +180,21 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
-struct SessionInfo {
+struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
 
   void Add(OrtSession& session);
 
-  bool HasInput(const std::string& name) const;
-  bool HasOutput(const std::string& name) const;
+  bool HasInput(const std::string& name) const override;
+  bool HasOutput(const std::string& name) const override;
 
-  ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
-  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override;
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override;
 
   std::vector<std::string> GetInputNames() const;
 
-  std::vector<int64_t> GetInputShape(const std::string& name) const;
-  std::vector<int64_t> GetOutputShape(const std::string& name) const;
+  std::vector<int64_t> GetInputShape(const std::string& name) const override;
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override;
 
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
@@ -220,6 +223,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
 
   DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
   DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
@@ -238,10 +242,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
-                                      bool disable_graph_capture = false);
+                                      bool disable_graph_capture = false,
+                                      bool cloned_from_parent = false,
+                                      bool append_providers = true);
 
  protected:
   void CreateSessionOptions();
+  void AddSharedInitializers();
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

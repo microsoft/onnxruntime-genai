@@ -477,6 +477,20 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeNumber(const OgaGenerato
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSpeculativeBool(OgaGeneratorParams* params, const char* name, bool value) {
+  OGA_TRY
+  params->SetSpeculativeBool(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsGetSpeculativeBool(const OgaGeneratorParams* params, const char* name, bool* value) {
+  OGA_TRY
+  *value = params->GetSpeculativeBool(name);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
   *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
@@ -501,6 +515,13 @@ OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator,
 OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator) {
   OGA_TRY
   generator->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaMtpGenerator_Reset(OgaMtpGenerator* generator) {
+  OGA_TRY
+  generator->Reset();
   return nullptr;
   OGA_CATCH
 }
@@ -800,6 +821,50 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->draft_forward_passes;
   else if (key == "target_forward_passes")
     *value = stats->target_forward_passes;
+  else if (key == "effective_k")
+    *value = stats->effective_k;
+  else if (key == "adaptive_k_increases")
+    *value = stats->adaptive_k_increases;
+  else if (key == "adaptive_k_decreases")
+    *value = stats->adaptive_k_decreases;
+  else if (key == "adaptive_k_observations")
+    *value = stats->adaptive_k_observations;
+  else if (key == "adaptive_k_probes")
+    *value = stats->adaptive_k_probes;
+  else if (key == "cooldown_entries")
+    *value = stats->cooldown_entries;
+  else if (key == "cooldown_steps")
+    *value = stats->cooldown_steps;
+  else if (key == "cooldown_remaining")
+    *value = stats->cooldown_remaining;
+  else if (key == "standard_fallback_steps")
+    *value = stats->standard_fallback_steps;
+  else if (key == "full_accept_rounds")
+    *value = stats->full_accept_rounds;
+  else if (key == "partial_accept_rounds")
+    *value = stats->partial_accept_rounds;
+  else if (key == "zero_accept_rounds")
+    *value = stats->zero_accept_rounds;
+  else if (key == "target_verify_forward_passes")
+    *value = stats->target_verify_forward_passes;
+  else if (key == "target_reanchor_forward_passes")
+    *value = stats->target_reanchor_forward_passes;
+  else if (key == "target_reconciliation_forward_passes")
+    *value = stats->target_reconciliation_forward_passes;
+  else if (key == "ngram_lookup_hits")
+    *value = stats->ngram_lookup_hits;
+  else if (key == "ngram_lookup_misses")
+    *value = stats->ngram_lookup_misses;
+  else if (key == "ngram_lookup_tokens_proposed")
+    *value = stats->ngram_lookup_tokens_proposed;
+  else if (key == "ngram_chained_tokens_proposed")
+    *value = stats->ngram_chained_tokens_proposed;
+  else if (key == "ngram_grammar_candidate_rejections")
+    *value = stats->ngram_grammar_candidate_rejections;
+  else if (key == "ngram_history_syncs")
+    *value = stats->ngram_history_syncs;
+  else if (key == "ngram_history_tokens_synced")
+    *value = stats->ngram_history_tokens_synced;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;
@@ -819,6 +884,14 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     *value = stats->total_target_ms;
   else if (key == "total_reconciliation_ms")
     *value = stats->total_reconciliation_ms;
+  else if (key == "total_target_verify_ms")
+    *value = stats->total_target_verify_ms;
+  else if (key == "total_target_reanchor_ms")
+    *value = stats->total_target_reanchor_ms;
+  else if (key == "total_ngram_history_sync_ms")
+    *value = stats->total_ngram_history_sync_ms;
+  else if (key == "total_ngram_lookup_ms")
+    *value = stats->total_ngram_lookup_ms;
   else if (key == "avg_draft_ms_per_token")
     *value = stats->avg_draft_ms_per_token;
   else if (key == "acceptance_rate")
@@ -839,6 +912,8 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     *value = stats->estimated_speedup;
   else if (key == "observed_speedup")
     *value = stats->observed_speedup;
+  else if (key == "adaptive_k_throughput")
+    *value = stats->adaptive_k_throughput;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetNumber.");
   return nullptr;
@@ -969,6 +1044,17 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer* tokenizer, const char* template_str,
+                                                                 const char* messages, const char* tools,
+                                                                 const char* template_kwargs, bool add_generation_prompt,
+                                                                 const char** out_string) {
+  OGA_TRY
+  *out_string = AllocOgaString(tokenizer->ApplyChatTemplateWithOptions(template_str, messages, tools,
+                                                                       template_kwargs, add_generation_prompt));
   return nullptr;
   OGA_CATCH
 }
@@ -1329,10 +1415,20 @@ OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
 
 OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
   OGA_TRY
-  if (tokens->size() > 1) {
-    throw std::runtime_error("Request can only be created with a single sequence");
+  if (tokens->size() != 1) {
+    throw std::runtime_error("Request input must contain exactly one sequence.");
   }
   request->AddTokens((*tokens)[0]);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
+  OGA_TRY
+  if (tokens->size() != 1) {
+    throw std::runtime_error("Request continuation must contain exactly one sequence.");
+  }
+  request->Continue((*tokens)[0]);
   return nullptr;
   OGA_CATCH
 }
@@ -1351,9 +1447,9 @@ OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
   OGA_CATCH
 }
 
-OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
+OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
   OGA_TRY
-  *out = request->IsDone();
+  *out = request->IsTurnComplete();
   return nullptr;
   OGA_CATCH
 }
