@@ -72,6 +72,22 @@ TEST_F(RequestLifecycleTest, InvalidEosTokenIsRejected) {
   }
 }
 
+TEST_F(RequestLifecycleTest, InvalidVocabSizeIsRejected) {
+  for (const int invalid_vocab_size : {-1, 0}) {
+    Config config;
+    config.model.vocab_size = invalid_vocab_size;
+    config.model.eos_token_id.clear();
+    auto params = std::make_shared<GeneratorParams>(config);
+
+    try {
+      std::make_shared<Request>(params);
+      FAIL() << "Expected invalid vocab_size to be rejected";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("vocab_size must be 1 or greater"), std::string::npos);
+    }
+  }
+}
+
 TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
   auto request = NewRequest();
 

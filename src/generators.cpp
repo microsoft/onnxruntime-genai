@@ -513,6 +513,9 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 }
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
+  if (params.config.model.vocab_size < 1)
+    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
+
   for (auto eos_token_id : params.config.model.eos_token_id) {
     if (eos_token_id < 0 || eos_token_id >= params.config.model.vocab_size)
       throw std::runtime_error("eos_token_id (" + std::to_string(eos_token_id) + ") must be in range [0, " + std::to_string(params.config.model.vocab_size) + ") (vocab_size)");
@@ -556,8 +559,6 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
     throw std::runtime_error("num_beams (" + std::to_string(params.search.num_beams) + ") must be in [1, " + std::to_string(max_num_beams) + "]");
   if (params.search.num_return_sequences < 1 || params.search.num_return_sequences > params.search.num_beams)
     throw std::runtime_error("num_return_sequences (" + std::to_string(params.search.num_return_sequences) + ") must be in [1, " + std::to_string(params.search.num_beams) + "]");
-  if (params.config.model.vocab_size < 1)
-    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
   // Beam search selects the top 2*num_beams (beam, token) candidates out of
   // num_beams*vocab_size entries in BeamSearch_Cpu::SelectTop, which requires
   // num_beams*vocab_size >= 2*num_beams, i.e. vocab_size >= 2. A smaller
