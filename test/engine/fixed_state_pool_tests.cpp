@@ -545,6 +545,63 @@ TEST_F(FixedStatePoolTest, MultiRowDirectBindingFallsBackForReorderedOrMixedBank
   EXPECT_EQ(snapshot.mixed_active_bank_fallbacks, 1u);
 }
 
+TEST_F(FixedStatePoolTest, ProvisionalRowExtendsResidentDirectSpan) {
+  auto pool = MakePool(4);
+  const auto handle_a = MakeResident(*pool, kRequestA, 1.0f);
+  const auto handle_b = MakeResident(*pool, kRequestB, 2.0f);
+  const auto handle_c = MakeResident(*pool, kRequestC, 3.0f);
+  ASSERT_EQ(handle_a.slot, 0u);
+  ASSERT_EQ(handle_b.slot, 1u);
+  ASSERT_EQ(handle_c.slot, 2u);
+  pool->Release(handle_a);
+  pool->Release(handle_b);
+
+  const std::array<Request, 2> requests{
+      Request{kRequestC, 2}, Request{kRequestA, 1}};
+  const auto plan = pool->PlanStep(requests);
+  ASSERT_EQ(plan->rows.size(), 2u);
+  EXPECT_EQ(plan->binding_mode, FixedStateBindingMode::DirectSpan);
+  EXPECT_EQ(plan->direct_first_slot, 2u);
+  EXPECT_EQ(plan->direct_active_bank, 1u);
+  EXPECT_EQ(plan->rows[0].slot, 2u);
+  EXPECT_FALSE(plan->rows[0].provisional);
+  EXPECT_EQ(plan->rows[1].slot, 3u);
+  EXPECT_TRUE(plan->rows[1].provisional);
+
+  auto reservation = pool->Reserve(*plan);
+  EXPECT_EQ(reservation.Handles()[0].slot, 2u);
+  EXPECT_EQ(reservation.Handles()[1].slot, 3u);
+  ExpectInputRows(reservation, 0, 3.0f);
+  ExpectInputRows(reservation, 1, 0.0f);
+}
+
+TEST_F(FixedStatePoolTest, ProvisionalRowCanPrecedeResidentDirectSpan) {
+  auto pool = MakePool(4);
+  const auto handle_a = MakeResident(*pool, kRequestA, 1.0f);
+  const auto handle_b = MakeResident(*pool, kRequestB, 2.0f);
+  const auto handle_c = MakeResident(*pool, kRequestC, 3.0f);
+  pool->Release(handle_a);
+  pool->Release(handle_b);
+
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 1}, Request{kRequestC, 2}};
+  const auto plan = pool->PlanStep(requests);
+  ASSERT_EQ(plan->rows.size(), 2u);
+  EXPECT_EQ(plan->binding_mode, FixedStateBindingMode::DirectSpan);
+  EXPECT_EQ(plan->direct_first_slot, 1u);
+  EXPECT_EQ(plan->direct_active_bank, 1u);
+  EXPECT_EQ(plan->rows[0].slot, 1u);
+  EXPECT_TRUE(plan->rows[0].provisional);
+  EXPECT_EQ(plan->rows[1].slot, 2u);
+  EXPECT_FALSE(plan->rows[1].provisional);
+
+  auto reservation = pool->Reserve(*plan);
+  EXPECT_EQ(reservation.Handles()[0].slot, 1u);
+  EXPECT_EQ(reservation.Handles()[1].slot, 2u);
+  ExpectInputRows(reservation, 0, 0.0f);
+  ExpectInputRows(reservation, 1, 3.0f);
+}
+
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
   auto pool = MakePool(1);
   const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};  // 2 > capacity 1.

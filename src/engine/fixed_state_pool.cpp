@@ -332,8 +332,7 @@ struct FixedStatePool::Impl {
 
   std::vector<PlannedRowLocation> PlanRowLocations(
       std::span<const FixedStateReservationRequest> requests) const {
-    std::vector<PlannedRowLocation> locations;
-    locations.reserve(requests.size());
+    std::vector<PlannedRowLocation> locations(requests.size());
     std::unordered_set<const void*> request_ids;
     request_ids.reserve(requests.size());
     std::vector<char> slot_taken(slots.size(), 0);
@@ -343,29 +342,94 @@ struct FixedStatePool::Impl {
       }
     }
 
-    const auto next_free_slot = [&]() -> size_t {
-      for (size_t index = 0; index < slots.size(); ++index) {
-        if (!slot_taken[index]) {
-          return index;
-        }
-      }
-      throw std::runtime_error(
-          "Not enough free slots for the complete fixed state reservation.");
-    };
-
-    for (const auto& request : requests) {
+    std::optional<size_t> direct_first_slot;
+    std::optional<uint8_t> direct_active_bank;
+    bool direct_layout_possible = true;
+    size_t provisional_count = 0;
+    for (size_t row = 0; row < requests.size(); ++row) {
+      const auto& request = requests[row];
       if (!request.request_id || !request_ids.insert(request.request_id).second) {
         throw std::runtime_error(
             "Fixed state reservation contains an invalid or duplicate request.");
       }
       const Slot* slot = FindSlot(request.request_id);
       if (slot && slot->ownership == FixedStateSlotOwnership::Committed) {
-        locations.push_back(PlannedRowLocation{SlotIndex(*slot), false});
+        const size_t slot_index = SlotIndex(*slot);
+        locations[row] = PlannedRowLocation{slot_index, false};
+        if (slot_index < row) {
+          direct_layout_possible = false;
+          continue;
+        }
+        const size_t candidate_first_slot = slot_index - row;
+        if (direct_first_slot && *direct_first_slot != candidate_first_slot) {
+          direct_layout_possible = false;
+        } else {
+          direct_first_slot = candidate_first_slot;
+        }
+        if (direct_active_bank && *direct_active_bank != slot->active_bank) {
+          direct_layout_possible = false;
+        } else {
+          direct_active_bank = slot->active_bank;
+        }
       } else {
-        const size_t slot_index = next_free_slot();
-        slot_taken[slot_index] = 1;
-        locations.push_back(PlannedRowLocation{slot_index, true});
+        locations[row].provisional = true;
+        ++provisional_count;
       }
+    }
+
+    if (provisional_count > FreeSlotCount()) {
+      throw std::runtime_error(
+          "Not enough free slots for the complete fixed state reservation.");
+    }
+
+    if (direct_layout_possible && !direct_first_slot) {
+      for (size_t first_slot = 0; first_slot + requests.size() <= slots.size(); ++first_slot) {
+        const bool span_is_free = std::none_of(
+            slot_taken.begin() + first_slot,
+            slot_taken.begin() + first_slot + requests.size(),
+            [](char taken) { return taken != 0; });
+        if (span_is_free) {
+          direct_first_slot = first_slot;
+          break;
+        }
+      }
+    }
+
+    if (direct_layout_possible && direct_first_slot &&
+        *direct_first_slot <= slots.size() - requests.size()) {
+      bool span_is_available = true;
+      for (size_t row = 0; row < locations.size(); ++row) {
+        const size_t expected_slot = *direct_first_slot + row;
+        if (locations[row].provisional ? slot_taken[expected_slot] != 0
+                                       : locations[row].slot_index != expected_slot) {
+          span_is_available = false;
+          break;
+        }
+      }
+      if (span_is_available) {
+        for (size_t row = 0; row < locations.size(); ++row) {
+          if (locations[row].provisional) {
+            locations[row].slot_index = *direct_first_slot + row;
+          }
+        }
+        return locations;
+      }
+    }
+
+    size_t next_free_slot = 0;
+    for (auto& location : locations) {
+      if (!location.provisional) {
+        continue;
+      }
+      while (next_free_slot < slot_taken.size() && slot_taken[next_free_slot]) {
+        ++next_free_slot;
+      }
+      if (next_free_slot == slot_taken.size()) {
+        throw std::runtime_error(
+            "Not enough free slots for the complete fixed state reservation.");
+      }
+      location.slot_index = next_free_slot;
+      slot_taken[next_free_slot] = 1;
     }
     return locations;
   }
