@@ -598,9 +598,9 @@ class Model:
 
         # Manage the outputs for linear attention + causal conv
         if "conv" not in self.layer_types and "linear_attention" not in self.layer_types:
-            del self.output_names["present.conv"]
+            self.output_names.pop("present.conv", None)
         if "linear_attention" not in self.layer_types:
-            del self.output_names["present.recurrent"]
+            self.output_names.pop("present.recurrent", None)
 
         # Manage the outputs for the LM head and hidden states
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)

@@ -101,6 +101,29 @@ def test_make_inputs_and_outputs_expands_per_layer_name_dicts():
     assert model.model.graph.outputs == ["present_key_self_0", "present_key_self_1"]
 
 
+def test_make_outputs_init_accepts_custom_output_schema():
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.layer_types = ["full_attention"]
+    model.output_names = {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present_key_self": {0: "present_key_self_0"},
+    }
+    model.output_types = {"logits": ir.DataType.FLOAT16}
+    model.output_shapes = {}
+    model.extra_options = {"include_hidden_states": True}
+    model.use_paged_attention = False
+
+    model.make_outputs_init()
+
+    assert model.output_names == {
+        "hidden_states": "hidden_states",
+        "logits": "logits",
+        "present_key_self": {0: "present_key_self_0"},
+    }
+
+
 def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
