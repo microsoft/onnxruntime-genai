@@ -33,16 +33,12 @@
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
-#include "models/preprocessing/parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
-#include "models/preprocessing/qwen2_5_vl_image_processor.h"
-#include "models/preprocessing/videochat_flash_processor.h"
-#include "models/preprocessing/mistral3_image_processor.h"
 #include "ep/dml/interface.h"
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
@@ -882,10 +878,6 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
 }
 
 
-std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
-}
-
 bool Model::IsPruned() const {
   const auto& logits_name = config_->model.decoder.outputs.logits;
   if (!session_info_.HasOutput(logits_name))
@@ -1058,40 +1050,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
     }
   }
   return expanded;
-}
-
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : tokenizer_{std::make_shared<Tokenizer>(config)},
-      processor_factory_{
-          {"phi3v", Processor::Create<PhiImageProcessor>},
-          {"whisper", Processor::Create<WhisperProcessor>},
-          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
-          {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
-          {"gemma3", Processor::Create<GemmaImageProcessor>},
-          {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
-          {"mistral3", Processor::Create<Mistral3ImageProcessor>},
-          {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
-          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
-  auto processor = processor_factory_.find(config.model.type);
-  if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
-  } else {
-    throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
-  }
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, {}, images, audios};
-  return processor_->Process(*tokenizer_, payload);
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
-  Payload payload{"", prompts, images, audios};
-  return processor_->Process(*tokenizer_, payload);
 }
 
 }  // namespace Generators

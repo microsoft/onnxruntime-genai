@@ -10,13 +10,8 @@
 #include "generator/generators.h"
 #include "utils.h"
 #include <optional>
-#include "models/preprocessing/phi_image_processor.h"
-#include "models/preprocessing/whisper_processor.h"
-#include "models/preprocessing/parakeet_processor.h"
 #include "models/preprocessing/genai_tokenizer.h"
-#include "models/preprocessing/phi_multimodal_processor.h"
-#include "models/preprocessing/gemma_image_processor.h"
-#include "models/preprocessing/gemma4_multimodal_processor.h"
+#include "models/preprocessing/multi_modal_processor.h"
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"
 
@@ -108,19 +103,6 @@ struct State {
   OrtSession* graph_capture_session_{nullptr};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
-};
-
-struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
-  MultiModalProcessor(Config& config, const SessionInfo& session_info);
-
-  std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
-  std::unique_ptr<NamedTensors> Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const;
-
-  std::shared_ptr<Tokenizer> tokenizer_;
-  std::shared_ptr<Processor> processor_;
-
- private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
 struct SessionInfo : ModelStateMetadata {
