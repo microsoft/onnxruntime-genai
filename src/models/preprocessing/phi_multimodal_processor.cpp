@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/phi_multimodal_processor.h"
 
 #include <regex>
 

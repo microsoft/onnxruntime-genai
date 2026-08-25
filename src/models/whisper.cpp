@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "generator/generators.h"
+#include "models/io/static_kv_cache.h"
 #include "whisper.h"
 
 namespace Generators {

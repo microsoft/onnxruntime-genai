@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/processor.h"
 
 namespace Generators {
 

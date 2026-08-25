@@ -9,6 +9,7 @@
 #include "ortx_tokenizer.h"
 #include "generator/generators.h"
 #include "utils.h"
+#include <map>
 #include <optional>
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/multi_modal_processor.h"
