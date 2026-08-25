@@ -16,6 +16,7 @@
 #include "smartptrs.h"
 #include "generator/mtp_generator.h"
 #include "engine/engine.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/processor.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"

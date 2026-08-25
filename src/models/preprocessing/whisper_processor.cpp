@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/whisper_processor.h"
 
 namespace Generators {

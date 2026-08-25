@@ -8,6 +8,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include <regex>
 
