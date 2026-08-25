@@ -199,7 +199,7 @@ struct DecoderState : State {
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input (ModelManaged for stateful OpenVINO/QNN)
+  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input (ModelManaged for stateful models)
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
 };
