@@ -62,6 +62,28 @@ def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     assert model.input_shapes["attention_metadata"] is not other_model.input_shapes["attention_metadata"]
 
 
+def test_context_length_uses_seq_length_without_max_position_embeddings(monkeypatch):
+    base = _load_base_module()
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
+    monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
+    config = types.SimpleNamespace(
+        architectures=["WhisperForConditionalGeneration"],
+        hidden_act="gelu",
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=8,
+        num_hidden_layers=2,
+        num_key_value_heads=8,
+        seq_length=1500,
+        vocab_size=256,
+        _name_or_path="test",
+    )
+
+    model = base.Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cpu", None, {})
+
+    assert model.context_length == 1500
+
+
 def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)

@@ -46,7 +46,7 @@ class Model:
         self.make_config_init(config)
 
         # Context length attributes from config
-        self.context_length = getattr(config, "seq_length", config.max_position_embeddings)
+        self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
             config.original_max_position_embeddings
             if hasattr(config, "original_max_position_embeddings")
