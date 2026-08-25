@@ -14,9 +14,10 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
                 : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
-  const auto dims = mode_ == MultiModalFeatures::Mode::Input
-                        ? model_.session_info_.GetInputSymbolicShape(name).size()
-                        : model_.session_info_.GetOutputSymbolicShape(name).size();
+  const auto model_shape = mode_ == MultiModalFeatures::Mode::Input
+                               ? model_.session_info_.GetInputShape(name)
+                               : model_.session_info_.GetOutputShape(name);
+  const auto dims = model_shape.size();
 
   // If the model expects 3 dimensions, add a batch dimension
   // batch_size <= 0 signals "skip batch dim even if model has 3D output"
@@ -25,7 +26,11 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   }
 
   shape_.push_back(num_feature_tokens);
-  shape_.push_back(model_.config_->model.decoder.hidden_size);
+  const int64_t feature_width =
+      !model_shape.empty() && model_shape.back() > 0
+          ? model_shape.back()
+          : model_.config_->model.decoder.hidden_size;
+  shape_.push_back(feature_width);
 
   // There are four cases for MultiModalFeatures:
   // 1) Created as an output for vision or speech model (num_feature_tokens > 0)

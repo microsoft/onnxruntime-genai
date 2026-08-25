@@ -17,6 +17,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 HIDDEN_SIZE = 64
+FEATURE_SIZE = 4 * HIDDEN_SIZE
 VOCAB_SIZE = 10
 NUM_KV_HEADS = 4
 HEAD_SIZE = 16
@@ -137,15 +138,15 @@ def make_embedding_model() -> onnx.ModelProto:
     """Embedding model: converts input_ids → inputs_embeds.
 
     Inputs:  input_ids      [batch, seq]
-             image_features [num_tokens, HIDDEN_SIZE]  (declared but unused in
+             image_features [num_tokens, FEATURE_SIZE] (declared but unused in
                             computation; required so that
-                            session_info_.GetInputDataType("image_features") succeeds
+                            MultiModalFeatures uses the model-declared width
                             when MultiModalFeatures allocates an empty features tensor
                             for text-only generation)
     Outputs: inputs_embeds  [batch, seq, HIDDEN_SIZE]
     """
     input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT32, ["batch", "seq"])
-    image_features = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", HIDDEN_SIZE])
+    image_features = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", FEATURE_SIZE])
     embeds_out = helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch", "seq", HIDDEN_SIZE])
     nodes = [
         helper.make_node("Shape", ["input_ids"], ["input_ids_shape"]),
@@ -162,14 +163,14 @@ def make_vision_model() -> onnx.ModelProto:
 
     Inputs:  pixel_values [num_images, max_crops, 3, height, width]
              image_sizes  [num_images, 2]
-    Outputs: image_features [num_tokens, HIDDEN_SIZE]  (fixed zero initializer)
+    Outputs: image_features [num_tokens, FEATURE_SIZE] (fixed zero initializer)
     """
-    feat_init = numpy_helper.from_array(np.zeros((1, HIDDEN_SIZE), dtype=np.float32), name="image_features")
+    feat_init = numpy_helper.from_array(np.zeros((1, FEATURE_SIZE), dtype=np.float32), name="image_features")
     pixel_values = helper.make_tensor_value_info(
         "pixel_values", TensorProto.FLOAT, ["num_images", "max_crops", 3, "height", "width"]
     )
     image_sizes = helper.make_tensor_value_info("image_sizes", TensorProto.INT64, ["num_images", 2])
-    feat_out = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", HIDDEN_SIZE])
+    feat_out = helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", FEATURE_SIZE])
     graph = helper.make_graph([], "vision", [pixel_values, image_sizes], [feat_out], [feat_init])
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
