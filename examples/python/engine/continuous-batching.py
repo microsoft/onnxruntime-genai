@@ -2,10 +2,10 @@
 # Licensed under the MIT License.
 
 import argparse
-from collections import deque
 import json
 import random
 import time
+from collections import deque
 
 import numpy as np
 import onnxruntime_genai as og

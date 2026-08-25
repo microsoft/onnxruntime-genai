@@ -307,7 +307,6 @@ struct Request : std::enable_shared_from_this<Request>,
   void SelectNextToken();
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
-
 };
 
 }  // namespace Generators

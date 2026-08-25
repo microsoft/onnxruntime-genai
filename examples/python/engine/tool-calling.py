@@ -10,8 +10,7 @@ import numpy as np
 import onnxruntime_genai as og
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import get_lark_grammar, to_tool  # noqa: E402
-
+from common import get_lark_grammar, to_tool
 
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"

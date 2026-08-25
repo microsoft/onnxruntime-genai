@@ -206,9 +206,7 @@ def run(args):
         baseline_throughput = unguided_summary["decode_tokens_per_second"]["p50"]
         guided_throughput = guided_summary["decode_tokens_per_second"]["p50"]
         summary["guided_decode_throughput_change_percent_p50"] = (
-            (guided_throughput - baseline_throughput) * 100 / baseline_throughput
-            if baseline_throughput > 0
-            else None
+            (guided_throughput - baseline_throughput) * 100 / baseline_throughput if baseline_throughput > 0 else None
         )
 
     output = json.dumps(summary, indent=2)

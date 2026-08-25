@@ -901,8 +901,7 @@ TEST(CAPITests, EngineRequestTurnOptionsAndOpaqueDataContracts) {
           request.get(), &zero_budget,
           input_tokens.data(), input_tokens.size())};
   ASSERT_NE(zero_budget_result, nullptr);
-  EXPECT_NE(std::string(zero_budget_result->GetError()).find(
-                "greater than zero"),
+  EXPECT_NE(std::string(zero_budget_result->GetError()).find("greater than zero"),
             std::string::npos);
   EXPECT_FALSE(engine->HasPendingRequests());
 
@@ -990,9 +989,8 @@ struct Phi2Test {
       tokenizer_->Encode(input_strings[i], *input_sequence);
       auto input_tokens = std::span<const int32_t>{
           input_sequence->SequenceData(0), input_sequence->SequenceCount(0)};
-      requests.push_back({
-          engine->CreateRequest(*params_),
-          std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
+      requests.push_back({engine->CreateRequest(*params_),
+                          std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
       auto& owned_request = requests.back();
       requests_by_handle.emplace(owned_request.request.get(), &owned_request);
       owned_request.request->BeginTurn(input_tokens);
