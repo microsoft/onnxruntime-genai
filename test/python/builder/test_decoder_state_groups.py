@@ -442,6 +442,7 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
         gate_shape=["num_tokens", 16],
         gate_activation="qwen",
         beta_activation="sigmoid",
+        arithmetic_mode="compatibility",
         qk_l2_norm=1,
         scale=0.0,
         state_update_capture_count="capture_count",
@@ -475,6 +476,7 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
     ]
     assert node["gate_activation"] == "qwen"
     assert node["beta_activation"] == "sigmoid"
+    assert node["arithmetic_mode"] == "compatibility"
     assert node["qk_l2_norm"] == 1
     assert node["scale"] == 0.0
 
@@ -630,10 +632,12 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     model._state_window_dims = []
     model._state_window = 0
     model.state_update_capacity = 3
+    model.gdn_arithmetic_mode = "compatibility"
     model.input_names = {"cumulative_sequence_lengths": "cu"}
     model._leading_dims = lambda: ["num_tokens"]
     model._make_linear_attention_projections = lambda *args: ("z", "b", "a", "conv_input", "weight")
-    model.make_initializer = lambda *args, **kwargs: None
+    initializers = []
+    model.make_initializer = lambda *args, **kwargs: initializers.append((args, kwargs))
     conv_calls = []
     model.make_varlen_causal_conv_with_state = lambda name, **kwargs: conv_calls.append((name, kwargs))
     model._make_linear_attention_normalize_and_gate = lambda *args: pytest.fail(
@@ -649,7 +653,8 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     outputs = []
     model._make_linear_attention_output = lambda *args: outputs.append(args)
 
-    model._make_linear_attention(1, SimpleNamespace(A_log="a_log_value", dt_bias="dt_bias_value"), "root")
+    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    model._make_linear_attention(1, SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"), "root")
 
     assert conv_calls[0][1]["output_shape"] == ["num_tokens", 48]
     assert [reshape[3] for reshape in reshapes[:3]] == [
@@ -666,6 +671,8 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     assert linear["beta"] == "b/output_0"
     assert linear["gate_activation"] == "qwen"
     assert linear["beta_activation"] == "sigmoid"
+    assert linear["arithmetic_mode"] == "compatibility"
+    assert linear["a_log"] == "model.layers.1.linear_attn.neg_exp_A"
     assert linear["qk_l2_norm"] == 1
     assert linear["scale"] == 0.0
     assert linear["state_update_capacity"] == 3
@@ -674,6 +681,8 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     assert linear["output_shape"] == ["num_tokens", 3, 8]
     assert linear["present_recurrent_shape"] == ["batch_size", 3, 8, 4]
     assert linear["gate_shape"] == ["num_tokens", 3]
+    decay_scale = next(args[0] for args, _ in initializers if args[1] == linear["a_log"])
+    qwen_module.torch.testing.assert_close(decay_scale, -a_log.exp())
     assert reshapes[-1][3] == ["num_tokens", 24]
     assert outputs[0][2].endswith("/linear_attention_output/Reshape/output_0")
 

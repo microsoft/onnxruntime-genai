@@ -1175,6 +1175,9 @@ class Qwen35TextModel(Model):
         if self.linear_attn_op == "gated_delta_net" and self._state_window > 8:
             # The window becomes the operator's checkpoint output, which it caps at 8 slots.
             raise ValueError("linear_attn_op=gated_delta_net supports state_window up to 8")
+        self.gdn_arithmetic_mode = str(extra_options.get("gdn_arithmetic_mode", "native")).lower()
+        if self.gdn_arithmetic_mode not in ("native", "compatibility"):
+            raise ValueError("gdn_arithmetic_mode must be one of: native, compatibility")
 
         self.state_update_capacity = self._parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
         self.state_update_keep_checkpoints = str(
@@ -2235,8 +2238,13 @@ class Qwen35TextModel(Model):
         k_thd = add_head_axis("k", k_out, n_k, hk)
         v_thd = add_head_axis("v", v_out, n_kv, hv)
 
-        a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
-        self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
+        arithmetic_mode = getattr(self, "gdn_arithmetic_mode", "native")
+        if arithmetic_mode == "compatibility":
+            a_log_init = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
+            self.make_initializer((-linear_attn.A_log.data.exp()).detach(), a_log_init, to=ir.DataType.FLOAT)
+        else:
+            a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
+            self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
@@ -2261,6 +2269,7 @@ class Qwen35TextModel(Model):
             gate_shape=["num_tokens", n_kv],
             gate_activation="qwen",
             beta_activation="sigmoid",
+            arithmetic_mode=arithmetic_mode,
             qk_l2_norm=1,
             update_rule="gated_delta",
             scale=0.0,
@@ -2344,8 +2353,13 @@ class Qwen35TextModel(Model):
         b_cast_name = f"{basename}/beta/b_cast/Cast"
         self.make_cast(b_cast_name, f"{b_name}/output_0", ir.DataType.FLOAT, gate_shape)
 
-        a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
-        self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
+        arithmetic_mode = getattr(self, "gdn_arithmetic_mode", "native")
+        if arithmetic_mode == "compatibility":
+            a_log_init = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
+            self.make_initializer((-linear_attn.A_log.data.exp()).detach(), a_log_init, to=ir.DataType.FLOAT)
+        else:
+            a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
+            self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
@@ -2373,6 +2387,7 @@ class Qwen35TextModel(Model):
             update_rule="gated_delta",
             gate_activation="qwen",
             beta_activation="sigmoid",
+            arithmetic_mode=arithmetic_mode,
             qk_l2_norm=1,
             scale=0.0,  # 0 means the op's default 1/sqrt(head_size_qk)
             output_shape=["batch_size", "sequence_length", n_kv, hv],
@@ -3233,7 +3248,7 @@ class Qwen35MoeTextModel(Qwen35TextModel):
         self._save_dspark_head(out_dir)
 
     def _save_dspark_head(self, out_dir):
-        if self.dspark_head is None:
+        if getattr(self, "dspark_head", None) is None:
             return
         self.dspark_head.save_model(out_dir)
         self.dspark_shared_initializers = self._share_mtp_embedding_lm_head(

@@ -77,6 +77,12 @@ def test_dflash2_save_hook_is_optional_for_auxiliary_heads(tmp_path):
     model._save_dflash2_head(tmp_path)
 
 
+def test_dspark_save_hook_is_optional_for_auxiliary_heads(tmp_path):
+    model = Qwen35MoeTextModel.__new__(Qwen35MoeTextModel)
+
+    model._save_dspark_head(tmp_path)
+
+
 def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"
