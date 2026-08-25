@@ -31,7 +31,8 @@ jobs:
     ${{ if or(eq(parameters.ep, 'cuda'), eq(parameters.ep, 'webgpu')) }}:
       pool: 'onnxruntime-Win2022-GPU-A10'
     ${{ else }}:
-      pool: 'onnxruntime-Win-CPU-2022'
+      pool:
+        name: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx') }}:
     pool:
       name: AcesShared
