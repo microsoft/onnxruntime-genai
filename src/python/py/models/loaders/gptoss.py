@@ -24,7 +24,6 @@ class GptOssMXFP4Loader:
         self._snapshot_dir = None
         self._weight_map = None
         self._weight_map_loaded = False
-        self._tensor_cache = {}
 
     def get_snapshot_dir(self):
         if self._snapshot_dir is not None:
@@ -68,9 +67,6 @@ class GptOssMXFP4Loader:
         return self._weight_map
 
     def load_tensor(self, tensor_name):
-        if tensor_name in self._tensor_cache:
-            return self._tensor_cache[tensor_name]
-
         snapshot_dir = self.get_snapshot_dir()
         weight_map = self.get_weight_map()
         if weight_map is None:
@@ -83,14 +79,11 @@ class GptOssMXFP4Loader:
         for tensor_file in candidate_files:
             with safe_open(tensor_file, framework="pt", device="cpu") as safetensors_file:
                 if tensor_name in safetensors_file.keys():  # noqa: SIM118
-                    tensor = safetensors_file.get_tensor(tensor_name)
-                    self._tensor_cache[tensor_name] = tensor
-                    return tensor
+                    return safetensors_file.get_tensor(tensor_name)
 
         raise RuntimeError(f"Original GPT-OSS MXFP4 tensor '{tensor_name}' was not found in {snapshot_dir}.")
 
-    @staticmethod
-    def pack_blocks_for_qmoe(blocks):
+    def pack_blocks_for_qmoe(self, blocks):
         """Repack ``[E,N,K/32,16]`` checkpoint blocks to QMoE ``[E,K,N/2]``."""
         if blocks.dtype != torch.uint8:
             blocks = blocks.to(torch.uint8)

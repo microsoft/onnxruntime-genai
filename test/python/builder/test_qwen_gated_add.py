@@ -29,7 +29,7 @@ def _make_model(ep):
     return model
 
 
-@pytest.mark.parametrize("ep", ["cpu", "cuda", "webgpu", "dml"])
+@pytest.mark.parametrize("ep", ["cpu", "cuda", "webgpu"])
 def test_moe_model_emits_one_gated_add(ep):
     model = _make_model(ep)
     name = "/model/layers.3/moe/GatedAdd"
@@ -43,3 +43,19 @@ def test_moe_model_emits_one_gated_add(ep):
     assert kwargs["inputs"] == ["routed", "shared", "gate"]
     assert kwargs["outputs"] == [f"{name}/output_0"]
     assert kwargs["domain"] == "com.microsoft"
+
+
+def test_moe_model_emits_portable_gated_add_for_dml():
+    model = _make_model("dml")
+    name = "/model/layers.3/moe/GatedAdd"
+    shape = ["batch_size", "sequence_length", model.hidden_size]
+
+    model.make_gated_add(name, "routed", "shared", "gate", shape)
+
+    assert [call[0] for call in model.calls] == ["make_mul", "make_add"]
+    _, args, kwargs = model.calls[0]
+    assert args == (f"{name}/Mul", ["shared", "gate"], model.io_dtype)
+    assert kwargs["shape"] == shape
+    _, args, kwargs = model.calls[1]
+    assert args == (name, ["routed", f"{name}/Mul/output_0"], model.io_dtype)
+    assert kwargs["shape"] == shape

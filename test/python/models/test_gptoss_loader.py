@@ -23,7 +23,7 @@ def _projection_tensors(layer_id=0):
 
 def test_pack_blocks_for_qmoe_preserves_fp4_codes():
     blocks = _projection_tensors()["model.layers.0.moe.experts.gate_up_proj_blocks"]
-    packed = GptOssMXFP4Loader.pack_blocks_for_qmoe(blocks)
+    packed = GptOssMXFP4Loader("").pack_blocks_for_qmoe(blocks)
 
     codes = torch.empty(2, 4, 2, 32, dtype=torch.uint8)
     codes[..., 0::2] = blocks & 0x0F
@@ -71,3 +71,16 @@ def test_indexed_checkpoint_reads_each_projection_from_its_shard(tmp_path):
 
     assert experts.gate_up_qweight.shape == (2, 64, 2)
     assert experts.down_qweight.shape == (2, 64, 3)
+
+
+def test_prepare_experts_does_not_retain_source_blocks(tmp_path):
+    tensors = {}
+    for layer_id in range(2):
+        tensors.update(_projection_tensors(layer_id))
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    loader = GptOssMXFP4Loader(tmp_path)
+    loader.prepare_experts(0)
+    loader.prepare_experts(1)
+
+    assert not hasattr(loader, "_tensor_cache")

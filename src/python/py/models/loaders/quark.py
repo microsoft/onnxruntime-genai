@@ -96,8 +96,7 @@ class QuarkModel(QuantizedModel):
         experts.gate_up_bias = self.combine_gate_up_biases(experts)
         experts.down_bias = self.combine_down_biases(experts)
 
-    @staticmethod
-    def combine_gate_up_biases(experts):
+    def combine_gate_up_biases(self, experts):
         combined_biases = []
         for expert_id in sorted(experts.keys()):
             expert = experts[expert_id]
@@ -118,8 +117,7 @@ class QuarkModel(QuantizedModel):
             combined_biases.append(bias)
         return torch.stack(combined_biases)
 
-    @staticmethod
-    def combine_down_biases(experts):
+    def combine_down_biases(self, experts):
         combined_biases = []
         for expert_id in sorted(experts.keys()):
             down_proj = experts[expert_id].down_proj
