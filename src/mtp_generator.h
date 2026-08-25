@@ -38,6 +38,10 @@ struct MtpGenerator {
   // internally; later calls drain those buffered tokens before another round runs.
   void GenerateNextToken();
 
+  // Rewind both inner generators to an empty request while retaining their allocated state and
+  // captured graphs. This is a full reset, not an arbitrary sequence rewind.
+  void Reset();
+
   bool IsDone() const;
 
   // The full committed token sequence (batch index 0).
@@ -71,8 +75,8 @@ struct MtpGenerator {
   // post-final-norm output (hidden_states_out, last row) into `head_out_hidden_` for the next
   // chained step, and returns the greedy draft (or 0 if need_draft is false).
   int32_t DraftHeadStep(int32_t token, bool need_draft = true);
-  // Greedy multi-token fast path: keep the draft on device so it can feed the next head forward.
-  void DraftHeadStepToDevice(int32_t token, DeviceSpan<int32_t> draft);
+  // Greedy multi-token fast path: keep the input and draft on device so adjacent head forwards
+  // can be submitted without temporary host-input lifetimes synchronizing the shared CUDA stream.
   void DraftHeadStepToDevice(DeviceSpan<int32_t> token, DeviceSpan<int32_t> draft);
   void CaptureDraftToDevice(DeviceSpan<int32_t> draft);
   // One MTP-head forward over `count` (hidden, token) pairs. The head's `hidden_states` input must
@@ -82,7 +86,7 @@ struct MtpGenerator {
   // for the token after tokens[count-1]. Used by the fused refeed+draft forward (see
   // pending_refeed_count_).
   int32_t DraftHeadStepMulti(const int32_t* tokens, int count);
-  void DraftHeadStepMultiToDevice(const int32_t* tokens, int count, DeviceSpan<int32_t> draft);
+  void DraftHeadStepMultiToDevice(DeviceSpan<int32_t> tokens, DeviceSpan<int32_t> draft);
   // Single-token (num_speculative_tokens == 1) draft/verify step (the original fast path).
   void GenerateStepSingle(int32_t t);
   // Multi-token (num_speculative_tokens > 1) chained draft/verify step: chains the single MTP
@@ -168,7 +172,18 @@ struct MtpGenerator {
   std::vector<int32_t> drafts_;         // scratch: the N chained draft tokens
   DeviceSpan<int32_t> drafts_device_;   // same drafts, kept on device between chained head forwards
   std::vector<int32_t> verify_tokens_;  // scratch: [t, d0..d_{N-1}] for the verify forward
+  // CUDA greedy fast path: persistent input buffers avoid per-forward pinned-host temporaries.
+  // Actual first/fused head ids are uploaded through `head_tokens_upload_`, then copied D2D into
+  // `head_tokens_device_` so its CPU mirror remains valid non-pad metadata for Logits::Update.
+  // Its last device token supplies the verify buffer; the remaining verify input is assembled from
+  // `drafts_device_` with D2D copies.
+  DeviceSpan<int32_t> head_tokens_upload_;
+  DeviceSpan<int32_t> head_tokens_device_;
+  DeviceSpan<int32_t> verify_tokens_device_;
   std::vector<int32_t> verify_argmax_;  // scratch: main argmax of the N+1 verify rows
+  // CUDA scratch for the verify top-1 ids. ArgmaxMainRows launches the proven batch-1 device
+  // kernel for each row, then copies this whole span to the host with one synchronization.
+  DeviceSpan<int32_t> verify_argmax_device_;
 
   // --- Speculative-sampling (do_sample=true) state. ---
   bool sampling_{false};                // true when do_sample && temperature > 0: use rejection sampling

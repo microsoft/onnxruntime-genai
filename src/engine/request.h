@@ -53,6 +53,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * @param params Shared pointer to GeneratorParams containing generation configuration.
    */
   Request(std::shared_ptr<GeneratorParams> params);
+  ~Request();
 
   /**
    * @brief Assigns this request to a specific engine for processing.
@@ -332,6 +333,8 @@ struct Request : std::enable_shared_from_this<Request>,
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
   std::unique_ptr<Search> search_;
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
@@ -339,6 +342,7 @@ struct Request : std::enable_shared_from_this<Request>,
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();
   RequestStepResult StageGeneration(int64_t sequence_length_before);
+  void CommitGuidanceToken(const RequestStepResult& result);
 
   void* opaque_data_{nullptr};  // Opaque data for user-defined purposes, can be set and retrieved by the application
 };

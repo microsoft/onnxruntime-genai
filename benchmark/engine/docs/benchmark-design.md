@@ -121,7 +121,6 @@ Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwe
     "scenario": "decode_baseline", // choices=[other scenarios, ...]
     "concurrency": 1, // choices=[1, 2, 4, 8]
     "prompt_length_k": 4, // choices=[4, 16, 18, 32, 48, 64, 96, 128]
-    "synthetic": false, // choices=[true, false]
     "model_path": $model_uri,
     "execution_provider": "cuda"
 }
@@ -149,7 +148,7 @@ out/
 Core Metrics (all scenarios)
 
 - config metadata:
-    - scenario, model_path, execution_provider, concurrency, prompt length, synthetic
+    - scenario, model_path, execution_provider, concurrency, prompt length
     - ort_version, genai_version
 - run status:
 	- status, error (if any)
@@ -180,7 +179,6 @@ Example `out/decode_baseline_results_001.json` shape:
         "execution_provider": "cuda",
         "concurrency": 4,
         "prompt_length_k": 4,
-        "synthetic": true,
         "generation_tokens": 128,
         "measured_runs": 2
     },

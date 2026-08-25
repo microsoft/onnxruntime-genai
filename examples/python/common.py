@@ -139,6 +139,7 @@ def get_search_options(args: argparse.Namespace):
     search_options = {}
     names = [
         "batch_size",
+        "chunk_size",
         "do_sample",
         "max_length",
         "min_length",

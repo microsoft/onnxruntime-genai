@@ -5,6 +5,8 @@
 
 #include <optional>
 
+#include "../models/model_state_manifest.h"
+
 namespace Generators {
 
 namespace {
@@ -67,6 +69,7 @@ class PagedCacheStepReservation final : public CacheStepReservation {
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
   if (model->config_->engine.dynamic_batching) {
+    ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     return std::make_unique<PagedCacheManager>(model);
   }
 

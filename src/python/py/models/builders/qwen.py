@@ -972,6 +972,38 @@ class Qwen35TextModel(Model):
     def _get_model_type(self, config):
         return "Qwen3_5_textForCausalLM" if self.is_text_only else "Qwen3_5ForConditionalGeneration"
 
+    @staticmethod
+    def _resolve_layer_types(config, num_layers):
+        text_config = getattr(config, "text_config", config)
+        configured_layer_types = getattr(config, "layer_types", None)
+        if configured_layer_types is None:
+            configured_layer_types = getattr(text_config, "layer_types", None)
+
+        if configured_layer_types is not None:
+            if len(configured_layer_types) < num_layers:
+                raise ValueError(
+                    f"Qwen3.5 layer_types has {len(configured_layer_types)} entries, "
+                    f"but {num_layers} layers were requested"
+                )
+            layer_types = list(configured_layer_types[:num_layers])
+        else:
+            interval = getattr(config, "full_attention_interval", None)
+            if interval is None:
+                interval = getattr(text_config, "full_attention_interval", None)
+            if interval is not None:
+                layer_types = [
+                    "full_attention" if (i + 1) % interval == 0 else "linear_attention"
+                    for i in range(num_layers)
+                ]
+            else:
+                layer_types = ["full_attention"] * num_layers
+
+        supported_layer_types = {"full_attention", "linear_attention"}
+        unknown_layer_types = sorted(set(layer_types) - supported_layer_types)
+        if unknown_layer_types:
+            raise ValueError(f"Unsupported Qwen3.5 layer_types: {unknown_layer_types}")
+        return layer_types
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # Qwen3.5 is a VL model. The decoder takes inputs_embeds.
         # When exclude_embeds is explicitly set to False, build as a standalone LLM.
@@ -1003,15 +1035,7 @@ class Qwen35TextModel(Model):
         # Mirror base class logic: prefer extra_options["num_hidden_layers"] when present.
         text_config = getattr(config, "text_config", config)
         num_layers = extra_options.get("num_hidden_layers", getattr(text_config, "num_hidden_layers", 0))
-        if hasattr(config, "layer_types") and config.layer_types is not None:
-            self.layer_types = list(config.layer_types)
-        elif hasattr(config, "full_attention_interval") and config.full_attention_interval is not None:
-            interval = config.full_attention_interval
-            self.layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)
-            ]
-        else:
-            self.layer_types = ["full_attention"] * num_layers
+        self.layer_types = self._resolve_layer_types(config, num_layers)
 
         # ModelOpt's FP8 KV-cache metadata maps to the generic fp8_per_tensor path in builder.py.
         # Without a calibration file, preserve the checkpoint's shared unit-scale convention.
@@ -2193,6 +2217,35 @@ class Qwen35TextModel(Model):
         gated_output = f"{gated_name}/output_0"
 
         return gated_output
+
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            i for i, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
+        ]
+        linear_attention_layers = [
+            i for i, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        if not linear_attention_layers:
+            return []
+
+        inputs["past_conv_names"] = "past_key_values.%d.conv_state"
+        inputs["past_recurrent_names"] = "past_key_values.%d.recurrent_state"
+        outputs["present_conv_names"] = "present.%d.conv_state"
+        outputs["present_recurrent_names"] = "present.%d.recurrent_state"
+
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
+        state_groups.extend(
+            [
+                {"kind": "fixed_conv", "layer_ids": linear_attention_layers},
+                {"kind": "fixed_recurrent", "layer_ids": linear_attention_layers},
+            ]
+        )
+        return state_groups
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         """Generate genai_config.json for the decoder (text-only) model.

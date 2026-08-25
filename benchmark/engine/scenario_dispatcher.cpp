@@ -25,11 +25,12 @@ namespace fs = std::filesystem;
 namespace engine_benchmark {
 namespace {
 
-// versions.json is written next to the executable when the build stages the benchmark dependencies.
-nlohmann::json ReadStagedVersions() {
-  std::ifstream file("build/Linux/RelWithDebInfo/benchmark/engine/versions.json", std::ios::binary);
+// versions.json is staged beside the running executable.
+nlohmann::json ReadStagedVersions(const fs::path& executable) {
+  const fs::path versions_path = executable.parent_path() / "versions.json";
+  std::ifstream file(versions_path, std::ios::binary);
   if (!file) {
-    throw std::runtime_error("versions.json not found; expected the build to stage it under benchmark/engine.");
+    throw std::runtime_error("versions.json not found beside executable: " + executable.string());
   }
 
   nlohmann::json versions;
@@ -46,7 +47,6 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
       config.scenario = e.value("scenario", config.scenario);
       config.concurrency = e.value("concurrency", config.concurrency);
       config.prompt_length_k = e.value("prompt_length_k", config.prompt_length_k);
-      config.synthetic = e.value("synthetic", config.synthetic);
       config.model_path = e.value("model_path", std::string{});
       config.execution_provider = e.value("execution_provider", config.execution_provider);
       config.execution_provider_library = e.value("execution_provider_library", std::string{});
@@ -67,9 +67,16 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
   std::set<std::string> registered;
 
   for (const auto& config : configs) {
+    if (config.execution_provider != "cuda" && config.execution_provider != "webgpu") {
+      continue;
+    }
+
+    const char* registration_name =
+        config.execution_provider == "cuda" ? "CUDAExecutionProvider" : "WebGpuExecutionProvider";
+
     if (config.execution_provider_library.empty()) {
       throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is 'cuda' or 'webgpu'");
+          "execution_provider_library is required when execution_provider is '" + config.execution_provider + "'");
     }
 
     const fs::path provider_library = fs::absolute(config.execution_provider_library);
@@ -77,13 +84,13 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
       throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
     }
 
-    if (!registered.insert("CUDAExecutionProvider").second) {
+    if (!registered.insert(registration_name).second) {
       continue;
     }
 
-    std::cout << "[dispatcher] Registering CUDA execution provider library: "
+    std::cout << "[dispatcher] Registering " << registration_name << " execution provider library: "
               << provider_library.string() << std::endl;
-    OgaRegisterExecutionProviderLibrary("CUDAExecutionProvider", provider_library.c_str());
+    OgaRegisterExecutionProviderLibrary(registration_name, provider_library.c_str());
   }
 }
 
@@ -97,7 +104,7 @@ void WriteJsonFile(const fs::path& path, const nlohmann::json& json) {
 
 }  // namespace
 
-int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
+int DispatchScenarios(const fs::path& executable, const fs::path& config_path, const fs::path& out_dir) {
   OgaHandle handle;
 
   std::ifstream config_file(config_path, std::ios::binary);
@@ -117,7 +124,7 @@ int DispatchScenarios(const fs::path& config_path, const fs::path& out_dir) {
 
   RegisterExecutionProviderLibraries(configs);
 
-  const nlohmann::json staged_versions = ReadStagedVersions();
+  const nlohmann::json staged_versions = ReadStagedVersions(executable);
 
   BenchmarkContext context;
   context.ort_version = staged_versions.value("ort_version", std::string{"unknown"});
@@ -163,7 +170,8 @@ int main(int argc, char** argv) {
       }
     }
 
-    return engine_benchmark::DispatchScenarios(config_path, out_dir);
+    // /proc/self/exe is a Linux virtual path that points to the currently running executable
+    return engine_benchmark::DispatchScenarios(fs::canonical("/proc/self/exe"), config_path, out_dir);
   } catch (const std::exception& ex) {
     std::cerr << "engine_benchmark failed: " << ex.what() << std::endl;
     return 1;

@@ -85,6 +85,23 @@ to 2048. Both limits are positive and independent.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
+## Decoder state manifest
+
+`model.decoder.state_groups` can describe decoder-owned state without identifying a model family. The supported group kinds are `paged_kv`, `fixed_conv`, and `fixed_recurrent`. Each group contains logical layer IDs. Tensor name templates live in the decoder's existing `inputs` and `outputs` objects: paged KV uses the key/value templates, while the two fixed kinds use their corresponding convolution or recurrent templates. Every referenced template contains one `%d` placeholder for the logical layer ID. A layer may own more than one group, and layers omitted from a group do not own that kind of state.
+
+The group kind defines the state transition:
+
+- Paged KV grows by appending token slots and commits by advancing logical occupancy.
+- Fixed convolution and recurrent state replace one request-indexed state value and require a staged output to be published at commit.
+
+Configuration loading rejects unknown kinds, malformed decoder templates, duplicate IDs or logical layers, and conflicting resolved names. Overlay application validates a complete copy and publishes it only on success. When `state_groups` is absent, the typed configuration retains the legacy dense paged-KV behavior over `0..num_hidden_layers-1` using the existing decoder key/value templates; it does not insert a synthetic group into the parsed configuration.
+
+When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
+
+The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
+
+Fixed groups remain unsupported by the Engine and are rejected until request-owned fixed-state storage and transactions are implemented.
+
 ## Request lifecycle
 
 A `Request` is one sequence. Engine requests currently require:
@@ -476,6 +493,27 @@ to `Active` or `TurnComplete`. The dynamic transaction path does not need a sepa
 scheduling state between those states.
 
 Finally, the engine swaps the staged ready list into `ready_requests_`. The first ready request is returned immediately, and later calls drain the rest without another model run.
+
+## Constrained decoding and tool calling
+
+Engine requests use the guidance configuration carried by their `GeneratorParams`. This allows
+concurrent requests to use different JSON schemas, regular expressions, or Lark grammars. Tool
+definitions and chat-template rendering remain application concerns; the Engine constrains the
+generated token stream but does not parse tool calls from the decoded output.
+
+Each guided request owns an independent constrained-logits processor. Its mask is applied before
+minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
+The processor snapshots its guidance and search configuration when the request is created, so later
+mutation of the caller-owned `GeneratorParams` cannot change an active grammar. After sampling, the
+selected token advances that request's grammar cursor.
+
+The grammar cursor participates in the same transaction as search and paged-cache state. A step
+checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
+on rollback. Draining an already-ready request does not advance the cursor again.
+
+Guidance fast-forward tokens are not currently supported by the Engine. Requests that enable them
+are rejected because each forced token would also need a corresponding model execution and paged
+KV-cache advancement inside the transaction.
 
 ## Rollback and failure handling
 
