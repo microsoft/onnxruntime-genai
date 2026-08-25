@@ -77,44 +77,57 @@ struct RecordingCacheManager : CacheManager {
 
   size_t MaxBatchSize() const override { return capacity_; }
 
+  size_t MaxQueryTokensPerRequest() const override { return max_query_tokens_per_request_; }
+
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
 
-  StepPlanningResult PlanStepResources(StepPlan& plan,
-                                       size_t committed_request_count) const override {
-    if (committed_request_count != allocated_.size() ||
-        committed_request_count > plan.requests.size()) {
-      throw std::runtime_error("Recording cache received an invalid committed request count.");
-    }
+  bool IsResident(const std::shared_ptr<Request>& request) const override {
+    return std::find(allocated_.begin(), allocated_.end(), request) != allocated_.end();
+  }
+
+  size_t ResidentRequestCount() const override { return allocated_.size(); }
+
+  StepPlanningResult PlanStepResources(StepPlan& plan) const override {
+    const size_t request_limit =
+        plan.scheduled_request_limit == 0 ? capacity_ : plan.scheduled_request_limit;
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
     bool capacity_deferred = false;
     const void* unserviceable_request_id = nullptr;
-    for (size_t i = 0; i < committed_request_count; ++i) {
-      if (plan.requests[i].request_id == unserviceable_request_id_) {
-        unserviceable_request_id = unserviceable_request_id_;
-        continue;
+    std::vector<const void*> request_ids;
+    request_ids.reserve(plan.requests.size());
+    for (size_t i = 0; i < plan.requests.size(); ++i) {
+      const auto& entry = plan.requests[i];
+      if (std::find(request_ids.begin(), request_ids.end(), entry.request_id) != request_ids.end()) {
+        throw std::runtime_error("Recording cache received a duplicate request.");
       }
-      if (selected_requests != i) {
-        plan.requests[selected_requests] = std::move(plan.requests[i]);
-      }
-      ++selected_requests;
-    }
+      request_ids.push_back(entry.request_id);
 
-    for (size_t i = committed_request_count; i < plan.requests.size(); ++i) {
-      if (plan.requests[i].request_id == unserviceable_request_id_) {
+      const bool resident =
+          std::find(allocated_.begin(), allocated_.end(), entry.request) != allocated_.end();
+      if (entry.newly_admitted == resident) {
+        throw std::runtime_error("Recording cache received invalid request membership.");
+      }
+      if (entry.request_id == unserviceable_request_id_) {
         unserviceable_request_id = unserviceable_request_id_;
         continue;
       }
-      if (!can_allocate_verdict_ ||
-          committed_request_count + selected_new_requests >= capacity_) {
+      if (entry.request_id == capacity_deferred_request_id_ ||
+          selected_requests >= request_limit ||
+          (entry.newly_admitted &&
+           (!can_allocate_verdict_ ||
+            allocated_.size() + selected_new_requests >= capacity_))) {
         capacity_deferred = true;
         continue;
       }
+      const bool newly_admitted = entry.newly_admitted;
       if (selected_requests != i) {
         plan.requests[selected_requests] = std::move(plan.requests[i]);
       }
       ++selected_requests;
-      ++selected_new_requests;
+      if (newly_admitted) {
+        ++selected_new_requests;
+      }
     }
     plan.requests.resize(selected_requests);
 
@@ -186,6 +199,12 @@ struct RecordingCacheManager : CacheManager {
   void SetUnserviceableRequest(const std::shared_ptr<Request>& request) {
     unserviceable_request_id_ = request.get();
   }
+  void SetCapacityDeferredRequest(const std::shared_ptr<Request>& request) {
+    capacity_deferred_request_id_ = request.get();
+  }
+  void SetMaxQueryTokensPerRequest(size_t token_count) {
+    max_query_tokens_per_request_ = token_count;
+  }
   size_t AllocatedCount() const { return allocated_.size(); }
 
   // Recorded call counts.
@@ -196,9 +215,11 @@ struct RecordingCacheManager : CacheManager {
 
  private:
   size_t capacity_;
+  size_t max_query_tokens_per_request_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
+  const void* capacity_deferred_request_id_{};
   bool supports_dynamic_batching_{true};
   std::vector<std::shared_ptr<Request>> allocated_;
 };
@@ -251,6 +272,7 @@ enum class ScriptedExecutionFailure {
   None,
   RetryableBeforeExecution,
   RetryableDuringExecution,
+  CapacityExceeded,
   Fatal,
   PostProcessing,
 };
@@ -270,6 +292,14 @@ struct RecordingModelExecutor : ModelExecutor {
               ExecutionContext& context) override {
     decode_calls++;
     decoded_batch_sizes.push_back(scheduled_requests.size());
+    if (context.plan) {
+      decoded_token_counts.push_back(context.plan->token_count);
+      std::vector<const void*> request_ids;
+      request_ids.reserve(context.plan->requests.size());
+      for (const auto& entry : context.plan->requests)
+        request_ids.push_back(entry.request_id);
+      decoded_request_ids.push_back(std::move(request_ids));
+    }
     if (trace_) trace_->Record("Decode");
     const auto failure = std::exchange(next_failure_, ScriptedExecutionFailure::None);
     if (failure == ScriptedExecutionFailure::RetryableBeforeExecution) {
@@ -279,6 +309,10 @@ struct RecordingModelExecutor : ModelExecutor {
     if (failure == ScriptedExecutionFailure::RetryableDuringExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable in-execution failure."};
+    }
+    if (failure == ScriptedExecutionFailure::CapacityExceeded) {
+      throw ModelExecutionError{ExecutionFailureKind::CapacityExceeded,
+                                "Injected execution capacity failure."};
     }
     if (failure == ScriptedExecutionFailure::Fatal) {
       throw std::runtime_error("Injected fatal execution failure.");
@@ -291,9 +325,12 @@ struct RecordingModelExecutor : ModelExecutor {
   }
 
   void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
+  void SetForcedToken(int32_t token) { forced_token_ = token; }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
+  std::vector<size_t> decoded_token_counts;
+  std::vector<std::vector<const void*>> decoded_request_ids;
 
  private:
   std::shared_ptr<Model> model_;
@@ -314,6 +351,8 @@ struct DoublesEngine {
 };
 
 inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capacity, int32_t forced_token) {
+  if (!model->config_->engine.dynamic_batching)
+    model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
   auto trace = std::make_shared<CallTrace>();
   auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace);
   auto scheduler = Scheduler::Create(model, cache);

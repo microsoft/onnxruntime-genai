@@ -23,12 +23,14 @@ enum class StepOutcomeKind {
   UnserviceableRequest,
   Committed,
   RetryableBatchAbort,
+  ExecutionCapacityExceeded,
   ExecutionContractFailure,
   FatalExecutionFailure,
 };
 
 enum class ExecutionFailureKind {
   RetryableAbort,
+  CapacityExceeded,
   Unknown,
 };
 
@@ -61,6 +63,7 @@ struct RequestStepPlan {
 struct StepPlan {
   StepTransactionId transaction_id{};
   std::vector<RequestStepPlan> requests;
+  size_t scheduled_request_limit{};  // Provisional rows cache feasibility may select.
   size_t token_count{};
   size_t proposed_block_table_columns{};
   bool graph_capture_eligible{};

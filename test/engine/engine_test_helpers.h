@@ -25,6 +25,10 @@ inline std::shared_ptr<Model> LoadDummyDecoderModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+}
+
 // Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request
 // advances deterministically (SelectTop) when fed scripted logits.
 inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
@@ -34,6 +38,18 @@ inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
   params->search.batch_size = 1;
   params->search.do_sample = false;
   return params;
+}
+
+inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
+                               RequestStepPlan entry) {
+  if (entry.unprocessed_token_count == 0) {
+    entry.unprocessed_token_count =
+        static_cast<size_t>(entry.request->CurrentSequenceLength() -
+                            entry.request->ProcessedSequenceLength());
+  }
+  StepPlan plan;
+  plan.requests.push_back(std::move(entry));
+  static_cast<void>(ScheduledRequests{plan, model, nullptr, nullptr});
 }
 
 // Mints a Request carrying `prompt_tokens` but does not assign it, leaving it Unassigned so it can be

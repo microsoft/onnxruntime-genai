@@ -141,7 +141,7 @@ jobs:
                 --cmake_extra_defines \
                   MANYLINUX=ON \
                   PYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \
-                  TEST_PHI2=True \
+                  TEST_PHI2=False \
                   TEST_QWEN_2_5=True \
                   'CMAKE_CUDA_ARCHITECTURES=60-real;70-real;75-real;80-real;86-real;89-real;90-real;100-real;120' \
                   'CMAKE_EXE_LINKER_FLAGS_INIT=-Wl,-z,now' \

@@ -66,17 +66,6 @@ if(USE_DML)
 
   onnxruntime_fetchcontent_makeavailable(directx_headers)
   set(DIRECTX_HEADERS_TARGET "DirectX-Headers")
-
-  include(ExternalProject)
-  ExternalProject_Add(nuget
-    PREFIX nuget
-    URL "https://dist.nuget.org/win-x86-commandline/v5.3.0/nuget.exe"
-    DOWNLOAD_NO_EXTRACT 1
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-    UPDATE_COMMAND ""
-    INSTALL_COMMAND ""
-  )
 endif()
 
 

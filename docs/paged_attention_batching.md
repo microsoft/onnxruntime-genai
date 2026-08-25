@@ -238,8 +238,8 @@ inheriting any of the constraints that make it unusable for a server.
 The fast path is taken only when all of the following hold for the current step. Otherwise the
 existing two-phase per-request loop runs unchanged.
 
-- At least two scheduled requests, none of them already `Completed`. A completed request is skipped
-  by the per-request loops, which would leave a hole in the logits rows that a single batched
+- At least two executable scheduled requests. `TurnComplete` and `Closed` rows are skipped by the
+  per-request loops, which would otherwise leave holes in the logits rows that a single batched
   sampler call cannot express.
 - Every scheduled request resolves to the same `(k, p, temperature)` triple. `Request` funnels every
   sampling branch into `SampleTopKTopP`, so comparing the resolved triple rather than the raw
@@ -392,7 +392,7 @@ Generator design" option in its strongest form. It was rejected because it requi
 `Sequences` to carry a per-row length cursor (today: one `current_length_`, and `GetSequence(i)`
 depends on it), reworking every kernel that writes at a shared `past_length` offset, moving
 per-request `GeneratorParams` into per-row arrays, and adding row allocation/eviction to `Search`.
-It also collides with `Request`'s public lifecycle — `Assign`, `Remove`, `AddTokens` can all be
+It also collides with `Request`'s public lifecycle — `Assign`, `Remove`, `AddTokens`, and `Continue` can all be
 called outside the engine. It is a plausible long-term direction, but it is a rewrite of the search
 layer, and Phase 2 gets most of the benefit without touching any of it.
 

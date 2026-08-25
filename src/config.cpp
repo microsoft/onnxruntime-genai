@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include "generators.h"
+#include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
@@ -13,8 +14,11 @@
 #include <limits>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace Generators {
+
+int64_t SafeDoubleToInt64(double x, std::string_view name);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
@@ -353,10 +357,16 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "block_table") {
       v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table_windowed") {
+      v_.block_table_windowed = JSON::Get<std::string_view>(value);
     } else if (name == "attention_metadata") {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_names") {
+      v_.past_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
       v_.targets = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -394,6 +404,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_names") {
+      v_.present_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -433,6 +447,110 @@ struct IntArray_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+struct Int64Array_Element : JSON::Element {
+  explicit Int64Array_Element(std::vector<int64_t>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(SafeDoubleToInt64(JSON::Get<double>(value), name));
+  }
+
+ private:
+  std::vector<int64_t>& v_;
+};
+
+struct SharedInitializer_Element : JSON::Element {
+  explicit SharedInitializer_Element(Config::Model::SharedInitializer& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "name") {
+      v_.name = JSON::Get<std::string_view>(value);
+    } else if (name == "data_file") {
+      v_.data_file = JSON::Get<std::string_view>(value);
+    } else if (name == "offset") {
+      v_.offset = JSON::Get<std::string_view>(value);
+    } else if (name == "length") {
+      v_.length = JSON::Get<std::string_view>(value);
+    } else if (name == "data_type") {
+      v_.data_type = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shape") {
+      return shape_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::SharedInitializer& v_;
+  Int64Array_Element shape_{v_.shape};
+};
+
+struct SharedInitializers_Element : JSON::Element {
+  explicit SharedInitializers_Element(std::vector<Config::Model::SharedInitializer>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& initializer = v_.emplace_back();
+    element_ = std::make_unique<SharedInitializer_Element>(initializer);
+    return *element_;
+  }
+
+ private:
+  std::vector<Config::Model::SharedInitializer>& v_;
+  std::unique_ptr<SharedInitializer_Element> element_;
+};
+
+using DecoderStateGroup = Config::Model::Decoder::StateGroup;
+using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+struct StateGroup_Element : JSON::Element {
+  explicit StateGroup_Element(DecoderStateGroup& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name != "kind") {
+      throw JSON::unknown_value_error{};
+    }
+    const auto kind = JSON::Get<std::string_view>(value);
+    if (kind == "paged_kv") {
+      v_.kind = DecoderStateGroupKind::PagedKeyValue;
+    } else if (kind == "fixed_conv") {
+      v_.kind = DecoderStateGroupKind::FixedConv;
+    } else if (kind == "fixed_recurrent") {
+      v_.kind = DecoderStateGroupKind::FixedRecurrent;
+    } else {
+      throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "layer_ids") {
+      return layer_ids_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  DecoderStateGroup& v_;
+  IntArray_Element layer_ids_{v_.layer_ids};
+};
+
+struct StateGroups_Element : JSON::Element {
+  explicit StateGroups_Element(std::vector<DecoderStateGroup>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& group = v_.emplace_back();
+    current_ = std::make_unique<StateGroup_Element>(group);
+    return *current_;
+  }
+
+ private:
+  std::vector<DecoderStateGroup>& v_;
+  std::unique_ptr<StateGroup_Element> current_;
+};
+
 struct StringStringMap_Element : JSON::Element {
   explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
 
@@ -456,6 +574,8 @@ struct PipelineModel_Element : JSON::Element {
       v_.run_on_token_gen = JSON::Get<bool>(value);
     } else if (name == "is_lm_head") {
       v_.is_lm_head = JSON::Get<bool>(value);
+    } else if (name == "inherit_session_options") {
+      v_.inherit_session_options = JSON::Get<bool>(value);
     } else if (name == "reset_session_idx") {
       v_.reset_session_idx = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
@@ -669,6 +789,14 @@ struct Decoder_Element : JSON::Element {
       layer_types_ = std::make_unique<StringArray_Element>(v_.layer_types);
       return *layer_types_;
     }
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    if (name == "state_groups") {
+      v_.state_groups.emplace();
+      state_groups_ = std::make_unique<StateGroups_Element>(*v_.state_groups);
+      return *state_groups_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -682,6 +810,112 @@ struct Decoder_Element : JSON::Element {
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  std::unique_ptr<StateGroups_Element> state_groups_;
+};
+
+struct MtpInputs_Element : JSON::Element {
+  explicit MtpInputs_Element(Config::Model::Mtp::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_names") {
+      v_.past_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_names") {
+      v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Inputs& v_;
+};
+
+struct MtpOutputs_Element : JSON::Element {
+  explicit MtpOutputs_Element(Config::Model::Mtp::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_names") {
+      v_.present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_names") {
+      v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Mtp::Outputs& v_;
+};
+
+struct Mtp_Element : JSON::Element {
+  explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_hidden_layers <= 0) throw std::out_of_range("num_hidden_layers must be > 0");
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_key_value_heads <= 0) throw std::out_of_range("num_key_value_heads must be > 0");
+    } else if (name == "head_size") {
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
+    } else if (name == "main_hidden_states") {
+      v_.main_hidden_states = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Mtp& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  MtpInputs_Element inputs_{v_.inputs};
+  MtpOutputs_Element outputs_{v_.outputs};
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -1240,6 +1474,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "mtp") {
+      return mtp_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1255,6 +1492,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Mtp_Element mtp_{v_.mtp};
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
@@ -1289,6 +1527,31 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+int64_t SafeDoubleToInt64(double x, std::string_view name) {
+  if (!std::isfinite(x)) {
+    throw std::runtime_error("Field '" + std::string(name) +
+                             "' cannot be converted to int64 (NaN or Inf)");
+  }
+
+  // int64_t::max() rounds up to 2^63 as a double, so use an exclusive upper bound.
+  constexpr double min_int64_val = -9223372036854775808.0;
+  constexpr double max_int64_exclusive = 9223372036854775808.0;
+  if (x < min_int64_val || x >= max_int64_exclusive) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is out of int64 range ["
+       << std::numeric_limits<int64_t>::min() << ", " << std::numeric_limits<int64_t>::max() << "]";
+    throw std::runtime_error(ss.str());
+  }
+
+  if (x != std::trunc(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is not an integer";
+    throw std::runtime_error(ss.str());
+  }
+
+  return static_cast<int64_t>(x);
 }
 
 struct Search_Element : JSON::Element {
@@ -1362,6 +1625,25 @@ struct Speculative_Element : JSON::Element {
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
             std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
+    } else if (name == "ngram_size") {
+      const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+        throw std::runtime_error(
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            ". Got: " + std::to_string(ngram_size) + ".");
+      v_.ngram_size = ngram_size;
+    } else if (name == "ngram_chained_lookup") {
+      v_.ngram_chained_lookup = JSON::Get<bool>(value);
+    } else if (name == "min_adaptive_k") {
+      const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
+        throw std::runtime_error(
+            "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
+            " and " + std::to_string(kMaxK) + ". Got: " +
+            std::to_string(min_adaptive_k) + ".");
+      v_.min_adaptive_k = min_adaptive_k;
+    } else if (name == "cooldown") {
+      v_.cooldown = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1398,6 +1680,11 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_batch_size must be > 0");
       v_->max_batch_size = static_cast<size_t>(parsed_value);
+    } else if (name == "max_scheduled_tokens") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("max_scheduled_tokens must be > 0");
+      v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1467,6 +1754,14 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value) {
+  try {
+    Speculative_Element(speculative).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
+}
+
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value) {
   try {
     Speculative_Element(speculative).OnValue(name, value);
   } catch (...) {
@@ -1766,9 +2061,12 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
-  Root_Element root{config};
+  Config candidate{config};
+  Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  std::swap(config, candidate);
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {
@@ -1865,6 +2163,7 @@ void ValidateModelPaths(const Config& config) {
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+  ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

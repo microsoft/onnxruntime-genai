@@ -5,8 +5,8 @@
 # --------------------------------------------------------------------------
 """Create the deterministic paged model used by the Engine tests.
 
-The graph writes packed tokens through the supplied block table and emits
-one-hot logits for:
+The graph writes packed tokens through the supplied block table and emits one
+FP16 logits row per request for:
 
     (first_prompt_token + current_token + current_length) % vocab_size
 """
@@ -20,6 +20,9 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 VOCAB_SIZE = 64
+NUM_LAYERS = 6
+PAGED_LAYERS = [1, 4]
+WRITE_LAYER, PASSTHROUGH_LAYER = PAGED_LAYERS
 BLOCK_SIZE = 4
 NUM_BLOCKS = 128
 MAX_BATCH_SIZE = 8
@@ -88,13 +91,15 @@ def _decoder_graph():
 
     # Write tokens to the key and value caches.
     node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
-    node("Reshape", ["past_key_values.0.key", "flat"], ["past_key_flat"])
-    node("Reshape", ["past_key_values.0.value", "flat"], ["past_value_flat"])
+    node("Reshape", [f"past_key_values.{WRITE_LAYER}.key", "flat"], ["past_key_flat"])
+    node("Reshape", [f"past_key_values.{WRITE_LAYER}.value", "flat"], ["past_value_flat"])
     node("Unsqueeze", ["phys", "axis1"], ["scatter_index"])
     node("ScatterND", ["past_key_flat", "scatter_index", "token_f"], ["present_key_flat"])
     node("ScatterND", ["past_value_flat", "scatter_index", "token_f"], ["present_value_flat"])
-    node("Reshape", ["present_key_flat", "cache_shape"], ["present.0.key"])
-    node("Reshape", ["present_value_flat", "cache_shape"], ["present.0.value"])
+    node("Reshape", ["present_key_flat", "cache_shape"], [f"present.{WRITE_LAYER}.key"])
+    node("Reshape", ["present_value_flat", "cache_shape"], [f"present.{WRITE_LAYER}.value"])
+    node("Identity", [f"past_key_values.{PASSTHROUGH_LAYER}.key"], [f"present.{PASSTHROUGH_LAYER}.key"])
+    node("Identity", [f"past_key_values.{PASSTHROUGH_LAYER}.value"], [f"present.{PASSTHROUGH_LAYER}.value"])
 
     # Read the request's first token and the current token through the cache.
     node("Gather", ["block_table_i64", "c0"], ["first_block_id"], axis=1)
@@ -113,8 +118,14 @@ def _decoder_graph():
     node("Sub", ["score", "score_floor"], ["next_token"])
 
     node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
-    node("Equal", ["next_token_col", "vocab_range"], ["is_next"])
-    node("Cast", ["is_next"], ["logits"], to=TensorProto.FLOAT)
+    node("Equal", ["next_token_col", "vocab_range"], ["is_next_per_token"])
+
+    # Select each request's final packed token so the Engine exercises its
+    # [batch_size, vocab_size] output allocation and row mapping. Each boundary
+    # is an exclusive end offset, so subtracting one gives the final token index.
+    node("Sub", ["boundaries", "c1"], ["last_token_index"])
+    node("Gather", ["is_next_per_token", "last_token_index"], ["is_next_per_request"], axis=0)
+    node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
 
     cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
     inputs = [
@@ -122,13 +133,26 @@ def _decoder_graph():
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
         helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
-        helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("attention_metadata", TensorProto.INT32, [3]),
+        *[
+            helper.make_tensor_value_info(f"past_key_values.{layer}.key", TensorProto.FLOAT, cache_shape)
+            for layer in PAGED_LAYERS
+        ],
+        *[
+            helper.make_tensor_value_info(f"past_key_values.{layer}.value", TensorProto.FLOAT, cache_shape)
+            for layer in PAGED_LAYERS
+        ],
     ]
     outputs = [
-        helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["num_tokens", VOCAB_SIZE]),
-        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT16, ["batch_size", VOCAB_SIZE]),
+        *[
+            helper.make_tensor_value_info(f"present.{layer}.key", TensorProto.FLOAT, cache_shape)
+            for layer in PAGED_LAYERS
+        ],
+        *[
+            helper.make_tensor_value_info(f"present.{layer}.value", TensorProto.FLOAT, cache_shape)
+            for layer in PAGED_LAYERS
+        ],
     ]
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
@@ -165,12 +189,14 @@ def create_config(output_dir):
                 "num_key_value_heads": 1,
                 "head_size": 1,
                 "hidden_size": 1,
-                "num_hidden_layers": 1,
+                "num_hidden_layers": NUM_LAYERS,
                 "inputs": {
                     "input_ids": "input_ids",
                     "block_table": "block_table",
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
+                    "attention_metadata": "attention_metadata",
+                    "attention_metadata": "attention_metadata",
                     "past_key_names": "past_key_values.%d.key",
                     "past_value_names": "past_key_values.%d.value",
                 },
@@ -179,6 +205,12 @@ def create_config(output_dir):
                     "present_key_names": "present.%d.key",
                     "present_value_names": "present.%d.value",
                 },
+                "state_groups": [
+                    {
+                        "kind": "paged_kv",
+                        "layer_ids": PAGED_LAYERS,
+                    }
+                ],
             },
         },
         "search": {"max_length": CONTEXT_LENGTH, "do_sample": False},
@@ -199,9 +231,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
