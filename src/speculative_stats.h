@@ -55,6 +55,9 @@ struct SpeculativeStats {
   size_t fixed_state_decode_gathered_rows{};
   size_t fixed_state_speculative_direct_rows{};
   size_t fixed_state_speculative_gathered_rows{};
+  size_t fixed_state_full_state_bytes_avoided{};
+  size_t fixed_state_replay_descriptor_count{};
+  size_t fixed_state_replayed_transition_count{};
   std::array<size_t, kSpeculativeAcceptanceLengthBins> acceptance_length_histogram{};
   size_t formula_supported{};
   float total_draft_ms{};

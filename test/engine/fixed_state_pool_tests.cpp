@@ -331,8 +331,16 @@ TEST_F(FixedStatePoolTest, RejectsCommitThatRegressesCommittedTokens) {
   auto requests = One(kRequestA, /*target_tokens=*/3);  // 3 < committed 10.
   auto reservation = pool->Reserve(requests);
   FillStagedRows(reservation, 0, 2.0f);
+  const auto metrics_before_prepare = pool->BindingMetrics();
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_THROW(reservation.PrepareCommit(), std::logic_error);
+  const auto metrics_after_prepare = pool->BindingMetrics();
+  EXPECT_EQ(metrics_after_prepare.full_state_bytes_avoided,
+            metrics_before_prepare.full_state_bytes_avoided);
+  EXPECT_EQ(metrics_after_prepare.replay_descriptor_count,
+            metrics_before_prepare.replay_descriptor_count);
+  EXPECT_EQ(metrics_after_prepare.replayed_transition_count,
+            metrics_before_prepare.replayed_transition_count);
   reservation.Discard();
 
   // The rejected commit left the resident state and tokens untouched.
@@ -1054,6 +1062,13 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdnFromGathered
     reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/2);
     reservation.Commit();
   }
+  {
+    const auto snapshot = pool->Snapshot();
+    EXPECT_EQ(snapshot.binding_metrics.full_state_bytes_avoided,
+              2 * pool->ZeroingScratchBytes());
+    EXPECT_EQ(snapshot.binding_metrics.replay_descriptor_count, 4u);
+    EXPECT_EQ(snapshot.binding_metrics.replayed_transition_count, 8u);
+  }
 
   auto requests = One(kRequestA);
   auto reservation = pool->Reserve(requests);
@@ -1106,6 +1121,13 @@ TEST_F(FixedStatePoolTest, CompactFullAcceptanceUsesFinalState) {
     FillStagedRows(reservation, 0, 99.0f);
     reservation.CommitPrefix(0, /*step_tokens=*/4, /*kept_tokens=*/4);
     reservation.Commit();
+  }
+  {
+    const auto snapshot = pool->Snapshot();
+    EXPECT_EQ(snapshot.binding_metrics.full_state_bytes_avoided,
+              3 * pool->ZeroingScratchBytes());
+    EXPECT_EQ(snapshot.binding_metrics.replay_descriptor_count, 0u);
+    EXPECT_EQ(snapshot.binding_metrics.replayed_transition_count, 0u);
   }
 
   auto requests = One(kRequestA);

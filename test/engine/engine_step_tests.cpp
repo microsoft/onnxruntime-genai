@@ -1173,6 +1173,10 @@ TEST_F(EngineStepTest, CompositeReservationExposesRowsAndCommitsBothStates) {
   const auto stats = engine.engine->GetSpeculativeStats();
   EXPECT_EQ(stats.fixed_state_prefill_direct_rows, 2u);
   EXPECT_EQ(stats.fixed_state_prefill_gathered_rows, 0u);
+  EXPECT_EQ(stats.fixed_state_full_state_bytes_avoided,
+            2 * engine.cache->FixedStateSnapshot()->zeroing_scratch_bytes);
+  EXPECT_EQ(stats.fixed_state_replay_descriptor_count, 0u);
+  EXPECT_EQ(stats.fixed_state_replayed_transition_count, 0u);
   EXPECT_TRUE(ValidateCompositeStateInvariants(
                   engine.cache->Snapshot(), *fixed,
                   {first->Snapshot(), second->Snapshot()})

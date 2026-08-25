@@ -877,6 +877,12 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->fixed_state_speculative_direct_rows;
   else if (key == "fixed_state_speculative_gathered_rows")
     *value = stats->fixed_state_speculative_gathered_rows;
+  else if (key == "fixed_state_full_state_bytes_avoided")
+    *value = stats->fixed_state_full_state_bytes_avoided;
+  else if (key == "fixed_state_replay_descriptor_count")
+    *value = stats->fixed_state_replay_descriptor_count;
+  else if (key == "fixed_state_replayed_transition_count")
+    *value = stats->fixed_state_replayed_transition_count;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;

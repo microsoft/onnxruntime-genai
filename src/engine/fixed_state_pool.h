@@ -170,6 +170,9 @@ struct FixedStateBindingMetrics {
   uint64_t decode_gathered_rows{};
   uint64_t speculative_direct_rows{};
   uint64_t speculative_gathered_rows{};
+  uint64_t full_state_bytes_avoided{};
+  uint64_t replay_descriptor_count{};
+  uint64_t replayed_transition_count{};
 };
 
 struct FixedStatePoolSnapshot {

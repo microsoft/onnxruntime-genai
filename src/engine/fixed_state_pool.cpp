@@ -468,6 +468,17 @@ struct FixedStatePool::Impl {
     counter = amount > maximum - counter ? maximum : counter + amount;
   }
 
+  static void SaturatingAddProduct(uint64_t& counter, size_t left, size_t right) noexcept {
+    const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+    const uint64_t left_value = static_cast<uint64_t>(left);
+    const uint64_t right_value = static_cast<uint64_t>(right);
+    if (left_value != 0 && right_value > maximum / left_value) {
+      counter = maximum;
+      return;
+    }
+    SaturatingAdd(counter, static_cast<size_t>(left_value * right_value));
+  }
+
   size_t CalculateStagingBytes(size_t row_count, bool binds_direct_banks,
                                bool capture_checkpoints,
                                bool capture_state_updates) const {
@@ -579,6 +590,9 @@ struct FixedStatePool::Impl {
   uint64_t decode_gathered_rows{};
   uint64_t speculative_direct_rows{};
   uint64_t speculative_gathered_rows{};
+  uint64_t full_state_bytes_avoided{};
+  uint64_t replay_descriptor_count{};
+  uint64_t replayed_transition_count{};
   uint64_t noncontiguous_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   bool healthy{true};
@@ -1520,6 +1534,11 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
   if (storage->binds_direct_banks) {
     Impl::SaturatingAdd(impl_->direct_span_reservations, 1);
     Impl::SaturatingAdd(impl_->direct_span_rows, plan.rows.size());
+    const size_t resident_rows = static_cast<size_t>(std::count_if(
+      plan.rows.begin(), plan.rows.end(),
+      [](const FixedStateStepPlanRow& row) { return !row.provisional; }));
+    Impl::SaturatingAddProduct(
+      impl_->full_state_bytes_avoided, resident_rows, impl_->zeroing_scratch_bytes);
   } else {
     Impl::SaturatingAdd(impl_->gathered_reservations, 1);
     Impl::SaturatingAdd(impl_->gathered_rows, plan.rows.size());
@@ -1596,6 +1615,9 @@ FixedStateBindingMetrics FixedStatePool::BindingMetrics() const noexcept {
       impl_->decode_gathered_rows,
       impl_->speculative_direct_rows,
       impl_->speculative_gathered_rows,
+      impl_->full_state_bytes_avoided,
+      impl_->replay_descriptor_count,
+      impl_->replayed_transition_count,
   };
 }
 
@@ -1694,6 +1716,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
   // inactive banks may be left partially written.
   try {
     std::vector<StateUpdateReplayDesc> replay_descriptors;
+    uint64_t replayed_transition_count = 0;
     if (storage.captures_state_updates) {
       replay_descriptors.reserve(impl_->tensors.size() * storage.handles.size());
     }
@@ -1763,6 +1786,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
                   ? StateUpdateReplayKind::CausalConv
                   : StateUpdateReplayKind::GatedDeltaNet,
           });
+              Impl::SaturatingAdd(replayed_transition_count, kept_tokens);
           continue;
         }
         impl_->StageCheckpointIntoInactiveBank(
@@ -1775,6 +1799,22 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
       impl_->device->ReplayStateUpdates(replay_descriptors.data(), replay_descriptors.size());
     }
     impl_->device->Synchronize();
+    if (storage.binds_direct_banks) {
+      size_t final_output_rows = 0;
+      for (size_t row = 0; row < storage.commit_kept_tokens.size(); ++row) {
+        const size_t kept_tokens = storage.commit_kept_tokens[row];
+        final_output_rows +=
+            kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row] ? 1 : 0;
+      }
+      Impl::SaturatingAddProduct(
+        impl_->full_state_bytes_avoided, final_output_rows,
+        impl_->zeroing_scratch_bytes);
+    }
+    Impl::SaturatingAdd(
+      impl_->replay_descriptor_count, replay_descriptors.size());
+    Impl::SaturatingAdd(
+      impl_->replayed_transition_count,
+      static_cast<size_t>(replayed_transition_count));
   } catch (...) {
     // Record the failure and release this reservation's provisional slots before draining. The
     // active banks were never touched, so committed state is intact; the inactive banks may be
