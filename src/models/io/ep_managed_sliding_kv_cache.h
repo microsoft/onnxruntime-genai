@@ -14,4 +14,3 @@ struct EpManagedSlidingKeyValueCache : SharedKeyValueCache {
 };
 
 }  // namespace Generators
-

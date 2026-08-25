@@ -16,4 +16,3 @@ void SharedKeyValueCache::RewindTo(size_t index) {
 }
 
 }  // namespace Generators
-

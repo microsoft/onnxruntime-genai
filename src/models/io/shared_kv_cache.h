@@ -15,4 +15,3 @@ struct SharedKeyValueCache : DefaultKeyValueCache {
 };
 
 }  // namespace Generators
-

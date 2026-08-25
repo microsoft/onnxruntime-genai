@@ -13,4 +13,3 @@ struct RegularKeyValueCache : DynamicKeyValueCache {
 };
 
 }  // namespace Generators
-

@@ -19,4 +19,3 @@ struct QuantizedSharedKeyValueCache : SharedKeyValueCache {
 };
 
 }  // namespace Generators
-

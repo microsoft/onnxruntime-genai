@@ -15,4 +15,3 @@ struct DynamicKeyValueCache : DefaultKeyValueCache {
 };
 
 }  // namespace Generators
-
