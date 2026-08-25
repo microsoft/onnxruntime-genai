@@ -87,6 +87,51 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
   return common_seq_len;
 }
 
+namespace {
+
+std::vector<std::string> MakePastKeyValueInputNames(const Model& model) {
+  std::vector<int> kv_layer_indices;
+  const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
+  auto prefix = key_template.substr(0, key_template.find('%'));
+  auto suffix = key_template.substr(key_template.find('%') + 2);
+  for (const auto& name : model.session_info_.GetInputNames()) {
+    if (name.size() > prefix.size() + suffix.size() &&
+        name.compare(0, prefix.size(), prefix) == 0 &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      auto idx_str = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+      kv_layer_indices.push_back(std::stoi(idx_str));
+    }
+  }
+  std::sort(kv_layer_indices.begin(), kv_layer_indices.end());
+
+  const int layer_count = kv_layer_indices.empty()
+                              ? model.config_->model.decoder.num_hidden_layers
+                              : static_cast<int>(kv_layer_indices.size());
+  std::vector<std::string> input_name_strings;
+  input_name_strings.reserve(layer_count * 2);
+  for (int i = 0; i < layer_count; ++i) {
+    const int layer_idx = kv_layer_indices.empty() ? i : kv_layer_indices[i];
+    input_name_strings.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, layer_idx));
+    input_name_strings.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.past_value_names, layer_idx));
+  }
+  return input_name_strings;
+}
+
+}  // namespace
+
+bool ShouldUseSharedPastPresentKeyValueCache(State& state) {
+  bool past_present_share_buffer =
+      state.params_->IsPastPresentShareBufferEnabled(state.model_.config_->model.type);
+  const auto input_name_strings = MakePastKeyValueInputNames(state.model_);
+  if (!input_name_strings.empty()) {
+    DetectAndConfigureFixedKvShape(
+        state.model_.session_info_, input_name_strings,
+        static_cast<int>(input_name_strings.size() / 2),
+        state.params_->search, past_present_share_buffer, "DefaultKeyValueCache");
+  }
+  return past_present_share_buffer;
+}
+
 DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
@@ -356,155 +401,6 @@ void DefaultKeyValueCache::Add() {
   if (past_present_share_buffer_) {
     for (int i = 0; i < layer_count_ * 2; ++i) {
       state_.inputs_[input_index_ + i] = presents_[i].get();
-    }
-  }
-}
-
-void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
-  current_length_ = total_length;
-
-  // If we're sharing past & present buffers there is nothing to do here, so early exit
-  if (past_present_share_buffer_)
-    return;
-
-  if (!is_first_update_) {
-    for (int i = 0; i < layer_count_ * 2; i++) {
-      if (beam_indices.empty()) {
-        pasts_[i] = std::move(presents_[i]);
-      } else {
-        PickPastState(beam_indices, i);
-      }
-      state_.inputs_[input_index_ + i] = pasts_[i].get();
-    }
-  }
-
-  if (!layer_shapes_.empty()) {
-    // Per-layer allocation with per-layer capacity constraints
-    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      // If max_cache_length is 0 (unconstrained), use total_length directly
-      current_shape[2] = (max_cache_length > 0) ? std::min(total_length, max_cache_length) : total_length;
-
-      // Key tensor
-      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
-      state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
-
-      // Value tensor
-      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
-      state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
-    }
-  } else {
-    // Uniform allocation
-    shape_[2] = total_length;
-    for (int i = 0; i < layer_count_ * 2; i++) {
-      presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
-      state_.outputs_[output_index_ + i] = presents_[i].get();
-    }
-  }
-
-  is_first_update_ = false;
-}
-
-void DefaultKeyValueCache::RewindTo(size_t index) {
-  if (past_present_share_buffer_) {
-    // Sliding-window layers hold only the most recent windowed_cache_size_ positions, anchored at
-    // cache index 0. Once anything has been evicted, position i no longer lives at cache offset i,
-    // so a rewind would silently read misaligned keys. Refuse instead of returning wrong logits.
-    CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
-    return;
-  } else if (shape_[2] <= static_cast<int>(index)) {
-    throw std::runtime_error("Requested length of rewind is greater than the current length.");
-  }
-
-  is_first_update_ = true;
-  if (index == 0) {
-    for (int i = 0; i < layer_count_ * 2; i++) {
-      pasts_[i] = nullptr;
-      if (!empty_pasts_.empty()) {
-        state_.inputs_[input_index_ + i] = empty_pasts_[i / 2].get();
-      } else {
-        state_.inputs_[input_index_ + i] = empty_past_.get();
-      }
-    }
-  } else if (type_ == Ort::TypeToTensorType<float>) {
-    RewindPastTensorsTo<float>(index);
-  } else if (type_ == Ort::TypeToTensorType<int8_t>) {
-    RewindPastTensorsTo<int8_t>(index);
-  } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
-    RewindPastTensorsTo<uint8_t>(index);
-  } else {
-    RewindPastTensorsTo<Ort::Float16_t>(index);
-  }
-}
-
-template <typename T>
-void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && !past_present_share_buffer_);
-
-  if (!layer_shapes_.empty()) {
-    // Handle per-layer shapes
-    // First validate that index doesn't exceed the global max_length
-    int max_length = static_cast<int>(shape_[2]);  // Set to max_length in constructor
-    if (static_cast<int>(index) > max_length) {
-      throw std::runtime_error("Requested rewind length exceeds max_length.");
-    }
-
-    for (int i = 0; i < layer_count_ * 2; i++) {
-      const int layer_idx = i / 2;
-      const std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
-      const int layer_max_cache = static_cast<int>(layer_shape[2]);
-
-      // For each layer, rewind to min(index, layer's max capacity)
-      // - Full attention layers: min(index, max_length)
-      // - Sliding window layers: min(index, sliding_window_size)
-      const int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
-
-      std::array<int64_t, 4> new_shape = layer_shape;
-      new_shape[2] = actual_rewind_length;
-      const auto batch_x_num_heads = new_shape[0] * new_shape[1];
-      const auto new_length_x_head_size = new_shape[2] * new_shape[3];
-
-      OrtValue& present = *presents_[i];
-      const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
-      const auto old_length_x_head_size = present_shape[2] * new_shape[3];
-
-      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
-      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
-      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
-
-      for (int j = 0; j < batch_x_num_heads; j++) {
-        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-        past_data.CopyFrom(present_data);
-      }
-      pasts_[i] = std::move(past);
-      state_.inputs_[input_index_ + i] = pasts_[i].get();
-    }
-  } else {
-    // Uniform shape handling (existing behavior)
-    assert(shape_[2] >= static_cast<int64_t>(index));
-    std::array<int64_t, 4> new_shape = shape_;
-    new_shape[2] = static_cast<int>(index);
-    auto batch_x_num_heads = new_shape[0] * new_shape[1];
-    auto new_length_x_head_size = new_shape[2] * new_shape[3];
-    auto old_length_x_head_size = shape_[2] * new_shape[3];
-    shape_[2] = new_shape[2];
-
-    for (int i = 0; i < layer_count_ * 2; i++) {
-      OrtValue& present = *presents_[i];
-      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-
-      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
-      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
-
-      for (int j = 0; j < batch_x_num_heads; j++) {
-        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-        past_data.CopyFrom(present_data);
-      }
-      pasts_[i] = std::move(past);
-      state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
   }
 }

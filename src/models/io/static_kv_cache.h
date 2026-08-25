@@ -23,11 +23,7 @@ struct DefaultKeyValueCache : KeyValueCache {
   auto& GetType() const { return type_; }
   auto& GetPresents() { return presents_; }
 
-  // Move present to past. Prepare present output for next generation iteration.
-  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
-  void RewindTo(size_t index) override;
-
- private:
+ protected:
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
@@ -66,5 +62,7 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
+
+bool ShouldUseSharedPastPresentKeyValueCache(State& state);
 
 }  // namespace Generators

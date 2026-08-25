@@ -5,11 +5,28 @@
 
 #include "models/model.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
+#include "models/utils.h"
+#include "ortx_tokenizer.h"
 #include "tensor.h"
 
 #include <algorithm>
 
 namespace Generators {
+
+struct Tokenizer::Impl {
+  OrtxPtr<OrtxTokenizer> tokenizer;
+};
+
+struct TokenizerStream::Impl {
+  explicit Impl(const Tokenizer& tokenizer)
+      : tokenizer{tokenizer.shared_from_this()} {
+    CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache.Address()));
+  }
+
+  std::shared_ptr<const Tokenizer> tokenizer;
+  OrtxPtr<OrtxObject> cache;
+  std::string chunk;
+};
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
   bool pad_right_{true};
@@ -40,18 +57,19 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
 }
 
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
-    : tokenizer_{tokenizer.shared_from_this()} {
-  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
-}
+    : impl_{std::make_unique<Impl>(tokenizer)} {}
+
+TokenizerStream::~TokenizerStream() = default;
 
 const std::string& TokenizerStream::Decode(int32_t token) {
   const char* string;
-  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
-  chunk_ = string;
-  return chunk_;
+  CheckResult(OrtxDetokenizeCached(impl_->tokenizer->impl_->tokenizer, impl_->cache, token, &string));
+  impl_->chunk = string;
+  return impl_->chunk;
 }
 
-Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
+Tokenizer::Tokenizer(Config& config) : impl_{std::make_unique<Impl>()},
+                                       bos_token_id_{config.model.bos_token_id},
                                        eos_token_id_{config.model.eos_token_id},
                                        pad_token_id_{config.model.pad_token_id},
                                        bot_token_id_{config.model.bot_token_id},
@@ -64,7 +82,7 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
 
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+  CheckResult(OrtxCreateTokenizerWithOptions(impl_->tokenizer.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
@@ -73,6 +91,8 @@ Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
   if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::BorTokenIdName), *this);
   if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::EorTokenIdName), *this);
 }
+
+Tokenizer::~Tokenizer() = default;
 
 int32_t Tokenizer::GetBotTokenId() const {
   if (!bot_token_id_) throw std::runtime_error("bot_token_id is not defined for this model");
@@ -100,12 +120,12 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 
 void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
   // Tap into ORT Extensions API
-  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
+  CheckResult(OrtxUpdateTokenizerOptions(impl_->tokenizer, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
+  CheckResult(OrtxTokenize(impl_->tokenizer, &text, 1, ids.Address()));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -115,7 +135,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
+  CheckResult(OrtxDetokenize1D(impl_->tokenizer, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
 
   const char* string;
   CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
@@ -124,7 +144,7 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
 
 std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
   OrtxPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.Address(), add_generation_prompt, false /*tokenize*/));
+  CheckResult(OrtxApplyChatTemplate(impl_->tokenizer, template_str, messages, tools, templated_text.Address(), add_generation_prompt, false /*tokenize*/));
 
   OrtxPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text, 0, tensor.Address()));
@@ -138,7 +158,7 @@ std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* m
 std::string Tokenizer::ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
                                                     const char* template_kwargs, bool add_generation_prompt) const {
   OrtxPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplateWithOptions(tokenizer_, template_str, messages, tools, template_kwargs,
+  CheckResult(OrtxApplyChatTemplateWithOptions(impl_->tokenizer, template_str, messages, tools, template_kwargs,
                                                templated_text.Address(), add_generation_prompt,
                                                false /*tokenize*/));
 
@@ -201,7 +221,7 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 
 int32_t Tokenizer::TokenToTokenId(const char* token) const {
   extTokenId_t token_id;
-  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
+  CheckResult(OrtxConvertTokenToId(impl_->tokenizer, token, &token_id));
   return token_id;
 }
 

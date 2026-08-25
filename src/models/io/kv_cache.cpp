@@ -5,8 +5,11 @@
 #include "generator/generators.h"
 #include "../model.h"
 #include "conv_kv_cache.h"
+#include "ep_managed_sliding_kv_cache.h"
 #include "kv_cache.h"
 #include "model_managed_kv_cache.h"
+#include "regular_kv_cache.h"
+#include "shared_kv_cache.h"
 #include "static_kv_cache.h"
 #include "windowed_kv_cache.h"
 #include <algorithm>
@@ -62,7 +65,16 @@ std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }
 
-  return std::make_unique<DefaultKeyValueCache>(state);
+  if (ShouldUseSharedPastPresentKeyValueCache(state)) {
+    const int windowed_cache_size = state.model_.p_device_kvcache_->GetWindowedKeyValueCacheSize(
+        state.model_.config_->model.decoder, state.params_->search, state.params_->search.max_length);
+    if (windowed_cache_size > 0) {
+      return std::make_unique<EpManagedSlidingKeyValueCache>(state);
+    }
+    return std::make_unique<SharedKeyValueCache>(state);
+  }
+
+  return std::make_unique<RegularKeyValueCache>(state);
 }
 
 std::unique_ptr<KeyValueCache> CreateModelManagedKeyValueCache(State& state) {

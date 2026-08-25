@@ -4,8 +4,6 @@
 #pragma once
 
 #include "generator/generators.h"
-#include "models/utils.h"
-#include "ortx_tokenizer.h"
 
 #include <memory>
 #include <optional>
@@ -22,13 +20,13 @@ struct Tokenizer;
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const Tokenizer& tokenizer);
+  ~TokenizerStream();
 
   const std::string& Decode(int32_t token);
 
  private:
-  std::shared_ptr<const Tokenizer> tokenizer_;
-  OrtxPtr<OrtxObject> cache_;
-  std::string chunk_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
@@ -36,6 +34,7 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
 
 struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer>, ExternalRefCounted<Tokenizer> {
   Tokenizer(Config& config);
+  ~Tokenizer();
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
 
@@ -60,9 +59,12 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   int32_t GetBorTokenId() const;
   int32_t GetEorTokenId() const;
 
-  OrtxPtr<OrtxTokenizer> tokenizer_;
-
  private:
+  friend struct TokenizerStream;
+
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
   int32_t bos_token_id_;
   std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;

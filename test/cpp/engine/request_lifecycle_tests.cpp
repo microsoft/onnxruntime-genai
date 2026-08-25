@@ -17,6 +17,7 @@
 #include "engine_test_helpers.h"
 #include "engine_test_doubles.h"
 #include "engine/request_status.h"
+#include "models/preprocessing/genai_tokenizer.h"
 
 namespace Generators {
 namespace test {
