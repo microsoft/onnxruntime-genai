@@ -969,7 +969,7 @@ struct OgaEngine : OgaAbstract {
 
   std::unique_ptr<OgaRequest> CreateRequest(
       const OgaGeneratorParams& params) {
-    OgaRequest* request;
+    OgaRequest* request{};
     OgaCheckResult(OgaEngineCreateRequest(this, &params, &request));
     return std::unique_ptr<OgaRequest>(request);
   }

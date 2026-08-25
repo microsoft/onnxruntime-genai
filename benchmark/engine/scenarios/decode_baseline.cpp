@@ -23,6 +23,13 @@ namespace {
 
 constexpr int kRandomSeed = 42;
 
+struct RequestRunState {
+  std::vector<int32_t> tokens;
+  double first_token_ms{-1.0};
+  std::chrono::steady_clock::time_point last_token_time;
+  std::vector<double> inter_token_latency_ms;
+};
+
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 1 || concurrency == 2 || concurrency == 4 || concurrency == 8;
 }
@@ -80,11 +87,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     const bool is_warmup = run < config.warmup_runs;
 
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<RequestRunState> request_states(static_cast<size_t>(config.concurrency));
     std::vector<std::unique_ptr<OgaRequest>> requests;
-    std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
-    std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
-    std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
-    std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
 
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
@@ -100,10 +104,12 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           "max_length", static_cast<double>(max_length));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
 
-      request_tokens[static_cast<size_t>(i)].assign(
+      auto& request_state = request_states[static_cast<size_t>(i)];
+      request_state.tokens.assign(
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
       requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
+      requests.back()->SetOpaqueData(&request_state);
       requests.back()->BeginTurn(std::span<const int32_t>{
           prompt_tokens->SequenceData(0), prompt_token_count});
     }
@@ -114,31 +120,24 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
         throw std::runtime_error(log_tag + ": Engine returned no ready request while work remained");
       }
       const auto now = std::chrono::steady_clock::now();
-      const auto owned_request = std::find_if(
-          requests.begin(), requests.end(),
-          [ready_request](const auto& request) {
-            return request.get() == ready_request;
-          });
-      if (owned_request == requests.end()) {
-        throw std::runtime_error(log_tag + ": ready request is not owned by this run");
+      auto* request_state = static_cast<RequestRunState*>(ready_request->GetOpaqueData());
+      if (!request_state) {
+        throw std::runtime_error(log_tag + ": ready request has no benchmark state");
       }
-      const auto request_index =
-          static_cast<size_t>(std::distance(requests.begin(), owned_request));
-      auto& tokens = request_tokens[request_index];
 
       while (ready_request->HasUnseenTokens()) {
-        tokens.push_back(ready_request->GetUnseenToken());
+        request_state->tokens.push_back(ready_request->GetUnseenToken());
         ++generated_tokens;
 
         const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
-        if (first_token_ms[request_index] < 0.0) {
-          first_token_ms[request_index] = elapsed_ms;
+        if (request_state->first_token_ms < 0.0) {
+          request_state->first_token_ms = elapsed_ms;
         } else {
-          request_itl_ms[request_index].push_back(
-              std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
+          request_state->inter_token_latency_ms.push_back(
+              std::chrono::duration<double, std::milli>(now - request_state->last_token_time).count());
         }
 
-        last_token_time[request_index] = now;
+        request_state->last_token_time = now;
       }
     }
     for (const auto& request : requests) {
@@ -165,12 +164,13 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     tokens_per_s_values.push_back(tokens_per_s);
 
     for (int i = 0; i < config.concurrency; ++i) {
-      const double ttft_ms = std::max(0.0, first_token_ms[static_cast<size_t>(i)]);
+      auto& request_state = request_states[static_cast<size_t>(i)];
+      const double ttft_ms = std::max(0.0, request_state.first_token_ms);
       ttft_values.push_back(ttft_ms);
 
       // Each request record reports its own median inter-token latency, not the global one.
-      auto& request_samples = request_itl_ms[static_cast<size_t>(i)];
-      const size_t actual_generated = request_tokens[static_cast<size_t>(i)].size() - prompt_token_count;
+      auto& request_samples = request_state.inter_token_latency_ms;
+      const size_t actual_generated = request_state.tokens.size() - prompt_token_count;
       const bool completed = actual_generated == static_cast<size_t>(config.generation_tokens);
       output.requests.push_back(
           {measured_run_index * config.concurrency + i, ttft_ms, Percentile(request_samples, 50.0), completed});
