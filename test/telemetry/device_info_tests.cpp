@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "telemetry/device_info.h"
+#include "telemetry/sha256.h"
 #include "telemetry_test_environment.h"
 
 namespace {
@@ -86,6 +87,12 @@ TEST(TelemetryDeviceInfoTest, IgnoresRelativeXdgCacheHome) {
 }
 
 #endif
+
+TEST(TelemetryDeviceInfoTest, DeviceIdHashMatchesSharedProtocol) {
+  EXPECT_EQ(Generators::telemetry_internal::Sha256::HashStringHex(
+                "00000000-0000-4000-8000-000000000000"),
+            "db8055e0e0307d5a016bec4dc338d69875eb0fb7e614a8b125b08fb082095d98");
+}
 
 TEST(TelemetryDeviceInfoDeathTest, RejectsSymlinkedOwnedDirectoryBeforeReading) {
   ScopedTestDirectory test_dir{"symlink_leaf"};
