@@ -449,7 +449,7 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
-        std::string hidden_states;                          // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;
