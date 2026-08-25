@@ -84,6 +84,23 @@ def test_context_length_uses_seq_length_without_max_position_embeddings(monkeypa
     assert model.context_length == 1500
 
 
+def test_make_inputs_and_outputs_expands_per_layer_name_dicts():
+    model = Model.__new__(Model)
+    model.model = types.SimpleNamespace(graph=types.SimpleNamespace(inputs=[], outputs=[]))
+    model.input_names = {"past_key_self": {0: "past_key_self_0", 1: "past_key_self_1"}}
+    model.input_types = {"past_key_self": ir.DataType.FLOAT16}
+    model.input_shapes = {"past_key_self": ["batch_size", 8, "past_sequence_length", 64]}
+    model.output_names = {"present_key_self": {0: "present_key_self_0", 1: "present_key_self_1"}}
+    model.output_types = {"present_key_self": ir.DataType.FLOAT16}
+    model.output_shapes = {"present_key_self": ["batch_size", 8, "total_sequence_length", 64]}
+    model.make_value = lambda name, dtype=None, shape=None: name
+
+    model.make_inputs_and_outputs()
+
+    assert model.model.graph.inputs == ["past_key_self_0", "past_key_self_1"]
+    assert model.model.graph.outputs == ["present_key_self_0", "present_key_self_1"]
+
+
 def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     base = _load_base_module()
     monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
