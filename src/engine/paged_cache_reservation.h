@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "../span.h"
@@ -13,11 +14,73 @@
 
 namespace Generators {
 
-struct PagedCacheBlockTable {
-  const void* request_id{};
-  size_t committed_slots{};
-  std::vector<std::shared_ptr<Block>> blocks;
-  std::vector<std::shared_ptr<Block>> window_blocks;
+struct PagedKeyValueCache;
+
+class PagedCacheBlockTable {
+ public:
+  PagedCacheBlockTable() = default;
+  explicit PagedCacheBlockTable(
+      const void* request_id,
+      size_t committed_slots,
+      std::vector<std::shared_ptr<Block>> blocks = {},
+      std::vector<std::shared_ptr<Block>> window_blocks = {})
+      : request_id_{request_id},
+        committed_slots_{committed_slots},
+        blocks_{std::move(blocks)},
+        window_blocks_{std::move(window_blocks)} {}
+
+  const void* RequestId() const { return request_id_; }
+  size_t CommittedSlots() const { return committed_slots_; }
+  const std::vector<std::shared_ptr<Block>>& Blocks() const { return blocks_; }
+  const std::vector<std::shared_ptr<Block>>& WindowBlocks() const { return window_blocks_; }
+  uint64_t MutationGeneration() const { return mutation_generation_; }
+
+  void SetCommittedSlots(size_t committed_slots) {
+    committed_slots_ = committed_slots;
+    ++mutation_generation_;
+  }
+  void AddCommittedBlockSlot(size_t index) {
+    blocks_.at(index)->AddSlot();
+    ++mutation_generation_;
+  }
+  void SwapCommittedBlocks(size_t left, size_t right) {
+    auto& left_block = blocks_.at(left);
+    auto& right_block = blocks_.at(right);
+    std::swap(left_block, right_block);
+    ++mutation_generation_;
+  }
+  void ReplaceCommittedBlock(size_t index, std::shared_ptr<Block> block) {
+    blocks_.at(index) = std::move(block);
+    ++mutation_generation_;
+  }
+  void ReplaceCommittedBlocks(std::vector<std::shared_ptr<Block>> blocks) {
+    blocks_ = std::move(blocks);
+    ++mutation_generation_;
+  }
+  void ShrinkCommittedBlockCapacity() {
+    blocks_.shrink_to_fit();
+    ++mutation_generation_;
+  }
+  void SwapWindowBlocks(size_t left, size_t right) {
+    auto& left_block = window_blocks_.at(left);
+    auto& right_block = window_blocks_.at(right);
+    std::swap(left_block, right_block);
+    ++mutation_generation_;
+  }
+  void ReplaceWindowBlocks(std::vector<std::shared_ptr<Block>> blocks) {
+    window_blocks_ = std::move(blocks);
+    ++mutation_generation_;
+  }
+
+ private:
+  friend class PagedCacheReservation;
+  friend struct PagedKeyValueCache;
+
+  const void* request_id_{};
+  size_t committed_slots_{};
+  std::vector<std::shared_ptr<Block>> blocks_;
+  std::vector<std::shared_ptr<Block>> window_blocks_;
+  uint64_t mutation_generation_{};
 };
 
 struct PagedCacheReservationRequest {
@@ -32,14 +95,15 @@ struct PagedCacheReservationRequest {
 struct PagedCacheReservationDelta {
   const void* request_id{};
   size_t committed_slots{};
-  std::vector<std::weak_ptr<Block>> committed_blocks;
-  std::vector<std::weak_ptr<Block>> committed_window_blocks;
+  uint64_t table_generation{};
   size_t target_slots{};
   size_t tail_slots_to_consume{};
   size_t reserved_block_offset{};
   size_t reserved_block_count{};
   size_t reserved_window_block_offset{};
   size_t reserved_window_block_count{};
+  size_t advance_block_offset{};
+  size_t advance_block_count{};
   bool newly_admitted{};
 };
 
@@ -87,13 +151,12 @@ class PagedCacheReservation {
                             std::span<int32_t> output) const;
   // Validates every precondition this reservation's own CommitValidated relies on, without
   // mutating any state. For a reservation that still satisfies the publish contract it is the only
-  // part of committing that can throw; CommitValidated additionally throws if the reservation is no
-  // longer Reserved (double publish), so an orchestrator must still guard CommitValidated too.
+  // part of committing expected to fail under the Engine's serialized transaction contract.
   void ValidateCommit() const;
   // Publishes a reservation that ValidateCommit has already accepted. For a single reservation it
-  // moves preallocated blocks and tables into the committed cache and performs no fallible allocation
-  // or device work; its only guard is a state-only, allocation-free check that the reservation is
-  // still Reserved (it throws rather than publish twice, which would be undefined behavior). See the
+  // moves preallocated blocks and tables into the committed cache and performs no fallible
+  // allocation or device work. Before mutation it preflights every delta again using only
+  // allocation-free state, ownership, generation, boundary, and occupancy checks. See the
   // implementation for why it is intentionally not marked noexcept.
   void CommitValidated();
   // Convenience wrapper preserving the original single-call contract: ValidateCommit then
@@ -104,6 +167,8 @@ class PagedCacheReservation {
  private:
   const PagedCacheBlockTable* FindCommittedTable(const void* request_id) const;
   const PagedCacheReservationDelta& FindDelta(const void* request_id) const;
+  void ValidateAdvancePreconditions(const PagedCacheReservationDelta& delta,
+                                    const PagedCacheBlockTable& table) const;
   void AdvanceCommittedSlots(PagedCacheBlockTable& table, size_t target_slots);
 
   BlockPool* block_pool_{};
@@ -114,6 +179,9 @@ class PagedCacheReservation {
   std::vector<std::shared_ptr<Block>> reserved_window_blocks_;
   std::vector<PagedCacheReservationDelta> deltas_;
   std::vector<PagedCacheBlockTable> new_tables_;
+  std::vector<const Block*> advance_blocks_;
+  uint64_t block_pool_generation_{};
+  uint64_t window_block_pool_generation_{};
   PagedCacheReservationState state_{PagedCacheReservationState::Released};
 };
 

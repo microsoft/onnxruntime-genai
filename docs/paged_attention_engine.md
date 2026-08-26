@@ -590,17 +590,22 @@ Paged-cache publication exposes a validate/publish split for the composite trans
 by the next Engine integration step. The current Engine continues to use the `Commit()` convenience
 wrapper.
 `ValidateCommit()` is repeatable and mutates nothing; it verifies request ownership, token
-boundaries, exact ordered full-cache and resident window-ring block mappings, block occupancy,
-block-pool identity ownership, unique committed request tables, empty reserved blocks,
-reserved-span accounting, and preallocated vector capacity.
-`CommitValidated()` then publishes the already-validated block handles and advances committed
-slots without allocating or touching the device. `Commit()` remains the single-reservation
-convenience wrapper that calls both phases.
+boundaries and scalar table/pool mutation generations, unique committed request tables, empty
+reserved blocks, reserved-span accounting, touched-block mappings and occupancy, resident window
+rings, and preallocated vector capacity. Generations make this check independent of
+already-committed context blocks; its work is proportional to resident request tables, scheduled
+requests, current growth, and the fixed window ring. `CommitValidated()` allocation-free preflights
+every delta and its captured growth mapping again before publishing the already-validated block
+handles and advancing committed slots. `Commit()` remains the single-reservation convenience
+wrapper that calls both phases.
 
 A future composite transaction must validate every participating state reservation before
 publishing any of them. Changing cache ownership, slot occupancy, block identity, or vector
 headroom after validation invalidates the publish preconditions and is a fatal
-transaction-contract error.
+transaction-contract error. A transaction must aggregate all paged-cache changes that share a
+block pool into one `PagedCacheReservation`. This is a caller-enforced precondition: pool
+generations reject overlapping reservations that allocate or free blocks, but a reservation whose
+growth fits existing preallocated capacity does not mutate the pool.
 
 ## Sliding-window paged layers
 

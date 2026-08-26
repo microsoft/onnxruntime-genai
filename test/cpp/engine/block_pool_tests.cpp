@@ -14,6 +14,17 @@
 #include "engine/block.h"
 
 namespace Generators {
+
+struct BlockTestAccess {
+  static void AddSlot(Block& block) {
+    block.AddSlot();
+  }
+
+  static void AddSlots(Block& block, size_t slots) {
+    block.AddSlots(slots);
+  }
+};
+
 namespace {
 
 constexpr size_t kBlockSize = 4;
@@ -53,7 +64,7 @@ TEST(BlockTest, ConstructFull) {
 TEST(BlockTest, AddSlotProgression) {
   Block block(/*id=*/0, /*slots=*/0, kBlockSize);
   for (size_t expected = 1; expected <= kBlockSize; ++expected) {
-    block.AddSlot();
+    BlockTestAccess::AddSlot(block);
     EXPECT_EQ(block.Size(), expected);
     EXPECT_EQ(block.EmptySlots(), kBlockSize - expected);
     EXPECT_EQ(block.SlotIds().size(), expected);
@@ -64,23 +75,23 @@ TEST(BlockTest, AddSlotProgression) {
 TEST(BlockTest, AddSlotOverflowRejected) {
   Block block(/*id=*/0, /*slots=*/kBlockSize, kBlockSize);
   ASSERT_TRUE(block.IsFull());
-  EXPECT_THROW(block.AddSlot(), std::runtime_error);
+  EXPECT_THROW(BlockTestAccess::AddSlot(block), std::runtime_error);
   // The rejected AddSlot must not have mutated the block.
   EXPECT_EQ(block.Size(), kBlockSize);
 }
 
 TEST(BlockTest, AddSlotsAdvancesInBulk) {
   Block block(/*id=*/0, /*slots=*/1, kBlockSize);
-  block.AddSlots(3);
+  BlockTestAccess::AddSlots(block, 3);
   EXPECT_EQ(block.Size(), kBlockSize);
-  EXPECT_THROW(block.AddSlots(1), std::runtime_error);
+  EXPECT_THROW(BlockTestAccess::AddSlots(block, 1), std::runtime_error);
   EXPECT_EQ(block.Size(), kBlockSize);
 }
 
 TEST(BlockTest, IdentityAndSlotIdsAreStable) {
   Block block(/*id=*/3, /*slots=*/0, kBlockSize);
-  block.AddSlot();
-  block.AddSlot();
+  BlockTestAccess::AddSlot(block);
+  BlockTestAccess::AddSlot(block);
   EXPECT_EQ(block.Id(), 3u);
   EXPECT_EQ(block.SlotIds(), (std::vector<size_t>{3 * kBlockSize, 3 * kBlockSize + 1}));
 }
@@ -238,13 +249,13 @@ TEST(BlockPoolTest, ReserveThenAdvanceMatchesAllocation) {
   for (size_t i = 0; i < kBlockSize; ++i) {
     EXPECT_EQ(reserved[0]->Size(), i);
     EXPECT_FALSE(reserved[0]->IsFull());
-    reserved[0]->AddSlot();
+    BlockTestAccess::AddSlot(*reserved[0]);
   }
   EXPECT_TRUE(reserved[0]->IsFull());
 
   // Fill the single trailing slot of the second block.
   EXPECT_EQ(reserved[1]->Size(), 0u);
-  reserved[1]->AddSlot();
+  BlockTestAccess::AddSlot(*reserved[1]);
 
   // Compare against a direct allocation of the same slot count.
   BlockPool allocated_pool(kBlockSize, /*num_blocks=*/4);

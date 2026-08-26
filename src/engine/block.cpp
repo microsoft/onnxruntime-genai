@@ -54,29 +54,31 @@ BlockPool::BlockPool(size_t block_size, size_t num_blocks)
     : block_size_(block_size), capacity_(num_blocks) {}
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
-  const auto allocate_block = [this](size_t slots) {
-    for (size_t i = 0; i < Capacity(); ++i) {
-      if (blocks_[i] == nullptr) {
-        blocks_[i] = std::make_shared<Block>(i, slots, block_size_);
-        return blocks_[i];
-      }
-    }
-    return std::shared_ptr<Block>();
-  };
-
-  if (BlocksNeeded(num_slots) > AvailableBlocks()) {
-    throw std::runtime_error("Requested number of blocks " + std::to_string(BlocksNeeded(num_slots)) +
+  const size_t blocks_needed = BlocksNeeded(num_slots);
+  if (blocks_needed > AvailableBlocks()) {
+    throw std::runtime_error("Requested number of blocks " + std::to_string(blocks_needed) +
                              " for number of slots " + std::to_string(num_slots) +
                              " exceeds available blocks " + std::to_string(AvailableBlocks()) + ".");
   }
 
   std::vector<std::shared_ptr<Block>> allocated_blocks;
-  for (size_t i = 0; i < num_slots; i += block_size_) {
-    auto block = allocate_block(mark_slots_used ? std::min(block_size_, num_slots - i) : 0);
-    if (!block) {
-      throw std::runtime_error("Failed to allocate a block.");
+  allocated_blocks.reserve(blocks_needed);
+  for (size_t id = 0; id < Capacity() && allocated_blocks.size() < blocks_needed; ++id) {
+    if (blocks_[id] == nullptr) {
+      const size_t allocated_slots = allocated_blocks.size() * block_size_;
+      const size_t slots =
+          mark_slots_used ? std::min(block_size_, num_slots - allocated_slots) : 0;
+      allocated_blocks.push_back(std::make_shared<Block>(id, slots, block_size_));
     }
-    allocated_blocks.push_back(block);
+  }
+
+  // Publish only after every allocation succeeds. Until this loop, an exception leaves the pool
+  // unchanged and the local handles clean themselves up.
+  for (const auto& block : allocated_blocks) {
+    blocks_[block->Id()] = block;
+  }
+  if (!allocated_blocks.empty()) {
+    ++mutation_generation_;
   }
   return allocated_blocks;
 }
@@ -124,6 +126,19 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
+  }
+  if (!blocks.empty()) {
+    ++mutation_generation_;
+  }
+}
+
+void BlockPool::RollbackReservedBlocks(
+    const std::vector<std::shared_ptr<Block>>& blocks) noexcept {
+  for (const auto& block : blocks) {
+    blocks_[block->Id()].reset();
+  }
+  if (!blocks.empty()) {
+    ++mutation_generation_;
   }
 }
 
