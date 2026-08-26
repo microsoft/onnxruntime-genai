@@ -235,4 +235,4 @@ jobs:
               export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:/ort_genai_src/build/cuda/Release/:\${LD_LIBRARY_PATH} && \
               /ort_genai_src/build/cuda/Release/unit_tests --ep_dir /ort_genai_src/ort/ep && \
               /ort_genai_src/build/cuda/Release/reinit_tests --ep_dir /ort_genai_src/ort/ep && \
-              /ort_genai_src/build/cuda/Release/engine_unit_tests"
+              /ort_genai_src/build/cuda/Release/engine_unit_tests --ep_dir /ort_genai_src/ort/ep"

@@ -234,5 +234,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\reinit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\$env:binaryDir\Release\engine_unit_tests.exe
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
