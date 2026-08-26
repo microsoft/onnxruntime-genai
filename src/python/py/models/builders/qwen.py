@@ -375,11 +375,11 @@ class Qwen35TextModel(Model):
 
         # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
-        self.make_initializer(attention.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
+        self.make_initializer(attention.dt_bias, dt_bias_init, to=self.io_dtype)
 
         neg_exp_a_name = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
         neg_exp_a = (-attention.A_log.data.exp()).detach()
-        self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
+        self.make_initializer(neg_exp_a, neg_exp_a_name, to=self.io_dtype)
 
         gate_name = f"{basename}/LinearAttentionGate"
         gate_shape = ["batch_size", "sequence_length", self.linear_num_value_heads]

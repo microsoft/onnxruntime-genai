@@ -184,7 +184,10 @@ struct Qwen2VLPositionInputs : PositionInputs {
 
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  void UpdateAttentionMask();
+  template <typename T>
+  void InitializeStaticMask(OrtValue& cpu_attention_mask);
+  void UpdateAttentionMask(int total_length, int new_kv_length);
+  bool ShouldUseStaticMaskHandling() const;
 
   const Model& model_;
   State& state_;
