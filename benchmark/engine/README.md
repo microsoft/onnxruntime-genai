@@ -20,11 +20,14 @@ conda activate engine-benchmark-venv
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
-python -m pip install patchelf
+python -m pip install -r benchmark/requirements.txt
 
 python --version
 patchelf --version
 ```
+
+The benchmark requirements file must be installed because it provides the `patchelf` dependency
+used while staging the benchmark's runtime libraries.
 
 Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
 compiler must also be installed separately for a CUDA build.
@@ -128,6 +131,10 @@ smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request i
 capped to one generated token while decode requests keep `generation_tokens`; this keeps the
 prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
 while still measuring prefill-vs-decode interference.
+
+For `mixed_workload`, the core TTFT percentiles include only active decode requests. The
+scenario-specific `prefill_ttft_ms` array reports the 128K prefill request's TTFT for each measured
+run, and each raw request is labeled with a `prefill` or `decode` role.
 
 ## Adding a scenario
 

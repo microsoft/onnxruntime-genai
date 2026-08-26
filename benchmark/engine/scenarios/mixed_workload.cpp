@@ -71,10 +71,11 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;
-  std::vector<double> ttft_values;
+  std::vector<double> decode_ttft_values;
   std::vector<double> inter_token_latency_values;
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
+  nlohmann::json prefill_ttft_ms_values = nlohmann::json::array();
   const int total_runs = config.warmup_runs + config.measured_runs;
   int measured_run_index = 0;
 
@@ -157,19 +158,28 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     for (int i = 0; i < config.concurrency; ++i) {
       const size_t request_index = static_cast<size_t>(i);
       const double ttft_ms = std::max(0.0, first_token_ms[request_index]);
-      ttft_values.push_back(ttft_ms);
+      const bool is_prefill = i == 0;
+      if (is_prefill) {
+        prefill_ttft_ms_values.push_back(ttft_ms);
+      } else {
+        decode_ttft_values.push_back(ttft_ms);
+      }
       auto& samples = request_itl_ms[request_index];
       const bool completed = request_tokens[request_index].size() - prompt_counts[request_index] ==
                              static_cast<size_t>(target_generation_tokens[request_index]);
-      output.requests.push_back({measured_run_index * config.concurrency + i, ttft_ms, Percentile(samples, 50.0), completed});
+      output.requests.push_back({measured_run_index * config.concurrency + i,
+                                 ttft_ms,
+                                 Percentile(samples, 50.0),
+                                 completed,
+                                 is_prefill ? "prefill" : "decode"});
       inter_token_latency_values.insert(inter_token_latency_values.end(), samples.begin(), samples.end());
     }
     ++measured_run_index;
   }
 
-  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
-  output.ttft_p50_ms = Percentile(ttft_values, 50.0);
-  output.ttft_p95_ms = Percentile(ttft_values, 95.0);
+  output.ttft_p5_ms = Percentile(decode_ttft_values, 5.0);
+  output.ttft_p50_ms = Percentile(decode_ttft_values, 50.0);
+  output.ttft_p95_ms = Percentile(decode_ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
   memory.Stop();
@@ -178,6 +188,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   output.scenario_metrics = {
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
+      {"prefill_ttft_ms", std::move(prefill_ttft_ms_values)},
       {"decode_prompt_tokens", decode_prompt_count},
       {"prefill_prompt_tokens", prefill_prompt_count},
       {"prefill_generation_tokens", kPrefillGenerationTokens},
