@@ -728,7 +728,8 @@ def get_args():
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
-                qwen_vlm = Export Qwen3.5 VLM auxiliary embedding and vision models alongside the text decoder.
+                qwen_vlm = true/false: Export Qwen3.5 VLM auxiliary embedding and vision models alongside the text decoder. Default is false.
+                    Requires Qwen3_5ForConditionalGeneration and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.

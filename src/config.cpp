@@ -1785,6 +1785,12 @@ void ClearProviders(Config& config) {
   if (config.model.embedding.session_options) {
     ClearProviders(*config.model.embedding.session_options);
   }
+  if (config.model.joiner.session_options) {
+    ClearProviders(*config.model.joiner.session_options);
+  }
+  if (config.model.vad.session_options) {
+    ClearProviders(*config.model.vad.session_options);
+  }
 }
 
 void PopulateProvidersFromProviderOptions(Config::SessionOptions& session_options) {
@@ -1815,6 +1821,14 @@ void PopulateModelProvidersFromProviderOptions(Config::Model& model) {
 
   if (model.embedding.session_options.has_value()) {
     PopulateProvidersFromProviderOptions(*model.embedding.session_options);
+  }
+
+  if (model.joiner.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.joiner.session_options);
+  }
+
+  if (model.vad.session_options.has_value()) {
+    PopulateProvidersFromProviderOptions(*model.vad.session_options);
   }
 }
 
