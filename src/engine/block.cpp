@@ -163,7 +163,7 @@ bool BlockPool::Owns(const std::shared_ptr<Block>& block) const {
 }
 
 size_t BlockPool::BlocksNeeded(size_t num_slots) {
-  return (num_slots + block_size_ - 1) / block_size_;
+  return num_slots / block_size_ + (num_slots % block_size_ != 0);
 }
 
 }  // namespace Generators

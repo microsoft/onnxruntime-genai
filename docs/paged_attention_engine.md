@@ -592,12 +592,16 @@ wrapper.
 `ValidateCommit()` is repeatable and mutates nothing; it verifies request ownership, token
 boundaries and scalar table/pool mutation generations, unique committed request tables, empty
 reserved blocks, reserved-span accounting, touched-block mappings and occupancy, resident window
-rings, and preallocated vector capacity. Generations make this check independent of
-already-committed context blocks; its work is proportional to resident request tables, scheduled
-requests, current growth, and the fixed window ring. `CommitValidated()` allocation-free preflights
-every delta and its captured growth mapping again before publishing the already-validated block
-handles and advancing committed slots. `Commit()` remains the single-reservation convenience
-wrapper that calls both phases.
+rings, and preallocated vector capacity. It also snapshots every committed resident table in order,
+including requests omitted from the step, and requires its request identity, generation, block
+mapping storage, committed-token boundary, and full/window mapping sizes to remain unchanged
+through publication. Table replacement advances the destination generation even when vector
+storage is reused. These
+checks are independent of already-committed context blocks; their work is proportional to resident
+request tables, scheduled requests, current growth, and the fixed window ring.
+`CommitValidated()` allocation-free preflights every resident snapshot, delta, and captured growth
+mapping again before publishing the already-validated block handles and advancing committed slots.
+`Commit()` remains the single-reservation convenience wrapper that calls both phases.
 
 A future composite transaction must validate every participating state reservation before
 publishing any of them. Changing cache ownership, slot occupancy, block identity, or vector

@@ -6,6 +6,7 @@
 // GPU; they validate slot arithmetic, allocation/reservation semantics, capacity accounting, and
 // free-time ownership guards deterministically.
 
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -109,6 +110,12 @@ TEST(BlockPoolTest, BlocksNeededBoundaries) {
   EXPECT_EQ(pool.BlocksNeeded(kBlockSize), 1u);
   EXPECT_EQ(pool.BlocksNeeded(kBlockSize + 1), 2u);
   EXPECT_EQ(pool.BlocksNeeded(kNumBlocks * kBlockSize), kNumBlocks);
+  EXPECT_EQ(
+      pool.BlocksNeeded(std::numeric_limits<size_t>::max()),
+      std::numeric_limits<size_t>::max() / kBlockSize + 1);
+  EXPECT_THROW(
+      pool.AllocateBlocks(std::numeric_limits<size_t>::max()),
+      std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------------------------

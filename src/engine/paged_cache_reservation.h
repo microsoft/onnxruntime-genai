@@ -28,6 +28,10 @@ class PagedCacheBlockTable {
         committed_slots_{committed_slots},
         blocks_{std::move(blocks)},
         window_blocks_{std::move(window_blocks)} {}
+  PagedCacheBlockTable(const PagedCacheBlockTable&) = default;
+  PagedCacheBlockTable(PagedCacheBlockTable&&) noexcept = default;
+  PagedCacheBlockTable& operator=(const PagedCacheBlockTable& other);
+  PagedCacheBlockTable& operator=(PagedCacheBlockTable&& other) noexcept;
 
   const void* RequestId() const { return request_id_; }
   size_t CommittedSlots() const { return committed_slots_; }
@@ -164,8 +168,19 @@ class PagedCacheReservation {
   void Release();
 
  private:
+  struct ResidentTableSnapshot {
+    const void* request_id{};
+    size_t committed_slots{};
+    uint64_t mutation_generation{};
+    const std::shared_ptr<Block>* blocks_data{};
+    size_t block_count{};
+    const std::shared_ptr<Block>* window_blocks_data{};
+    size_t window_block_count{};
+  };
+
   const PagedCacheBlockTable* FindCommittedTable(const void* request_id) const;
   const PagedCacheReservationDelta& FindDelta(const void* request_id) const;
+  void ValidateResidentTablesUnchanged() const;
   void ValidateAdvancePreconditions(const PagedCacheReservationDelta& delta,
                                     const PagedCacheBlockTable& table) const;
   void AdvanceCommittedSlots(PagedCacheBlockTable& table, size_t target_slots);
@@ -179,6 +194,7 @@ class PagedCacheReservation {
   std::vector<PagedCacheReservationDelta> deltas_;
   std::vector<PagedCacheBlockTable> new_tables_;
   std::vector<const Block*> advance_blocks_;
+  std::vector<ResidentTableSnapshot> resident_table_snapshots_;
   uint64_t block_pool_generation_{};
   uint64_t window_block_pool_generation_{};
   PagedCacheReservationState state_{PagedCacheReservationState::Released};
