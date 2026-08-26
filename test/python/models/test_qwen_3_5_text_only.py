@@ -6,7 +6,7 @@ Unit tests for Qwen3.5 text-only (LLM) model.
 
 Tests cover model loading, tokenizer creation, generator creation, and
 basic text generation for the text-only variant of Qwen3.5 (model type
-"qwen3_5_text"), which uses 2D position_ids and hybrid KV/recurrent state.
+"qwen3_5_text"), which uses 3D MRoPE position_ids and hybrid KV/recurrent state.
 
 Usage:
     pytest test_qwen_3_5_text_only.py --test_models=test/models
