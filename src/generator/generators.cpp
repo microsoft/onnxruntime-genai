@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include "config_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
