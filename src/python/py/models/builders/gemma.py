@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from onnx_ir.tensor_adapters import to_torch_dtype
 
+from .base import Model
 from .mistral import MistralModel
 
 
@@ -370,8 +371,12 @@ class Gemma4Model(Gemma3Model):
         self.rope_attrs["partial_rotary_factor"] = 1.0
         self.rope_attrs["create_caches"] = True
         self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
-        super(Gemma3Model, self).make_rotary_embedding_caches(
-            cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
+        # Deliberately reach the base (Model) implementation, skipping Gemma3's
+        # multi-cache override, to build a single default RoPE cache. Called
+        # explicitly (rather than super()) because super() would resolve to
+        # Gemma3Model.make_rotary_embedding_caches and change behavior.
+        Model.make_rotary_embedding_caches(
+            self, cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
         )
         self.head_size, self.rope_attrs["theta"], self.rope_attrs["partial_rotary_factor"] = original
 
@@ -482,7 +487,11 @@ class Gemma4MoEModel(Gemma4Model):
         # Same text-only remap as the dense model, but the MoE checkpoint is a
         # `Gemma4ForConditionalGeneration` whose text tower is `Gemma4ForCausalLM`.
         if self.quant_type is not None or input_path.endswith(".gguf"):
-            return super(Gemma4Model, self).load_weights(input_path)
+            # Deliberately skip Gemma4Model.load_weights (the dense text-only
+            # remap) and use the generic base loader for quantized/GGUF inputs.
+            # Called explicitly rather than via super() because super() would
+            # resolve to Gemma4Model.load_weights and change behavior.
+            return Model.load_weights(self, input_path)
 
         import glob
 
@@ -572,7 +581,7 @@ class Gemma4MoEModel(Gemma4Model):
         expert_input = self.make_gemma4_rmsnorm(
             f"layers.{layer_id}.pre_feedforward_layernorm_2", residual, layer.pre_feedforward_layernorm_2.weight
         )
-        moe_out = self.make_moe(layer_id, layer, router_input=residual, expert_input=expert_input)
+        moe_out = self.make_gemma4_moe(layer_id, layer, router_input=residual, expert_input=expert_input)
         h2 = self.make_gemma4_rmsnorm(
             f"layers.{layer_id}.post_feedforward_layernorm_2", moe_out, layer.post_feedforward_layernorm_2.weight
         )
@@ -584,7 +593,10 @@ class Gemma4MoEModel(Gemma4Model):
         )
         self.layernorm_attrs["skip_input"] = f"{combine_name}/output_0"
 
-    def make_moe(self, layer_id, layer, router_input, expert_input):
+    def make_gemma4_moe(self, layer_id, layer, router_input, expert_input):
+        # Bespoke Gemma4 MoE builder (distinct signature from base Model.make_moe,
+        # which it does not override): the dense+MoE parallel FFN is driven from
+        # make_mlp, so this takes the full layer plus separate router/expert inputs.
         # Router pre-projection (built as explicit nodes) feeds raw logits to the fused
         # MoE/QMoE op; the op runs the experts on `expert_input` and does topk+softmax
         # internally. Returns the MoE op output tensor name.
