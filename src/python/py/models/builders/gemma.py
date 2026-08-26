@@ -738,11 +738,14 @@ class Gemma4MoEModel(Gemma4Model):
 
     def make_moe_quark_input_transform(self, layer_id, moe, expert_input):
         # Shared gate/up input transform: x_rot = (x * input_prescale) @ shared_input_rotation.
-        # The experts are stored in the prescaled+rotated domain (down is plain), with a per-input
-        # `input_prescale` that is byte-identical across all experts and gate==up, so use expert 0's.
+        # Only the factored LoRA-KD checkpoint stores experts in a prescaled+rotated domain; it
+        # carries a per-input `input_prescale` (byte-identical across experts, gate==up). Plain
+        # Quark/AWQ experts have no prescale/rotation, so the input feeds QMoE directly.
         basename = f"/model/layers.{layer_id}/moe"
         experts = moe.mlp.experts
         expert0 = experts[sorted(experts.keys())[0]]
+        if expert0.gate_proj.input_prescale is None:
+            return expert_input
 
         prescale_name = f"model.layers.{layer_id}.moe.experts.input_prescale"
         self.make_initializer(expert0.gate_proj.input_prescale, prescale_name, to=self.io_dtype)
@@ -770,11 +773,11 @@ class Gemma4MoEModel(Gemma4Model):
         return f"{rot_matmul_name}/output_0"
 
     def make_moe_quark_preprocessing(self, layer_id, moe):
-        """Emit initializers for pre-quantized Quark uint2 experts (split gate/up re-fused offline).
+        """Emit initializers for pre-quantized Quark experts (split gate/up re-fused offline).
 
         The QuarkModel loader has already re-fused each layer's split experts into
         `experts.fc1_weights/fc1_scales/fc1_zero_points` (gate|up CONCAT, [E, 2*inter, hidden/pack])
-        and `experts.fc2_*` ([E, hidden, inter/pack]), with float zero_points. Here we:
+        and `experts.fc2_*` ([E, hidden, inter/pack]). Here we:
           - fold router.per_expert_scale into fc2 scales (pure per-expert output constant),
           - emit weight / scale / (optional) zero-point / zero-bias initializers under the shared
             make_moe_expert_names, so make_moe_subgraph can reference them.
@@ -788,16 +791,18 @@ class Gemma4MoEModel(Gemma4Model):
         per_expert = moe.router.per_expert_scale.to(experts.fc2_scales.dtype).reshape(-1, 1, 1)
         fc2_scales = experts.fc2_scales * per_expert
 
-        # The CPU QMoE kernel only supports the interleaved gate|up layout (swiglu_fusion=1), while
-        # the Quark checkpoint stores fc1 as [gate(inter), up(inter)] concat along the output dim.
-        # Reorder the fc1 output rows from concat to interleaved ([gate0,up0,gate1,up1,...]) for the
-        # CPU path so the op's interleaved activation reads the correct gate/up pairs. fc1 rows are
+        # The CPU QMoE kernel only supports the interleaved gate|up layout (swiglu_fusion=1). The
+        # 2-bit factored loader re-fuses fc1 as [gate(inter), up(inter)] CONCAT along the output
+        # dim, so for the CPU path we reorder those rows to interleaved ([gate0,up0,gate1,up1,...])
+        # so the op's interleaved activation reads the correct gate/up pairs. fc1 rows are
         # independent (quantization packs the input dim), so this is a pure row permutation on
-        # weights/scales/zero_points.
+        # weights/scales/zero_points. Plain Quark/AWQ int4 experts are already emitted interleaved
+        # by combine_and_repack_gate_up, so no reorder is needed.
+        is_int2 = int(self.moe_attrs["expert_weight_bits"]) == 2
         fc1_weights = experts.fc1_weights
         fc1_scales = experts.fc1_scales
         fc1_zero_points = experts.fc1_zero_points
-        if self.ep == "cpu":
+        if self.ep == "cpu" and is_int2:
             inter = self.moe_intermediate_size
 
             def _concat_to_interleaved(t):
@@ -820,17 +825,19 @@ class Gemma4MoEModel(Gemma4Model):
         )
         self.make_initializer(torch.zeros(num_experts, self.hidden_size), names["down_bias"], to=self.io_dtype)
 
-        # zero_points: the Quark uint2 export is symmetric with a constant zp of 1.5
-        # (codes {0,1,2,3} -> {-1.5,-0.5,0.5,1.5}*scale). On CUDA the GeGLU QMoE op reconstructs the
-        # -1.5*scale bias internally from scales when zp is omitted (bits==2, no zp input), so we
-        # emit NO zero_points tensor there. CPU keeps the float zp inputs as-is; trt-rtx never
-        # supports ZP inputs.
+        # (codes {0,1,2,3} -> {-1.5,-0.5,0.5,1.5}*scale) stored as FLOAT per-group zero-points.
+        # On CUDA the GeGLU QMoE op reconstructs the -1.5*scale bias internally from scales when
+        # zp is omitted (bits==2, no zp input), so we emit NO zero_points tensor there. CPU keeps
+        # the float zp inputs as-is. Plain Quark/AWQ int4 experts carry INTEGER (uint8) per-group
+        # zero-points, which are emitted without an io_dtype cast. trt-rtx never supports ZP inputs.
         is_int2 = int(self.moe_attrs["expert_weight_bits"]) == 2
+        zp_is_float = torch.is_floating_point(fc1_zero_points)
         omit_zero_points = self.ep == "trt-rtx" or (self.ep == "cuda" and is_int2)
         use_zero_points = not omit_zero_points
         self._quark_use_zero_points = use_zero_points
         if use_zero_points:
             gate_up_zero = f"model.layers.{layer_id}.moe.experts.gate_up_proj.zero_points"
             down_zero = f"model.layers.{layer_id}.moe.experts.down_proj.zero_points"
-            self.make_initializer(fc1_zero_points, gate_up_zero, to=self.io_dtype)
-            self.make_initializer(experts.fc2_zero_points, down_zero, to=self.io_dtype)
+            zp_to = self.io_dtype if zp_is_float else None
+            self.make_initializer(fc1_zero_points, gate_up_zero, to=zp_to)
+            self.make_initializer(experts.fc2_zero_points, down_zero, to=zp_to)
