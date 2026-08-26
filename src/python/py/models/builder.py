@@ -45,6 +45,7 @@ from builders import (
     PhiModel,
     Qwen3Model,
     Qwen3VLTextModel,
+    Qwen4ExpModel,
     Qwen25VLTextModel,
     Qwen35TextModel,
     QwenModel,
@@ -560,6 +561,8 @@ def create_model(
             onnx_model.model_type = "qwen3_5_moe_text"
         else:
             onnx_model.model_type = "qwen3_5_moe"
+    elif config.architectures[0] == "Qwen4ExpForConditionalGeneration":
+        onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":

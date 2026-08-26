@@ -590,6 +590,1446 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return shared_output, f"{gate_sigmoid_name}/output_0"
 
 
+class Qwen4ExpTextModel(Qwen35MoETextModel):
+    """Qwen4-Exp decoder builder using external token/vision embeddings."""
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["exclude_embeds"] = True
+        extra_options.setdefault("filename", "text.onnx")
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.graph.opset_imports["com.microsoft"] = 2
+        self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past_key_values.%d.indexer_key"
+        self.model.metadata_props["qwen4_exp.present_indexer_names"] = "present.%d.indexer_key"
+        self.model.metadata_props["qwen4_exp.past_ple_token_names"] = "past.%d.ple_tokens"
+        self.model.metadata_props["qwen4_exp.present_ple_token_names"] = "present.%d.ple_tokens"
+        self.model.metadata_props["qwen4_exp.past_ple_conv_names"] = "past.%d.ple_conv"
+        self.model.metadata_props["qwen4_exp.present_ple_conv_names"] = "present.%d.ple_conv"
+
+        self.hc_count = config.hc_count
+        self.hc_hidden_size = self.hc_count * self.hidden_size
+        self.ple_layer_ids = {layer_id - 1 for layer_id in config.ple_layer_ids}
+        self.ple_embed_dim = config.ple_embed_dim
+        self.ple_conv_kernel_size = config.ple_conv_kernel_size
+        self.ple_conv_dilation = config.ngram_size
+        self.ngram_size = config.ngram_size
+        self.heads_per_ngram = config.heads_per_ngram
+        self.indexer_num_heads = config.indexer_n_heads
+        self.indexer_kv_heads = config.indexer_kv_heads
+        self.indexer_head_dim = config.indexer_head_dim
+        self.indexer_budget = config.indexer_budget
+        self.indexer_compress_ratio = config.indexer_compress_ratio
+        self.output_gate_type = config.output_gate_type or config.hidden_act
+
+        qsa_layers = {
+            layer_id: f"past_key_values.{layer_id}.indexer_key"
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type == "qwen_sparse_attention"
+        }
+        qsa_outputs = {
+            layer_id: f"present.{layer_id}.indexer_key"
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type == "qwen_sparse_attention"
+        }
+        self.input_names["past_key_values.key"] = self.make_cache_names(
+            ["qwen_sparse_attention"], "past_key_values.key"
+        )
+        self.input_names["past_key_values.value"] = self.make_cache_names(
+            ["qwen_sparse_attention"], "past_key_values.value"
+        )
+        self.output_names["present.key"] = self.make_cache_names(["qwen_sparse_attention"], "present.key")
+        self.output_names["present.value"] = self.make_cache_names(["qwen_sparse_attention"], "present.value")
+        self.input_names["past.indexer"] = qsa_layers
+        self.input_types["past.indexer"] = self.io_dtype
+        self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
+        self.output_names["present.indexer"] = qsa_outputs
+        self.output_types["present.indexer"] = self.io_dtype
+        self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
+
+        ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
+        ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
+        present_ple_tokens = {layer_id: f"present.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
+        present_ple_conv = {layer_id: f"present.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
+        self.input_names["past.ple_tokens"] = ple_token_state
+        self.input_types["past.ple_tokens"] = ir.DataType.INT64
+        self.input_shapes["past.ple_tokens"] = ["batch_size", self.ngram_size - 1]
+        self.input_names["past.ple_conv"] = ple_conv_state
+        self.input_types["past.ple_conv"] = self.io_dtype
+        self.input_shapes["past.ple_conv"] = [
+            "batch_size",
+            self.hc_hidden_size,
+            self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
+        ]
+        self.output_names["present.ple_tokens"] = present_ple_tokens
+        self.output_types["present.ple_tokens"] = ir.DataType.INT64
+        self.output_shapes["present.ple_tokens"] = ["batch_size", self.ngram_size - 1]
+        self.output_names["present.ple_conv"] = present_ple_conv
+        self.output_types["present.ple_conv"] = self.io_dtype
+        self.output_shapes["present.ple_conv"] = self.input_shapes["past.ple_conv"]
+
+        self.input_names["input_ids"] = "input_ids"
+        self.input_types["input_ids"] = ir.DataType.INT64
+        self.input_shapes["input_ids"] = ["batch_size", "sequence_length"]
+
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+        output = f"{name}/output_0"
+        self.make_node(
+            "GatedRMSNorm",
+            inputs=[root_input, scale, gate],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            epsilon=epsilon,
+            activation=self.output_gate_type,
+        )
+        self.make_value(output, self.io_dtype, shape=shape)
+
+    def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
+        grouped_shape = ["batch_size", "sequence_length", self.hc_count, hidden_size]
+        reshape_name = f"{name}/Reshape"
+        self.make_reshape(
+            reshape_name,
+            [root_input, f"/model/constants/INT64/[0, 0, {self.hc_count}, {hidden_size}]"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        grouped = f"{reshape_name}/output_0"
+        square_name = f"{name}/Square"
+        self.make_mul(square_name, [grouped, grouped], self.io_dtype, grouped_shape)
+        mean_name = f"{name}/Mean"
+        mean_shape = ["batch_size", "sequence_length", self.hc_count, 1]
+        self.make_reduce_mean(
+            mean_name,
+            [f"{square_name}/output_0", "/model/constants/INT64/[-1]"],
+            self.io_dtype,
+            mean_shape,
+            keepdims=True,
+        )
+        epsilon_name = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.layernorm_attrs['epsilon']}"
+        variance_name = f"{name}/Variance"
+        self.make_add(variance_name, [f"{mean_name}/output_0", epsilon_name], self.io_dtype, mean_shape)
+        rsqrt_name = f"{name}/Rsqrt"
+        self.make_rsqrt(rsqrt_name, [f"{variance_name}/output_0"], self.io_dtype, mean_shape)
+        normalized_name = f"{name}/Normalize"
+        self.make_mul(normalized_name, [grouped, f"{rsqrt_name}/output_0"], self.io_dtype, grouped_shape)
+        flatten_name = f"{name}/Flatten"
+        flat_shape = ["batch_size", "sequence_length", self.hc_count * hidden_size]
+        self.make_reshape(
+            flatten_name,
+            [f"{normalized_name}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_count * hidden_size}]"],
+            self.io_dtype,
+            flat_shape,
+        )
+        scale_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(norm.weight + 1, scale_name, to=self.io_dtype)
+        scale_mul_name = f"{name}/Scale"
+        self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], self.io_dtype, flat_shape)
+        return f"{scale_mul_name}/output_0"
+
+    def make_hyper_connection_mix(self, layer_id, hyper_connection, root_input, location, combine=True):
+        basename = f"/model/layers.{layer_id}/{location}_hyper_connection"
+        normalized = self.make_branchwise_rms_norm(
+            f"{basename}/hc_norm", root_input, hyper_connection.hc_norm, self.hidden_size
+        )
+        down_name = self.make_matmul(
+            hyper_connection.input_mix_weight_down, f"{basename}/input_mix_weight_down/MatMul", normalized
+        )
+        divide_name = f"{basename}/input_mix_weight_down/Div"
+        self.make_div(
+            divide_name,
+            [f"{down_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+        )
+        silu_sigmoid = f"{basename}/input_mix_weight_down/Sigmoid"
+        self.make_sigmoid(
+            silu_sigmoid,
+            f"{divide_name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+        )
+        silu_name = f"{basename}/input_mix_weight_down/SiLU"
+        self.make_mul(
+            silu_name,
+            [f"{divide_name}/output_0", f"{silu_sigmoid}/output_0"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+        )
+        up_name = self.make_matmul(
+            hyper_connection.input_mix_weight_up,
+            f"{basename}/input_mix_weight_up/MatMul",
+            f"{silu_name}/output_0",
+        )
+        mix_sigmoid = f"{basename}/input_mix_weight_up/Sigmoid"
+        self.make_sigmoid(
+            mix_sigmoid,
+            f"{up_name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hc_hidden_size],
+        )
+        mix_reshape = f"{basename}/input_mix_weight/Reshape"
+        grouped_shape = ["batch_size", "sequence_length", self.hc_count, self.hidden_size]
+        self.make_reshape(
+            mix_reshape,
+            [f"{mix_sigmoid}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_count}, {self.hidden_size}]"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        norm_reshape = f"{basename}/normalized/Reshape"
+        self.make_reshape(
+            norm_reshape,
+            [normalized, f"/model/constants/INT64/[0, 0, {self.hc_count}, {self.hidden_size}]"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        weighted_name = f"{basename}/mixed/Mul"
+        self.make_mul(
+            weighted_name,
+            [f"{mix_reshape}/output_0", f"{norm_reshape}/output_0"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        mixed_name = f"{basename}/mixed/Mean"
+        self.make_reduce_mean(
+            mixed_name,
+            [f"{weighted_name}/output_0", "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hidden_size],
+        )
+        if not combine:
+            return f"{mixed_name}/output_0"
+
+        inject_name = self.make_matmul(
+            hyper_connection.block_inject_weight, f"{basename}/block_inject_weight/MatMul", normalized
+        )
+        inject_div = f"{basename}/block_inject_weight/Div"
+        inject_shape = ["batch_size", "sequence_length", self.hc_count]
+        self.make_div(
+            inject_div,
+            [f"{inject_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
+            self.io_dtype,
+            inject_shape,
+        )
+        inject_sigmoid = f"{basename}/block_inject_weight/Sigmoid"
+        self.make_sigmoid(inject_sigmoid, f"{inject_div}/output_0", self.io_dtype, inject_shape)
+        inject_scale = f"{basename}/block_inject_weight/Mul"
+        self.make_mul(
+            inject_scale,
+            [f"{inject_sigmoid}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/2"],
+            self.io_dtype,
+            inject_shape,
+        )
+        return f"{mixed_name}/output_0", root_input, f"{inject_scale}/output_0"
+
+    def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location):
+        basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
+        output_unsqueeze = f"{basename}/output/Unsqueeze"
+        self.make_unsqueeze(
+            output_unsqueeze,
+            [block_output, "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", 1, self.hidden_size],
+        )
+        weight_unsqueeze = f"{basename}/weight/Unsqueeze"
+        self.make_unsqueeze(
+            weight_unsqueeze,
+            [injection_weights, "/model/constants/INT64/[-1]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hc_count, 1],
+        )
+        weighted_name = f"{basename}/Mul"
+        self.make_mul(
+            weighted_name,
+            [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hc_count, self.hidden_size],
+        )
+        flatten_name = f"{basename}/Reshape"
+        self.make_reshape(
+            flatten_name,
+            [f"{weighted_name}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_hidden_size}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hc_hidden_size],
+        )
+        add_name = f"{basename}/Add"
+        self.make_add(
+            add_name,
+            [hyper_input, f"{flatten_name}/output_0"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.hc_hidden_size],
+        )
+        return f"{add_name}/output_0"
+
+    def make_ple(self, layer_id, ple, root_input):
+        basename = f"/model/layers.{layer_id}/ple"
+        embedding = ple.ple_embedding
+        multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
+        vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
+        offsets = f"model.layers.{layer_id}.ple.head_offsets"
+        eos = f"model.layers.{layer_id}.ple.eos_token_id"
+        self.make_initializer(embedding.layer_multipliers, multipliers)
+        self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
+        self.make_initializer(embedding.ngram_heads_offsets, offsets)
+        self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
+        ngram_name = f"{basename}/NGramHashMapping"
+        ngram_ids = f"{ngram_name}/output_0"
+        self.make_node(
+            "NGramHashMapping",
+            inputs=[
+                self.input_names["input_ids"],
+                self.input_names["past.ple_tokens"][layer_id],
+                multipliers,
+                vocab_sizes,
+                offsets,
+                eos,
+            ],
+            outputs=[ngram_ids, self.output_names["present.ple_tokens"][layer_id]],
+            name=ngram_name,
+            domain="com.microsoft",
+            ngram_size=self.ngram_size,
+            heads_per_ngram=self.heads_per_ngram,
+            reset_on_eos=1,
+        )
+        ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
+        self.make_value(
+            ngram_ids,
+            ir.DataType.INT64,
+            ["batch_size", "sequence_length", ngram_heads],
+        )
+        table_name = f"model.layers.{layer_id}.ple.ngram_embedding.weight"
+        self.make_initializer(embedding.ngram_embedding.weight, table_name, to=self.io_dtype)
+        gather_name = f"{basename}/ngram_embedding/Gather"
+        head_dim = self.ple_embed_dim // ngram_heads
+        self.make_gather(
+            gather_name,
+            [table_name, ngram_ids],
+            self.io_dtype,
+            ["batch_size", "sequence_length", ngram_heads, head_dim],
+            axis=0,
+        )
+        flatten_name = f"{basename}/ngram_embedding/Reshape"
+        self.make_reshape(
+            flatten_name,
+            [f"{gather_name}/output_0", f"/model/constants/INT64/[0, 0, {self.ple_embed_dim}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.ple_embed_dim],
+        )
+
+        key_weight = f"model.layers.{layer_id}.ple.key_weight"
+        value_weight = f"model.layers.{layer_id}.ple.value_weight"
+        key_scale = f"model.layers.{layer_id}.ple.key_norm_scale"
+        query_scale = f"model.layers.{layer_id}.ple.query_norm_scale"
+        conv_scale = f"model.layers.{layer_id}.ple.conv_norm_scale"
+        self.make_initializer(
+            ple.key_proj.weight.T.reshape(self.hc_count, self.ple_embed_dim, self.hidden_size),
+            key_weight,
+            to=self.io_dtype,
+        )
+        self.make_initializer(ple.value_proj.weight.T, value_weight, to=self.io_dtype)
+        self.make_initializer(ple.norm_key.weight + 1, key_scale, to=self.io_dtype)
+        self.make_initializer(ple.norm_query.weight + 1, query_scale, to=self.io_dtype)
+        self.make_initializer(ple.norm_conv.weight + 1, conv_scale, to=self.io_dtype)
+        gate_name = f"{basename}/EngramGate"
+        gated_value = f"{gate_name}/output_0"
+        gated_value_normed = f"{gate_name}/output_1"
+        self.make_node(
+            "EngramGate",
+            inputs=[
+                root_input,
+                f"{flatten_name}/output_0",
+                key_weight,
+                value_weight,
+                key_scale,
+                query_scale,
+                conv_scale,
+            ],
+            outputs=[gated_value, gated_value_normed],
+            name=gate_name,
+            domain="com.microsoft",
+            epsilon=self.layernorm_attrs["epsilon"],
+            hc_count=self.hc_count,
+        )
+        ple_shape = ["batch_size", "sequence_length", self.hc_hidden_size]
+        self.make_value(gated_value, self.io_dtype, ple_shape)
+        self.make_value(gated_value_normed, self.io_dtype, ple_shape)
+
+        conv_weight = f"model.layers.{layer_id}.ple.conv1d.weight"
+        self.make_initializer(ple.conv1d.weight, conv_weight, to=self.io_dtype)
+        conv_name = f"{basename}/ShortConvWithState"
+        conv_output = f"{conv_name}/output_0"
+        self.make_node(
+            "ShortConvWithState",
+            inputs=[
+                gated_value_normed,
+                self.input_names["past.ple_conv"][layer_id],
+                conv_scale,
+                conv_weight,
+            ],
+            outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
+            name=conv_name,
+            domain="com.microsoft",
+            kernel_size=self.ple_conv_kernel_size,
+            dilation=self.ple_conv_dilation,
+            activation="silu",
+            epsilon=self.layernorm_attrs["epsilon"],
+        )
+        self.make_value(conv_output, self.io_dtype, ple_shape)
+        add_name = f"{basename}/Add"
+        self.make_add(add_name, [gated_value, conv_output], self.io_dtype, ple_shape)
+        return f"{add_name}/output_0"
+
+    def make_qwen_sparse_attention(self, layer_id, attention, root_input):
+        self.make_attention_input_proj(layer_id, attention, root_input)
+        q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
+        self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
+        self.make_initializer(attention.k_norm.weight + 1, k_norm_weight, to=self.io_dtype)
+        index_weight = f"model.layers.{layer_id}.attn.indexer.index_qk_weight"
+        index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
+        index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
+        self.make_initializer(attention.indexer.index_qk_proj.weight.T, index_weight, to=self.io_dtype)
+        self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
+        self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
+        cos_cache, sin_cache = self.make_rotary_embedding_caches()
+        past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
+        op_type = "SparsePagedAttention" if self.use_paged_attention else "QwenSparseAttention"
+        name = f"/model/layers.{layer_id}/attn/{op_type}"
+        inputs = [
+            root_input,
+            self.attention_attrs["q_path"],
+            self.attention_attrs["k_path"],
+            self.attention_attrs["v_path"],
+            past_k,
+            past_v,
+            self.input_names["past.indexer"][layer_id],
+            index_weight,
+            index_q_scale,
+            index_k_scale,
+            cos_cache,
+            sin_cache,
+            q_norm_weight,
+            k_norm_weight,
+        ]
+        if self.use_paged_attention:
+            inputs.extend(
+                [
+                    self.input_names["cumulative_sequence_lengths"],
+                    self.input_names["past_sequence_lengths"],
+                    self.input_names["block_table"],
+                    "",
+                    self.input_names["attention_metadata"],
+                ]
+            )
+        else:
+            inputs.extend(
+                [
+                    "",
+                    "",
+                    f"{self.mask_attrs['seqlens_k']}/output_0",
+                    f"{self.mask_attrs['total_seq_len']}/output_0",
+                ]
+            )
+        outputs = [
+            f"{name}/output_0",
+            present_k,
+            present_v,
+            self.output_names["present.indexer"][layer_id],
+        ]
+        self.make_node(
+            op_type,
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            num_heads=self.num_attn_heads,
+            kv_num_heads=self.num_kv_heads,
+            scale=self.attention_attrs["scale"],
+            softcap=self.attention_attrs["softcap"],
+            causal=1,
+            do_rotary=1,
+            rotary_interleaved=self.rope_attrs["interleaved"],
+            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
+            indexer_num_heads=self.indexer_num_heads,
+            indexer_kv_heads=self.indexer_kv_heads,
+            indexer_head_dim=self.indexer_head_dim,
+            indexer_budget=self.indexer_budget,
+            indexer_compress_ratio=self.indexer_compress_ratio,
+            indexer_qk_norm_epsilon=self.layernorm_attrs["epsilon"],
+            indexer_score_activation="relu",
+            indexer_block_pooling="mean",
+            indexer_tail_policy="include_visible_tail",
+            score_mode="learned_dot",
+        )
+        self.make_value(
+            f"{name}/output_0",
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
+        )
+        self.attention_attrs["o_path"] = f"{name}/output_0"
+        self.make_attention_output_proj(layer_id, attention, root_input)
+
+    def make_layer(self, layer_id, layer):
+        if layer_id == 0:
+            tile_name = "/model/hyper_connection/Tile"
+            self.make_tile(
+                tile_name,
+                [self.input_names["inputs_embeds"], f"/model/constants/INT64/[1, 1, {self.hc_count}]"],
+                self.io_dtype,
+                ["batch_size", "sequence_length", self.hc_hidden_size],
+            )
+            self.layernorm_attrs["root_input"] = f"{tile_name}/output_0"
+
+        hyper_states = self.layernorm_attrs["root_input"]
+        if layer_id in self.ple_layer_ids:
+            ple_output = self.make_ple(layer_id, layer.ple, hyper_states)
+            ple_add = f"/model/layers.{layer_id}/ple/residual/Add"
+            self.make_add(
+                ple_add,
+                [hyper_states, ple_output],
+                self.io_dtype,
+                ["batch_size", "sequence_length", self.hc_hidden_size],
+            )
+            hyper_states = f"{ple_add}/output_0"
+
+        mixed, residual, injection = self.make_hyper_connection_mix(
+            layer_id, layer.attn_hyper_connection, hyper_states, "attn"
+        )
+        attention = self.get_attn_module(layer_id, layer)
+        if self.layer_types[layer_id] == "linear_attention":
+            self.make_gated_delta_net(layer_id, attention, mixed)
+        else:
+            self.make_qwen_sparse_attention(layer_id, attention, mixed)
+        hyper_states = self.make_hyper_connection_injection(
+            layer_id, self.layernorm_attrs["skip_input"], residual, injection, "attn"
+        )
+
+        mixed, residual, injection = self.make_hyper_connection_mix(
+            layer_id, layer.mlp_hyper_connection, hyper_states, "mlp"
+        )
+        moe = self.get_moe_module(layer_id, layer)
+        self.make_moe_preprocessing(layer_id, moe, mixed)
+        self.make_moe_router(layer_id, moe, mixed)
+        moe_output = self.make_moe_subgraph(layer_id, moe, mixed)
+        hyper_states = self.make_hyper_connection_injection(
+            layer_id, moe_output, residual, injection, "mlp"
+        )
+        self.layernorm_attrs["root_input"] = hyper_states
+        self.layernorm_attrs["skip_input"] = hyper_states
+
+        if layer_id == self.num_layers - 1:
+            final_output = self.make_hyper_connection_mix(
+                self.num_layers,
+                self.weights.model.language_model.hyper_connection_mixer,
+                hyper_states,
+                "final",
+                combine=False,
+            )
+            self.layernorm_attrs["output_0"] = final_output
+
+
+class _Qwen4ExpGraphModel(Model):
+    def __init__(self, io_dtype, filename, graph_name):
+        self.io_dtype = ir.DataType(io_dtype)
+        self.filename = filename
+        self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22}, name=graph_name)
+        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        self.values = {}
+        self.node_names = set()
+
+    def save_model(self, output_dir):
+        ir.save(
+            self.model,
+            os.path.join(output_dir, self.filename),
+            external_data=f"{self.filename}.data",
+            size_threshold_bytes=0,
+        )
+
+    def make_linear(self, name, linear, root_input, shape, output=None):
+        weight_name = f"{name}.weight"
+        self.make_initializer(linear.weight.T, weight_name, to=self.io_dtype)
+        matmul_name = f"/{name.replace('.', '/')}/MatMul"
+        matmul_output = f"{matmul_name}/output_0"
+        self.make_node("MatMul", [root_input, weight_name], [matmul_output], name=matmul_name)
+        self.make_value(matmul_output, self.io_dtype, shape)
+        if linear.bias is None:
+            if output is not None:
+                self.make_node("Identity", [matmul_output], [output], name=f"/{name.replace('.', '/')}/Identity")
+                self.make_value(output, self.io_dtype, shape)
+                return output
+            return matmul_output
+        bias_name = f"{name}.bias"
+        self.make_initializer(linear.bias, bias_name, to=self.io_dtype)
+        add_name = f"/{name.replace('.', '/')}/Add"
+        add_output = output or f"{add_name}/output_0"
+        self.make_node("Add", [matmul_output, bias_name], [add_output], name=add_name)
+        self.make_value(add_output, self.io_dtype, shape)
+        return add_output
+
+    def make_layer_norm(self, name, layer_norm, root_input, shape):
+        scale_name = f"{name}.weight"
+        bias_name = f"{name}.bias"
+        self.make_initializer(layer_norm.weight, scale_name, to=self.io_dtype)
+        self.make_initializer(layer_norm.bias, bias_name, to=self.io_dtype)
+        node_name = f"/{name.replace('.', '/')}/LayerNormalization"
+        output = f"{node_name}/output_0"
+        self.make_node(
+            "LayerNormalization",
+            [root_input, scale_name, bias_name],
+            [output],
+            name=node_name,
+            axis=-1,
+            epsilon=layer_norm.eps,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape)
+        return output
+
+    def make_binary(self, op_type, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node(op_type, inputs, [output], name=name)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_cast(self, name, root_input, dtype, shape):
+        super().make_cast(name, root_input, dtype, shape)
+        return f"{name}/output_0"
+
+
+class Qwen4ExpEmbeddingModel(_Qwen4ExpGraphModel):
+    def __init__(self, config, embedding_weight, io_dtype):
+        super().__init__(io_dtype, "embedding.onnx", "qwen4_exp_embedding")
+        hidden_size = embedding_weight.shape[1]
+        input_ids = self.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
+        image_features = self.make_value("image_features", self.io_dtype, ["num_image_tokens", hidden_size])
+        inputs_embeds = self.make_value(
+            "inputs_embeds", self.io_dtype, ["batch_size", "sequence_length", hidden_size]
+        )
+        self.graph.inputs.extend([input_ids, image_features])
+        self.graph.outputs.append(inputs_embeds)
+
+        weight_name = "model.embed_tokens.weight"
+        self.make_initializer(embedding_weight, weight_name, to=self.io_dtype)
+        image_token = "image_token_id"
+        video_token = "video_token_id"
+        self.make_initializer(torch.tensor(config.image_token_id, dtype=torch.int64), image_token)
+        self.make_initializer(torch.tensor(config.video_token_id, dtype=torch.int64), video_token)
+        gathered = "/model/embed_tokens/Gather/output_0"
+        self.make_node(
+            "Gather", [weight_name, "input_ids"], [gathered], name="/model/embed_tokens/Gather", axis=0
+        )
+        self.make_value(gathered, self.io_dtype, ["batch_size", "sequence_length", hidden_size])
+        image_mask = self.make_binary(
+            "Equal",
+            "/model/image_mask/Equal",
+            ["input_ids", image_token],
+            ir.DataType.BOOL,
+            ["batch_size", "sequence_length"],
+        )
+        video_mask = self.make_binary(
+            "Equal",
+            "/model/video_mask/Equal",
+            ["input_ids", video_token],
+            ir.DataType.BOOL,
+            ["batch_size", "sequence_length"],
+        )
+        multimodal_mask = self.make_binary(
+            "Or",
+            "/model/multimodal_mask/Or",
+            [image_mask, video_mask],
+            ir.DataType.BOOL,
+            ["batch_size", "sequence_length"],
+        )
+        indices = "/model/multimodal_indices/NonZero/output_0"
+        self.make_node("NonZero", [multimodal_mask], [indices], name="/model/multimodal_indices/NonZero")
+        self.make_value(indices, ir.DataType.INT64, [2, "num_image_tokens"])
+        scatter_indices = "/model/multimodal_indices/Transpose/output_0"
+        self.make_node(
+            "Transpose",
+            [indices],
+            [scatter_indices],
+            name="/model/multimodal_indices/Transpose",
+            perm=[1, 0],
+        )
+        self.make_value(scatter_indices, ir.DataType.INT64, ["num_image_tokens", 2])
+        self.make_node(
+            "ScatterND",
+            [gathered, scatter_indices, "image_features"],
+            ["inputs_embeds"],
+            name="/model/merge_embeddings/ScatterND",
+        )
+
+
+class Qwen4ExpVisionModel(_Qwen4ExpGraphModel):
+    def __init__(self, config, visual, io_dtype):
+        super().__init__(io_dtype, "vision.onnx", "qwen4_exp_vision")
+        self.config = config
+        self.visual = visual
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_heads
+        self.head_size = config.hidden_size // config.num_heads
+        self.merge_size = config.spatial_merge_size
+        patch_size = config.patch_size[0] if isinstance(config.patch_size, (list, tuple)) else config.patch_size
+        temporal_size = (
+            config.temporal_patch_size[0]
+            if isinstance(config.temporal_patch_size, (list, tuple))
+            else config.temporal_patch_size
+        )
+        self.patch_dim = config.in_channels * temporal_size * patch_size * patch_size
+        self.make_model()
+
+    def make_unary(self, op_type, name, root_input, dtype, shape, **attributes):
+        output = f"{name}/output_0"
+        self.make_node(op_type, [root_input], [output], name=name, **attributes)
+        self.make_value(output, dtype, shape)
+        return output
+
+    def make_grid_values(self):
+        flat = "/vision/grid/Reshape/output_0"
+        self.make_reshape(
+            "/vision/grid/Reshape",
+            ["image_grid_thw", "/model/constants/INT64/[-1]"],
+            ir.DataType.INT64,
+            [3],
+        )
+        values = []
+        for index, label in enumerate(("t", "h", "w")):
+            name = f"/vision/grid/{label}/Gather"
+            self.make_gather(
+                name,
+                [flat, f"/model/constants/INT64/{index}"],
+                ir.DataType.INT64,
+                [],
+                axis=0,
+            )
+            values.append(f"{name}/output_0")
+        return values
+
+    def make_patch_positions(self, num_patches, height, width):
+        positions = "/vision/positions/Range/output_0"
+        self.make_node(
+            "Range",
+            ["/model/constants/INT64/0", num_patches, "/model/constants/INT64/1"],
+            [positions],
+            name="/vision/positions/Range",
+        )
+        self.make_value(positions, ir.DataType.INT64, ["num_patches"])
+        frame_size = self.make_binary(
+            "Mul", "/vision/grid/frame_size/Mul", [height, width], ir.DataType.INT64, []
+        )
+        within = self.make_binary(
+            "Mod", "/vision/positions/within/Mod", [positions, frame_size], ir.DataType.INT64, ["num_patches"]
+        )
+        merge = f"/model/constants/INT64/{self.merge_size}"
+        merge_sq = f"/model/constants/INT64/{self.merge_size * self.merge_size}"
+        blocks_w = self.make_binary("Div", "/vision/grid/blocks_w/Div", [width, merge], ir.DataType.INT64, [])
+        in_col = self.make_binary(
+            "Mod", "/vision/positions/in_col/Mod", [within, merge], ir.DataType.INT64, ["num_patches"]
+        )
+        within_div_merge = self.make_binary(
+            "Div",
+            "/vision/positions/within_div_merge/Div",
+            [within, merge],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        in_row = self.make_binary(
+            "Mod",
+            "/vision/positions/in_row/Mod",
+            [within_div_merge, merge],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        within_div_block = self.make_binary(
+            "Div",
+            "/vision/positions/within_div_block/Div",
+            [within, merge_sq],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        block_col = self.make_binary(
+            "Mod",
+            "/vision/positions/block_col/Mod",
+            [within_div_block, blocks_w],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        row_denominator = self.make_binary(
+            "Mul", "/vision/positions/row_denominator/Mul", [blocks_w, merge_sq], ir.DataType.INT64, []
+        )
+        block_row = self.make_binary(
+            "Div",
+            "/vision/positions/block_row/Div",
+            [within, row_denominator],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        row_base = self.make_binary(
+            "Mul", "/vision/positions/row_base/Mul", [block_row, merge], ir.DataType.INT64, ["num_patches"]
+        )
+        col_base = self.make_binary(
+            "Mul", "/vision/positions/col_base/Mul", [block_col, merge], ir.DataType.INT64, ["num_patches"]
+        )
+        row = self.make_binary(
+            "Add", "/vision/positions/row/Add", [row_base, in_row], ir.DataType.INT64, ["num_patches"]
+        )
+        col = self.make_binary(
+            "Add", "/vision/positions/col/Add", [col_base, in_col], ir.DataType.INT64, ["num_patches"]
+        )
+        return row, col
+
+    def make_axis_interpolation(self, label, position, size):
+        position_float = self.make_cast(
+            f"/vision/interpolation/{label}/position/Cast", position, ir.DataType.FLOAT, ["num_patches"]
+        )
+        size_minus_one = self.make_binary(
+            "Sub",
+            f"/vision/interpolation/{label}/size_minus_one/Sub",
+            [size, "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            [],
+        )
+        denominator = self.make_binary(
+            "Max",
+            f"/vision/interpolation/{label}/denominator/Max",
+            [size_minus_one, "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            [],
+        )
+        denominator_float = self.make_cast(
+            f"/vision/interpolation/{label}/denominator/Cast", denominator, ir.DataType.FLOAT, []
+        )
+        scaled = self.make_binary(
+            "Mul",
+            f"/vision/interpolation/{label}/scaled/Mul",
+            [position_float, f"/model/constants/FLOAT/{self.visual.num_grid_per_side - 1}.0"],
+            ir.DataType.FLOAT,
+            ["num_patches"],
+        )
+        source = self.make_binary(
+            "Div",
+            f"/vision/interpolation/{label}/source/Div",
+            [scaled, denominator_float],
+            ir.DataType.FLOAT,
+            ["num_patches"],
+        )
+        floor_float = self.make_unary(
+            "Floor", f"/vision/interpolation/{label}/floor/Floor", source, ir.DataType.FLOAT, ["num_patches"]
+        )
+        floor_int = self.make_cast(
+            f"/vision/interpolation/{label}/floor/Cast", floor_float, ir.DataType.INT64, ["num_patches"]
+        )
+        ceil_int = self.make_binary(
+            "Add",
+            f"/vision/interpolation/{label}/ceil/Add",
+            [floor_int, "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            ["num_patches"],
+        )
+        taps = []
+        for tap_name, tap in (("floor", floor_int), ("ceil", ceil_int)):
+            clipped = f"/vision/interpolation/{label}/{tap_name}/Clip/output_0"
+            self.make_node(
+                "Clip",
+                [
+                    tap,
+                    "/model/constants/INT64/0",
+                    f"/model/constants/INT64/{self.visual.num_grid_per_side - 1}",
+                ],
+                [clipped],
+                name=f"/vision/interpolation/{label}/{tap_name}/Clip",
+            )
+            self.make_value(clipped, ir.DataType.INT64, ["num_patches"])
+            unsqueezed = f"/vision/interpolation/{label}/{tap_name}/Unsqueeze/output_0"
+            self.make_unsqueeze(
+                f"/vision/interpolation/{label}/{tap_name}/Unsqueeze",
+                [clipped, "/model/constants/INT64/[1]"],
+                ir.DataType.INT64,
+                ["num_patches", 1],
+            )
+            taps.append(unsqueezed)
+        tap_indices = f"/vision/interpolation/{label}/taps/Concat/output_0"
+        self.make_concat(
+            f"/vision/interpolation/{label}/taps/Concat",
+            taps,
+            ir.DataType.INT64,
+            ["num_patches", 2],
+            axis=1,
+        )
+        fraction = self.make_binary(
+            "Sub",
+            f"/vision/interpolation/{label}/fraction/Sub",
+            [source, floor_float],
+            ir.DataType.FLOAT,
+            ["num_patches"],
+        )
+        lower_weight = self.make_binary(
+            "Sub",
+            f"/vision/interpolation/{label}/lower_weight/Sub",
+            ["/model/constants/FLOAT/1.0", fraction],
+            ir.DataType.FLOAT,
+            ["num_patches"],
+        )
+        weight_parts = []
+        for weight_name, weight in (("lower", lower_weight), ("upper", fraction)):
+            unsqueezed = f"/vision/interpolation/{label}/{weight_name}_weight/Unsqueeze/output_0"
+            self.make_unsqueeze(
+                f"/vision/interpolation/{label}/{weight_name}_weight/Unsqueeze",
+                [weight, "/model/constants/INT64/[1]"],
+                ir.DataType.FLOAT,
+                ["num_patches", 1],
+            )
+            weight_parts.append(unsqueezed)
+        tap_weights = f"/vision/interpolation/{label}/weights/Concat/output_0"
+        self.make_concat(
+            f"/vision/interpolation/{label}/weights/Concat",
+            weight_parts,
+            ir.DataType.FLOAT,
+            ["num_patches", 2],
+            axis=1,
+        )
+        return tap_indices, tap_weights
+
+    def make_position_embeddings(self, row, col, height, width):
+        h_taps, h_weights = self.make_axis_interpolation("h", row, height)
+        w_taps, w_weights = self.make_axis_interpolation("w", col, width)
+        h_taps_3d = "/vision/interpolation/h/taps/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/interpolation/h/taps/Unsqueeze",
+            [h_taps, "/model/constants/INT64/[2]"],
+            ir.DataType.INT64,
+            ["num_patches", 2, 1],
+        )
+        w_taps_3d = "/vision/interpolation/w/taps/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/interpolation/w/taps/Unsqueeze",
+            [w_taps, "/model/constants/INT64/[1]"],
+            ir.DataType.INT64,
+            ["num_patches", 1, 2],
+        )
+        h_offset = self.make_binary(
+            "Mul",
+            "/vision/interpolation/h_offset/Mul",
+            [h_taps_3d, f"/model/constants/INT64/{self.visual.num_grid_per_side}"],
+            ir.DataType.INT64,
+            ["num_patches", 2, 1],
+        )
+        indices_3d = self.make_binary(
+            "Add",
+            "/vision/interpolation/indices/Add",
+            [h_offset, w_taps_3d],
+            ir.DataType.INT64,
+            ["num_patches", 2, 2],
+        )
+        indices = "/vision/interpolation/indices/Reshape/output_0"
+        self.make_reshape(
+            "/vision/interpolation/indices/Reshape",
+            [indices_3d, "/model/constants/INT64/[-1, 4]"],
+            ir.DataType.INT64,
+            ["num_patches", 4],
+        )
+        h_weights_3d = "/vision/interpolation/h/weights/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/interpolation/h/weights/Unsqueeze",
+            [h_weights, "/model/constants/INT64/[2]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 2, 1],
+        )
+        w_weights_3d = "/vision/interpolation/w/weights/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/interpolation/w/weights/Unsqueeze",
+            [w_weights, "/model/constants/INT64/[1]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 1, 2],
+        )
+        weights_3d = self.make_binary(
+            "Mul",
+            "/vision/interpolation/weights/Mul",
+            [h_weights_3d, w_weights_3d],
+            ir.DataType.FLOAT,
+            ["num_patches", 2, 2],
+        )
+        weights = "/vision/interpolation/weights/Reshape/output_0"
+        self.make_reshape(
+            "/vision/interpolation/weights/Reshape",
+            [weights_3d, "/model/constants/INT64/[-1, 4]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 4],
+        )
+        table_name = "visual.pos_embed.weight"
+        self.make_initializer(self.visual.pos_embed.weight, table_name, to=self.io_dtype)
+        gathered = "/vision/pos_embed/Gather/output_0"
+        self.make_gather(
+            "/vision/pos_embed/Gather",
+            [table_name, indices],
+            self.io_dtype,
+            ["num_patches", 4, self.hidden_size],
+            axis=0,
+        )
+        if self.io_dtype != ir.DataType.FLOAT:
+            weights = self.make_cast(
+                "/vision/interpolation/weights/Cast",
+                weights,
+                self.io_dtype,
+                ["num_patches", 4],
+            )
+        weights_expanded = "/vision/interpolation/weights/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/interpolation/weights/Unsqueeze",
+            [weights, "/model/constants/INT64/[-1]"],
+            self.io_dtype,
+            ["num_patches", 4, 1],
+        )
+        weighted = self.make_binary(
+            "Mul",
+            "/vision/pos_embed/Mul",
+            [gathered, weights_expanded],
+            self.io_dtype,
+            ["num_patches", 4, self.hidden_size],
+        )
+        output = "/vision/pos_embed/ReduceSum/output_0"
+        self.make_reduce_sum(
+            "/vision/pos_embed/ReduceSum",
+            [weighted, "/model/constants/INT64/[1]"],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        return output
+
+    def make_rotary_embeddings(self, row, col):
+        row_float = self.make_cast("/vision/rotary/row/Cast", row, ir.DataType.FLOAT, ["num_patches"])
+        col_float = self.make_cast("/vision/rotary/col/Cast", col, ir.DataType.FLOAT, ["num_patches"])
+        row_2d = "/vision/rotary/row/Unsqueeze/output_0"
+        col_2d = "/vision/rotary/col/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/rotary/row/Unsqueeze",
+            [row_float, "/model/constants/INT64/[1]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 1],
+        )
+        self.make_unsqueeze(
+            "/vision/rotary/col/Unsqueeze",
+            [col_float, "/model/constants/INT64/[1]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 1],
+        )
+        position_ids = "/vision/rotary/position_ids/Concat/output_0"
+        self.make_concat(
+            "/vision/rotary/position_ids/Concat",
+            [row_2d, col_2d],
+            ir.DataType.FLOAT,
+            ["num_patches", 2],
+            axis=1,
+        )
+        position_ids_3d = "/vision/rotary/position_ids/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            "/vision/rotary/position_ids/Unsqueeze",
+            [position_ids, "/model/constants/INT64/[-1]"],
+            ir.DataType.FLOAT,
+            ["num_patches", 2, 1],
+        )
+        inv_freq_name = "visual.rotary_pos_emb.inv_freq"
+        self.make_initializer(self.visual.rotary_pos_emb.inv_freq, inv_freq_name, to=ir.DataType.FLOAT)
+        frequencies = self.make_binary(
+            "Mul",
+            "/vision/rotary/frequencies/Mul",
+            [position_ids_3d, inv_freq_name],
+            ir.DataType.FLOAT,
+            ["num_patches", 2, self.head_size // 4],
+        )
+        flattened = "/vision/rotary/frequencies/Reshape/output_0"
+        self.make_reshape(
+            "/vision/rotary/frequencies/Reshape",
+            [frequencies, f"/model/constants/INT64/[-1, {self.head_size // 2}]"],
+            ir.DataType.FLOAT,
+            ["num_patches", self.head_size // 2],
+        )
+        full = "/vision/rotary/frequencies/Concat/output_0"
+        self.make_concat(
+            "/vision/rotary/frequencies/Concat",
+            [flattened, flattened],
+            ir.DataType.FLOAT,
+            ["num_patches", self.head_size],
+            axis=1,
+        )
+        cos = self.make_unary("Cos", "/vision/rotary/Cos", full, ir.DataType.FLOAT, ["num_patches", self.head_size])
+        sin = self.make_unary("Sin", "/vision/rotary/Sin", full, ir.DataType.FLOAT, ["num_patches", self.head_size])
+        if self.io_dtype != ir.DataType.FLOAT:
+            cos = self.make_cast("/vision/rotary/cos/Cast", cos, self.io_dtype, ["num_patches", self.head_size])
+            sin = self.make_cast("/vision/rotary/sin/Cast", sin, self.io_dtype, ["num_patches", self.head_size])
+        return cos, sin
+
+    def apply_rotary(self, layer_id, label, tensor, cos, sin):
+        basename = f"/visual/blocks/{layer_id}/attn/{label}_rotary"
+        first = f"{basename}/Split/output_0"
+        second = f"{basename}/Split/output_1"
+        self.make_split(
+            f"{basename}/Split",
+            [tensor, f"/model/constants/INT64/[{self.head_size // 2}, {self.head_size // 2}]"],
+            [first, second],
+            [self.io_dtype, self.io_dtype],
+            [["num_patches", self.num_heads, self.head_size // 2]] * 2,
+            axis=-1,
+        )
+        negative = self.make_unary(
+            "Neg", f"{basename}/Neg", second, self.io_dtype, ["num_patches", self.num_heads, self.head_size // 2]
+        )
+        rotated = f"{basename}/Concat/output_0"
+        self.make_concat(
+            f"{basename}/Concat",
+            [negative, first],
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+            axis=-1,
+        )
+        cos_3d = f"{basename}/cos/Unsqueeze/output_0"
+        sin_3d = f"{basename}/sin/Unsqueeze/output_0"
+        self.make_unsqueeze(
+            f"{basename}/cos/Unsqueeze",
+            [cos, "/model/constants/INT64/[1]"],
+            self.io_dtype,
+            ["num_patches", 1, self.head_size],
+        )
+        self.make_unsqueeze(
+            f"{basename}/sin/Unsqueeze",
+            [sin, "/model/constants/INT64/[1]"],
+            self.io_dtype,
+            ["num_patches", 1, self.head_size],
+        )
+        direct = self.make_binary(
+            "Mul",
+            f"{basename}/direct/Mul",
+            [tensor, cos_3d],
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+        )
+        crossed = self.make_binary(
+            "Mul",
+            f"{basename}/crossed/Mul",
+            [rotated, sin_3d],
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+        )
+        return self.make_binary(
+            "Add",
+            f"{basename}/Add",
+            [direct, crossed],
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+        )
+
+    def make_attention(self, layer_id, attention, root_input, cos, sin):
+        qkv = self.make_linear(
+            f"visual.blocks.{layer_id}.attn.qkv",
+            attention.qkv,
+            root_input,
+            ["num_patches", 3 * self.hidden_size],
+        )
+        qkv_4d = f"/visual/blocks/{layer_id}/attn/qkv/Reshape/output_0"
+        self.make_reshape(
+            f"/visual/blocks/{layer_id}/attn/qkv/Reshape",
+            [qkv, f"/model/constants/INT64/[-1, 3, {self.num_heads}, {self.head_size}]"],
+            self.io_dtype,
+            ["num_patches", 3, self.num_heads, self.head_size],
+        )
+        split_outputs = [f"/visual/blocks/{layer_id}/attn/qkv/Split/output_{index}" for index in range(3)]
+        self.make_split(
+            f"/visual/blocks/{layer_id}/attn/qkv/Split",
+            [qkv_4d, "/model/constants/INT64/[1, 1, 1]"],
+            split_outputs,
+            [self.io_dtype] * 3,
+            [["num_patches", 1, self.num_heads, self.head_size]] * 3,
+            axis=1,
+        )
+        squeezed = []
+        for label, value in zip(("q", "k", "v"), split_outputs, strict=True):
+            output = f"/visual/blocks/{layer_id}/attn/{label}/Squeeze/output_0"
+            self.make_squeeze(
+                f"/visual/blocks/{layer_id}/attn/{label}/Squeeze",
+                [value, "/model/constants/INT64/[1]"],
+                self.io_dtype,
+                ["num_patches", self.num_heads, self.head_size],
+            )
+            squeezed.append(output)
+        query = self.apply_rotary(layer_id, "q", squeezed[0], cos, sin)
+        key = self.apply_rotary(layer_id, "k", squeezed[1], cos, sin)
+        query_t = f"/visual/blocks/{layer_id}/attn/q/Transpose/output_0"
+        key_t = f"/visual/blocks/{layer_id}/attn/k/Transpose/output_0"
+        value_t = f"/visual/blocks/{layer_id}/attn/v/Transpose/output_0"
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/q/Transpose",
+            query,
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+            [1, 0, 2],
+        )
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/k/Transpose",
+            key,
+            self.io_dtype,
+            [self.num_heads, self.head_size, "num_patches"],
+            [1, 2, 0],
+        )
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/v/Transpose",
+            squeezed[2],
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+            [1, 0, 2],
+        )
+        scores = self.make_binary(
+            "MatMul",
+            f"/visual/blocks/{layer_id}/attn/scores/MatMul",
+            [query_t, key_t],
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+        )
+        scaled = self.make_binary(
+            "Mul",
+            f"/visual/blocks/{layer_id}/attn/scores/Mul",
+            [scores, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{attention.scaling}"],
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+        )
+        probabilities = f"/visual/blocks/{layer_id}/attn/Softmax/output_0"
+        self.make_softmax(
+            f"/visual/blocks/{layer_id}/attn/Softmax",
+            scaled,
+            self.io_dtype,
+            [self.num_heads, "num_patches", "num_patches"],
+            axis=-1,
+        )
+        context = self.make_binary(
+            "MatMul",
+            f"/visual/blocks/{layer_id}/attn/context/MatMul",
+            [probabilities, value_t],
+            self.io_dtype,
+            [self.num_heads, "num_patches", self.head_size],
+        )
+        context_t = f"/visual/blocks/{layer_id}/attn/context/Transpose/output_0"
+        self.make_transpose(
+            f"/visual/blocks/{layer_id}/attn/context/Transpose",
+            context,
+            self.io_dtype,
+            ["num_patches", self.num_heads, self.head_size],
+            [1, 0, 2],
+        )
+        context_flat = f"/visual/blocks/{layer_id}/attn/context/Reshape/output_0"
+        self.make_reshape(
+            f"/visual/blocks/{layer_id}/attn/context/Reshape",
+            [context_t, f"/model/constants/INT64/[-1, {self.hidden_size}]"],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        return self.make_linear(
+            f"visual.blocks.{layer_id}.attn.proj",
+            attention.proj,
+            context_flat,
+            ["num_patches", self.hidden_size],
+        )
+
+    def make_gelu(self, name, root_input, shape, approximate="none"):
+        output = f"{name}/output_0"
+        self.make_node("Gelu", [root_input], [output], name=name, approximate=approximate)
+        self.make_value(output, self.io_dtype, shape)
+        return output
+
+    def make_model(self):
+        pixel_values = self.make_value("pixel_values", self.io_dtype, ["num_patches", self.patch_dim])
+        image_grid = self.make_value("image_grid_thw", ir.DataType.INT64, [1, 3])
+        image_features = self.make_value("image_features", self.io_dtype, ["num_image_tokens", self.config.out_hidden_size])
+        self.graph.inputs.extend([pixel_values, image_grid])
+        self.graph.outputs.append(image_features)
+
+        shape = "/vision/pixel_values/Shape/output_0"
+        self.make_shape("/vision/pixel_values/Shape", "pixel_values", [2])
+        self.make_gather(
+            "/vision/pixel_values/num_patches/Gather",
+            [shape, "/model/constants/INT64/0"],
+            ir.DataType.INT64,
+            [],
+            axis=0,
+        )
+        num_patches = "/vision/pixel_values/num_patches/Gather/output_0"
+        _, height, width = self.make_grid_values()
+        row, col = self.make_patch_positions(num_patches, height, width)
+
+        patch_weight = self.visual.patch_embed.proj.weight.reshape(self.hidden_size, -1).T
+        patch_weight_name = "visual.patch_embed.proj.weight"
+        patch_bias_name = "visual.patch_embed.proj.bias"
+        self.make_initializer(patch_weight, patch_weight_name, to=self.io_dtype)
+        self.make_initializer(self.visual.patch_embed.proj.bias, patch_bias_name, to=self.io_dtype)
+        patch_matmul = self.make_binary(
+            "MatMul",
+            "/visual/patch_embed/proj/MatMul",
+            ["pixel_values", patch_weight_name],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        hidden_states = self.make_binary(
+            "Add",
+            "/visual/patch_embed/proj/Add",
+            [patch_matmul, patch_bias_name],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        position_embeddings = self.make_position_embeddings(row, col, height, width)
+        hidden_states = self.make_binary(
+            "Add",
+            "/visual/patch_embed/add_position/Add",
+            [hidden_states, position_embeddings],
+            self.io_dtype,
+            ["num_patches", self.hidden_size],
+        )
+        cos, sin = self.make_rotary_embeddings(row, col)
+
+        for layer_id, block in enumerate(self.visual.blocks):
+            norm1 = self.make_layer_norm(
+                f"visual.blocks.{layer_id}.norm1", block.norm1, hidden_states, ["num_patches", self.hidden_size]
+            )
+            attention = self.make_attention(layer_id, block.attn, norm1, cos, sin)
+            hidden_states = self.make_binary(
+                "Add",
+                f"/visual/blocks/{layer_id}/attn/residual/Add",
+                [hidden_states, attention],
+                self.io_dtype,
+                ["num_patches", self.hidden_size],
+            )
+            norm2 = self.make_layer_norm(
+                f"visual.blocks.{layer_id}.norm2", block.norm2, hidden_states, ["num_patches", self.hidden_size]
+            )
+            fc1 = self.make_linear(
+                f"visual.blocks.{layer_id}.mlp.linear_fc1",
+                block.mlp.linear_fc1,
+                norm2,
+                ["num_patches", self.config.intermediate_size],
+            )
+            activated = self.make_gelu(
+                f"/visual/blocks/{layer_id}/mlp/Gelu",
+                fc1,
+                ["num_patches", self.config.intermediate_size],
+                approximate="tanh",
+            )
+            fc2 = self.make_linear(
+                f"visual.blocks.{layer_id}.mlp.linear_fc2",
+                block.mlp.linear_fc2,
+                activated,
+                ["num_patches", self.hidden_size],
+            )
+            hidden_states = self.make_binary(
+                "Add",
+                f"/visual/blocks/{layer_id}/mlp/residual/Add",
+                [hidden_states, fc2],
+                self.io_dtype,
+                ["num_patches", self.hidden_size],
+            )
+
+        merger = self.visual.merger
+        merged_norm = self.make_layer_norm(
+            "visual.merger.norm", merger.norm, hidden_states, ["num_patches", self.hidden_size]
+        )
+        merged_input = "/visual/merger/Reshape/output_0"
+        merged_hidden_size = self.hidden_size * self.merge_size * self.merge_size
+        self.make_reshape(
+            "/visual/merger/Reshape",
+            [merged_norm, f"/model/constants/INT64/[-1, {merged_hidden_size}]"],
+            self.io_dtype,
+            ["num_image_tokens", merged_hidden_size],
+        )
+        merger_fc1 = self.make_linear(
+            "visual.merger.linear_fc1",
+            merger.linear_fc1,
+            merged_input,
+            ["num_image_tokens", merged_hidden_size],
+        )
+        merger_activated = self.make_gelu(
+            "/visual/merger/Gelu", merger_fc1, ["num_image_tokens", merged_hidden_size]
+        )
+        self.make_linear(
+            "visual.merger.linear_fc2",
+            merger.linear_fc2,
+            merger_activated,
+            ["num_image_tokens", self.config.out_hidden_size],
+            output="image_features",
+        )
+
+
+class Qwen4ExpModel:
+    """Composite builder that emits Qwen4-Exp vision, embedding, and text graphs."""
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.config = config
+        self.extra_options = copy.deepcopy(extra_options)
+        self.decoder = Qwen4ExpTextModel(
+            copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, self.extra_options
+        )
+        self.decoder.model_type = "qwen3_5"
+        self.input_path = None
+
+        text_config = config.text_config
+        self.bos_token_id = text_config.bos_token_id
+        self.eos_token_id = text_config.eos_token_id
+        self.pad_token_id = text_config.pad_token_id
+        self.vocab_size = self.decoder.vocab_size
+        self.hf_token = self.decoder.hf_token
+        self.hf_remote = self.decoder.hf_remote
+        self.context_length = self.decoder.context_length
+        self.exclude_embeds = self.decoder.exclude_embeds
+        self.model_type = "qwen3_5"
+
+    def make_model(self, input_path):
+        self.input_path = input_path
+        self.decoder.make_model(input_path)
+
+    def save_model(self, output_dir):
+        self.decoder.save_model(output_dir)
+        if self.input_path is None:
+            raise RuntimeError("make_model must be called before save_model.")
+        weights = self.decoder.load_weights(self.input_path)
+        language_model = weights.model.language_model
+        embedding_model = Qwen4ExpEmbeddingModel(
+            self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
+        )
+        embedding_model.save_model(output_dir)
+        vision_config = self.config.vision_config
+        if vision_config.out_hidden_size != self.decoder.hidden_size:
+            raise ValueError(
+                "Qwen4-Exp vision output size must match the text embedding size: "
+                f"{vision_config.out_hidden_size} != {self.decoder.hidden_size}."
+            )
+        vision_model = Qwen4ExpVisionModel(vision_config, weights.model.visual, self.decoder.io_dtype)
+        vision_model.save_model(output_dir)
+        del weights
+
+    def make_genai_config(self, config, extra_kwargs, out_dir):
+        self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        model_config = genai_config["model"]
+        model_config["type"] = "qwen3_5"
+        model_config["image_token_id"] = config.image_token_id
+        model_config["vision_start_token_id"] = config.vision_start_token_id
+        decoder_inputs = model_config["decoder"]["inputs"]
+        decoder_inputs["inputs_embeds"] = "inputs_embeds"
+        decoder_inputs["input_ids"] = "input_ids"
+        model_config["embedding"] = {
+            "filename": "embedding.onnx",
+            "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
+            "outputs": {"inputs_embeds": "inputs_embeds"},
+        }
+        model_config["vision"] = {
+            "filename": "vision.onnx",
+            "spatial_merge_size": config.vision_config.spatial_merge_size,
+            "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
+            "outputs": {"image_features": "image_features"},
+        }
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+
+
 class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
 

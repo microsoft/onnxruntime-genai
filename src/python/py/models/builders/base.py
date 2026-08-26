@@ -23,6 +23,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     QuantFormat,
     RTNWeightOnlyQuantConfig,
 )
+from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
@@ -36,8 +37,6 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
-
-from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
@@ -1531,7 +1530,8 @@ class Model:
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
             return
 
-        from onnx import helper as onnx_helper, numpy_helper  # noqa: PLC0415
+        from onnx import helper as onnx_helper  # noqa: PLC0415
+        from onnx import numpy_helper
 
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
@@ -5191,9 +5191,13 @@ class Model:
                 "qwen3_5": Qwen3_5ForConditionalGeneration,
                 "Whisper": AutoModelForSpeechSeq2Seq,
             }
+            if "qwen4_exp" in self.model_type.lower():
+                from transformers import Qwen4ExpForConditionalGeneration
+
+                auto_class_map["qwen4_exp"] = Qwen4ExpForConditionalGeneration
             auto_class = AutoModelForCausalLM
             for k, v in auto_class_map.items():
-                if k in self.model_type:
+                if k.lower() in self.model_type.lower():
                     auto_class = v
                     break
 

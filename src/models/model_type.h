@@ -17,13 +17,13 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 31> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
+    static constexpr std::array<std::string_view, 31> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp_text", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 9> VLM = {"fara", "gemma3", "mistral3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "videochat_flash_qwen"};
+    static constexpr std::array<std::string_view, 10> VLM = {"fara", "gemma3", "mistral3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "videochat_flash_qwen"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
@@ -64,7 +64,7 @@ struct ModelType {
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
     // Qwen-VL family: models requiring 3D mRoPE position IDs
-    static constexpr std::array<std::string_view, 10> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "videochat_flash_qwen"};
+    static constexpr std::array<std::string_view, 12> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};
     return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
   }
 
