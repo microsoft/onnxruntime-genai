@@ -1,0 +1,122 @@
+parameters:
+- name: run_full_engine_benchmark
+  type: boolean
+
+jobs:
+- job: engine_benchmark_linux_x64
+  displayName: 'Engine benchmark'
+  pool: 'onnx-publish-Linux-GPU-H100'
+  workspace:
+    clean: all
+
+  variables:
+  - name: buildConfig
+    value: RelWithDebInfo
+  - name: benchmarkDir
+    value: '$(Build.Repository.LocalPath)/build/Linux/$(buildConfig)/benchmark/engine'
+  - name: benchmarkOut
+    value: '$(Build.ArtifactStagingDirectory)/engine-benchmark'
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.11'
+      addToPath: true
+      architecture: 'x64'
+
+  - bash: mkdir -p '$(benchmarkOut)'
+    displayName: 'Initialize benchmark output'
+
+  - bash: |
+      set -euo pipefail
+      python -m pip install --upgrade pip
+      python -m pip install -r requirements-dev.txt
+      python -m pip install -r benchmark/requirements.txt
+      python --version
+      patchelf --version
+      nvidia-smi
+      nvcc --version
+    displayName: 'Install benchmark prerequisites'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - bash: |
+      set -euo pipefail
+      cuda_home="${CUDA_HOME:-/usr/local/cuda}"
+      if [ ! -x "$cuda_home/bin/nvcc" ]; then
+        echo "CUDA compiler not found at $cuda_home/bin/nvcc" >&2
+        exit 1
+      fi
+
+      python build.py --update --build \
+        --config $(buildConfig) \
+        --parallel \
+        --use_cuda \
+        --cuda_home "$cuda_home" \
+        --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=90 \
+        --skip_tests \
+        --skip_examples \
+        --build_engine_benchmark
+    displayName: 'Build engine benchmark'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: AzureCLI@2
+    displayName: 'Download benchmark models'
+    inputs:
+      azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      inlineScript: |
+        set -euo pipefail
+
+        models=(qwen2.5-0.5b-instruct)
+        if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
+          models+=(qwen2.5-1.5b-instruct qwen2.5-7b-instruct)
+        fi
+
+        export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+        for model in "${models[@]}"; do
+          destination="$HOME/models/$model"
+          mkdir -p "$destination"
+          echo "Downloading staging/paged-attention/$model to $destination"
+          azcopy copy \
+            "https://foundrylocalmodels.blob.core.windows.net/staging/paged-attention/$model/*" \
+            "$destination" \
+            --recursive
+        done
+
+  - bash: |
+      set -euo pipefail
+      config='benchmark/engine/configs/smoke-test.json'
+      if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
+        config='benchmark/engine/configs/config.json'
+      fi
+
+      gpu_ids=$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
+      if [ -z "$gpu_ids" ]; then
+        echo 'No NVIDIA GPUs detected.' >&2
+        exit 1
+      fi
+
+      mkdir -p '$(benchmarkOut)'
+      export LD_LIBRARY_PATH="${CUDA_HOME:-/usr/local/cuda}/lib64:$(benchmarkDir):${LD_LIBRARY_PATH:-}"
+      echo "Running $config on GPU(s): $gpu_ids"
+      python benchmark/engine/run.py \
+        --executable '$(benchmarkDir)/engine_benchmark' \
+        --config "$config" \
+        --out '$(benchmarkOut)' \
+        --cuda_visible_devices "$gpu_ids" \
+        --verbose
+    displayName: 'Run engine benchmark'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish engine benchmark results'
+    condition: always()
+    inputs:
+      artifactName: 'engine-benchmark-results'
+      targetPath: '$(benchmarkOut)'

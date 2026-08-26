@@ -27,6 +27,8 @@ parameters:
   type: boolean
 - name: linux_x64_engine
   type: boolean
+- name: run_full_engine_benchmark
+  type: boolean
 - name: build_macos_arm64
   type: boolean
 - name: macos_arm64_cpu
@@ -141,6 +143,14 @@ stages:
         ep: 'cuda'
         model: 'qwen2.5-0.5b-instruct-paged'
         storage_model: 'qwen2.5-0.5b-instruct'
+
+- stage: integration_engine_benchmark_linux_x64
+  displayName: 'Test · Engine Benchmark · Linux x64'
+  dependsOn: validate_pipeline_in_sync
+  jobs:
+  - template: jobs/integration-engine-benchmark-job.yml
+    parameters:
+      run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
 
 - ${{ if eq(parameters.build_macos_arm64, true) }}:
   - stage: build_osx_arm64
