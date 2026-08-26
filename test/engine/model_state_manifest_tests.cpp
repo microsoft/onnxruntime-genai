@@ -132,42 +132,20 @@ std::string CaptureValidationError(const ModelStateManifest& manifest,
   return {};
 }
 
-// The speculative-rollback variant of the fixed group: the committed state keeps its shape and
-// the per-token series arrives through a separate output with one leading slot axis.
-Config::Model::Decoder MakeCheckpointDecoder(int checkpoint_count = 4) {
-  auto decoder = MakeSparseDecoder();
-  auto& fixed = decoder.state_groups->back();
-  fixed.state->checkpoints = "checkpoints.%d.conv";
-  fixed.checkpoint_count = checkpoint_count;
-  fixed.checkpoint_alignment = Config::Model::Decoder::CheckpointAlignment::Left;
-  return decoder;
-}
-
-FakeModelStateMetadata MakeCheckpointMetadata(int checkpoint_count = 4) {
-  auto metadata = MakeValidMetadata();
-  for (const int layer_id : {0, 2}) {
-    metadata.AddOutput(
-        "checkpoints." + std::to_string(layer_id) + ".conv",
-        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
-        {checkpoint_count, -1, 8192, 3});
-  }
-  return metadata;
-}
-
 Config::Model::Decoder MakeCompactConvDecoder() {
   using Decoder = Config::Model::Decoder;
-  auto decoder = MakeCheckpointDecoder();
+  auto decoder = MakeSparseDecoder();
   auto& fixed = decoder.state_groups->back();
-  fixed.state_update = Decoder::StateUpdate{
-      Decoder::StateUpdateKind::CausalConv,
-      3,
-      "state_update_capture_count",
-      "state_update.%d.conv_value"};
+  fixed.state_update.emplace();
+  fixed.state_update->kind = Decoder::StateUpdateKind::CausalConv;
+  fixed.state_update->capacity = 3;
+  fixed.state_update->capture_count = "state_update_capture_count";
+  fixed.state_update->value = "state_update.%d.conv_value";
   return decoder;
 }
 
 FakeModelStateMetadata MakeCompactConvMetadata() {
-  auto metadata = MakeCheckpointMetadata();
+  auto metadata = MakeValidMetadata();
   metadata.AddInput(
       "state_update_capture_count",
       ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
@@ -189,14 +167,12 @@ Config::Model::Decoder MakeCompactGdnDecoder() {
   group.kind = Decoder::StateGroupKind::Fixed;
   group.layer_ids = {0};
   group.state = Decoder::StateBinding{"past.%d.recurrent", "present.%d.recurrent"};
-  group.state_update = Decoder::StateUpdate{
-      Decoder::StateUpdateKind::GatedDeltaNet,
-      3,
-      "state_update_capture_count",
-      "",
-      "state_update.%d.decay",
-      "state_update.%d.key",
-      "state_update.%d.delta"};
+  group.state_update.emplace();
+  group.state_update->kind = Decoder::StateUpdateKind::GatedDeltaNet;
+  group.state_update->capacity = 3;
+  group.state_update->capture_count = "state_update_capture_count";
+  group.state_update->capsule = "state_update.%d.capsule";
+  group.state_update->key_head_count = 16;
   decoder.state_groups = std::vector<Decoder::StateGroup>{std::move(group)};
   return decoder;
 }
@@ -216,85 +192,13 @@ FakeModelStateMetadata MakeCompactGdnMetadata() {
       ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
       {-1});
   metadata.AddOutput(
-      "state_update.0.decay",
+      "state_update.0.capsule",
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 48});
-  metadata.AddOutput(
-      "state_update.0.key",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 16, 128});
-  metadata.AddOutput(
-      "state_update.0.delta",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 48, 128});
+      {-1, 24720});
   return metadata;
 }
 
-TEST(ModelStateManifestTest, ValidatesCheckpointOutputs) {
-  const ModelStateManifest manifest{MakeCheckpointDecoder()};
-
-  EXPECT_NO_THROW(manifest.ValidateSession(MakeCheckpointMetadata()));
-}
-
-TEST(ModelStateManifestTest, RejectsMissingCheckpointOutput) {
-  const ModelStateManifest manifest{MakeCheckpointDecoder()};
-
-  const auto message = CaptureValidationError(manifest, MakeValidMetadata());
-  EXPECT_NE(message.find("checkpoints output was not found: checkpoints.0.conv"),
-            std::string::npos)
-      << message;
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointCountMismatch) {
-  const ModelStateManifest manifest{MakeCheckpointDecoder(4)};
-
-  const auto message = CaptureValidationError(manifest, MakeCheckpointMetadata(3));
-  EXPECT_NE(message.find("must be [4, ...]"), std::string::npos) << message;
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointRankMismatch) {
-  const ModelStateManifest manifest{MakeCheckpointDecoder()};
-  auto metadata = MakeCheckpointMetadata();
-  metadata.AddOutput(
-      "checkpoints.0.conv",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
-      {-1, 8192, 3});
-
-  const auto message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("must be [4, ...]"), std::string::npos) << message;
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointCountWithoutTemplate) {
-  auto decoder = MakeSparseDecoder();
-  decoder.state_groups->back().checkpoint_count = 4;
-
-  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointTemplateWithoutCount) {
-  auto decoder = MakeSparseDecoder();
-  decoder.state_groups->back().state->checkpoints = "checkpoints.%d.conv";
-
-  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointsOnPagedGroup) {
-  auto decoder = MakeSparseDecoder();
-  auto& paged = decoder.state_groups->front();
-  paged.checkpoint_count = 4;
-  paged.key->checkpoints = "checkpoints.%d.key";
-
-  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
-}
-
-TEST(ModelStateManifestTest, RejectsCheckpointTemplateColliding) {
-  auto decoder = MakeCheckpointDecoder();
-  decoder.state_groups->back().state->checkpoints = "present.%d.conv";
-
-  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
-}
-
-TEST(ModelStateManifestTest, ValidatesCompactConvUpdatesAlongsideCheckpoints) {
+TEST(ModelStateManifestTest, ValidatesCompactConvUpdates) {
   const ModelStateManifest manifest{MakeCompactConvDecoder()};
 
   EXPECT_NO_THROW(manifest.ValidateSession(MakeCompactConvMetadata()));
@@ -381,10 +285,10 @@ TEST(ModelStateManifestTest, RejectsInvalidCompactCaptureCountMetadata) {
 TEST(ModelStateManifestTest, RejectsMissingCompactStateUpdateOutput) {
   const ModelStateManifest manifest{MakeCompactGdnDecoder()};
   auto metadata = MakeCompactGdnMetadata();
-  metadata.RemoveOutput("state_update.0.key");
+  metadata.RemoveOutput("state_update.0.capsule");
 
   const auto message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("key output was not found: state_update.0.key"),
+  EXPECT_NE(message.find("capsule output was not found: state_update.0.capsule"),
             std::string::npos)
       << message;
 }
@@ -418,47 +322,18 @@ TEST(ModelStateManifestTest, RejectsInvalidCompactGdnDtypeAndShapeMetadata) {
   const ModelStateManifest manifest{MakeCompactGdnDecoder()};
   auto metadata = MakeCompactGdnMetadata();
   metadata.AddOutput(
-      "state_update.0.decay",
+    "state_update.0.capsule",
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
-      {-1, 3, 48});
+    {-1, 24720});
   auto message = CaptureValidationError(manifest, metadata);
   EXPECT_NE(message.find("must have float dtype"), std::string::npos) << message;
 
   metadata.AddOutput(
-      "state_update.0.decay",
+    "state_update.0.capsule",
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 48});
-  metadata.AddOutput(
-      "state_update.0.key",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 0, 128});
+    {-1, 24719});
   message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("positive key-head dimension"), std::string::npos) << message;
-
-  metadata.AddOutput(
-      "state_update.0.key",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 16, 64});
-  message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("key dimensions are incompatible"), std::string::npos) << message;
-
-  metadata.AddOutput(
-      "state_update.0.key",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 16, 128});
-  metadata.AddOutput(
-      "state_update.0.delta",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 24, 128});
-  message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("value-head dimensions are incompatible"), std::string::npos) << message;
-
-  metadata.AddOutput(
-      "state_update.0.delta",
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-      {-1, 3, 48, 64});
-  message = CaptureValidationError(manifest, metadata);
-  EXPECT_NE(message.find("value dimensions are incompatible"), std::string::npos) << message;
+  EXPECT_NE(message.find("width must be 24720"), std::string::npos) << message;
 }
 
 TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
@@ -577,53 +452,6 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidExplicitBindings) {
   })";
   auto valid_config = std::make_unique<Config>(model_path, valid_overlay);
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
-}
-
-TEST(ModelStateManifestTest, ParsesCheckpointStateGroupFields) {
-  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
-  const auto overlay = R"({
-    "model": {"decoder": {"state_groups": [{
-      "kind": "fixed",
-      "layer_ids": [0],
-      "checkpoint_count": 4,
-      "checkpoint_alignment": "left",
-      "bindings": {
-        "state": {
-          "input": "past_key_values.%d.conv",
-          "output": "present.%d.conv",
-          "checkpoints": "checkpoints.%d.conv"
-        }
-      }
-    }]}}
-  })";
-  const Config config{model_path, overlay};
-
-  ASSERT_TRUE(config.model.decoder.state_groups.has_value());
-  ASSERT_EQ(config.model.decoder.state_groups->size(), 1u);
-  const auto& group = config.model.decoder.state_groups->front();
-  EXPECT_EQ(group.checkpoint_count, 4);
-  EXPECT_EQ(group.checkpoint_alignment, Config::Model::Decoder::CheckpointAlignment::Left);
-  ASSERT_TRUE(group.state.has_value());
-  EXPECT_EQ(group.state->checkpoints, "checkpoints.%d.conv");
-}
-
-TEST(ModelStateManifestTest, RejectsOutOfRangeCheckpointCount) {
-  const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
-  const auto overlay = R"({
-    "model": {"decoder": {"state_groups": [{
-      "kind": "fixed",
-      "layer_ids": [0],
-      "checkpoint_count": 9,
-      "bindings": {
-        "state": {
-          "input": "past_key_values.%d.conv",
-          "output": "present.%d.conv",
-          "checkpoints": "checkpoints.%d.conv"
-        }
-      }
-    }]}}
-  })";
-  EXPECT_THROW((Config{model_path, overlay}), std::runtime_error);
 }
 
 TEST(ModelStateManifestTest, AcceptsFixedDynamicEngineContract) {

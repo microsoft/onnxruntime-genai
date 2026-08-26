@@ -59,6 +59,8 @@ struct SpeculativeStats {
   size_t fixed_state_replay_descriptor_count{};
   size_t fixed_state_replayed_transition_count{};
   size_t fixed_state_noncontiguous_slot_fallbacks{};
+  size_t fixed_state_nonmonotonic_slot_fallbacks{};
+  size_t fixed_state_gapped_slot_fallbacks{};
   size_t fixed_state_mixed_active_bank_fallbacks{};
   size_t fixed_state_capsule_bytes_allocated{};
   size_t fixed_state_capsule_valid_prefix_bytes{};

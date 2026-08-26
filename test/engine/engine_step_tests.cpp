@@ -71,25 +71,7 @@ void FillCompactUpdateRow(const FixedStateBinding& binding, size_t row) {
     std::fill_n(data + row * row_elements, row_elements, value);
   };
   fill(binding.state_update_value, 0.0f);
-  fill(binding.state_update_decay, 1.0f);
-  fill(binding.state_update_key, 0.0f);
-  fill(binding.state_update_delta, 0.0f);
-}
-
-void StripCompactStateUpdates(Model& model) {
-  for (auto& group : *model.config_->model.decoder.state_groups) {
-    group.state_update.reset();
-  }
-}
-
-void StripDenseCheckpoints(Model& model) {
-  for (auto& group : *model.config_->model.decoder.state_groups) {
-    if (group.kind != Config::Model::Decoder::StateGroupKind::Fixed) {
-      continue;
-    }
-    group.checkpoint_count = 0;
-    group.state->checkpoints.clear();
-  }
+  fill(binding.state_update_capsule, 0.0f);
 }
 
 const FixedStateSlotSnapshot& FixedSlotFor(const FixedStatePoolSnapshot& snapshot,
@@ -1178,6 +1160,8 @@ TEST_F(EngineStepTest, CompositeReservationExposesRowsAndCommitsBothStates) {
   EXPECT_EQ(stats.fixed_state_replay_descriptor_count, 0u);
   EXPECT_EQ(stats.fixed_state_replayed_transition_count, 0u);
   EXPECT_EQ(stats.fixed_state_noncontiguous_slot_fallbacks, 0u);
+  EXPECT_EQ(stats.fixed_state_nonmonotonic_slot_fallbacks, 0u);
+  EXPECT_EQ(stats.fixed_state_gapped_slot_fallbacks, 0u);
   EXPECT_EQ(stats.fixed_state_mixed_active_bank_fallbacks, 0u);
   EXPECT_TRUE(ValidateCompositeStateInvariants(
                   engine.cache->Snapshot(), *fixed,
@@ -1282,7 +1266,7 @@ TEST_F(EngineStepTest, CompositeReservationRequiredMismatchIsFatal) {
   // the divergence at the reservation boundary, treat it as fatal, and stay unhealthy afterwards.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 1, 1, 256, false, false},
+      FixedStateResourcePlan{true, 1, 1, 256, false, nullptr},
       /*slots=*/{}, /*staging_bytes=*/0);
   auto request = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(request);
@@ -1304,7 +1288,7 @@ TEST_F(EngineStepTest, CompositeReservationOverreportedRowsAreFatal) {
   // A buggy cache manager reports two fixed rows for a one-request plan. The Engine must reject the
   // row count before indexing the plan with either reservation row.
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 2, 1, 0, false, false},
+      FixedStateResourcePlan{true, 2, 1, 0, false, nullptr},
       {
           FixedStateSlotHandle{nullptr, request.get(), 0, 0},
           FixedStateSlotHandle{nullptr, &extra_request_storage, 1, 0},
@@ -1327,7 +1311,7 @@ TEST_F(EngineStepTest, CompositeReservationRowOrderMismatchIsFatal) {
   // Row count and staging bytes match the plan, but the single fixed slot names a different request:
   // the per-row identity guard must fail fatally.
   engine.cache->ScriptFixedStateMismatch(
-      FixedStateResourcePlan{true, 1, 1, 0, false, false},
+      FixedStateResourcePlan{true, 1, 1, 0, false, nullptr},
       {FixedStateSlotHandle{nullptr, &other_storage, 0, 0}},
       /*staging_bytes=*/0);
 
@@ -1984,9 +1968,8 @@ TEST_F(EngineStepTest, SpeculativeStepEndsTheTurnOnADraftedStopToken) {
   EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 2u);
 }
 
-TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
+TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCompactState) {
   model_ = LoadSyntheticCompositeModel();
-  StripCompactStateUpdates(*model_);
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeCompositeDoublesEngine(model_, filler);
@@ -1996,7 +1979,6 @@ TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
   engine.engine->AddRequest(request);
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
-      EXPECT_EQ(binding.checkpoints, nullptr);  // no drafts, so no series is captured
       FillFixedOutputRow(binding, 0, 10.0f);
     }
   });
@@ -2013,17 +1995,8 @@ TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
     EXPECT_LE(context.cache_reservation->RequiredBlockTableColumns(),
               context.plan->proposed_block_table_columns);
     for (const auto& binding : context.fixed_state_bindings) {
-      ASSERT_NE(binding.checkpoints, nullptr);
-      FillFixedOutputRow(binding, 0, 99.0f);  // the step's final state, which must NOT be committed
-      const auto shape = binding.checkpoints->GetTensorTypeAndShapeInfo()->GetShape();
-      size_t row_elements = 1;
-      for (size_t axis = 2; axis < shape.size(); ++axis) {
-        row_elements *= static_cast<size_t>(shape[axis]);
-      }
-      auto* data = binding.checkpoints->GetTensorMutableData<float>();
-      for (size_t slot = 0; slot < static_cast<size_t>(shape[0]); ++slot) {
-        std::fill_n(data + slot * row_elements, row_elements, 20.0f + static_cast<float>(slot));
-      }
+      FillFixedOutputRow(binding, 0, 99.0f);
+      FillCompactUpdateRow(binding, 0);
     }
   });
 
@@ -2046,21 +2019,17 @@ TEST_F(EngineStepTest, CompositeSpeculativeStepPublishesTheAcceptedCheckpoint) {
   EXPECT_EQ(paged.requests[0].used_slots, expected_boundary);
   EXPECT_TRUE(ValidateCompositeStateInvariants(paged, *fixed, {request->Snapshot()}).empty());
 
-  // A three-token step of which three were kept: the conv group is left-aligned so it publishes
-  // slot 2, and the right-aligned recurrent group publishes slot 4 - 4 + 3 - 1 = 2 as well.
   engine.executor->SetVerifyRowTokens({});
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
-      ExpectFixedInputRow(binding, 0, 22.0f);
       FillFixedOutputRow(binding, 0, 30.0f);
     }
   });
   EXPECT_EQ(engine.engine->Step(), request);
 }
 
-TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
+TEST_F(EngineStepTest, CompositeKeepsDraftsWhilePrefillSharesTheStep) {
   model_ = LoadSyntheticCompositeModel();
-  StripCompactStateUpdates(*model_);
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
   auto decode = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(decode);
@@ -2078,15 +2047,14 @@ TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_EQ(context.plan->requests.size(), 2u);
     EXPECT_EQ(context.plan->requests[0].request, decode);
-    EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
-    EXPECT_EQ(context.plan->requests[0].unprocessed_token_count, 1u);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 3u);
     EXPECT_EQ(context.plan->requests[1].request, prefill);
     EXPECT_TRUE(context.plan->requests[1].is_prefill);
-    EXPECT_FALSE(context.plan->fixed_state.capture_checkpoints);
+    EXPECT_TRUE(context.plan->fixed_state.capture_state_updates);
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {
-        EXPECT_EQ(binding.checkpoints, nullptr);
         FillFixedOutputRow(binding, row, 20.0f + static_cast<float>(row));
+        FillCompactUpdateRow(binding, row);
       }
     }
   });
@@ -2098,16 +2066,12 @@ TEST_F(EngineStepTest, CompositeDefersDraftsWhilePrefillSharesTheStep) {
   const auto fixed = engine.cache->FixedStateSnapshot();
   ASSERT_TRUE(fixed.has_value());
   EXPECT_EQ(fixed->binding_metrics.prefill_direct_rows, 2u);
-  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 1u);
-  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 0u);
+  EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 0u);
+  EXPECT_EQ(fixed->binding_metrics.speculative_direct_rows, 1u);
 }
 
-// The inverse: a model whose operators emit the checkpoint series per request keeps the decode
-// row's drafts, because the prefill row's plan no longer decides for the whole batch.
-TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
+TEST_F(EngineStepTest, CompositeCapturesCompactUpdatesPerRequest) {
   model_ = LoadSyntheticCompositeModel();
-  StripCompactStateUpdates(*model_);
-  model_->config_->model.decoder.mixed_batch_checkpoints = true;
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
   auto decode = MintRequest(*model_, Prompt(10));
   engine.engine->AddRequest(decode);
@@ -2132,11 +2096,11 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
     EXPECT_EQ(context.plan->requests[1].request, prefill);
     EXPECT_TRUE(context.plan->requests[1].is_prefill);
     EXPECT_EQ(context.plan->requests[1].draft_token_count, 0u);
-    EXPECT_TRUE(context.plan->fixed_state.capture_checkpoints);
+    EXPECT_TRUE(context.plan->fixed_state.capture_state_updates);
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {
-        ASSERT_NE(binding.checkpoints, nullptr);
         FillFixedOutputRow(binding, row, 20.0f + static_cast<float>(row));
+        FillCompactUpdateRow(binding, row);
       }
     }
   });
@@ -2152,9 +2116,8 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWhenCheckpointsArePerRequest) {
   EXPECT_EQ(fixed->binding_metrics.decode_direct_rows, 0u);
 }
 
-TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsInMixedBatchWithCompactUpdates) {
+TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsWithCompactUpdates) {
   model_ = LoadSyntheticCompositeModel();
-  ASSERT_FALSE(model_->config_->model.decoder.mixed_batch_checkpoints);
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
   EXPECT_EQ(engine.cache->MaxDraftTokensPerStep(), 3u);
   auto decode = MintRequest(*model_, Prompt(10));
@@ -2182,10 +2145,8 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsInMixedBatchWithCompactUpdates)
     EXPECT_TRUE(context.plan->requests[1].is_prefill);
     EXPECT_EQ(context.plan->requests[1].draft_token_count, 0u);
     EXPECT_TRUE(context.plan->fixed_state.capture_state_updates);
-    EXPECT_FALSE(context.plan->fixed_state.capture_checkpoints);
     EXPECT_EQ(context.fixed_state_staging_bytes, context.plan->fixed_state.staging_bytes);
     for (const auto& binding : context.fixed_state_bindings) {
-      EXPECT_EQ(binding.checkpoints, nullptr);
       ASSERT_NE(binding.state_update_capture_count, nullptr);
       const auto* capture_counts =
           binding.state_update_capture_count->GetTensorData<int32_t>();
@@ -2204,9 +2165,8 @@ TEST_F(EngineStepTest, CompositeKeepsDecodeDraftsInMixedBatchWithCompactUpdates)
   EXPECT_TRUE(prefill->HasUnseenTokens());
 }
 
-TEST_F(EngineStepTest, CompositeDraftLimitUsesCompactCapacityWithoutCheckpoints) {
+TEST_F(EngineStepTest, CompositeDraftLimitUsesCompactCapacity) {
   model_ = LoadSyntheticCompositeModel();
-  StripDenseCheckpoints(*model_);
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
 
   EXPECT_EQ(engine.cache->MaxDraftTokensPerStep(), 3u);

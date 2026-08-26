@@ -68,17 +68,6 @@ void HybridDecoderIO::BindFixedState() {
     inputs_.push_back(binding.input);
     output_names_.push_back(binding.output_name);
     outputs_.push_back(binding.output);
-    // A step that verifies drafts also fetches the per-token state series it may roll back to.
-    // Leaving it unbound on every other step keeps the operators from writing it at all.
-    if (binding.checkpoints) {
-      if (!binding.checkpoints_name ||
-          !output_names.insert(binding.checkpoints_name).second) {
-        throw std::runtime_error(
-            "Hybrid fixed state contains an invalid or duplicate checkpoints binding.");
-      }
-      output_names_.push_back(binding.checkpoints_name);
-      outputs_.push_back(binding.checkpoints);
-    }
     if (binding.state_update_capacity == 0) {
       continue;
     }
@@ -123,22 +112,15 @@ void HybridDecoderIO::BindFixedState() {
     }
 
     const bool has_state_update_outputs =
-        binding.state_update_value || binding.state_update_decay || binding.state_update_key ||
-      binding.state_update_delta || binding.state_update_capsule;
+      binding.state_update_value || binding.state_update_capsule;
     if (!has_state_update_outputs) {
       continue;
     }
     using StateUpdateKind = Config::Model::Decoder::StateUpdateKind;
     const bool valid_outputs =
         binding.state_update_kind == StateUpdateKind::CausalConv
-            ? binding.state_update_value && !binding.state_update_decay &&
-            !binding.state_update_key && !binding.state_update_delta &&
-            !binding.state_update_capsule
-          : !binding.state_update_value &&
-            ((binding.state_update_decay && binding.state_update_key &&
-              binding.state_update_delta && !binding.state_update_capsule) ||
-             (!binding.state_update_decay && !binding.state_update_key &&
-              !binding.state_update_delta && binding.state_update_capsule));
+            ? binding.state_update_value && !binding.state_update_capsule
+            : !binding.state_update_value && binding.state_update_capsule;
     if (!valid_outputs) {
       throw std::runtime_error(
           "Hybrid fixed state contains incomplete state_update output tensors.");
@@ -155,9 +137,6 @@ void HybridDecoderIO::BindFixedState() {
       outputs_.push_back(value);
     };
     bind_state_update_output(binding.state_update_value_name, binding.state_update_value);
-    bind_state_update_output(binding.state_update_decay_name, binding.state_update_decay);
-    bind_state_update_output(binding.state_update_key_name, binding.state_update_key);
-    bind_state_update_output(binding.state_update_delta_name, binding.state_update_delta);
     bind_state_update_output(binding.state_update_capsule_name, binding.state_update_capsule);
   }
 }

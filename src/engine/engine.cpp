@@ -1287,6 +1287,8 @@ SpeculativeStats Engine::GetSpeculativeStats() const noexcept {
   stats.fixed_state_replay_descriptor_count = fixed_state.replay_descriptor_count;
   stats.fixed_state_replayed_transition_count = fixed_state.replayed_transition_count;
   stats.fixed_state_noncontiguous_slot_fallbacks = fixed_state.noncontiguous_slot_fallbacks;
+  stats.fixed_state_nonmonotonic_slot_fallbacks = fixed_state.nonmonotonic_slot_fallbacks;
+  stats.fixed_state_gapped_slot_fallbacks = fixed_state.gapped_slot_fallbacks;
   stats.fixed_state_mixed_active_bank_fallbacks = fixed_state.mixed_active_bank_fallbacks;
   stats.fixed_state_capsule_bytes_allocated = fixed_state.capsule_bytes_allocated;
   stats.fixed_state_capsule_valid_prefix_bytes = fixed_state.capsule_valid_prefix_bytes;

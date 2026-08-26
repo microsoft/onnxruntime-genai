@@ -256,16 +256,14 @@ TEST(DecoderStateGroupsConfigTest, RejectsDuplicateExpandedBindings) {
       "resolves more than one binding to 'past.0'");
 }
 
-TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints) {
+TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdates) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 2,
     "state_groups": [
       {
         "kind": "fixed", "layer_ids": [0],
-        "checkpoint_count": 4, "checkpoint_alignment": "left",
         "bindings": {"state": {
-          "input": "past.%d.conv", "output": "present.%d.conv",
-          "checkpoints": "checkpoints.%d.conv"
+          "input": "past.%d.conv", "output": "present.%d.conv"
         }},
         "state_update": {
           "enabled": false,
@@ -285,9 +283,8 @@ TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints
           "kind": "gated_delta_net", "capacity": 3,
           "capture_count": "state_update_capture_count",
           "active": "state_update_active",
-          "decay": "state_update.%d.decay",
-          "key": "state_update.%d.key",
-          "delta": "state_update.%d.delta"
+          "capsule": "state_update.%d.capsule",
+          "key_head_count": 2
         }
       }
     ]
@@ -303,15 +300,13 @@ TEST(DecoderStateGroupsConfigTest, ParsesCompactStateUpdatesAlongsideCheckpoints
   EXPECT_EQ(groups[0].state_update->capture_count, "state_update_capture_count");
   EXPECT_EQ(groups[0].state_update->active, "state_update_active");
   EXPECT_EQ(groups[0].state_update->value, "state_update.%d.conv_value");
-  EXPECT_EQ(groups[0].checkpoint_count, 4);
   ASSERT_TRUE(groups[1].state_update);
   EXPECT_FALSE(groups[1].state_update->enabled);
   EXPECT_EQ(groups[1].state_update->kind,
             Config::Model::Decoder::StateUpdateKind::GatedDeltaNet);
   EXPECT_EQ(groups[1].state_update->active, "state_update_active");
-  EXPECT_EQ(groups[1].state_update->decay, "state_update.%d.decay");
-  EXPECT_EQ(groups[1].state_update->key, "state_update.%d.key");
-  EXPECT_EQ(groups[1].state_update->delta, "state_update.%d.delta");
+  EXPECT_EQ(groups[1].state_update->capsule, "state_update.%d.capsule");
+  EXPECT_EQ(groups[1].state_update->key_head_count, 2);
 }
 
 TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateKindAndFields) {
@@ -345,7 +340,8 @@ TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateKindAndFiel
         "kind": "fixed", "layer_ids": [0],
         "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
         "state_update": {"kind": "causal_conv", "capacity": 3,
-                         "capture_count": "capture", "decay": "update.%d"}
+                         "capture_count": "capture", "capsule": "update.%d",
+                         "key_head_count": 2}
       }]})",
       "causal_conv state_update requires only value");
 
@@ -354,9 +350,9 @@ TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateKindAndFiel
         "kind": "fixed", "layer_ids": [0],
         "bindings": {"state": {"input": "past.%d", "output": "present.%d"}},
         "state_update": {"kind": "gated_delta_net", "capacity": 3,
-                         "capture_count": "capture", "decay": "decay.%d", "key": "key.%d"}
+                         "capture_count": "capture", "value": "update.%d"}
       }]})",
-      "requires decay, key, and delta and no value");
+      "requires capsule and key_head_count");
 }
 
 TEST(DecoderStateGroupsConfigTest, RejectsMalformedCompactStateUpdateCapacity) {
@@ -422,17 +418,17 @@ TEST(DecoderStateGroupsConfigTest, RequiresSharedCompactStateUpdateInputAndCapac
   ExpectStateGroupError(
       decoder_with_second_group(
           R"({"kind": "gated_delta_net", "capacity": 2, "capture_count": "capture",
-              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+          "capsule": "capsule.%d", "key_head_count": 2}})"),
       "same capacity and capture_count input");
   ExpectStateGroupError(
       decoder_with_second_group(
           R"({"kind": "gated_delta_net", "capacity": 3, "capture_count": "other_capture",
-              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+          "capsule": "capsule.%d", "key_head_count": 2}})"),
       "same capacity and capture_count input");
   ExpectStateGroupError(
       decoder_with_second_group(
           R"({"enabled": false, "kind": "gated_delta_net", "capacity": 3, "capture_count": "capture",
-              "decay": "decay.%d", "key": "key.%d", "delta": "delta.%d"}})"),
+          "capsule": "capsule.%d", "key_head_count": 2}})"),
       "same enabled setting");
 }
 

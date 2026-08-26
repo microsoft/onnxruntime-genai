@@ -115,31 +115,6 @@ void ValidateCompatiblePair(std::string_view group_label,
   }
 }
 
-// A checkpoints output is the state output with one leading slot axis of `count` entries.
-void ValidateCheckpointsShape(std::string_view group_label,
-                              std::string_view semantic,
-                              int count,
-                              const TensorMetadata& output,
-                              const TensorMetadata& checkpoints) {
-  if (checkpoints.data_type != output.data_type) {
-    throw std::runtime_error(
-        std::string{group_label} + " binding '" + std::string{semantic} +
-        "' checkpoints output '" + checkpoints.name +
-        "' has a different dtype than the state output '" + output.name + "'");
-  }
-  const bool shape_matches =
-      checkpoints.shape.size() == output.shape.size() + 1 &&
-      checkpoints.shape.front() == count &&
-      ShapesCompatible({checkpoints.shape.begin() + 1, checkpoints.shape.end()}, output.shape);
-  if (!shape_matches) {
-    throw std::runtime_error(
-        std::string{group_label} + " binding '" + std::string{semantic} +
-        "' checkpoints output '" + checkpoints.name + "' " + ShapeString(checkpoints.shape) +
-        " must be [" + std::to_string(count) + ", ...] over the state output '" +
-        output.name + "' " + ShapeString(output.shape));
-  }
-}
-
 void ValidatePagedGeometry(std::string_view group_label,
                            const TensorMetadata& tensor,
                            std::optional<TensorMetadata>& reference) {
@@ -290,7 +265,7 @@ void ValidateStateUpdateSession(std::string_view group_label,
       validate_batch(state, value);
       validate_capacity(value);
       validate_dimension("channel", state, 1, value, 2);
-    } else if (!update.capsule.empty()) {
+    } else {
       const auto capsule = get_output("capsule", update.capsule, layer_id);
       ValidateRank(group_label, "state_update capsule output", capsule, 2);
       if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
@@ -309,33 +284,6 @@ void ValidateStateUpdateSession(std::string_view group_label,
             std::string{group_label} + " state_update capsule output '" + capsule.name +
             "' width must be " + std::to_string(expected_width));
       }
-    } else {
-      const auto decay = get_output("decay", update.decay, layer_id);
-      const auto key = get_output("key", update.key, layer_id);
-      const auto delta = get_output("delta", update.delta, layer_id);
-      ValidateRank(group_label, "state_update decay output", decay, 3);
-      ValidateRank(group_label, "state_update key output", key, 4);
-      ValidateRank(group_label, "state_update delta output", delta, 4);
-      if (state.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-          decay.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-          key.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-          delta.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-        throw std::runtime_error(
-            std::string{group_label} + " gated_delta_net state and state_update outputs must have float dtype");
-      }
-      for (const auto* tensor : {&decay, &key, &delta}) {
-        validate_batch(state, *tensor);
-        validate_capacity(*tensor);
-      }
-      if (key.shape[2] <= 0) {
-        throw std::runtime_error(
-            std::string{group_label} + " state_update key output '" + key.name +
-            "' must have a positive key-head dimension");
-      }
-      validate_dimension("value-head", state, 1, decay, 2);
-      validate_dimension("value-head", state, 1, delta, 2);
-      validate_dimension("value", state, 2, delta, 3);
-      validate_dimension("key", state, 3, key, 3);
     }
   }
 }
@@ -395,17 +343,6 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       ++fixed_group_count;
     }
 
-    const bool declares_checkpoints = group.state && !group.state->checkpoints.empty();
-    if (declares_checkpoints != (group.checkpoint_count > 0)) {
-      throw std::runtime_error(
-          group_label +
-          " must declare a state checkpoints template and a positive "
-          "checkpoint_count together, or neither");
-    }
-    if (group.checkpoint_count > 0 && group.kind != StateGroupKind::Fixed) {
-      throw std::runtime_error(group_label + " only fixed state groups support checkpoints");
-    }
-
     if (group.state_update) {
       ++fixed_state_update_group_count;
       const auto& update = *group.state_update;
@@ -428,21 +365,13 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
         throw std::runtime_error(group_label + " state_update active must be a graph input name, not a template");
       }
       if (update.kind == StateUpdateKind::CausalConv) {
-        if (update.value.empty() || !update.decay.empty() || !update.key.empty() ||
-            !update.delta.empty() || !update.capsule.empty() || update.key_head_count != 0) {
+        if (update.value.empty() || !update.capsule.empty() || update.key_head_count != 0) {
           throw std::runtime_error(group_label + " causal_conv state_update requires only value");
         }
       } else {
-        const bool separate = update.value.empty() && !update.decay.empty() &&
-                              !update.key.empty() && !update.delta.empty() &&
-                              update.capsule.empty() && update.key_head_count == 0;
-        const bool capsule = update.value.empty() && update.decay.empty() &&
-                             update.key.empty() && update.delta.empty() &&
-                             !update.capsule.empty() && update.key_head_count > 0;
-        if (!separate && !capsule) {
+        if (!update.value.empty() || update.capsule.empty() || update.key_head_count <= 0) {
           throw std::runtime_error(
-              group_label + " gated_delta_net state_update requires decay, key, and delta and no "
-                    "value, or capsule and key_head_count");
+              group_label + " gated_delta_net state_update requires capsule and key_head_count");
         }
       }
 
@@ -485,9 +414,6 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
     const auto validate_binding = [&](std::string_view semantic, const StateBinding& binding) {
       ValidateBindingTemplate(group_label, semantic, "input", binding.input);
       ValidateBindingTemplate(group_label, semantic, "output", binding.output);
-      if (!binding.checkpoints.empty()) {
-        ValidateBindingTemplate(group_label, semantic, "checkpoints", binding.checkpoints);
-      }
       for (const int layer_id : group.layer_ids) {
         for (const auto& name : {
                  ExpandBinding(binding.input, layer_id),
@@ -496,12 +422,6 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
             throw std::runtime_error(
                 group_label + " resolves more than one binding to '" + name + "'");
           }
-        }
-        if (!binding.checkpoints.empty() &&
-            !expanded_bindings.insert(ExpandBinding(binding.checkpoints, layer_id)).second) {
-          throw std::runtime_error(
-              group_label + " resolves more than one binding to '" +
-              ExpandBinding(binding.checkpoints, layer_id) + "'");
         }
       }
     };
@@ -532,9 +452,6 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
         }
       };
       validate_update_output("state_update.value", update.value);
-      validate_update_output("state_update.decay", update.decay);
-      validate_update_output("state_update.key", update.key);
-      validate_update_output("state_update.delta", update.delta);
       validate_update_output("state_update.capsule", update.capsule);
     }
   }
@@ -575,20 +492,6 @@ void ModelStateManifest::ValidateSession(const ModelStateMetadata& metadata) con
             metadata.GetOutputShape(output_name),
             output_name};
         ValidateCompatiblePair(group_label, semantic, input, output);
-
-        if (!binding.checkpoints.empty()) {
-          const auto checkpoints_name = ExpandBinding(binding.checkpoints, layer_id);
-          if (!metadata.HasOutput(checkpoints_name)) {
-            throw std::runtime_error(
-                group_label + " binding '" + std::string{semantic} +
-                "' checkpoints output was not found: " + checkpoints_name);
-          }
-          TensorMetadata checkpoints{
-              metadata.GetOutputDataType(checkpoints_name),
-              metadata.GetOutputShape(checkpoints_name),
-              checkpoints_name};
-          ValidateCheckpointsShape(group_label, semantic, group.checkpoint_count, output, checkpoints);
-        }
 
         if (group.kind == StateGroupKind::PagedKeyValue) {
           ValidatePagedGeometry(group_label, input, paged_reference);

@@ -385,16 +385,6 @@ struct Config {
       struct StateBinding {
         std::string input;
         std::string output;
-        // Optional third output exposing the per-token state series of this state, shaped
-        // [checkpoint_count, ...output shape]. Present only on models exported for speculative
-        // decoding; the runtime promotes one slot to `output` to roll back a rejected draft.
-        std::string checkpoints;
-      };
-
-      // Which slot of a checkpoint output corresponds to which token of the step.
-      enum class CheckpointAlignment {
-        Left,   // Slot j is the state after local token j (VarlenCausalConvWithState).
-        Right,  // Slot count-1 is the state after the last token (GatedDeltaNet).
       };
 
       enum class StateUpdateKind {
@@ -408,9 +398,6 @@ struct Config {
         int capacity{0};
         std::string capture_count;
         std::string value;
-        std::string decay;
-        std::string key;
-        std::string delta;
         bool enabled{true};
         std::string active;
         std::string capsule;
@@ -423,21 +410,11 @@ struct Config {
         std::optional<StateBinding> key;
         std::optional<StateBinding> value;
         std::optional<StateBinding> state;
-        int checkpoint_count{0};
-        CheckpointAlignment checkpoint_alignment{CheckpointAlignment::Right};
         std::optional<StateUpdate> state_update;
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.
       std::optional<std::vector<StateGroup>> state_groups;
-
-      // EXPERIMENTAL, known broken -- leave false. Setting it keeps drafts alive on the decode
-      // rows of a step that also holds a prefill, instead of deferring the whole step's drafts.
-      // ONNX Runtime emits its recurrent checkpoint series per request, but something else in
-      // the mixed-step rollback path still corrupts state: MMLU-Pro falls from 82.75% to 68.75%
-      // with token-0 degeneration. See
-      // dev/docs/memory/qwen_3.8_27b_nvfp4_gdn_paged_dflash2_hybrid_dispatch_design.md 6.2.
-      bool mixed_batch_checkpoints{false};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};

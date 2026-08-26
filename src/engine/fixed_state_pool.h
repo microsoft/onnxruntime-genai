@@ -76,15 +76,15 @@ enum class FixedStateBindingMode {
 
 enum class FixedStateGatherFallbackReason {
   None,
-  NoncontiguousSlots,
+  ForcedGathered,
+  NonmonotonicSlots,
+  GappedSlots,
   MixedActiveBanks,
 };
 
 enum class FixedStateCaptureMode {
   None,
   Capsule,
-  LegacyFactors,
-  DenseCheckpoints,
 };
 
 enum class FixedStateStepPhase {
@@ -124,10 +124,6 @@ struct FixedStateBinding {
   OrtValue* input{};
   const char* output_name{};
   OrtValue* output{};
-  // Non-null only on a reservation that captures checkpoints: the step's per-token state series,
-  // shaped [checkpoint_count, row_count, row...]. CommitPrefix selects one slot of it to commit.
-  const char* checkpoints_name{};
-  OrtValue* checkpoints{};
   Config::Model::Decoder::StateUpdateKind state_update_kind{};
   size_t state_update_capacity{};
   const char* state_update_capture_count_name{};
@@ -136,12 +132,6 @@ struct FixedStateBinding {
   OrtValue* state_update_active{};
   const char* state_update_value_name{};
   OrtValue* state_update_value{};
-  const char* state_update_decay_name{};
-  OrtValue* state_update_decay{};
-  const char* state_update_key_name{};
-  OrtValue* state_update_key{};
-  const char* state_update_delta_name{};
-  OrtValue* state_update_delta{};
   const char* state_update_capsule_name{};
   OrtValue* state_update_capsule{};
 };
@@ -174,6 +164,8 @@ struct FixedStateBindingMetrics {
   uint64_t replay_descriptor_count{};
   uint64_t replayed_transition_count{};
   uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t nonmonotonic_slot_fallbacks{};
+  uint64_t gapped_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   uint64_t capsule_bytes_allocated{};
   uint64_t capsule_valid_prefix_bytes{};
@@ -191,6 +183,8 @@ struct FixedStatePoolSnapshot {
   uint64_t gathered_rows{};
   FixedStateBindingMetrics binding_metrics;
   uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t nonmonotonic_slot_fallbacks{};
+  uint64_t gapped_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   size_t persistent_bytes{};
   size_t zeroing_scratch_bytes{};
@@ -212,13 +206,11 @@ class FixedStateReservation {
   std::span<const FixedStateBinding> Bindings() const;
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
-  bool CapturesCheckpoints() const;
   bool CapturesStateUpdates() const;
 
   // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed. A
-  // partial prefix selects the operator's dense checkpoint or replays its compact transitions from
-  // the gathered input state; a full prefix uses the step's final state. The row's committed token
-  // boundary is lowered by the rejected tokens as well.
+  // partial prefix replays compact transitions from the gathered input state; a full prefix uses
+  // the step's final state. The row's committed token boundary is lowered by rejected tokens too.
   void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
@@ -262,7 +254,8 @@ class FixedStatePool {
  public:
   FixedStatePool(std::shared_ptr<Model> model,
                  const ModelStateManifest& manifest,
-                 size_t capacity);
+                 size_t capacity,
+                 bool force_gathered = false);
   ~FixedStatePool();
 
   FixedStatePool(const FixedStatePool&) = delete;
@@ -286,21 +279,12 @@ class FixedStatePool {
   // single row is always directly bindable; the request-aware overload also recognizes contiguous
   // multi-row cohorts with one active bank. The conservative row-count overload includes gather
   // and output staging for larger batches.
-  size_t PlannedStagingBytes(size_t row_count, bool capture_checkpoints = false,
-                             bool capture_state_updates = false) const;
-  size_t PlannedStagingBytes(
+  size_t PlannedStagingBytes(size_t row_count, bool capture_state_updates = false) const;
+  size_t PlannedStagingBytes(std::span<const FixedStateReservationRequest> requests) const;
+  std::shared_ptr<const FixedStateStepPlan> PlanStep(
       std::span<const FixedStateReservationRequest> requests,
-      bool capture_checkpoints = false) const;
-    std::shared_ptr<const FixedStateStepPlan> PlanStep(
-      std::span<const FixedStateReservationRequest> requests,
-        bool capture_checkpoints = false,
-        std::span<const FixedStateStepPhase> phases = {}) const;
+      std::span<const FixedStateStepPhase> phases = {}) const;
 
-  // True when every fixed binding declares a checkpoints output, so reservations may capture the
-  // per-token state series a speculative step rolls back through.
-  bool SupportsCheckpoints() const;
-  // Shared checkpoint window of every fixed binding, or 0 when the model declares none.
-  size_t CheckpointCount() const;
   // True when every fixed binding declares compact state-update outputs.
   bool SupportsStateUpdates() const;
   // Shared compact transition capacity, or 0 when the model declares none.
@@ -314,11 +298,9 @@ class FixedStatePool {
   // Admits a batch in scheduled row order. Ownership is inferred per request: an identity that
   // already owns a committed slot is treated as resident and keeps that slot; any other identity is
   // admitted provisionally and only becomes discoverable committed ownership on Commit.
-  // `capture_checkpoints` explicitly binds each tensor's dense checkpoint output. Nonzero request
-  // capture counts prefer compact state updates when the model supports them; either mechanism
-  // makes FixedStateReservation::CommitPrefix available.
-  FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests,
-                                bool capture_checkpoints = false);
+  // Nonzero request capture counts bind compact state updates and make
+  // FixedStateReservation::CommitPrefix available.
+  FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests);
   FixedStateReservation Reserve(const FixedStateStepPlan& plan);
   void Release(const FixedStateSlotHandle& handle);
 

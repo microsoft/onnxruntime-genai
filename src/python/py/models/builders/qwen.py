@@ -1172,17 +1172,13 @@ class Qwen35TextModel(Model):
         self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
         if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
-        if self.linear_attn_op == "gated_delta_net" and self._state_window > 8:
-            # The window becomes the operator's checkpoint output, which it caps at 8 slots.
-            raise ValueError("linear_attn_op=gated_delta_net supports state_window up to 8")
+        if self.linear_attn_op == "gated_delta_net" and self._state_window:
+            raise ValueError("linear_attn_op=gated_delta_net no longer supports state_window")
         self.gdn_arithmetic_mode = str(extra_options.get("gdn_arithmetic_mode", "native")).lower()
         if self.gdn_arithmetic_mode not in ("native", "compatibility"):
             raise ValueError("gdn_arithmetic_mode must be one of: native, compatibility")
 
         self.state_update_capacity = self._parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
-        self.state_update_keep_checkpoints = str(
-            extra_options.get("state_update_keep_checkpoints", "true")
-        ).lower() in ("1", "true", "yes")
         self._validate_state_update_options(
             self.state_update_capacity,
             self.use_paged_attention,
@@ -1192,17 +1188,6 @@ class Qwen35TextModel(Model):
 
         # Replace standard KV cache I/O with hybrid cache I/O
         self._setup_hybrid_cache_io()
-
-    def _packed_state_checkpoints(self):
-        """Window extent for the packed operators' speculative-rollback checkpoint outputs.
-
-        Zero when the export is dense (the window is folded into the committed state instead) or
-        when no window was requested. Compact deployment can omit the dense checkpoint outputs;
-        a separate export with state_update_keep_checkpoints=true remains the fallback and oracle.
-        """
-        if getattr(self, "state_update_capacity", 0) and not getattr(self, "state_update_keep_checkpoints", True):
-            return 0
-        return self._state_window if self.use_paged_attention else 0
 
     def _setup_hybrid_cache_io(self):
         """Set up hybrid cache I/O: KV cache for attention layers,
@@ -1281,16 +1266,6 @@ class Qwen35TextModel(Model):
                 self.output_names[f"present_state.{i}.recurrent"] = f"present.{i}.recurrent_state"
                 self.output_types[f"present_state.{i}.recurrent"] = recurrent_state_dtype
                 self.output_shapes[f"present_state.{i}.recurrent"] = list(recurrent_state_shape)
-
-                if self._packed_state_checkpoints():
-                    window = self._state_window
-                    self.output_names[f"checkpoint_state.{i}.conv"] = f"checkpoints.{i}.conv_state"
-                    self.output_types[f"checkpoint_state.{i}.conv"] = conv_state_dtype
-                    self.output_shapes[f"checkpoint_state.{i}.conv"] = [window, *conv_state_shape]
-
-                    self.output_names[f"checkpoint_state.{i}.recurrent"] = f"checkpoints.{i}.recurrent_state"
-                    self.output_types[f"checkpoint_state.{i}.recurrent"] = recurrent_state_dtype
-                    self.output_shapes[f"checkpoint_state.{i}.recurrent"] = [window, *recurrent_state_shape]
 
                 if state_update_capacity:
                     self.output_names[f"state_update.{i}.conv_value"] = f"state_update.{i}.conv_value"
@@ -2087,7 +2062,6 @@ class Qwen35TextModel(Model):
         present_conv_shape = ["batch_size", conv_dim, kernel_size - 1]
 
         if packed:
-            checkpoints = self._packed_state_checkpoints()
             state_update_capacity = getattr(self, "state_update_capacity", 0)
             conv_op_name = f"{basename}/VarlenCausalConvWithState"
             self.make_varlen_causal_conv_with_state(
@@ -2098,11 +2072,8 @@ class Qwen35TextModel(Model):
                 cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
                 past_conv_state=past_conv,
                 present_conv_state=present_conv,
-                prefix_conv_state=f"checkpoints.{layer_id}.conv_state" if checkpoints else "",
-                max_checkpoints=checkpoints,
                 output_shape=["num_tokens", conv_dim],
                 present_conv_shape=present_conv_shape,
-                prefix_conv_shape=[checkpoints, *present_conv_shape],
                 state_update_capture_count="state_update_capture_count",
                 state_update_capacity=state_update_capacity,
                 state_update_value=f"state_update.{layer_id}.conv_value",
@@ -2249,7 +2220,6 @@ class Qwen35TextModel(Model):
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
         present_recurrent_shape = ["batch_size", n_kv, hv, hk]
-        checkpoints = self._packed_state_checkpoints()
         state_update_capacity = getattr(self, "state_update_capacity", 0)
         op_name = f"{basename}/GatedDeltaNet"
         self.make_varlen_gated_delta_net(
@@ -2260,8 +2230,6 @@ class Qwen35TextModel(Model):
             cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
             past_recurrent_state=f"past_key_values.{layer_id}.recurrent_state",
             present_recurrent_state=f"present.{layer_id}.recurrent_state",
-            checkpoints=f"checkpoints.{layer_id}.recurrent_state" if checkpoints else "",
-            state_checkpoints=checkpoints,
             decay=f"{a_name}/output_0",
             beta=f"{b_name}/output_0",
             a_log=a_log_init,
@@ -2275,7 +2243,6 @@ class Qwen35TextModel(Model):
             scale=0.0,
             output_shape=["num_tokens", n_kv, hv],
             present_recurrent_shape=present_recurrent_shape,
-            checkpoints_shape=[checkpoints, *present_recurrent_shape],
             state_update_capture_count="state_update_capture_count",
             state_update_active="state_update_active",
             state_update_capacity=state_update_capacity,
@@ -2364,9 +2331,8 @@ class Qwen35TextModel(Model):
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
         op_name = f"{basename}/GatedDeltaNet"
-        window = self._state_window
         present = f"present.{layer_id}.recurrent_state"
-        state_shape = [*self._state_window_dims, "batch_size", n_kv, hv, hk]
+        state_shape = ["batch_size", n_kv, hv, hk]
         self.make_gated_delta_net(
             op_name,
             q_path=q_4d,
@@ -2375,13 +2341,7 @@ class Qwen35TextModel(Model):
             decay=f"{a_cast_name}/output_0",
             beta=f"{b_cast_name}/output_0",
             initial_state=f"past_key_values.{layer_id}.recurrent_state",
-            # Windowed: past and present are one buffer whose last slot is the committed state,
-            # so the op writes the whole window through `checkpoints` and no separate final
-            # state exists. MtpGenerator promotes an accepted slot to the last one on a partial
-            # accept, which is exactly the rollback the window is for.
-            final_state="" if window else present,
-            checkpoints=present if window else "",
-            state_checkpoints=window,
+            final_state=present,
             a_log=a_log_init,
             dt_bias=dt_bias_init,
             update_rule="gated_delta",
@@ -2392,7 +2352,6 @@ class Qwen35TextModel(Model):
             scale=0.0,  # 0 means the op's default 1/sqrt(head_size_qk)
             output_shape=["batch_size", "sequence_length", n_kv, hv],
             state_shape=state_shape,
-            checkpoints_shape=state_shape,
         )
 
         flat_name = f"{basename}/gdn_out/Reshape"
@@ -2757,7 +2716,6 @@ class Qwen35TextModel(Model):
             state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
 
         if linear_attention_layers:
-            checkpoints = self._packed_state_checkpoints()
             for state_name in ("conv_state", "recurrent_state"):
                 binding = {
                     "input": f"past_key_values.%d.{state_name}",
@@ -2768,13 +2726,6 @@ class Qwen35TextModel(Model):
                     "layer_ids": linear_attention_layers,
                     "bindings": {"state": binding},
                 }
-                if checkpoints:
-                    # Slot alignment differs by operator: the conv writes slot j after local token
-                    # j (left-aligned) while GatedDeltaNet writes slot W-1 after the last token
-                    # (right-aligned). The runtime needs to know which to index.
-                    binding["checkpoints"] = f"checkpoints.%d.{state_name}"
-                    group["checkpoint_count"] = checkpoints
-                    group["checkpoint_alignment"] = "left" if state_name == "conv_state" else "right"
                 state_update_capacity = getattr(self, "state_update_capacity", 0)
                 if state_update_capacity:
                     state_update = {

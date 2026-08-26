@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <optional>
 
+#include "../models/env_utils.h"
 #include "../models/model_state_manifest.h"
 
 namespace Generators {
@@ -301,9 +302,12 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
   if (manifest.HasFixedStateGroups()) {
+    bool force_gathered_fixed_state = false;
+    GetEnv("ORTGENAI_FORCE_GATHERED_FIXED_STATE", force_gathered_fixed_state);
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
         model, manifest,
-        model_->config_->engine.dynamic_batching->max_batch_size);
+      model_->config_->engine.dynamic_batching->max_batch_size,
+      force_gathered_fixed_state);
     // Continuous batching schedules a variable number of rows per step, so a fixed group whose
     // tensors declare a static (non-symbolic) batch axis can never be served: every reservation
     // would have to have exactly that many rows. Reject it here, at load, with a clear message
@@ -432,17 +436,13 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
-  // Recurrent state can only be rewound to a token the operators checkpointed, so a verify step of
-  // 1 + drafts tokens has to fit in the declared window. Without fixed state the paged KV boundary
-  // alone decides, and any tail slot can be left uncommitted.
+  // Recurrent state can only be rewound through captured compact transitions. Without fixed state
+  // the paged KV boundary alone decides, and any tail slot can be left uncommitted.
   size_t limit = kMaxDraftTokensPerStep;
   if (fixed_state_pool_) {
-    if (fixed_state_pool_->SupportsStateUpdates()) {
-      limit = std::min(limit, fixed_state_pool_->StateUpdateCapacity());
-    } else {
-      const size_t window = fixed_state_pool_->CheckpointCount();
-      limit = std::min(limit, window == 0 ? size_t{0} : window - 1);
-    }
+    limit = fixed_state_pool_->SupportsStateUpdates()
+                ? std::min(limit, fixed_state_pool_->StateUpdateCapacity())
+                : 0;
   }
   if (const size_t query_cap = MaxQueryTokensPerRequest(); query_cap != 0) {
     limit = std::min(limit, query_cap - 1);
@@ -472,16 +472,11 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   const bool has_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-  if (has_prefill && has_drafts && !fixed_state_pool_->SupportsStateUpdates() &&
-      !model_->config_->model.decoder.mixed_batch_checkpoints) {
+  if (has_prefill && has_drafts && !fixed_state_pool_->SupportsStateUpdates()) {
     // Packed recurrent operators choose one execution plan for the whole batch. A long prefill
     // selects the chunked GDN path, which only publishes final state and cannot provide the
-    // intermediate checkpoints needed to reject a draft. Keep every selected request progressing
-    // in this mixed step, but verify drafts only once the selected batch is decode-only.
-    //
-    // mixed_batch_checkpoints skips this and is EXPERIMENTAL: per-request operator checkpoints
-    // are necessary but not sufficient, and a mixed step still corrupts state somewhere in this
-    // rollback path. Do not enable it without re-running the MMLU-Pro gate.
+    // compact transitions needed to reject a draft. Keep every selected request progressing in
+    // this mixed step, but verify drafts only once the selected batch is decode-only.
     for (auto& entry : plan.requests) {
       entry.draft_token_count = 0;
     }
@@ -531,12 +526,10 @@ void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
   const bool captures_drafts = std::any_of(
       plan.requests.begin(), plan.requests.end(),
       [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-  const bool capture_state_updates =
-      captures_drafts && fixed_state_pool_->SupportsStateUpdates();
-  const bool capture_checkpoints = captures_drafts && !capture_state_updates;
-  if (capture_checkpoints && !fixed_state_pool_->SupportsCheckpoints()) {
+  const bool capture_state_updates = captures_drafts;
+  if (capture_state_updates && !fixed_state_pool_->SupportsStateUpdates()) {
     throw std::logic_error(
-        "Planned draft verification on a model whose fixed state declares no checkpoints.");
+        "Planned draft verification on a model whose fixed state declares no compact updates.");
   }
 
   std::vector<FixedStateReservationRequest> fixed_requests;
@@ -556,14 +549,12 @@ void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
     new_slot_count += entry.newly_admitted ? 1 : 0;
   }
 
-    const auto fixed_step_plan = fixed_state_pool_->PlanStep(
-      fixed_requests, capture_checkpoints, fixed_phases);
-    plan.fixed_state = FixedStateResourcePlan{
+  const auto fixed_step_plan = fixed_state_pool_->PlanStep(fixed_requests, fixed_phases);
+  plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),
       new_slot_count,
       fixed_step_plan->staging_bytes,
-      capture_checkpoints,
       capture_state_updates,
       std::move(fixed_step_plan),
   };

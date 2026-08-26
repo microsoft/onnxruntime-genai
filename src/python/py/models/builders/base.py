@@ -3488,13 +3488,9 @@ class Model:
         `root_input` is token-major `[num_tokens, channels]` instead of channel-first
         `[batch_size, channels, sequence_length]`; activation-typed state is keyed per scheduled
         request as `[batch_size, channels, kernel_size - 1]`.
-
-        `max_checkpoints=W` additionally emits `prefix_states`, `[W, batch_size, channels,
-        kernel_size - 1]`, holding the carry state after each of the first W local tokens of the
-        step. A speculative decoder promotes slot `a` to the committed state to roll back to an
-        accepted prefix of length `a + 1`. Unlike the dense `state_window`, the committed state
-        keeps its own unwindowed input and output, so the engine's fixed-state banks are unchanged.
         """
+        if kwargs.get("prefix_conv_state") or kwargs.get("max_checkpoints"):
+            raise ValueError("VarlenCausalConvWithState checkpoint outputs are no longer supported")
         inputs = [
             kwargs["root_input"],
             kwargs["weight"],
@@ -3507,21 +3503,12 @@ class Model:
             inputs.append(kwargs["state_update_capture_count"])
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
-        checkpoints = kwargs.get("prefix_conv_state", "")
-        max_checkpoints = kwargs.get("max_checkpoints", 0)
-        if bool(checkpoints) != bool(max_checkpoints):
-            raise ValueError("prefix_conv_state and max_checkpoints must be set together")
         outputs = [output, present_conv]
-        if checkpoints:
-            outputs.append(checkpoints)
         state_update_value = kwargs.get("state_update_value", "")
         if state_update_capacity:
-            if not checkpoints:
-                outputs.append("")
             outputs.append(state_update_value)
         attributes = {
             "activation": kwargs.get("activation", "silu"),
-            "max_checkpoints": max_checkpoints,
         }
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
@@ -3535,8 +3522,6 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
-        if checkpoints:
-            self.make_value(checkpoints, self.io_dtype, shape=kwargs["prefix_conv_shape"])
         if state_update_capacity:
             self.make_value(state_update_value, self.io_dtype, shape=kwargs["state_update_value_shape"])
 
@@ -3609,13 +3594,9 @@ class Model:
         self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
 
     def make_gated_delta_net(self, name, **kwargs):
-        """com.microsoft::GatedDeltaNet -- token-major inputs, V-major float32 state.
-
-        The state may be a plain committed state (`final_state`) or a checkpoint window
-        (`checkpoints`) whose last slot is the committed state and whose earlier slots are the
-        per-token series a speculative decoder rolls back to. In the windowed form one buffer
-        serves as both the past and the present state, so `final_state` is left unbound.
-        """
+        """com.microsoft::GatedDeltaNet -- token-major inputs, V-major float32 state."""
+        if kwargs.get("checkpoints") or kwargs.get("state_checkpoints"):
+            raise ValueError("GatedDeltaNet checkpoint outputs are no longer supported")
         inputs = [
             kwargs["q_path"],
             kwargs["k_path"],
@@ -3629,11 +3610,8 @@ class Model:
         if kwargs.get("a_log"):
             inputs += [kwargs["a_log"], kwargs["dt_bias"]]
         output = f"{name}/output_0"
-        final_state = kwargs.get("final_state", "")
-        checkpoints = kwargs.get("checkpoints", "")
+        final_state = kwargs["final_state"]
         outputs = [output, final_state]
-        if checkpoints:
-            outputs.append(checkpoints)
 
         attributes = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
@@ -3642,7 +3620,7 @@ class Model:
         for opt in ("gate_activation", "beta_activation", "arithmetic_mode"):
             if kwargs.get(opt):
                 attributes[opt] = kwargs[opt]
-        for opt in ("qk_l2_norm", "chunk_size", "state_checkpoints"):
+        for opt in ("qk_l2_norm", "chunk_size"):
             if kwargs.get(opt):
                 attributes[opt] = kwargs[opt]
 
@@ -3655,10 +3633,7 @@ class Model:
             **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
-        if final_state:
-            self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
-        if checkpoints:
-            self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
+        self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
         """Packed-layout GatedDeltaNet with optional fused normalization and gate activations."""
@@ -3667,6 +3642,10 @@ class Model:
                 "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
                 "the current ORT kernel registers float and float16 only"
             )
+        if kwargs.get("checkpoints") or kwargs.get("state_checkpoints"):
+            raise ValueError("GatedDeltaNet checkpoint outputs are no longer supported")
+        if any(kwargs.get(name) for name in ("state_update_decay", "state_update_key", "state_update_delta")):
+            raise ValueError("GatedDeltaNet separate state-update outputs are no longer supported")
         # Casting here satisfies GDN's FP32 ABI but cannot recover precision already rounded by
         # the shared FP16 gate path; a production exporter should use the qwen/sigmoid fusion
         # inputs of `make_gated_delta_net` instead.
@@ -3697,33 +3676,12 @@ class Model:
                 inputs.append(state_update_active)
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
-        # `state_checkpoints=W` adds the right-aligned `checkpoints` output alongside the
-        # committed `final_state`: slot W-1 is the state after the last token of the step and
-        # slot W-1-k the state k tokens before it, which is the series a speculative decoder
-        # rolls back through. The committed state keeps its own unwindowed input and output so
-        # the engine's fixed-state banks stay as they are.
-        checkpoints = kwargs.get("checkpoints", "")
-        state_checkpoints = kwargs.get("state_checkpoints", 0)
-        if bool(checkpoints) != bool(state_checkpoints):
-            raise ValueError("checkpoints and state_checkpoints must be set together")
         outputs = [output, present_recurrent]
-        if checkpoints:
-            outputs.append(checkpoints)
-        state_update_outputs = [
-            kwargs.get("state_update_decay", ""),
-            kwargs.get("state_update_key", ""),
-            kwargs.get("state_update_delta", ""),
-        ]
         state_update_capsule = kwargs.get("state_update_capsule", "")
         if state_update_capacity:
-            while len(outputs) < 3:
-                outputs.append("")
-            if state_update_capsule:
-                if any(state_update_outputs):
-                    raise ValueError("state_update_capsule cannot be combined with separate outputs")
-                outputs.extend(["", "", "", state_update_capsule])
-            else:
-                outputs.extend(state_update_outputs)
+            if not state_update_capsule:
+                raise ValueError("state_update_capsule is required when state_update_capacity is positive")
+            outputs.append(state_update_capsule)
         attributes = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
             "scale": kwargs.get("scale", 1.0),
@@ -3732,7 +3690,6 @@ class Model:
             "arithmetic_mode": kwargs.get("arithmetic_mode", "native"),
             "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
             "chunk_size": kwargs.get("chunk_size", 64),
-            "state_checkpoints": state_checkpoints,
         }
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
@@ -3746,22 +3703,12 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
-        if checkpoints:
-            self.make_value(checkpoints, ir.DataType.FLOAT, shape=kwargs["checkpoints_shape"])
         if state_update_capacity:
-            if state_update_capsule:
-                self.make_value(
-                    state_update_capsule,
-                    ir.DataType.FLOAT,
-                    shape=kwargs["state_update_capsule_shape"],
-                )
-            else:
-                for state_update_output, state_update_shape in zip(
-                    state_update_outputs,
-                    kwargs["state_update_shapes"],
-                    strict=True,
-                ):
-                    self.make_value(state_update_output, ir.DataType.FLOAT, shape=state_update_shape)
+            self.make_value(
+                state_update_capsule,
+                ir.DataType.FLOAT,
+                shape=kwargs["state_update_capsule_shape"],
+            )
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [

@@ -38,13 +38,10 @@
             0,
             3
           ],
-          "checkpoint_count": 4,
-          "checkpoint_alignment": "left",
           "bindings": {
             "state": {
               "input": "past_conv.%d",
-              "output": "present_conv.%d",
-              "checkpoints": "checkpoints_conv.%d"
+              "output": "present_conv.%d"
             }
           },
           "state_update": {
@@ -77,22 +74,18 @@
             2,
             5
           ],
-          "checkpoint_count": 4,
-          "checkpoint_alignment": "right",
           "bindings": {
             "state": {
               "input": "past_recurrent.%d",
-              "output": "present_recurrent.%d",
-              "checkpoints": "checkpoints_recurrent.%d"
+              "output": "present_recurrent.%d"
             }
           },
           "state_update": {
             "kind": "gated_delta_net",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
-            "decay": "state_update.%d.recurrent_decay",
-            "key": "state_update.%d.recurrent_key",
-            "delta": "state_update.%d.recurrent_delta"
+            "capsule": "state_update.%d.recurrent_capsule",
+            "key_head_count": 1
           }
         }
       ]

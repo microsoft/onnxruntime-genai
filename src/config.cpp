@@ -543,12 +543,11 @@ struct SharedInitializers_Element : JSON::Element {
 
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
-using DecoderCheckpointAlignment = Config::Model::Decoder::CheckpointAlignment;
 using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
 using DecoderStateUpdateKind = Config::Model::Decoder::StateUpdateKind;
 
-// Both packed state operators cap their checkpoint window at eight slots.
-constexpr int kMaxStateCheckpoints = 8;
+// Both packed state operators cap their compact transition window at eight slots.
+constexpr int kMaxStateUpdateCapacity = 8;
 
 struct StateUpdate_Element : JSON::Element {
   explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
@@ -568,21 +567,15 @@ struct StateUpdate_Element : JSON::Element {
     } else if (name == "capacity") {
       const auto capacity = SafeDoubleToInt64(
           JSON::Get<double>(value), "model.decoder.state_groups.state_update.capacity");
-      if (capacity < 1 || capacity > kMaxStateCheckpoints) {
+      if (capacity < 1 || capacity > kMaxStateUpdateCapacity) {
         throw std::runtime_error("Decoder state update capacity must be in [1, " +
-                                 std::to_string(kMaxStateCheckpoints) + "]");
+                                 std::to_string(kMaxStateUpdateCapacity) + "]");
       }
       v_.capacity = static_cast<int>(capacity);
     } else if (name == "capture_count") {
       v_.capture_count = JSON::Get<std::string_view>(value);
     } else if (name == "value") {
       v_.value = JSON::Get<std::string_view>(value);
-    } else if (name == "decay") {
-      v_.decay = JSON::Get<std::string_view>(value);
-    } else if (name == "key") {
-      v_.key = JSON::Get<std::string_view>(value);
-    } else if (name == "delta") {
-      v_.delta = JSON::Get<std::string_view>(value);
     } else if (name == "active") {
       v_.active = JSON::Get<std::string_view>(value);
     } else if (name == "capsule") {
@@ -611,8 +604,6 @@ struct StateBinding_Element : JSON::Element {
       v_.input = JSON::Get<std::string_view>(value);
     } else if (name == "output") {
       v_.output = JSON::Get<std::string_view>(value);
-    } else if (name == "checkpoints") {
-      v_.checkpoints = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -668,22 +659,6 @@ struct StateGroup_Element : JSON::Element {
         v_.kind = DecoderStateGroupKind::Fixed;
       } else {
         throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
-      }
-    } else if (name == "checkpoint_count") {
-      v_.checkpoint_count = static_cast<int>(JSON::Get<double>(value));
-      if (v_.checkpoint_count < 0 || v_.checkpoint_count > kMaxStateCheckpoints) {
-        throw std::runtime_error("Decoder state group checkpoint_count must be in [0, " +
-                                 std::to_string(kMaxStateCheckpoints) + "]");
-      }
-    } else if (name == "checkpoint_alignment") {
-      const auto alignment = JSON::Get<std::string_view>(value);
-      if (alignment == "left") {
-        v_.checkpoint_alignment = DecoderCheckpointAlignment::Left;
-      } else if (alignment == "right") {
-        v_.checkpoint_alignment = DecoderCheckpointAlignment::Right;
-      } else {
-        throw std::runtime_error("Unsupported decoder state group checkpoint_alignment '" +
-                                 std::string{alignment} + "'");
       }
     } else {
       throw JSON::unknown_value_error{};
@@ -930,8 +905,6 @@ struct Decoder_Element : JSON::Element {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "mixed_batch_checkpoints") {
-      v_.mixed_batch_checkpoints = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

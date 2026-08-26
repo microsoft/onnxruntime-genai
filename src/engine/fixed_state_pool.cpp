@@ -135,9 +135,6 @@ FixedStateGeometry ValidateFixedStateGeometry(std::string_view input_name,
 struct FixedStateReservation::Storage {
   struct StateUpdateTensors {
     std::unique_ptr<OrtValue> value;
-    std::unique_ptr<OrtValue> decay;
-    std::unique_ptr<OrtValue> key;
-    std::unique_ptr<OrtValue> delta;
     std::unique_ptr<OrtValue> capsule;
   };
 
@@ -149,7 +146,6 @@ struct FixedStateReservation::Storage {
   std::vector<size_t> capture_counts;
   std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
-  std::vector<std::unique_ptr<OrtValue>> staged_checkpoints;
   std::unique_ptr<OrtValue> state_update_capture_count;
   std::unique_ptr<OrtValue> state_update_active;
   std::vector<StateUpdateTensors> state_update_tensors;
@@ -161,13 +157,9 @@ struct FixedStateReservation::Storage {
   // destroyed; FixedStateBinding::input_name/output_name point into these.
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
-  std::vector<std::string> checkpoints_names;
   std::string state_update_capture_count_name;
   std::string state_update_active_name;
   std::vector<std::string> state_update_value_names;
-  std::vector<std::string> state_update_decay_names;
-  std::vector<std::string> state_update_key_names;
-  std::vector<std::string> state_update_delta_names;
   std::vector<std::string> state_update_capsule_names;
   std::vector<FixedStateBinding> bindings;
   size_t staging_bytes{};
@@ -175,7 +167,6 @@ struct FixedStateReservation::Storage {
   bool binds_direct_banks{};
   size_t direct_first_slot{};
   uint8_t direct_active_bank{};
-  bool captures_checkpoints{};
   bool captures_state_updates{};
 };
 
@@ -206,9 +197,6 @@ struct FixedStatePool::Impl {
     int layer_id{};
     std::string input_name;
     std::string output_name;
-    std::string checkpoints_name;
-    Config::Model::Decoder::CheckpointAlignment checkpoint_alignment{};
-    size_t checkpoint_count{};
     ONNXTensorElementDataType data_type{};
     std::vector<int64_t> session_shape;
     size_t row_bytes{};
@@ -218,9 +206,6 @@ struct FixedStatePool::Impl {
     std::string state_update_capture_count_name;
     std::string state_update_active_name;
     StateUpdateOutputSpec state_update_value;
-    StateUpdateOutputSpec state_update_decay;
-    StateUpdateOutputSpec state_update_key;
-    StateUpdateOutputSpec state_update_delta;
     StateUpdateOutputSpec state_update_capsule;
     size_t state_update_row_bytes{};
     size_t state_update_channel_count{};
@@ -244,10 +229,12 @@ struct FixedStatePool::Impl {
     FixedStateSlotOwnership ownership{FixedStateSlotOwnership::Free};
   };
 
-  explicit Impl(std::shared_ptr<Model> model_value, size_t capacity_value)
+  explicit Impl(std::shared_ptr<Model> model_value, size_t capacity_value,
+                bool force_gathered_value)
       : model{std::move(model_value)},
         device{model ? model->p_device_kvcache_ : nullptr},
         capacity{capacity_value},
+        force_gathered{force_gathered_value},
         slots(capacity_value) {}
 
   Slot* FindSlot(const void* request_id) {
@@ -439,11 +426,19 @@ struct FixedStatePool::Impl {
     if (locations.empty()) {
       return {};
     }
-    for (size_t row = 0; row < locations.size(); ++row) {
-      const auto& location = locations[row];
-      if (location.slot_index != locations.front().slot_index + row) {
+    const bool slots_are_monotonic = std::adjacent_find(
+        locations.begin(), locations.end(),
+        [](const PlannedRowLocation& previous, const PlannedRowLocation& current) {
+          return current.slot_index <= previous.slot_index;
+        }) == locations.end();
+    if (!slots_are_monotonic) {
+      return BindingDecision{
+          std::nullopt, FixedStateGatherFallbackReason::NonmonotonicSlots};
+    }
+    for (size_t row = 1; row < locations.size(); ++row) {
+      if (locations[row].slot_index != locations.front().slot_index + row) {
         return BindingDecision{
-          std::nullopt, FixedStateGatherFallbackReason::NoncontiguousSlots};
+            std::nullopt, FixedStateGatherFallbackReason::GappedSlots};
       }
     }
     std::optional<uint8_t> resident_bank;
@@ -480,10 +475,8 @@ struct FixedStatePool::Impl {
   }
 
   size_t CalculateStagingBytes(size_t row_count, bool binds_direct_banks,
-                               bool capture_checkpoints,
                                bool capture_state_updates) const {
-    const size_t copies_per_tensor =
-        (binds_direct_banks ? 0 : 2) + (capture_checkpoints ? checkpoint_count : 0);
+    const size_t copies_per_tensor = binds_direct_banks ? 0 : 2;
     size_t bytes = 0;
     for (const auto& spec : tensors) {
       bytes = CheckedAdd(
@@ -541,38 +534,15 @@ struct FixedStatePool::Impl {
     destination.CopyFrom(source);
   }
 
-  // Which checkpoint slot of a `step_tokens`-long step holds the state after its token
-  // `kept_tokens - 1`. Left-aligned outputs index from the start of the step, right-aligned ones
-  // from its end.
-  static size_t CheckpointSlotFor(const TensorSpec& spec, size_t step_tokens, size_t kept_tokens) {
-    using Alignment = Config::Model::Decoder::CheckpointAlignment;
-    return spec.checkpoint_alignment == Alignment::Left
-               ? kept_tokens - 1
-               : spec.checkpoint_count - step_tokens + kept_tokens - 1;
-  }
-
-  // Same as StageRowIntoInactiveBank but sources one slot of the step's checkpoint series, which is
-  // laid out [checkpoint_count, batch_rows, row...].
-  void StageCheckpointIntoInactiveBank(const TensorSpec& spec, size_t slot_index,
-                                       uint8_t inactive_bank, size_t batch_row, size_t batch_rows,
-                                       size_t checkpoint_slot, OrtValue& checkpoints) {
-    auto destination = ByteWrapTensor(*device, *spec.banks[inactive_bank])
-                           .subspan(slot_index * spec.row_bytes, spec.row_bytes);
-    const auto source =
-        ByteWrapTensor(*device, checkpoints)
-            .subspan((checkpoint_slot * batch_rows + batch_row) * spec.row_bytes, spec.row_bytes);
-    destination.CopyFrom(source);
-  }
-
   std::shared_ptr<Model> model;
   DeviceInterface* device{};
   FixedStatePool* owner{};
   size_t capacity{};
+  bool force_gathered{};
   size_t persistent_bytes{};
   size_t zeroing_scratch_bytes{};
   size_t active_staging_bytes{};
   size_t fixed_session_batch_size{};
-  size_t checkpoint_count{};
   bool state_update_enabled{};
   size_t state_update_capacity{};
   std::string state_update_capture_count_name;
@@ -597,6 +567,8 @@ struct FixedStatePool::Impl {
   uint64_t capsule_valid_prefix_bytes{};
   uint64_t capsule_suffix_bytes_not_written{};
   uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t nonmonotonic_slot_fallbacks{};
+  uint64_t gapped_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   bool healthy{true};
   FixedStateReservation* active_reservation{};
@@ -660,17 +632,12 @@ size_t FixedStateReservation::PlannedStagingBytes() const {
   return storage_ ? storage_->staging_bytes : 0;
 }
 
-bool FixedStateReservation::CapturesCheckpoints() const {
-  return storage_ && storage_->captures_checkpoints;
-}
-
 bool FixedStateReservation::CapturesStateUpdates() const {
   return storage_ && storage_->captures_state_updates;
 }
 
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
-  if (!storage_ ||
-      (!storage_->captures_checkpoints && !storage_->captures_state_updates)) {
+  if (!storage_ || !storage_->captures_state_updates) {
     throw std::logic_error(
         "Committing a prefix requires a reservation that captures rollback state.");
   }
@@ -684,20 +651,12 @@ void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t 
     throw std::runtime_error(
         "Fixed state prefix commit must keep between one and step_tokens tokens.");
   }
-  if (storage_->captures_state_updates) {
-    const size_t capture_count = storage_->capture_counts[row];
-    const bool full_acceptance = kept_tokens == step_tokens;
-    if (capture_count == 0 || step_tokens != capture_count + 1 ||
-        (!full_acceptance && kept_tokens > capture_count)) {
-      throw std::runtime_error(
-          "Compact fixed state prefix commit does not match the row's captured transition count.");
-    }
-  } else {
-    const size_t window = pool_ ? pool_->CheckpointCount() : 0;
-    if (step_tokens > window) {
-      throw std::runtime_error(
-          "Fixed state prefix commit step is longer than the checkpoint window.");
-    }
+  const size_t capture_count = storage_->capture_counts[row];
+  const bool full_acceptance = kept_tokens == step_tokens;
+  if (capture_count == 0 || step_tokens != capture_count + 1 ||
+      (!full_acceptance && kept_tokens > capture_count)) {
+    throw std::runtime_error(
+        "Compact fixed state prefix commit does not match the row's captured transition count.");
   }
   if (storage_->commit_kept_tokens[row] != 0) {
     throw std::logic_error("Fixed state prefix commit is already set for this row.");
@@ -769,8 +728,9 @@ void FixedStateReservation::Discard() {
 
 FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
                                const ModelStateManifest& manifest,
-                               size_t capacity)
-    : impl_{std::make_unique<Impl>(std::move(model), capacity)} {
+                 size_t capacity,
+                 bool force_gathered)
+  : impl_{std::make_unique<Impl>(std::move(model), capacity, force_gathered)} {
   if (!impl_->model) {
     throw std::invalid_argument("Fixed state pool requires a model.");
   }
@@ -804,11 +764,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
       spec.layer_id = layer_id;
       spec.input_name = ExpandBinding(group.state->input, layer_id);
       spec.output_name = ExpandBinding(group.state->output, layer_id);
-      if (group.checkpoint_count > 0) {
-        spec.checkpoints_name = ExpandBinding(group.state->checkpoints, layer_id);
-        spec.checkpoint_count = static_cast<size_t>(group.checkpoint_count);
-        spec.checkpoint_alignment = group.checkpoint_alignment;
-      }
       spec.data_type =
           impl_->model->session_info_.GetInputDataType(spec.input_name);
       spec.session_shape =
@@ -866,13 +821,8 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
         };
 
         spec.state_update_value = load_update_output(update.value);
-        spec.state_update_decay = load_update_output(update.decay);
-        spec.state_update_key = load_update_output(update.key);
-        spec.state_update_delta = load_update_output(update.delta);
         spec.state_update_capsule = load_update_output(update.capsule);
-        for (const auto* output : {&spec.state_update_value, &spec.state_update_decay,
-                 &spec.state_update_key, &spec.state_update_delta,
-                 &spec.state_update_capsule}) {
+  for (const auto* output : {&spec.state_update_value, &spec.state_update_capsule}) {
           spec.state_update_row_bytes = CheckedAdd(
               spec.state_update_row_bytes, output->row_bytes, "state_update staging allocation");
         }
@@ -887,9 +837,7 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
           }
         } else {
           spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
-          spec.state_update_key_head_count = update.capsule.empty()
-                                                   ? static_cast<size_t>(spec.state_update_key.session_shape[2])
-                                                   : static_cast<size_t>(update.key_head_count);
+          spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
         }
       }
       // Two persistent banks per tensor so publish can flip banks without any device copy.
@@ -924,16 +872,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model,
     throw std::runtime_error(
         "Fixed state pool requires at least one fixed state binding.");
   }
-  // A rollback has to move every fixed group's state together, so a partially checkpointed model
-  // could never actually roll back. Require all-or-nothing with a shared window.
-  const size_t checkpoint_count = impl_->tensors.front().checkpoint_count;
-  for (const auto& spec : impl_->tensors) {
-    if (spec.checkpoint_count != checkpoint_count) {
-      throw std::runtime_error(
-          "Fixed state bindings declare inconsistent checkpoint windows.");
-    }
-  }
-  impl_->checkpoint_count = checkpoint_count;
   const bool state_update_enabled = impl_->tensors.front().state_update_enabled;
   const size_t state_update_capacity = impl_->tensors.front().state_update_capacity;
   const std::string& state_update_capture_count_name =
@@ -1009,32 +947,24 @@ size_t FixedStatePool::ActiveStagingBytes() const {
   return impl_->active_staging_bytes;
 }
 
-size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkpoints,
-                                           bool capture_state_updates) const {
-  if (capture_checkpoints && capture_state_updates) {
-    throw std::invalid_argument(
-        "Fixed state planning cannot capture checkpoints and compact updates together.");
-  }
+size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_state_updates) const {
   if (capture_state_updates && !SupportsStateUpdates()) {
     throw std::invalid_argument(
         "Fixed state planning requested compact updates from a model without them.");
   }
     // Without request identities only a single row is guaranteed to be directly bindable. Engine
     // planning uses the request-aware overload below to recognize larger contiguous cohorts.
-    return impl_->CalculateStagingBytes(row_count, row_count == 1, capture_checkpoints,
-                                        capture_state_updates);
-  }
+  return impl_->CalculateStagingBytes(row_count, row_count == 1, capture_state_updates);
+}
 
-  size_t FixedStatePool::PlannedStagingBytes(
-      std::span<const FixedStateReservationRequest> requests,
-      bool capture_checkpoints) const {
-    return PlanStep(requests, capture_checkpoints)->staging_bytes;
-  }
+size_t FixedStatePool::PlannedStagingBytes(
+    std::span<const FixedStateReservationRequest> requests) const {
+  return PlanStep(requests)->staging_bytes;
+}
 
-  std::shared_ptr<const FixedStateStepPlan> FixedStatePool::PlanStep(
-      std::span<const FixedStateReservationRequest> requests,
-      bool capture_checkpoints,
-      std::span<const FixedStateStepPhase> phases) const {
+std::shared_ptr<const FixedStateStepPlan> FixedStatePool::PlanStep(
+    std::span<const FixedStateReservationRequest> requests,
+    std::span<const FixedStateStepPhase> phases) const {
     impl_->EnsureHealthy();
     impl_->EnsureIdle();
     if (requests.empty()) {
@@ -1049,15 +979,7 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
         requests.begin(), requests.end(),
         [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
     const bool capture_state_updates = has_capture_counts && SupportsStateUpdates();
-    if (capture_checkpoints && capture_state_updates) {
-      throw std::runtime_error(
-          "Fixed state planning cannot capture checkpoints and compact updates together.");
-    }
-    if (capture_checkpoints && impl_->checkpoint_count == 0) {
-      throw std::runtime_error(
-          "This model's fixed state bindings declare no checkpoints output.");
-    }
-    if (has_capture_counts && !SupportsStateUpdates() && !capture_checkpoints) {
+    if (has_capture_counts && !SupportsStateUpdates()) {
       throw std::runtime_error(
           "This model's fixed state bindings declare no compact state_update outputs.");
     }
@@ -1080,8 +1002,11 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
       }
     }
 
-    const auto locations = impl_->PlanRowLocations(requests);
-    const auto binding = impl_->SelectBinding(locations);
+        const auto locations = impl_->PlanRowLocations(requests);
+        const auto binding = impl_->force_gathered
+                 ? Impl::BindingDecision{
+                   std::nullopt, FixedStateGatherFallbackReason::ForcedGathered}
+                 : impl_->SelectBinding(locations);
     auto plan = std::make_shared<FixedStateStepPlan>();
     plan->pool = this;
     plan->pool_epoch = impl_->pool_epoch;
@@ -1093,22 +1018,11 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
       plan->direct_first_slot = binding.direct_span->first_slot;
       plan->direct_active_bank = binding.direct_span->active_bank;
     }
-    if (capture_checkpoints) {
-      plan->capture_mode = FixedStateCaptureMode::DenseCheckpoints;
-    } else if (capture_state_updates) {
-      const bool uses_legacy_factors = std::any_of(
-          impl_->tensors.begin(), impl_->tensors.end(),
-          [](const Impl::TensorSpec& spec) {
-            return spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet &&
-                   spec.state_update_capsule.name.empty();
-          });
-      plan->capture_mode = uses_legacy_factors
-                               ? FixedStateCaptureMode::LegacyFactors
-                               : FixedStateCaptureMode::Capsule;
+    if (capture_state_updates) {
+      plan->capture_mode = FixedStateCaptureMode::Capsule;
     }
     plan->staging_bytes = impl_->CalculateStagingBytes(
-        requests.size(), binding.direct_span.has_value(), capture_checkpoints,
-        capture_state_updates);
+        requests.size(), binding.direct_span.has_value(), capture_state_updates);
     plan->rows.reserve(requests.size());
     for (size_t row = 0; row < requests.size(); ++row) {
       const auto& location = locations[row];
@@ -1129,14 +1043,6 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool capture_checkp
       });
     }
     return plan;
-}
-
-bool FixedStatePool::SupportsCheckpoints() const {
-  return impl_->checkpoint_count != 0;
-}
-
-size_t FixedStatePool::CheckpointCount() const {
-  return impl_->checkpoint_count;
 }
 
 bool FixedStatePool::SupportsStateUpdates() const {
@@ -1170,9 +1076,8 @@ bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
 }
 
 FixedStateReservation FixedStatePool::Reserve(
-    std::span<const FixedStateReservationRequest> requests,
-    bool capture_checkpoints) {
-  return Reserve(*PlanStep(requests, capture_checkpoints));
+    std::span<const FixedStateReservationRequest> requests) {
+  return Reserve(*PlanStep(requests));
 }
 
 FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
@@ -1200,15 +1105,8 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
         "Fixed state reservation does not match the session's fixed batch dimension.");
   }
 
-  const bool capture_checkpoints =
-      plan.capture_mode == FixedStateCaptureMode::DenseCheckpoints;
   const bool capture_state_updates =
-      plan.capture_mode == FixedStateCaptureMode::Capsule ||
-      plan.capture_mode == FixedStateCaptureMode::LegacyFactors;
-  if (capture_checkpoints && impl_->checkpoint_count == 0) {
-    throw std::logic_error(
-        "Fixed state step plan requires unavailable checkpoints.");
-  }
+      plan.capture_mode == FixedStateCaptureMode::Capsule;
   if (capture_state_updates && !SupportsStateUpdates()) {
     throw std::logic_error(
         "Fixed state step plan requires unavailable compact updates.");
@@ -1217,7 +1115,7 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
       plan.binding_mode == FixedStateBindingMode::DirectSpan;
   if (plan.staging_bytes != impl_->CalculateStagingBytes(
                                 plan.rows.size(), binds_direct_banks,
-                                capture_checkpoints, capture_state_updates)) {
+                                capture_state_updates)) {
     throw std::logic_error(
         "Fixed state step plan staging bytes do not match its row layout.");
   }
@@ -1281,23 +1179,14 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
     storage->direct_first_slot = plan.direct_first_slot;
     storage->direct_active_bank = plan.direct_active_bank;
   }
-  storage->captures_checkpoints = capture_checkpoints;
   storage->captures_state_updates = capture_state_updates;
   storage->gathered_inputs.reserve(impl_->tensors.size());
   storage->staged_outputs.reserve(impl_->tensors.size());
-  storage->staged_checkpoints.reserve(capture_checkpoints ? impl_->tensors.size() : 0);
   storage->input_names.reserve(impl_->tensors.size());
   storage->output_names.reserve(impl_->tensors.size());
-  storage->checkpoints_names.reserve(capture_checkpoints ? impl_->tensors.size() : 0);
   storage->state_update_tensors.reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
   storage->state_update_value_names.reserve(
-      capture_state_updates ? impl_->tensors.size() : 0);
-  storage->state_update_decay_names.reserve(
-      capture_state_updates ? impl_->tensors.size() : 0);
-  storage->state_update_key_names.reserve(
-      capture_state_updates ? impl_->tensors.size() : 0);
-  storage->state_update_delta_names.reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
     storage->state_update_capsule_names.reserve(
       capture_state_updates ? impl_->tensors.size() : 0);
@@ -1355,14 +1244,6 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
       staged = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), shape, spec.data_type);
     }
-    std::unique_ptr<OrtValue> checkpoints;
-    if (capture_checkpoints) {
-      auto checkpoint_shape = shape;
-      checkpoint_shape.insert(checkpoint_shape.begin(),
-                              static_cast<int64_t>(spec.checkpoint_count));
-      checkpoints = OrtValue::CreateTensor(
-          impl_->device->GetAllocator(), checkpoint_shape, spec.data_type);
-    }
     FixedStateReservation::Storage::StateUpdateTensors state_updates;
     const auto allocate_update_output = [&](const Impl::StateUpdateOutputSpec& output) {
       if (!capture_state_updates || output.name.empty()) {
@@ -1373,17 +1254,13 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
           output.data_type);
     };
     state_updates.value = allocate_update_output(spec.state_update_value);
-    state_updates.decay = allocate_update_output(spec.state_update_decay);
-    state_updates.key = allocate_update_output(spec.state_update_key);
-    state_updates.delta = allocate_update_output(spec.state_update_delta);
     state_updates.capsule = allocate_update_output(spec.state_update_capsule);
 
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
         CheckedMultiply(
             CheckedMultiply(batch_rows, spec.row_bytes, "staging allocation"),
-        (storage->binds_direct_banks ? 0 : 2) +
-          (capture_checkpoints ? spec.checkpoint_count : 0),
+        storage->binds_direct_banks ? 0 : 2,
         "staging allocation"),
         "staging allocation");
     if (capture_state_updates) {
@@ -1395,9 +1272,6 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
     }
     storage->input_names.push_back(spec.input_name);
     storage->output_names.push_back(spec.output_name);
-    if (capture_checkpoints) {
-      storage->checkpoints_names.push_back(spec.checkpoints_name);
-    }
     const auto keep_update_name = [&](const Impl::StateUpdateOutputSpec& output,
                                       std::vector<std::string>& names) -> const char* {
       if (!capture_state_updates || output.name.empty()) {
@@ -1408,12 +1282,6 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
     };
     const char* state_update_value_name =
         keep_update_name(spec.state_update_value, storage->state_update_value_names);
-    const char* state_update_decay_name =
-        keep_update_name(spec.state_update_decay, storage->state_update_decay_names);
-    const char* state_update_key_name =
-        keep_update_name(spec.state_update_key, storage->state_update_key_names);
-    const char* state_update_delta_name =
-        keep_update_name(spec.state_update_delta, storage->state_update_delta_names);
     const char* state_update_capsule_name =
       keep_update_name(spec.state_update_capsule, storage->state_update_capsule_names);
     storage->bindings.push_back(FixedStateBinding{
@@ -1423,8 +1291,6 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
         gathered.get(),
         storage->output_names.back().c_str(),
         staged.get(),
-        capture_checkpoints ? storage->checkpoints_names.back().c_str() : nullptr,
-        checkpoints.get(),
         spec.state_update_kind,
         spec.state_update_capacity,
         impl_->state_update_capacity != 0 ? storage->state_update_capture_count_name.c_str() : nullptr,
@@ -1433,20 +1299,11 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
         storage->state_update_active.get(),
         state_update_value_name,
         state_updates.value.get(),
-        state_update_decay_name,
-        state_updates.decay.get(),
-        state_update_key_name,
-        state_updates.key.get(),
-        state_update_delta_name,
-        state_updates.delta.get(),
         state_update_capsule_name,
         state_updates.capsule.get(),
     });
     storage->gathered_inputs.push_back(std::move(gathered));
     storage->staged_outputs.push_back(std::move(staged));
-    if (capture_checkpoints) {
-      storage->staged_checkpoints.push_back(std::move(checkpoints));
-    }
     if (capture_state_updates) {
       storage->state_update_tensors.push_back(std::move(state_updates));
     }
@@ -1564,10 +1421,21 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
   } else {
     Impl::SaturatingAdd(impl_->gathered_reservations, 1);
     Impl::SaturatingAdd(impl_->gathered_rows, plan.rows.size());
-    if (plan.fallback_reason == FixedStateGatherFallbackReason::NoncontiguousSlots) {
-      Impl::SaturatingAdd(impl_->noncontiguous_slot_fallbacks, 1);
-    } else if (plan.fallback_reason == FixedStateGatherFallbackReason::MixedActiveBanks) {
-      Impl::SaturatingAdd(impl_->mixed_active_bank_fallbacks, 1);
+    switch (plan.fallback_reason) {
+      case FixedStateGatherFallbackReason::NonmonotonicSlots:
+        Impl::SaturatingAdd(impl_->noncontiguous_slot_fallbacks, 1);
+        Impl::SaturatingAdd(impl_->nonmonotonic_slot_fallbacks, 1);
+        break;
+      case FixedStateGatherFallbackReason::GappedSlots:
+        Impl::SaturatingAdd(impl_->noncontiguous_slot_fallbacks, 1);
+        Impl::SaturatingAdd(impl_->gapped_slot_fallbacks, 1);
+        break;
+      case FixedStateGatherFallbackReason::MixedActiveBanks:
+        Impl::SaturatingAdd(impl_->mixed_active_bank_fallbacks, 1);
+        break;
+      case FixedStateGatherFallbackReason::ForcedGathered:
+      case FixedStateGatherFallbackReason::None:
+        break;
     }
   }
   for (const auto& row : plan.rows) {
@@ -1641,6 +1509,8 @@ FixedStateBindingMetrics FixedStatePool::BindingMetrics() const noexcept {
       impl_->replay_descriptor_count,
       impl_->replayed_transition_count,
       impl_->noncontiguous_slot_fallbacks,
+      impl_->nonmonotonic_slot_fallbacks,
+      impl_->gapped_slot_fallbacks,
       impl_->mixed_active_bank_fallbacks,
       impl_->capsule_bytes_allocated,
       impl_->capsule_valid_prefix_bytes,
@@ -1657,6 +1527,8 @@ FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
   snapshot.gathered_rows = impl_->gathered_rows;
   snapshot.binding_metrics = BindingMetrics();
   snapshot.noncontiguous_slot_fallbacks = impl_->noncontiguous_slot_fallbacks;
+  snapshot.nonmonotonic_slot_fallbacks = impl_->nonmonotonic_slot_fallbacks;
+  snapshot.gapped_slot_fallbacks = impl_->gapped_slot_fallbacks;
   snapshot.mixed_active_bank_fallbacks = impl_->mixed_active_bank_fallbacks;
   snapshot.persistent_bytes = impl_->persistent_bytes;
   snapshot.zeroing_scratch_bytes = impl_->zeroing_scratch_bytes;
@@ -1762,39 +1634,33 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           }
           continue;
         }
-        if (storage.captures_state_updates) {
-          const auto& updates = storage.state_update_tensors[tensor_index];
-          const auto row_pointer = [&](const std::unique_ptr<OrtValue>& tensor,
-                                       size_t row_bytes) -> const uint8_t* {
-            if (!tensor) {
-              return nullptr;
-            }
-            return ByteWrapTensor(*impl_->device, *tensor).Span().data() + row * row_bytes;
-          };
-          const auto source = ByteWrapTensor(*impl_->device, *storage.gathered_inputs[tensor_index])
-                                  .Span()
-                                  .data() +
-                              row * spec.row_bytes;
-          auto destination = ByteWrapTensor(*impl_->device, *spec.banks[inactive_bank])
-                                 .Span()
-                                 .data() +
-                             storage.handles[row].slot * spec.row_bytes;
-                          const auto* capsule = reinterpret_cast<const float*>(
-                          row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
-                          const float* decay = capsule != nullptr
-                                   ? capsule
-                                   : reinterpret_cast<const float*>(
-                                     row_pointer(updates.decay, spec.state_update_decay.row_bytes));
-                          const float* key = capsule != nullptr
-                                 ? capsule + spec.state_update_capacity * spec.state_update_channel_count
-                                 : reinterpret_cast<const float*>(
-                                   row_pointer(updates.key, spec.state_update_key.row_bytes));
-                          const float* delta = capsule != nullptr
-                                   ? key + spec.state_update_capacity *
-                                       spec.state_update_key_head_count *
-                                       spec.state_update_key_width
-                                   : reinterpret_cast<const float*>(
-                                     row_pointer(updates.delta, spec.state_update_delta.row_bytes));
+        const auto& updates = storage.state_update_tensors[tensor_index];
+        const auto row_pointer = [&](const std::unique_ptr<OrtValue>& tensor,
+                                     size_t row_bytes) -> const uint8_t* {
+          if (!tensor) {
+            return nullptr;
+          }
+          return ByteWrapTensor(*impl_->device, *tensor).Span().data() + row * row_bytes;
+        };
+        const auto source = ByteWrapTensor(*impl_->device, *storage.gathered_inputs[tensor_index])
+                                .Span()
+                                .data() +
+                            row * spec.row_bytes;
+        auto destination = ByteWrapTensor(*impl_->device, *spec.banks[inactive_bank])
+                               .Span()
+                               .data() +
+                           storage.handles[row].slot * spec.row_bytes;
+        const auto* capsule = reinterpret_cast<const float*>(
+            row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
+        const float* decay = capsule;
+        const float* key = capsule
+                               ? capsule + spec.state_update_capacity * spec.state_update_channel_count
+                               : nullptr;
+        const float* delta = key
+                                 ? key + spec.state_update_capacity *
+                                             spec.state_update_key_head_count *
+                                             spec.state_update_key_width
+                                 : nullptr;
           replay_descriptors.push_back(StateUpdateReplayDesc{
               source,
               destination,
@@ -1813,13 +1679,7 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
                   ? StateUpdateReplayKind::CausalConv
                   : StateUpdateReplayKind::GatedDeltaNet,
           });
-              Impl::SaturatingAdd(replayed_transition_count, kept_tokens);
-          continue;
-        }
-        impl_->StageCheckpointIntoInactiveBank(
-            spec, storage.handles[row].slot, inactive_bank, row, storage.batch_rows,
-            Impl::CheckpointSlotFor(spec, storage.commit_step_tokens[row], kept_tokens),
-            *storage.staged_checkpoints[tensor_index]);
+        Impl::SaturatingAdd(replayed_transition_count, kept_tokens);
       }
     }
     if (!replay_descriptors.empty()) {

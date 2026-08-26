@@ -885,6 +885,10 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->fixed_state_replayed_transition_count;
   else if (key == "fixed_state_noncontiguous_slot_fallbacks")
     *value = stats->fixed_state_noncontiguous_slot_fallbacks;
+  else if (key == "fixed_state_nonmonotonic_slot_fallbacks")
+    *value = stats->fixed_state_nonmonotonic_slot_fallbacks;
+  else if (key == "fixed_state_gapped_slot_fallbacks")
+    *value = stats->fixed_state_gapped_slot_fallbacks;
   else if (key == "fixed_state_mixed_active_bank_fallbacks")
     *value = stats->fixed_state_mixed_active_bank_fallbacks;
   else if (key == "fixed_state_capsule_bytes_allocated")

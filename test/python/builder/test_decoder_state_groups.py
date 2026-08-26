@@ -150,26 +150,21 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert "mixed_batch_checkpoints" not in config["model"]["decoder"]
 
 
-def test_qwen38_state_window_emits_checkpoint_bindings(monkeypatch, tmp_path):
+def test_qwen38_state_window_does_not_emit_checkpoint_bindings(monkeypatch, tmp_path):
     layer_types = ["full_attention" if (layer_id + 1) % 4 == 0 else "linear_attention" for layer_id in range(64)]
     model = _make_config_model(Qwen35TextModel, layer_types=layer_types)
     model._state_window = 4
     config = _write_config(monkeypatch, tmp_path, model)
 
     groups = config["model"]["decoder"]["state_groups"]
-    assert groups[1]["checkpoint_count"] == 4
-    assert groups[1]["checkpoint_alignment"] == "left"
-    assert groups[1]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.conv_state"
-    assert groups[2]["checkpoint_count"] == 4
-    assert groups[2]["checkpoint_alignment"] == "right"
-    assert groups[2]["bindings"]["state"]["checkpoints"] == "checkpoints.%d.recurrent_state"
-    # mixed_batch_checkpoints stays opt-in: keeping drafts alive in a mixed prefill+decode step
-    # still corrupts state even with per-request operator checkpoints. See
-    # dev/docs/memory/qwen_3.8_27b_nvfp4_gdn_paged_dflash2_hybrid_dispatch_design.md section 6.2.
+    for group in groups[1:]:
+        assert "checkpoints" not in group["bindings"]["state"]
+        assert "checkpoint_count" not in group
+        assert "checkpoint_alignment" not in group
     assert "mixed_batch_checkpoints" not in config["model"]["decoder"]
 
 
-def test_qwen38_compact_state_updates_coexist_with_checkpoints(monkeypatch, tmp_path):
+def test_qwen38_compact_state_updates_are_checkpoint_free(monkeypatch, tmp_path):
     layer_types = ["linear_attention", "full_attention"]
     model = _make_config_model(Qwen35TextModel, layer_types=layer_types)
     model.num_layers = 2
@@ -185,11 +180,8 @@ def test_qwen38_compact_state_updates_coexist_with_checkpoints(monkeypatch, tmp_
             "state": {
                 "input": "past_key_values.%d.conv_state",
                 "output": "present.%d.conv_state",
-                "checkpoints": "checkpoints.%d.conv_state",
             }
         },
-        "checkpoint_count": 4,
-        "checkpoint_alignment": "left",
         "state_update": {
             "kind": "causal_conv",
             "capacity": 3,
@@ -205,11 +197,8 @@ def test_qwen38_compact_state_updates_coexist_with_checkpoints(monkeypatch, tmp_
             "state": {
                 "input": "past_key_values.%d.recurrent_state",
                 "output": "present.%d.recurrent_state",
-                "checkpoints": "checkpoints.%d.recurrent_state",
             }
         },
-        "checkpoint_count": 4,
-        "checkpoint_alignment": "right",
         "state_update": {
             "kind": "gated_delta_net",
             "capacity": 3,
@@ -228,7 +217,6 @@ def test_qwen38_compact_deployment_omits_dense_checkpoints(monkeypatch, tmp_path
     model.num_layers = 2
     model._state_window = 4
     model.state_update_capacity = 3
-    model.state_update_keep_checkpoints = False
     config = _write_config(monkeypatch, tmp_path, model)
 
     for group in config["model"]["decoder"]["state_groups"][1:]:
@@ -330,7 +318,7 @@ def test_varlen_causal_conv_emits_reviewed_required_state_contract():
     assert node["inputs"] == ["input", "weight", "cu", "", "past"]
     assert node["outputs"] == ["/conv/output_0", "present"]
     assert node["activation"] == "silu"
-    assert node["max_checkpoints"] == 0
+    assert "max_checkpoints" not in node
     assert "ndim" not in node
     assert "state_window" not in node
 
@@ -421,7 +409,7 @@ def test_gated_delta_net_evaluation_preserves_precomputed_gate_contract():
     assert node["beta_activation"] == "none"
     assert node["qk_l2_norm"] == 0
     assert node["chunk_size"] == 64
-    assert node["state_checkpoints"] == 0
+    assert "state_checkpoints" not in node
     assert model.values[-1] == ("present", base_module.ir.DataType.FLOAT, state_shape)
 
 
@@ -448,14 +436,8 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
         state_update_capture_count="capture_count",
         state_update_active="state_update_active",
         state_update_capacity=7,
-        state_update_decay="update_decay",
-        state_update_key="update_key",
-        state_update_delta="update_delta",
-        state_update_shapes=[
-            ["batch_size", 7, 16],
-            ["batch_size", 7, 16, 128],
-            ["batch_size", 7, 16, 128],
-        ],
+        state_update_capsule="state_update",
+        state_update_capsule_shape=["batch_size", 7 * (16 + 16 * 128 + 16 * 128)],
         output_shape=["num_tokens", 16, 128],
         present_recurrent_shape=["batch_size", 16, 128, 128],
     )
@@ -479,6 +461,7 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
     assert node["arithmetic_mode"] == "compatibility"
     assert node["qk_l2_norm"] == 1
     assert node["scale"] == 0.0
+    assert node["outputs"] == ["/gdn/output_0", "present", "state_update"]
 
 
 def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
@@ -491,14 +474,11 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
         cumulative_sequence_length="cu",
         past_conv_state="past",
         present_conv_state="present",
-        prefix_conv_state="checkpoint",
-        max_checkpoints=4,
         state_update_capture_count="state_update_capture_count",
         state_update_capacity=3,
         state_update_value="state_update.0.conv_value",
         output_shape=["num_tokens", 48],
         present_conv_shape=["batch_size", 48, 3],
-        prefix_conv_shape=[4, "batch_size", 48, 3],
         state_update_value_shape=["batch_size", 3, 48],
     )
     conv = model.nodes[-1][1]
@@ -506,7 +486,6 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
     assert conv["outputs"] == [
         "/conv/output_0",
         "present",
-        "checkpoint",
         "state_update.0.conv_value",
     ]
     assert conv["state_update_capacity"] == 3
@@ -535,7 +514,6 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
     assert compact_conv["outputs"] == [
         "/compact_conv/output_0",
         "present",
-        "",
         "state_update.0.conv_value",
     ]
 
@@ -547,24 +525,15 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
         cumulative_sequence_length="cu",
         past_recurrent_state="past",
         present_recurrent_state="present",
-        checkpoints="checkpoint",
-        state_checkpoints=4,
         decay="decay",
         beta="beta",
         gate_shape=["num_tokens", 3],
         state_update_capture_count="state_update_capture_count",
         state_update_capacity=3,
-        state_update_decay="state_update.0.recurrent_decay",
-        state_update_key="state_update.0.recurrent_key",
-        state_update_delta="state_update.0.recurrent_delta",
+        state_update_capsule="state_update.0.recurrent_capsule",
         output_shape=["num_tokens", 3, 8],
         present_recurrent_shape=["batch_size", 3, 8, 4],
-        checkpoints_shape=[4, "batch_size", 3, 8, 4],
-        state_update_shapes=[
-            ["batch_size", 3, 3],
-            ["batch_size", 3, 2, 4],
-            ["batch_size", 3, 3, 8],
-        ],
+        state_update_capsule_shape=["batch_size", 3 * (3 + 2 * 4 + 3 * 8)],
     )
     gdn = model.nodes[-1][1]
     assert gdn["inputs"] == [
@@ -582,17 +551,14 @@ def test_varlen_ops_emit_compact_state_update_contract_at_exact_slots():
     assert gdn["outputs"] == [
         "/gdn/output_0",
         "present",
-        "checkpoint",
-        "state_update.0.recurrent_decay",
-        "state_update.0.recurrent_key",
-        "state_update.0.recurrent_delta",
+        "state_update.0.recurrent_capsule",
     ]
     assert gdn["state_update_capacity"] == 3
-    assert model.values[-3:] == [
-        ("state_update.0.recurrent_decay", base_module.ir.DataType.FLOAT, ["batch_size", 3, 3]),
-        ("state_update.0.recurrent_key", base_module.ir.DataType.FLOAT, ["batch_size", 3, 2, 4]),
-        ("state_update.0.recurrent_delta", base_module.ir.DataType.FLOAT, ["batch_size", 3, 3, 8]),
-    ]
+    assert model.values[-1] == (
+        "state_update.0.recurrent_capsule",
+        base_module.ir.DataType.FLOAT,
+        ["batch_size", 3 * (3 + 2 * 4 + 3 * 8)],
+    )
 
 
 def test_gated_delta_net_evaluation_rejects_bf16_but_accepts_fp32():
@@ -723,7 +689,7 @@ def test_qwen_packed_recurrent_io_is_fp32_v_major():
     assert "checkpoint_state.0.conv" not in model.output_names
 
 
-def test_qwen_packed_state_window_declares_checkpoint_outputs():
+def test_qwen_packed_state_window_keeps_checkpoint_outputs_absent():
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
     model.io_dtype = base_module.ir.DataType.FLOAT16
@@ -744,15 +710,11 @@ def test_qwen_packed_state_window_declares_checkpoint_outputs():
 
     model._setup_hybrid_cache_io()
 
-    # The committed state keeps its unwindowed shape; only the extra outputs carry the window.
+    # Packed operators always use unwindowed committed state and compact replay.
     assert model.input_shapes["past_state.0.recurrent"] == ["batch_size", 3, 8, 4]
     assert model.output_shapes["present_state.0.recurrent"] == ["batch_size", 3, 8, 4]
-    assert model.output_names["checkpoint_state.0.conv"] == "checkpoints.0.conv_state"
-    assert model.output_shapes["checkpoint_state.0.conv"] == [4, "batch_size", 48, 3]
-    assert model.output_types["checkpoint_state.0.conv"] == base_module.ir.DataType.FLOAT16
-    assert model.output_names["checkpoint_state.0.recurrent"] == "checkpoints.0.recurrent_state"
-    assert model.output_shapes["checkpoint_state.0.recurrent"] == [4, "batch_size", 3, 8, 4]
-    assert model.output_types["checkpoint_state.0.recurrent"] == base_module.ir.DataType.FLOAT
+    assert "checkpoint_state.0.conv" not in model.output_names
+    assert "checkpoint_state.0.recurrent" not in model.output_names
 
 
 def test_qwen_packed_compact_state_update_declares_exact_graph_io():
@@ -793,53 +755,9 @@ def test_qwen_packed_compact_state_update_declares_exact_graph_io():
     assert model.output_types["state_update.0.recurrent_capsule"] == base_module.ir.DataType.FLOAT
 
 
-def test_varlen_ops_emit_checkpoint_outputs():
+def test_varlen_ops_reject_checkpoint_outputs():
     model = _recording_model()
-    model.make_varlen_causal_conv_with_state(
-        "/conv",
-        root_input="x",
-        weight="w",
-        bias="b",
-        cumulative_sequence_length="cu",
-        past_conv_state="past",
-        present_conv_state="present",
-        prefix_conv_state="prefix",
-        max_checkpoints=4,
-        output_shape=["num_tokens", 48],
-        present_conv_shape=["batch_size", 48, 3],
-        prefix_conv_shape=[4, "batch_size", 48, 3],
-    )
-    conv = model.nodes[-1][1]
-    assert conv["outputs"] == ["/conv/output_0", "present", "prefix"]
-    assert conv["max_checkpoints"] == 4
-    assert model.values[-1] == ("prefix", base_module.ir.DataType.FLOAT16, [4, "batch_size", 48, 3])
-
-    model.make_varlen_gated_delta_net(
-        "/gdn",
-        q_path="q",
-        k_path="k",
-        v_path="v",
-        cumulative_sequence_length="cu",
-        past_recurrent_state="past",
-        present_recurrent_state="present",
-        checkpoints="ckpt",
-        state_checkpoints=4,
-        decay="decay",
-        beta="beta",
-        gate_shape=["num_tokens", 3],
-        output_shape=["num_tokens", 3, 8],
-        present_recurrent_shape=["batch_size", 3, 8, 4],
-        checkpoints_shape=[4, "batch_size", 3, 8, 4],
-    )
-    gdn = model.nodes[-1][1]
-    assert gdn["outputs"] == ["/gdn/output_0", "present", "ckpt"]
-    assert gdn["state_checkpoints"] == 4
-    assert model.values[-1] == ("ckpt", base_module.ir.DataType.FLOAT, [4, "batch_size", 3, 8, 4])
-
-
-def test_varlen_ops_reject_half_configured_checkpoints():
-    model = _recording_model()
-    with pytest.raises(ValueError, match="must be set together"):
+    with pytest.raises(ValueError, match="checkpoint outputs are no longer supported"):
         model.make_varlen_causal_conv_with_state(
             "/conv",
             root_input="x",
@@ -848,11 +766,12 @@ def test_varlen_ops_reject_half_configured_checkpoints():
             cumulative_sequence_length="cu",
             past_conv_state="past",
             present_conv_state="present",
+            prefix_conv_state="prefix",
             max_checkpoints=4,
             output_shape=["num_tokens", 48],
             present_conv_shape=["batch_size", 48, 3],
         )
-    with pytest.raises(ValueError, match="must be set together"):
+    with pytest.raises(ValueError, match="checkpoint outputs are no longer supported"):
         model.make_varlen_gated_delta_net(
             "/gdn",
             q_path="q",
@@ -867,4 +786,13 @@ def test_varlen_ops_reject_half_configured_checkpoints():
             gate_shape=["num_tokens", 3],
             output_shape=["num_tokens", 3, 8],
             present_recurrent_shape=["batch_size", 3, 8, 4],
+        )
+
+
+def test_gated_delta_net_rejects_separate_state_update_outputs():
+    model = _recording_model()
+    with pytest.raises(ValueError, match="separate state-update outputs are no longer supported"):
+        model.make_varlen_gated_delta_net(
+            "/gdn",
+            state_update_decay="decay_update",
         )

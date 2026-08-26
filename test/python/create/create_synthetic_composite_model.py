@@ -52,10 +52,6 @@ MAX_BATCH_SIZE = 8
 CONTEXT_LENGTH = 128
 EOS_TOKEN_ID = 1
 
-# Speculative-rollback checkpoint window. Each fixed group also publishes the state after each of
-# the last CHECKPOINT_COUNT tokens of a step, so a partially accepted draft can roll back to it.
-# The two groups use opposite slot alignments, mirroring the real packed operators.
-CHECKPOINT_COUNT = 4
 STATE_UPDATE_CAPACITY = 3
 
 
@@ -81,7 +77,6 @@ def _decoder_graph():
         _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
         _const("state_one", np.asarray(1.0, dtype=np.float32)),
-        _const("checkpoint_axis", i64([0])),
         _const("state_update_axis", i64([1])),
         _const("gdn_decay_axes", i64([2, 3])),
         _const("gdn_key_axes", i64([1, 2])),
@@ -193,27 +188,13 @@ def _decoder_graph():
         for layer in layer_ids:
             in_name = f"past_{prefix}.{layer}"
             out_name = f"present_{prefix}.{layer}"
-            checkpoints_name = f"checkpoints_{prefix}.{layer}"
             shape = ["batch_size", *row_dims]
             inputs.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, shape))
             outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, shape))
-            outputs.append(
-                helper.make_tensor_value_info(
-                    checkpoints_name, TensorProto.FLOAT, [CHECKPOINT_COUNT, *shape]
-                )
-            )
             if prefix == "conv" and layer == 0:
                 nodes.append(helper.make_node("Add", [in_name, "state_one"], [out_name]))
             else:
                 nodes.append(helper.make_node("Identity", [in_name], [out_name]))
-            # Concatenating unsqueezed copies keeps the batch axis dynamic without any Shape math.
-            unsqueezed = f"{checkpoints_name}/unsqueezed"
-            nodes.append(helper.make_node("Unsqueeze", [in_name, "checkpoint_axis"], [unsqueezed]))
-            nodes.append(
-                helper.make_node(
-                    "Concat", [unsqueezed] * CHECKPOINT_COUNT, [checkpoints_name], axis=0
-                )
-            )
             if prefix == "conv":
                 update_name = f"state_update.{layer}.conv_value"
                 outputs.append(
@@ -231,24 +212,16 @@ def _decoder_graph():
             decay_name = f"state_update.{layer}.recurrent_decay"
             key_name = f"state_update.{layer}.recurrent_key"
             delta_name = f"state_update.{layer}.recurrent_delta"
-            outputs.extend(
-                [
-                    helper.make_tensor_value_info(
-                        decay_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0]],
-                    ),
-                    helper.make_tensor_value_info(
-                        key_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, 1, row_dims[2]],
-                    ),
-                    helper.make_tensor_value_info(
-                        delta_name,
-                        TensorProto.FLOAT,
-                        ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0], row_dims[1]],
-                    ),
-                ]
+            capsule_name = f"state_update.{layer}.recurrent_capsule"
+            capsule_width = STATE_UPDATE_CAPACITY * (
+                row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1]
+            )
+            outputs.append(
+                helper.make_tensor_value_info(
+                    capsule_name,
+                    TensorProto.FLOAT,
+                    ["batch_size", capsule_width],
+                )
             )
             decay_base = f"{decay_name}/base"
             key_base = f"{key_name}/base"
@@ -278,6 +251,15 @@ def _decoder_graph():
                     helper.make_node("Unsqueeze", [delta_base, "state_update_axis"], [delta_step]),
                     helper.make_node(
                         "Concat", [delta_step] * STATE_UPDATE_CAPACITY, [delta_name], axis=1
+                    ),
+                    helper.make_node("Flatten", [decay_name], [f"{decay_name}/flat"], axis=1),
+                    helper.make_node("Flatten", [key_name], [f"{key_name}/flat"], axis=1),
+                    helper.make_node("Flatten", [delta_name], [f"{delta_name}/flat"], axis=1),
+                    helper.make_node(
+                        "Concat",
+                        [f"{decay_name}/flat", f"{key_name}/flat", f"{delta_name}/flat"],
+                        [capsule_name],
+                        axis=1,
                     ),
                 ]
             )
@@ -340,13 +322,10 @@ def create_config(output_dir):
                     {
                         "kind": "fixed",
                         "layer_ids": CONV_LAYERS,
-                        "checkpoint_count": CHECKPOINT_COUNT,
-                        "checkpoint_alignment": "left",
                         "bindings": {
                             "state": {
                                 "input": "past_conv.%d",
                                 "output": "present_conv.%d",
-                                "checkpoints": "checkpoints_conv.%d",
                             },
                         },
                         "state_update": {
@@ -373,22 +352,18 @@ def create_config(output_dir):
                     {
                         "kind": "fixed",
                         "layer_ids": RECURRENT_LAYERS,
-                        "checkpoint_count": CHECKPOINT_COUNT,
-                        "checkpoint_alignment": "right",
                         "bindings": {
                             "state": {
                                 "input": "past_recurrent.%d",
                                 "output": "present_recurrent.%d",
-                                "checkpoints": "checkpoints_recurrent.%d",
                             },
                         },
                         "state_update": {
                             "kind": "gated_delta_net",
                             "capacity": STATE_UPDATE_CAPACITY,
                             "capture_count": "state_update_capture_count",
-                            "decay": "state_update.%d.recurrent_decay",
-                            "key": "state_update.%d.recurrent_key",
-                            "delta": "state_update.%d.recurrent_delta",
+                            "capsule": "state_update.%d.recurrent_capsule",
+                            "key_head_count": 1,
                         },
                     },
                 ],
