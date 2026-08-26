@@ -216,3 +216,34 @@ def test_multimodal_type_is_registered_as_a_mrope_qwen_vl_model():
 def test_text_only_type_is_not_registered_as_a_vision_model():
     _, vlm = _parse_model_type_array("VLM")
     assert "qwen4exp_text" not in vlm
+
+
+#####################################################################################
+# Runtime multimodal processor registry
+#####################################################################################
+
+MODEL_SOURCE = (REPO_ROOT / "src" / "models" / "model.cpp").read_text()
+
+
+def _processor_factory_entries():
+    match = re.search(r"processor_factory_\{(.*?)\}\}\s*\{", MODEL_SOURCE, re.DOTALL)
+    assert match, "could not find the MultiModalProcessor processor_factory_ initializer"
+    entries = re.findall(r'\{"([^"]+)",\s*Processor::Create<(\w+)>\}', match.group(1) + "}")
+    assert entries, "processor_factory_ initializer parsed but contained no entries"
+    return dict(entries)
+
+
+def test_multimodal_type_maps_to_the_qwen_image_processor():
+    # Without this entry `MultiModalProcessor` throws "no processor for model type" at load
+    # time, even though the three ONNX graphs export cleanly.
+    entries = _processor_factory_entries()
+    assert entries.get("qwen4exp") == "QwenImageProcessor"
+
+
+def test_multimodal_type_reuses_the_processor_of_its_qwen_vl_siblings():
+    entries = _processor_factory_entries()
+    assert entries["qwen4exp"] == entries["qwen3_5"] == entries["qwen3_vl"]
+
+
+def test_text_only_type_has_no_multimodal_processor():
+    assert "qwen4exp_text" not in _processor_factory_entries()

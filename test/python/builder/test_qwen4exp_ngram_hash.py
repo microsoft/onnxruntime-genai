@@ -172,3 +172,80 @@ def test_head_offsets_partition_the_table_without_gaps():
 )
 def test_padded_vocab_rounds_up_to_divisor(total, divisor, expected):
     assert qwen4exp.padded_ngram_vocab_size(total, divisor) == expected
+
+
+#####################################################################################
+# Parity against the reference implementation shipped in `transformers`
+#####################################################################################
+
+
+@pytest.fixture(scope="module")
+def reference_module():
+    """The upstream `modeling_qwen4_exp` module, when the installed transformers ships it."""
+    return pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+
+
+@pytest.mark.parametrize("value", [0, 1, 7, 12345, 2**31, 2**63, (1 << 64) - 1])
+def test_splitmix64_matches_reference(reference_module, value):
+    assert qwen4exp.splitmix64(value) == reference_module._splitmix64(value)
+
+
+@pytest.mark.parametrize("vocab_size", [1, 1000, 248320])
+@pytest.mark.parametrize("ngram_size", [2, 3, 5])
+@pytest.mark.parametrize("ple_layer_index", [0, 1, 7])
+def test_layer_multipliers_match_reference(reference_module, vocab_size, ngram_size, ple_layer_index):
+    expected = reference_module._build_layer_multipliers(vocab_size, ngram_size, ple_layer_index, 1234)
+    assert qwen4exp.build_layer_multipliers(vocab_size, ngram_size, ple_layer_index, 1234) == expected.tolist()
+
+
+def test_primality_helpers_match_reference(reference_module):
+    assert all(qwen4exp.is_prime(value) == reference_module._is_prime(value) for value in range(5000))
+    for start in (0, 10, 999, 19999999):
+        for count in (1, 2, 5, 17):
+            assert qwen4exp.find_nth_prime_after(start, count) == reference_module._find_nth_prime_after(start, count)
+
+
+@pytest.mark.parametrize("ple_layer_index", [0, 1])
+def test_head_layout_matches_a_real_ngram_embedding_module(reference_module, ple_layer_index):
+    """The builder's initializers must line up with the checkpoint's embedding table."""
+    config_module = pytest.importorskip("transformers.models.qwen4_exp.configuration_qwen4_exp")
+    config = config_module.Qwen4ExpTextConfig(
+        vocab_size=512,
+        hidden_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["linear_attention"] * 3 + ["qwen_sparse_attention"],
+        hc_count=2,
+        hc_lowrank=16,
+        ple_layer_ids=[1, 2],
+        ple_embed_dim=32,
+        ple_conv_kernel_size=2,
+        ngram_size=3,
+        heads_per_ngram=2,
+        ngram_vocab_size_base=1000,
+        make_ngram_vocab_size_divisible_by=8,
+        seed=1234,
+        eos_token_id=2,
+    )
+    ngram_heads = (config.ngram_size - 1) * config.heads_per_ngram
+    embedding = reference_module.Qwen4ExpTextNGramEmbedding(
+        config, config.ple_embed_dim, layer_idx=config.ple_layer_ids[ple_layer_index] - 1, ple_layer_index=ple_layer_index
+    )
+
+    sizes, offsets, total = qwen4exp.ngram_head_vocab_layout(
+        config.ngram_vocab_size_base, ngram_heads, ple_layer_index
+    )
+    assert sizes == embedding.ngram_heads_vocab_sizes.tolist()
+    assert offsets == embedding.ngram_heads_offsets.tolist()
+    assert total == embedding.total_vocab_size
+    assert qwen4exp.build_layer_multipliers(
+        config.vocab_size, config.ngram_size, ple_layer_index, config.seed
+    ) == embedding.layer_multipliers.tolist()
+    padded = qwen4exp.padded_ngram_vocab_size(total, config.make_ngram_vocab_size_divisible_by)
+    assert (padded, config.ple_embed_dim // ngram_heads) == tuple(embedding.ngram_embedding.weight.shape)

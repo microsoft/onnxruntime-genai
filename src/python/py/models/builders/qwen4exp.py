@@ -183,6 +183,36 @@ def padded_ngram_vocab_size(total_vocab_size: int, divisor: int) -> int:
     return math.ceil(total_vocab_size / divisor) * divisor
 
 
+class _PackedExpertsView:
+    """Adapter that makes ``Qwen4ExpTextExperts`` usable by ``Qwen35MoeTextModel.make_moe``.
+
+    Qwen3.5's MoE builder probes ``next(iter(mlp.experts), None)`` to detect a ModelOpt NVFP4
+    checkpoint whose experts are stored as a per-expert module list.  Qwen4Exp only ever stores
+    the packed 3-D ``gate_up_proj``/``down_proj`` parameters, which the builder already handles,
+    so iteration yields nothing and the packed path is taken.
+    """
+
+    def __init__(self, experts):
+        self._experts = experts
+
+    def __getattr__(self, name):
+        return getattr(self._experts, name)
+
+    def __iter__(self):
+        return iter(())
+
+
+class _PackedMoeView:
+    """``mlp`` view whose ``experts`` attribute is a :class:`_PackedExpertsView`."""
+
+    def __init__(self, mlp):
+        self._mlp = mlp
+        self.experts = _PackedExpertsView(mlp.experts)
+
+    def __getattr__(self, name):
+        return getattr(self._mlp, name)
+
+
 #####################################################################################
 # Text decoder
 #####################################################################################
@@ -203,6 +233,28 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
 
     def _get_model_type(self, config):
         return "Qwen4Exp_textForCausalLM" if self.is_text_only else "Qwen4ExpForConditionalGeneration"
+
+    #: Qwen4Exp names its attention layers ``qwen_sparse_attention``. Published checkpoints may
+    #: still say ``full_attention``; the HF config normalizes those to ``qwen_sparse_attention``.
+    QSA_LAYER_TYPE = "qwen_sparse_attention"
+
+    def _resolve_layer_types(self, config, num_layers):
+        """Normalize ``qwen_sparse_attention`` to the ``full_attention`` name the base uses.
+
+        Every Qwen4Exp attention layer is a QSA layer, so it maps 1:1 onto the Qwen3.5
+        full-attention path; only the attention op itself differs.  ``_make_full_attention``
+        swaps in ``QwenSparseAttention``/``SparsePagedAttention`` when the module actually
+        carries an indexer.
+        """
+        text_config = getattr(config, "text_config", config)
+        configured = getattr(text_config, "layer_types", None)
+        if configured is not None and self.QSA_LAYER_TYPE in configured:
+            normalized = ["full_attention" if lt == self.QSA_LAYER_TYPE else lt for lt in configured]
+            # `_resolve_layer_types` re-reads the config, so rewrite it on both views.
+            text_config.layer_types = normalized
+            if text_config is not config:
+                config.layer_types = list(normalized)
+        return super()._resolve_layer_types(config, num_layers)
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         text_config = getattr(config, "text_config", config)
@@ -973,6 +1025,16 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
         if layer_id == self.num_layers - 1:
             self.layernorm_attrs["last_layernorm"] = True
 
+    def make_moe(self, layer_id, mlp, root_input):
+        """Routed experts + shared expert, using the inherited Qwen3.5 MoE emitter.
+
+        Qwen4Exp stores the routed experts as packed 3-D tensors, so the module is wrapped in a
+        view that satisfies the base class's per-expert iteration probe.
+        """
+        if not isinstance(getattr(mlp, "experts", None), torch.nn.ModuleList):
+            mlp = _PackedMoeView(mlp)
+        super().make_moe(layer_id, mlp, root_input)
+
     def make_mlp(self, layer_id, mlp, root_input):
         # Every Qwen4Exp layer is MoE; keep the base dispatch honest.
         self.make_moe(layer_id, mlp, root_input)
@@ -1047,6 +1109,9 @@ class Qwen4ExpEmbeddingModel(Model):
     """
 
     DEFAULT_FILENAME = "embedding.onnx"
+
+    def _get_model_type(self, config):
+        return "Qwen4ExpEmbeddingModel"
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = dict(extra_options)
@@ -1182,6 +1247,9 @@ class Qwen4ExpVisionModel(Model):
     """
 
     DEFAULT_FILENAME = "vision.onnx"
+
+    def _get_model_type(self, config):
+        return "Qwen4ExpVisionModel"
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = dict(extra_options)

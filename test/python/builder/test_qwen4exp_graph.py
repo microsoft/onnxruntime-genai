@@ -370,9 +370,9 @@ def test_ple_query_norm_reads_the_residual_stream_and_key_norm_reads_the_embeddi
     model._make_ple_layer(0, _ple_module(), "stream")
 
     nodes = _named(model)
-    assert nodes["/model/layers.0/ple/norm_query/hc_norm/group/Reshape"].inputs[0] == "stream"
+    assert nodes["/model/layers.0/ple/norm_query/group/Reshape"].inputs[0] == "stream"
     assert (
-        nodes["/model/layers.0/ple/norm_key/hc_norm/group/Reshape"].inputs[0]
+        nodes["/model/layers.0/ple/norm_key/group/Reshape"].inputs[0]
         == "/model/layers.0/ple/key_proj/MatMul/output_0"
     )
 
@@ -561,3 +561,56 @@ def test_attention_op_uses_the_sparse_op_when_the_indexer_is_pending():
 def test_sequence_dim_follows_the_packing_mode(use_paged_attention, expected):
     model = _make_recording_model(use_paged_attention=use_paged_attention)
     assert model.sequence_dim_name() == expected
+
+
+#####################################################################################
+# Checkpoint compatibility shims
+#####################################################################################
+
+
+def _resolve(layer_types, num_layers=4):
+    """Run `_resolve_layer_types` against a config pair shaped like a real checkpoint."""
+    text_config = SimpleNamespace(layer_types=list(layer_types), num_hidden_layers=num_layers)
+    config = SimpleNamespace(text_config=text_config, layer_types=list(layer_types))
+    model = object.__new__(Qwen4ExpTextModel)
+    resolved = Qwen4ExpTextModel._resolve_layer_types(model, config, num_layers)
+    return resolved, config, text_config
+
+
+def test_qwen_sparse_attention_layers_are_normalized_to_full_attention():
+    """`Qwen4ExpTextConfig` renames full attention to `qwen_sparse_attention`; the shared
+    Qwen3.5 resolver only accepts the canonical names, so the alias has to be rewritten."""
+    resolved, _, _ = _resolve(["linear_attention", "qwen_sparse_attention"] * 2)
+
+    assert resolved == ["linear_attention", "full_attention", "linear_attention", "full_attention"]
+
+
+def test_normalization_rewrites_both_config_objects_in_place():
+    # The base builder re-reads `layer_types` off whichever config it flattened, so leaving a
+    # stale alias behind on either object resurfaces as an unsupported-layer error later on.
+    _, config, text_config = _resolve(["qwen_sparse_attention", "linear_attention"], num_layers=2)
+
+    assert config.layer_types == ["full_attention", "linear_attention"]
+    assert text_config.layer_types == ["full_attention", "linear_attention"]
+
+
+def test_already_canonical_layer_types_survive_normalization():
+    resolved, _, _ = _resolve(["full_attention", "linear_attention"], num_layers=2)
+
+    assert resolved == ["full_attention", "linear_attention"]
+
+
+def test_packed_experts_are_wrapped_so_the_nvfp4_probe_can_iterate():
+    """`Qwen35MoeTextModel.make_moe` probes `next(iter(mlp.experts), None)` for NVFP4 weights.
+    Qwen4Exp stores experts as packed 3-D tensors on a non-iterable module, so the view has to
+    make iteration empty rather than raising."""
+    packed = SimpleNamespace(gate_up_proj=object(), down_proj=object())
+    mlp = SimpleNamespace(experts=packed, gate=object(), shared_expert=object())
+
+    view = qwen4exp._PackedMoeView(mlp)
+
+    assert next(iter(view.experts), None) is None
+    assert list(view.experts) == []
+    assert view.experts.gate_up_proj is packed.gate_up_proj
+    assert view.experts.down_proj is packed.down_proj
+    assert view.gate is mlp.gate and view.shared_expert is mlp.shared_expert

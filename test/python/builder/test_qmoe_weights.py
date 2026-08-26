@@ -146,6 +146,8 @@ def _load_builder_cli_module(monkeypatch):
         "Qwen35TextModel",
         "Qwen3Model",
         "Qwen3VLTextModel",
+        "Qwen4ExpModel",
+        "Qwen4ExpTextModel",
         "QwenModel",
         "SmolLM3Model",
         "VideoChatFlashQwenModel",
