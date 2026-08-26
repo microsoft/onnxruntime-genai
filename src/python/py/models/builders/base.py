@@ -3617,7 +3617,7 @@ class Model:
             "update_rule": kwargs.get("update_rule", "gated_delta"),
             "scale": kwargs.get("scale", 1.0),
         }
-        for opt in ("gate_activation", "beta_activation", "arithmetic_mode"):
+        for opt in ("gate_activation", "beta_activation"):
             if kwargs.get(opt):
                 attributes[opt] = kwargs[opt]
         for opt in ("qk_l2_norm", "chunk_size"):
@@ -3687,7 +3687,6 @@ class Model:
             "scale": kwargs.get("scale", 1.0),
             "gate_activation": kwargs.get("gate_activation", "none"),
             "beta_activation": kwargs.get("beta_activation", "none"),
-            "arithmetic_mode": kwargs.get("arithmetic_mode", "native"),
             "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
             "chunk_size": kwargs.get("chunk_size", 64),
         }

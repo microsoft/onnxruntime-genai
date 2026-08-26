@@ -1141,18 +1141,13 @@ class Qwen35TextModel(Model):
         # the legacy unwindowed state I/O (no cropping, so MTP falls back to snapshot + replay).
         # Requires ORT kernels that understand the `state_window` attribute.
         #
-        # The packed varlen operators express the same series as a separate third output
-        # (`checkpoints.%d.{conv,recurrent}_state`) rather than by widening the committed state,
-        # so there the past/present pair keeps its unwindowed shape. Both packed operators cap the
-        # window at 8.
+        # Packed varlen operators keep committed state unwindowed and expose compact transitions
+        # for replay instead of materializing dense checkpoint state.
         self._state_window = int(extra_options.get("state_window", 0))
         if self._state_window < 0:
             raise ValueError("state_window must be >= 0")
-        if self.use_paged_attention and self._state_window > 8:
-            raise ValueError("packed varlen state operators support state_window up to 8")
-        # The packed operators expose the same series through a separate third output instead of
-        # widening the committed state, so the past/present pair keeps its unwindowed shape and
-        # the Engine's fixed-state banks are unaffected.
+        # Packed operators keep the committed past/present pair unwindowed, so the Engine's
+        # fixed-state banks are unaffected by speculative width.
         self._state_window_dims = [] if self.use_paged_attention else ([self._state_window] if self._state_window else [])
 
         # Collapse the float32 gate glue around LinearAttention into the fused com.microsoft
@@ -1172,11 +1167,6 @@ class Qwen35TextModel(Model):
         self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
         if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
-        if self.linear_attn_op == "gated_delta_net" and self._state_window:
-            raise ValueError("linear_attn_op=gated_delta_net no longer supports state_window")
-        self.gdn_arithmetic_mode = str(extra_options.get("gdn_arithmetic_mode", "native")).lower()
-        if self.gdn_arithmetic_mode not in ("native", "compatibility"):
-            raise ValueError("gdn_arithmetic_mode must be one of: native, compatibility")
 
         self.state_update_capacity = self._parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
         self._validate_state_update_options(
@@ -1240,8 +1230,11 @@ class Qwen35TextModel(Model):
                     self.linear_conv_dim,
                     self.linear_conv_kernel_dim - 1,
                 ]
+                recurrent_window_dims = (
+                    [] if self.use_paged_attention or self.linear_attn_op == "gated_delta_net" else self._state_window_dims
+                )
                 recurrent_state_shape = [
-                    *self._state_window_dims,
+                    *recurrent_window_dims,
                     "batch_size",
                     self.linear_num_value_heads,
                     *(
@@ -2209,13 +2202,8 @@ class Qwen35TextModel(Model):
         k_thd = add_head_axis("k", k_out, n_k, hk)
         v_thd = add_head_axis("v", v_out, n_kv, hv)
 
-        arithmetic_mode = getattr(self, "gdn_arithmetic_mode", "native")
-        if arithmetic_mode == "compatibility":
-            a_log_init = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
-            self.make_initializer((-linear_attn.A_log.data.exp()).detach(), a_log_init, to=ir.DataType.FLOAT)
-        else:
-            a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
-            self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
+        a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
+        self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
@@ -2237,7 +2225,6 @@ class Qwen35TextModel(Model):
             gate_shape=["num_tokens", n_kv],
             gate_activation="qwen",
             beta_activation="sigmoid",
-            arithmetic_mode=arithmetic_mode,
             qk_l2_norm=1,
             update_rule="gated_delta",
             scale=0.0,
@@ -2320,13 +2307,8 @@ class Qwen35TextModel(Model):
         b_cast_name = f"{basename}/beta/b_cast/Cast"
         self.make_cast(b_cast_name, f"{b_name}/output_0", ir.DataType.FLOAT, gate_shape)
 
-        arithmetic_mode = getattr(self, "gdn_arithmetic_mode", "native")
-        if arithmetic_mode == "compatibility":
-            a_log_init = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
-            self.make_initializer((-linear_attn.A_log.data.exp()).detach(), a_log_init, to=ir.DataType.FLOAT)
-        else:
-            a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
-            self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
+        a_log_init = f"model.layers.{layer_id}.linear_attn.A_log"
+        self.make_initializer(linear_attn.A_log, a_log_init, to=ir.DataType.FLOAT)
         dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
         self.make_initializer(linear_attn.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
 
@@ -2347,7 +2329,6 @@ class Qwen35TextModel(Model):
             update_rule="gated_delta",
             gate_activation="qwen",
             beta_activation="sigmoid",
-            arithmetic_mode=arithmetic_mode,
             qk_l2_norm=1,
             scale=0.0,  # 0 means the op's default 1/sqrt(head_size_qk)
             output_shape=["batch_size", "sequence_length", n_kv, hv],

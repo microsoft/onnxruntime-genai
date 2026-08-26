@@ -430,7 +430,6 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
         gate_shape=["num_tokens", 16],
         gate_activation="qwen",
         beta_activation="sigmoid",
-        arithmetic_mode="compatibility",
         qk_l2_norm=1,
         scale=0.0,
         state_update_capture_count="capture_count",
@@ -458,7 +457,7 @@ def test_gated_delta_net_fused_gate_inputs_use_schema_slots_before_capture_count
     ]
     assert node["gate_activation"] == "qwen"
     assert node["beta_activation"] == "sigmoid"
-    assert node["arithmetic_mode"] == "compatibility"
+    assert "arithmetic_mode" not in node
     assert node["qk_l2_norm"] == 1
     assert node["scale"] == 0.0
     assert node["outputs"] == ["/gdn/output_0", "present", "state_update"]
@@ -598,7 +597,6 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     model._state_window_dims = []
     model._state_window = 0
     model.state_update_capacity = 3
-    model.gdn_arithmetic_mode = "compatibility"
     model.input_names = {"cumulative_sequence_lengths": "cu"}
     model._leading_dims = lambda: ["num_tokens"]
     model._make_linear_attention_projections = lambda *args: ("z", "b", "a", "conv_input", "weight")
@@ -637,8 +635,8 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     assert linear["beta"] == "b/output_0"
     assert linear["gate_activation"] == "qwen"
     assert linear["beta_activation"] == "sigmoid"
-    assert linear["arithmetic_mode"] == "compatibility"
-    assert linear["a_log"] == "model.layers.1.linear_attn.neg_exp_A"
+    assert "arithmetic_mode" not in linear
+    assert linear["a_log"] == "model.layers.1.linear_attn.A_log"
     assert linear["qk_l2_norm"] == 1
     assert linear["scale"] == 0.0
     assert linear["state_update_capacity"] == 3
@@ -647,10 +645,47 @@ def test_qwen_packed_linear_attention_reshapes_thd_and_uses_v_major_state():
     assert linear["output_shape"] == ["num_tokens", 3, 8]
     assert linear["present_recurrent_shape"] == ["batch_size", 3, 8, 4]
     assert linear["gate_shape"] == ["num_tokens", 3]
-    decay_scale = next(args[0] for args, _ in initializers if args[1] == linear["a_log"])
-    qwen_module.torch.testing.assert_close(decay_scale, -a_log.exp())
+    exported_a_log = next(args[0] for args, _ in initializers if args[1] == linear["a_log"])
+    qwen_module.torch.testing.assert_close(exported_a_log, a_log)
     assert reshapes[-1][3] == ["num_tokens", 24]
     assert outputs[0][2].endswith("/linear_attention_output/Reshape/output_0")
+
+
+def test_qwen_dense_gated_delta_net_exports_native_arithmetic_contract():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.linear_key_dim = 8
+    model.linear_value_dim = 24
+    model.linear_num_value_heads = 3
+    model.linear_num_key_heads = 2
+    model.linear_key_head_dim = 4
+    model.linear_value_head_dim = 8
+    model._state_window = 0
+    model.make_node = lambda *args, **kwargs: None
+    model.make_value = lambda *args, **kwargs: None
+    model.make_cast = lambda *args, **kwargs: None
+    model.make_reshape = lambda *args, **kwargs: None
+    initializers = []
+    model.make_initializer = lambda *args, **kwargs: initializers.append((args, kwargs))
+    gdn_calls = []
+    model.make_gated_delta_net = lambda name, **kwargs: gdn_calls.append((name, kwargs))
+
+    a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
+    output = model._make_gated_delta_net(
+        1,
+        SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
+        "conv_out",
+        "b",
+        "a",
+    )
+
+    gdn = gdn_calls[0][1]
+    assert "arithmetic_mode" not in gdn
+    assert gdn["a_log"] == "model.layers.1.linear_attn.A_log"
+    assert gdn["state_shape"] == ["batch_size", 3, 8, 4]
+    exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
+    qwen_module.torch.testing.assert_close(exported_a_log, a_log)
+    assert output.endswith("/gdn_out/Reshape/output_0")
 
 
 def test_qwen_packed_recurrent_io_is_fp32_v_major():
