@@ -20,12 +20,6 @@ StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
   if (!decoder.state_groups) {
     StateGroup group;
     group.kind = StateGroupKind::PagedKeyValue;
-    group.key = Config::Model::Decoder::StateBinding{
-        decoder.inputs.past_key_names,
-        decoder.outputs.present_key_names};
-    group.value = Config::Model::Decoder::StateBinding{
-        decoder.inputs.past_value_names,
-        decoder.outputs.present_value_names};
     group.layer_ids.reserve(decoder.num_hidden_layers);
     for (int layer_id = 0; layer_id < decoder.num_hidden_layers; ++layer_id) {
       group.layer_ids.push_back(layer_id);
@@ -52,11 +46,9 @@ StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
     throw std::runtime_error(
         "Dynamic batching requires one paged_kv decoder state group");
   }
-  if (!paged_group->key || !paged_group->value ||
-      paged_group->layer_ids.empty()) {
+  if (paged_group->layer_ids.empty()) {
     throw std::runtime_error(
-        "Dynamic batching requires a non-empty paged_kv decoder state group "
-        "with key and value bindings");
+        "Dynamic batching requires a non-empty paged_kv decoder state group");
   }
   return *paged_group;
 }
@@ -64,7 +56,8 @@ StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
 ONNXTensorElementDataType KeyValueCacheType(const std::shared_ptr<Model>& model,
                                             const StateGroup& paged_group) {
   const auto key_name = ComposeKeyValueName(
-      paged_group.key->input, paged_group.layer_ids.front());
+      model->config_->model.decoder.inputs.past_key_names,
+      paged_group.layer_ids.front());
   return model->session_info_.GetInputDataType(key_name);
 }
 
@@ -227,10 +220,10 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     cache_.push_back(LayerCache{
         OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),  // Key cache
         OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),  // Value cache
-        ComposeKeyValueName(paged_group.key->input, layer_id),
-        ComposeKeyValueName(paged_group.value->input, layer_id),
-        ComposeKeyValueName(paged_group.key->output, layer_id),
-        ComposeKeyValueName(paged_group.value->output, layer_id)});
+        ComposeKeyValueName(decoder.inputs.past_key_names, layer_id),
+        ComposeKeyValueName(decoder.inputs.past_value_names, layer_id),
+        ComposeKeyValueName(decoder.outputs.present_key_names, layer_id),
+        ComposeKeyValueName(decoder.outputs.present_value_names, layer_id)});
   }
   block_pool_ = std::make_unique<BlockPool>(block_size, num_blocks);
   if (Windowed()) {
@@ -589,14 +582,6 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
       request_reservation.reserved_block_ids.push_back(
           reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
     }
-    request_reservation.reserved_window_block_ids.reserve(
-        delta.reserved_window_block_count);
-    for (size_t i = 0; i < delta.reserved_window_block_count; ++i) {
-      request_reservation.reserved_window_block_ids.push_back(
-          reservation.ReservedWindowBlocks()[delta.reserved_window_block_offset + i]
-              ->Id());
-    }
-    request_reservation.newly_admitted = delta.newly_admitted;
     snapshot.reservations.push_back(std::move(request_reservation));
   }
   return snapshot;
