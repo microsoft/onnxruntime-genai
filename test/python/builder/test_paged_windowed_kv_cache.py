@@ -134,7 +134,9 @@ def test_ring_is_not_emitted_when_it_is_off():
 
 
 def test_ring_is_not_emitted_when_every_layer_is_local():
-    assert _make_layer_count_model(use_ring=True, local_layers=(0, 1), num_layers=2).has_windowed_paged_layers() is False
+    assert (
+        _make_layer_count_model(use_ring=True, local_layers=(0, 1), num_layers=2).has_windowed_paged_layers() is False
+    )
 
 
 # ===========================================================================
@@ -223,6 +225,15 @@ def test_paged_model_without_a_ring_drops_the_windowed_block_table():
 
     assert "block_table_windowed" not in model.input_names
     assert "block_table" in model.input_names
+
+
+def test_webgpu_paged_model_keeps_attention_metadata():
+    model = _make_inputs_model(use_paged_attention=True, use_ring=False)
+    model.ep = "webgpu"
+
+    model.make_inputs_init()
+
+    assert "attention_metadata" in model.input_names
 
 
 def test_non_paged_model_drops_every_paged_input():

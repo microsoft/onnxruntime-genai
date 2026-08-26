@@ -647,11 +647,12 @@ class Model:
             valid_paged_configurations = {
                 ("cuda", ir.DataType.FLOAT16),
                 ("cuda", ir.DataType.BFLOAT16),
+                ("webgpu", ir.DataType.FLOAT16),
             }
             if (self.ep, self.io_dtype) not in valid_paged_configurations:
                 raise NotImplementedError(
-                    "PagedAttention (use_paged_attention=true) is currently only supported for the CUDA "
-                    f"execution provider with FP16 or BF16 precision, not ({self.ep}, {self.io_dtype})."
+                    "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
+                    f"with FP16, not ({self.ep}, {self.io_dtype})."
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
             self.attention_attrs["paged_block_size"] = block_size
