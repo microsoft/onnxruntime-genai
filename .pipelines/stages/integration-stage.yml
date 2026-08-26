@@ -146,7 +146,7 @@ stages:
 
 - stage: integration_engine_benchmark_linux_x64
   displayName: 'Test · Engine Benchmark · Linux x64'
-  dependsOn: validate_pipeline_in_sync
+  dependsOn: []
   jobs:
   - template: jobs/integration-engine-benchmark-job.yml
     parameters:
