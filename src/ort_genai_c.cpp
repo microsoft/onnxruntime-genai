@@ -887,6 +887,12 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->fixed_state_noncontiguous_slot_fallbacks;
   else if (key == "fixed_state_mixed_active_bank_fallbacks")
     *value = stats->fixed_state_mixed_active_bank_fallbacks;
+  else if (key == "fixed_state_capsule_bytes_allocated")
+    *value = stats->fixed_state_capsule_bytes_allocated;
+  else if (key == "fixed_state_capsule_valid_prefix_bytes")
+    *value = stats->fixed_state_capsule_valid_prefix_bytes;
+  else if (key == "fixed_state_capsule_suffix_bytes_not_written")
+    *value = stats->fixed_state_capsule_suffix_bytes_not_written;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;

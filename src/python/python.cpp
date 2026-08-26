@@ -269,7 +269,10 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "fixed_state_replay_descriptor_count",
                           "fixed_state_replayed_transition_count",
                           "fixed_state_noncontiguous_slot_fallbacks",
-                          "fixed_state_mixed_active_bank_fallbacks"})
+                          "fixed_state_mixed_active_bank_fallbacks",
+                          "fixed_state_capsule_bytes_allocated",
+                          "fixed_state_capsule_valid_prefix_bytes",
+                          "fixed_state_capsule_suffix_bytes_not_written"})
     d[key] = stats.GetCount(key);
   d["formula_supported"] = stats.GetBool("formula_supported");
   for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",

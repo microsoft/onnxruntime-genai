@@ -175,6 +175,9 @@ struct FixedStateBindingMetrics {
   uint64_t replayed_transition_count{};
   uint64_t noncontiguous_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
+  uint64_t capsule_bytes_allocated{};
+  uint64_t capsule_valid_prefix_bytes{};
+  uint64_t capsule_suffix_bytes_not_written{};
 };
 
 struct FixedStatePoolSnapshot {

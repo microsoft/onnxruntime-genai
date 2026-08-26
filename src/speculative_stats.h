@@ -60,6 +60,9 @@ struct SpeculativeStats {
   size_t fixed_state_replayed_transition_count{};
   size_t fixed_state_noncontiguous_slot_fallbacks{};
   size_t fixed_state_mixed_active_bank_fallbacks{};
+  size_t fixed_state_capsule_bytes_allocated{};
+  size_t fixed_state_capsule_valid_prefix_bytes{};
+  size_t fixed_state_capsule_suffix_bytes_not_written{};
   std::array<size_t, kSpeculativeAcceptanceLengthBins> acceptance_length_histogram{};
   size_t formula_supported{};
   float total_draft_ms{};

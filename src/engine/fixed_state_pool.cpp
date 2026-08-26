@@ -593,6 +593,9 @@ struct FixedStatePool::Impl {
   uint64_t full_state_bytes_avoided{};
   uint64_t replay_descriptor_count{};
   uint64_t replayed_transition_count{};
+  uint64_t capsule_bytes_allocated{};
+  uint64_t capsule_valid_prefix_bytes{};
+  uint64_t capsule_suffix_bytes_not_written{};
   uint64_t noncontiguous_slot_fallbacks{};
   uint64_t mixed_active_bank_fallbacks{};
   bool healthy{true};
@@ -1531,6 +1534,25 @@ FixedStateReservation FixedStatePool::Reserve(const FixedStateStepPlan& plan) {
   ++impl_->next_reservation_id;
   impl_->active_reservation_id = reservation_id;
   impl_->active_staging_bytes = storage->staging_bytes;
+  if (capture_state_updates) {
+    for (const auto& spec : impl_->tensors) {
+      if (spec.state_update_capsule.row_bytes == 0) {
+        continue;
+      }
+      Impl::SaturatingAddProduct(
+          impl_->capsule_bytes_allocated, batch_rows,
+          spec.state_update_capsule.row_bytes);
+      const size_t transition_bytes =
+          spec.state_update_capsule.row_bytes / spec.state_update_capacity;
+      for (const auto& row : plan.rows) {
+        Impl::SaturatingAddProduct(
+            impl_->capsule_valid_prefix_bytes, row.capture_count, transition_bytes);
+        Impl::SaturatingAddProduct(
+            impl_->capsule_suffix_bytes_not_written,
+            spec.state_update_capacity - row.capture_count, transition_bytes);
+      }
+    }
+  }
   if (storage->binds_direct_banks) {
     Impl::SaturatingAdd(impl_->direct_span_reservations, 1);
     Impl::SaturatingAdd(impl_->direct_span_rows, plan.rows.size());
@@ -1620,6 +1642,9 @@ FixedStateBindingMetrics FixedStatePool::BindingMetrics() const noexcept {
       impl_->replayed_transition_count,
       impl_->noncontiguous_slot_fallbacks,
       impl_->mixed_active_bank_fallbacks,
+      impl_->capsule_bytes_allocated,
+      impl_->capsule_valid_prefix_bytes,
+      impl_->capsule_suffix_bytes_not_written,
   };
 }
 

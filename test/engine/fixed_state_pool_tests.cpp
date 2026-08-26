@@ -990,6 +990,12 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
     }
     reservation.Discard();
   }
+  {
+    const auto metrics = pool->BindingMetrics();
+    EXPECT_EQ(metrics.capsule_bytes_allocated, 0u);
+    EXPECT_EQ(metrics.capsule_valid_prefix_bytes, 0u);
+    EXPECT_EQ(metrics.capsule_suffix_bytes_not_written, 0u);
+  }
 
   const std::array<Request, 2> requests{
       Request{kRequestA, 4, 3}, Request{kRequestB, 1, 0}};
@@ -1019,6 +1025,10 @@ TEST_F(FixedStatePoolTest, CaptureCountIsAlwaysBoundAndCompactOutputsAreConditio
   EXPECT_EQ(recurrent.state_update_capsule->GetTensorTypeAndShapeInfo()->GetShape(),
             (std::vector<int64_t>{2, 24}));
   EXPECT_EQ(reservation.PlannedStagingBytes(), planned_staging);
+  const auto metrics = pool->BindingMetrics();
+  EXPECT_EQ(metrics.capsule_bytes_allocated, 2 * 2 * 24 * sizeof(float));
+  EXPECT_EQ(metrics.capsule_valid_prefix_bytes, 2 * 24 * sizeof(float));
+  EXPECT_EQ(metrics.capsule_suffix_bytes_not_written, 2 * 24 * sizeof(float));
 }
 
 TEST_F(FixedStatePoolTest, CompactCaptureAddsExactFactorStagingBytes) {
