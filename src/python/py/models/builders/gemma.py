@@ -156,7 +156,7 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
-class Gemma4Model(Gemma3Model):
+class Gemma4UnifiedModel(Gemma3Model):
     """Builder for the text decoder of Gemma4Unified (gemma4-12b-it).
 
     Differs from Gemma3 in several structural ways (see below). Only the text
@@ -437,7 +437,7 @@ class Gemma4Model(Gemma3Model):
             self.layernorm_attrs[attr] = f"{mul_name}/output_0"
 
 
-class Gemma4MoEModel(Gemma4Model):
+class Gemma4MoEModel(Gemma4UnifiedModel):
     """Builder for the text decoder of Gemma4 MoE (gemma-4-26B-A4B-it).
 
     Inherits the entire attention / RoPE / per-layer-KV / layer_scalar stack from
