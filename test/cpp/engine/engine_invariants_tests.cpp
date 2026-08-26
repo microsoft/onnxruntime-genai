@@ -130,7 +130,6 @@ TEST(InvariantValidatorTest, ValidTransactionReservationBalancesAccounting) {
           kRequestA,
           /*committed_slots=*/kBlockSize + 1,
           /*target_slots=*/2 * kBlockSize + 1,
-          /*tail_slots_to_consume=*/kBlockSize - 1,
           /*reserved_block_ids=*/{3},
       },
   };
@@ -148,7 +147,7 @@ TEST(InvariantValidatorTest, InitialAdmissionReservationValidatesWithoutCommitte
   cache.free_blocks = 0;
   cache.transaction_reserved_block_ids = {0};
   cache.reservations = {
-      RequestReservationSnapshot{kRequestA, 0, 1, 0, {0}},
+      RequestReservationSnapshot{kRequestA, 0, 1, {0}},
   };
 
   EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
@@ -176,7 +175,7 @@ TEST(InvariantValidatorTest, InitialAdmissionRejectsUnreservedDeltaBlock) {
   cache.free_blocks = 1;
   cache.transaction_reserved_block_ids = {0};
   cache.reservations = {
-      RequestReservationSnapshot{kRequestA, 0, 1, 0, {1}},
+      RequestReservationSnapshot{kRequestA, 0, 1, {1}},
   };
 
   const auto violations = ValidateCacheInvariants(cache);
@@ -201,7 +200,7 @@ TEST(InvariantValidatorTest, ReservedBlockCannotAlsoBeCommitted) {
   cache.free_blocks = 0;
   cache.transaction_reserved_block_ids = {2};
   cache.reservations = {
-      RequestReservationSnapshot{kRequestB, 4, 5, 0, {2}},
+      RequestReservationSnapshot{kRequestB, 4, 5, {2}},
   };
 
   EXPECT_FALSE(ValidateCacheInvariants(cache).empty());

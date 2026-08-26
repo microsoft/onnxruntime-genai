@@ -156,8 +156,6 @@ PagedCacheReservation::PagedCacheReservation(
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool.BlocksNeeded(additional_slots);
-    const size_t tail_capacity = committed_capacity - committed_slots;
-    const size_t growth = request.target_slots - committed_slots;
     const size_t first_advance_block = committed_slots / block_pool.BlockSize();
     const size_t past_last_advance_block =
         request.target_slots / block_pool.BlockSize() +
@@ -170,7 +168,6 @@ PagedCacheReservation::PagedCacheReservation(
         committed_slots,
         table_generation,
         request.target_slots,
-        std::min(growth, tail_capacity),
         reserved_block_count,
         new_blocks,
         reserved_window_block_count,

@@ -67,7 +67,6 @@ TEST(PagedCacheReservationTest, CommitConsumesExistingTailWithoutNewBlock) {
 
   PagedCacheReservation reservation{pool, tables, requests};
   ASSERT_EQ(reservation.Deltas().size(), 1u);
-  EXPECT_EQ(reservation.Deltas()[0].tail_slots_to_consume, 1u);
   EXPECT_EQ(reservation.ReservedBlockCount(), 0u);
 
   reservation.Commit();

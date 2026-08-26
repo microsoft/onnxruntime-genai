@@ -576,7 +576,6 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     request_reservation.request_id = delta.request_id;
     request_reservation.committed_slots = delta.committed_slots;
     request_reservation.target_slots = delta.target_slots;
-    request_reservation.tail_slots_to_consume = delta.tail_slots_to_consume;
     request_reservation.reserved_block_ids.reserve(
         delta.reserved_block_count);
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {

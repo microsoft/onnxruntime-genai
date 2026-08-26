@@ -97,7 +97,6 @@ struct PagedCacheReservationDelta {
   size_t committed_slots{};
   uint64_t table_generation{};
   size_t target_slots{};
-  size_t tail_slots_to_consume{};
   size_t reserved_block_offset{};
   size_t reserved_block_count{};
   size_t reserved_window_block_offset{};
