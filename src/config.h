@@ -23,9 +23,13 @@ struct Config {
     static constexpr std::string_view PositionIdsName = "position_ids";
     static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
     static constexpr std::string_view PastValueName = "past_key_values.%d.value";
+    static constexpr std::string_view PastConvName = "past.%d.conv";
+    static constexpr std::string_view PastRecurrentName = "past.%d.recurrent";
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
+    static constexpr std::string_view PresentConvName = "present.%d.conv";
+    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent";
     static constexpr std::string_view HiddenStatesName = "hidden_states";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
@@ -42,6 +46,7 @@ struct Config {
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
+    static constexpr std::string_view OutputCrossQKName = "output_cross_qk_%d";
 
     // Vision encoder names
     static constexpr std::string_view PixelValuesName = "pixel_values";
@@ -416,8 +421,8 @@ struct Config {
         // ones. Empty when the model has no windowed paged layers.
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
-        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
-        std::string past_recurrent_names;
+        std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
+        std::string past_recurrent_names{Defaults::PastRecurrentName};
 
         // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
         // Empty unless the model graph takes a hidden_states input.
@@ -440,10 +445,10 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
-        std::string output_cross_qk_names{"output_cross_qk_%d"};
+        std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
-        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
-        std::string present_recurrent_names;
+        std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
+        std::string present_recurrent_names{Defaults::PresentRecurrentName};
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
