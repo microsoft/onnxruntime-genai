@@ -20,11 +20,14 @@ conda activate engine-benchmark-venv
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
-python -m pip install patchelf
+python -m pip install -r benchmark/requirements.txt
 
 python --version
 patchelf --version
 ```
+
+The benchmark requirements file must be installed because it provides the `patchelf` dependency
+used while staging the benchmark's runtime libraries.
 
 Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
 compiler must also be installed separately for a CUDA build.

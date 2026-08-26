@@ -50,6 +50,7 @@ struct RequestMetrics {
   double inter_token_latency_ms{0.0};
   // False when the request generated fewer tokens than config.generation_tokens.
   bool completed{true};
+  std::string role{"request"};
 };
 
 struct ScenarioExecutionOutput {
