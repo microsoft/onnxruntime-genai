@@ -59,6 +59,14 @@ stages:
           --all "${{ join(',', parameters.all_models) }}"
       displayName: 'Check pr_models / all_models match models.py'
 
+- stage: integration_engine_benchmark_linux_x64
+  displayName: 'Engine Benchmark · Linux x64'
+  dependsOn: []
+  jobs:
+  - template: jobs/integration-engine-benchmark-job.yml
+    parameters:
+      run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
+
 - ${{ if eq(parameters.build_windows_x64, true) }}:
   - stage: build_win_x64
     displayName: 'Build · Windows x64'
@@ -143,14 +151,6 @@ stages:
         ep: 'cuda'
         model: 'qwen2.5-0.5b-instruct-paged'
         storage_model: 'qwen2.5-0.5b-instruct'
-
-- stage: integration_engine_benchmark_linux_x64
-  displayName: 'Engine Benchmark · Linux x64'
-  dependsOn: []
-  jobs:
-  - template: jobs/integration-engine-benchmark-job.yml
-    parameters:
-      run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
 
 - ${{ if eq(parameters.build_macos_arm64, true) }}:
   - stage: build_osx_arm64

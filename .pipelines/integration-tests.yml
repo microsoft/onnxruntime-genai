@@ -94,11 +94,6 @@ parameters:
   type: boolean
   default: true
 
-- name: run_full_engine_benchmark
-  displayName: 'Run Full Engine Benchmark'
-  type: boolean
-  default: false
-
 - name: macos_arm64_cpu
   displayName: 'Run macOS arm64 CPU tests'
   type: boolean
@@ -108,6 +103,11 @@ parameters:
   displayName: 'Run macOS arm64 WebGPU tests'
   type: boolean
   default: true
+
+- name: run_full_engine_benchmark
+  displayName: 'Run Full Engine Benchmark'
+  type: boolean
+  default: false
 
 # Suite contents - keep in sync with test/python/integration/models.py.
 # The validate_pipeline_in_sync stage runs test/python/integration/check_models_in_sync.py
