@@ -182,7 +182,16 @@ TEST(ConventionalKvCacheTest, CreationDispatchesThroughSelectedDevice) {
   } restore{*model, original_cache_device};
 
   auto params = MakeGreedyParams(*model);
-  Generator generator{*model, *params};
+  class TestState final : public State {
+   public:
+    TestState(const GeneratorParams& params, const Model& model)
+        : State{params, model} {}
+
+    DeviceSpan<float> Run(int /*total_length*/, DeviceSpan<int32_t>& /*next_tokens*/, DeviceSpan<int32_t> /*next_indices*/) override {
+      return {};
+    }
+  } state{*params, *model};
+  static_cast<void>(model->p_device_kvcache_->CreateKeyValueCache(state));
   EXPECT_EQ(device.KvCacheCreationCount(), 1u);
 }
 

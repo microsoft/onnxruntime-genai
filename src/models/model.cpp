@@ -63,7 +63,7 @@ std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_
 
 std::string SharedInitializerFileIdentity(const fs::path& path) {
 #ifndef _WIN32
-  struct stat file_info {};
+  struct stat file_info = {};
   if (::stat(path.c_str(), &file_info) == 0) {
     return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
   }

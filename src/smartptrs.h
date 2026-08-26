@@ -299,7 +299,7 @@ struct DeviceInterface {
   virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const { return false; }
   virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
   virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
-#if defined(onnxruntime_genai_cuda_EXPORTS)
+#if defined(onnxruntime_genai_cuda_EXPORTS) || defined(ORTGENAI_CUDA_ADDON_COMPILATION)
   virtual DeviceInterface& GetCpuFallbackDevice() = 0;
   virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
                                                                DeviceSpan<int32_t> sequence_lengths,
