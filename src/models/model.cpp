@@ -36,6 +36,8 @@
 #include "parakeet.h"
 #include "parakeet_processor.h"
 #include "nemotron_speech.h"
+#include "nemotron_parse.h"
+#include "nemotron_parse_processor.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -1159,8 +1161,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (ModelType::IsVLM(config->model.type))
+  if (ModelType::IsVLM(config->model.type)) {
+    if (config->model.type == "nemotron_parse")
+      return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
@@ -1275,6 +1280,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_5", Processor::Create<QwenImageProcessor>},
           {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
+          {"nemotron_parse", Processor::Create<NemotronParseProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {

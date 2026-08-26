@@ -18,6 +18,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
+    - [Nemotron Parse Options](#nemotron-parse-options)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
@@ -71,6 +72,7 @@ The tool currently supports the following model architectures.
 - Llama
 - Mistral
 - Nemotron
+- Nemotron Parse
 - Phi
 - Qwen
 - SmolLM3
@@ -226,6 +228,41 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
+```
+
+#### Nemotron Parse Options
+
+Nemotron Parse exports a static RADIO encoder plus separate mBART prefill and
+decode graphs. The decoder graphs use the common ONNX IR builder; decode emits
+the standard main-domain `TensorScatter` operator from opset 24. Its
+model-specific options are:
+
+- `image_height` and `image_width`: fixed encoder input dimensions. They default to the checkpoint's `image_size` (or `768` when absent); the encoder graph is specialized to these dimensions.
+- `prefill_sequence_length`: fixed decoder prefill length. The default is `8`.
+- `export_components`: comma-separated components to export (`encoder`, `decoder`, or both). The default is `encoder,decoder`; selecting `decoder` also exports its prefill graph.
+- `cache_sequence_length`: static self-attention KV-cache and decoder attention-mask length. The default is the model's maximum sequence length and it must exceed `prefill_sequence_length`.
+- `export_device`: device used to load the model and create export inputs. Supported values are `cpu` (the default) and `cuda`.
+
+INT4 export uses the model builder's standard quantization options. For
+TRT-RTX, use `use_qdq=true block_size=32` to emit the
+`DequantizeLinear -> MatMul` weight-only pattern.
+
+For models that provide custom Hugging Face code, explicitly set
+`hf_remote=true` only after verifying and trusting that code. For example, the
+following exports a native-size INT4 package:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder export_device=cuda use_qdq=true block_size=32
+
+# From source:
+python builder.py -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder export_device=cuda use_qdq=true block_size=32
+```
+
+Run the exported package through the shared multimodal example:
+
+```bash
+python examples/python/model-mm.py -m path_to_output_folder --image_paths document.png --non_interactive
 ```
 
 #### Exclude Embedding Layer

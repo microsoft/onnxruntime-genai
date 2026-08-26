@@ -34,6 +34,7 @@ from builders import (
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -512,6 +513,8 @@ def create_model(
             onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
