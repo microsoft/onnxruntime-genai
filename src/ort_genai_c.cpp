@@ -519,6 +519,13 @@ OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* gener
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaMtpGenerator_Reset(OgaMtpGenerator* generator) {
+  OGA_TRY
+  generator->Reset();
+  return nullptr;
+  OGA_CATCH
+}
+
 bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator) {
   return generator->IsDone();
 }

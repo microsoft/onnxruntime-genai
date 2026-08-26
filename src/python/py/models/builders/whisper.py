@@ -53,8 +53,8 @@ class WhisperEncoder(Model):
         # Set output dicts
         self.output_names = {
             "hidden_states": "hidden_states",
-            "present_key_cross": [f"present_key_cross_{i}" for i in range(self.num_layers)],
-            "present_value_cross": [f"present_value_cross_{i}" for i in range(self.num_layers)],
+            "present_key_cross": {i: f"present_key_cross_{i}" for i in range(self.num_layers)},
+            "present_value_cross": {i: f"present_value_cross_{i}" for i in range(self.num_layers)},
         }
         self.output_types = {
             "hidden_states": self.io_dtype,
@@ -229,10 +229,10 @@ class WhisperDecoder(Model):
         # Set input dicts
         self.input_names = {
             "input_ids": "input_ids",
-            "past_key_self": [f"past_key_self_{i}" for i in range(self.num_layers)],
-            "past_value_self": [f"past_value_self_{i}" for i in range(self.num_layers)],
-            "past_key_cross": [f"past_key_cross_{i}" for i in range(self.num_layers)],
-            "past_value_cross": [f"past_value_cross_{i}" for i in range(self.num_layers)],
+            "past_key_self": {i: f"past_key_self_{i}" for i in range(self.num_layers)},
+            "past_value_self": {i: f"past_value_self_{i}" for i in range(self.num_layers)},
+            "past_key_cross": {i: f"past_key_cross_{i}" for i in range(self.num_layers)},
+            "past_value_cross": {i: f"past_value_cross_{i}" for i in range(self.num_layers)},
         }
         self.input_types = {
             "input_ids": ir.DataType.INT32,
@@ -253,8 +253,8 @@ class WhisperDecoder(Model):
         self.output_names = {
             "hidden_states": "hidden_states",
             "logits": "logits",
-            "present_key_self": [f"present_key_self_{i}" for i in range(self.num_layers)],
-            "present_value_self": [f"present_value_self_{i}" for i in range(self.num_layers)],
+            "present_key_self": {i: f"present_key_self_{i}" for i in range(self.num_layers)},
+            "present_value_self": {i: f"present_value_self_{i}" for i in range(self.num_layers)},
         }
         self.output_types = {
             "hidden_states": self.io_dtype,

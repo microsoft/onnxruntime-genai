@@ -18,6 +18,9 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
   for (auto& session : sessions_) {
     session_info_.Add(*session);
   }
+  if (config_->model.decoder.state_groups) {
+    ModelStateManifest{config_->model.decoder}.ValidateSession(session_info_);
+  }
 }
 
 std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,

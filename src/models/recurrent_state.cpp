@@ -10,31 +10,30 @@
 
 namespace Generators {
 
+std::string ComposeCacheName(const std::string& template_string, int index) {
+  constexpr int32_t CacheNameLength = 64;
+  char cache_name[CacheNameLength];
+  if (auto length = snprintf(cache_name, std::size(cache_name), template_string.c_str(), index);
+      length < 0 || length >= CacheNameLength) {
+    throw std::runtime_error("Unable to compose cache name from the provided template " + template_string +
+                             ". This could be either due to an encoding error or the name being too long.");
+  }
+  return std::string(cache_name);
+}
+
 RecurrentState::RecurrentState(State& state)
     : state_{state} {
-  const auto& past_key_template = model_.config_->model.decoder.inputs.past_key_names;
-  const auto& present_key_template = model_.config_->model.decoder.outputs.present_key_names;
-
-  // Derive recurrent name templates from KV name templates
-  auto derive_template = [](const std::string& kv_template, const std::string& suffix) -> std::string {
-    auto pos = kv_template.rfind('.');
-    if (pos == std::string::npos) return "";
-    return kv_template.substr(0, pos + 1) + suffix;
-  };
-
-  std::string past_conv_template = derive_template(past_key_template, "conv_state");
-  std::string past_recurrent_template = derive_template(past_key_template, "recurrent_state");
-  std::string present_conv_template = derive_template(present_key_template, "conv_state");
-  std::string present_recurrent_template = derive_template(present_key_template, "recurrent_state");
-
-  if (past_conv_template.empty()) return;
-
   // Discover recurrent layer indices by scanning all session input names
+  const auto& past_recurrent_template = model_.config_->model.decoder.inputs.past_recurrent_names;
+  const auto placeholder_pos = past_recurrent_template.find("%d");
+  if (placeholder_pos == std::string::npos) return;
+
+  const auto prefix = past_recurrent_template.substr(0, placeholder_pos);
+  const auto suffix = past_recurrent_template.substr(placeholder_pos + 2);
+
   for (const auto& name : model_.session_info_.GetInputNames()) {
-    // Try to match against the conv_state template (e.g. "past_key_values.%d.conv_state")
+    // Try to match against the recurrent state template (e.g. "past.%d.recurrent")
     // Extract the layer index from names that match
-    auto prefix = past_conv_template.substr(0, past_conv_template.find('%'));
-    auto suffix = past_conv_template.substr(past_conv_template.find('%') + 2);  // skip %d
     if (name.size() > prefix.size() + suffix.size() &&
         name.compare(0, prefix.size(), prefix) == 0 &&
         name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
@@ -57,10 +56,10 @@ RecurrentState::RecurrentState(State& state)
                       return s; }() + ")");
 
   for (int idx : layer_indices_) {
-    input_name_strings_.push_back(ComposeKeyValueName(past_conv_template, idx));
-    input_name_strings_.push_back(ComposeKeyValueName(past_recurrent_template, idx));
-    output_name_strings_.push_back(ComposeKeyValueName(present_conv_template, idx));
-    output_name_strings_.push_back(ComposeKeyValueName(present_recurrent_template, idx));
+    input_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.inputs.past_conv_names, idx));
+    input_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.inputs.past_recurrent_names, idx));
+    output_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.outputs.present_conv_names, idx));
+    output_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.outputs.present_recurrent_names, idx));
   }
 
   conv_type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
@@ -87,8 +86,8 @@ RecurrentState::RecurrentState(State& state)
                                  std::to_string(shape[i]) + " at axis " + std::to_string(i));
     }
   };
-  validate_shape(conv_shape_, "conv_state");
-  validate_shape(recurrent_shape_, "recurrent_state");
+  validate_shape(conv_shape_, "conv");
+  validate_shape(recurrent_shape_, "recurrent");
 
   // A model built with `state_window=W` carries a LEADING window axis (conv_state
   // becomes rank 4 and recurrent_state rank 5). Only the last W per-token states are kept, which
@@ -108,7 +107,8 @@ RecurrentState::RecurrentState(State& state)
 
   const int num_layers = static_cast<int>(layer_indices_.size());
 
-  share_buffers_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
+  const bool share_buffers_configured =
+      state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
 
   // WebGPU prohibits binding the same buffer as both read-only (input) and
   // read-write (output) storage in the same compute pass, so it must use
@@ -118,16 +118,18 @@ RecurrentState::RecurrentState(State& state)
   // LinearAttention kernel with native past/present buffer sharing support.
   const bool is_webgpu = model_.p_device_kvcache_->GetType() == DeviceType::WEBGPU;
 
-  // Under CUDA-graph capture the recurrent (conv + linear-attention) state MUST be
-  // double-buffered, not shared in place. Unlike GroupQueryAttention's KV share-buffer,
-  // the LinearAttention / CausalConvWithState kernels update the recurrent state in place
-  // (present_state aliased onto past_state); capturing that in-place update in a CUDA graph
-  // produces a small but systematic per-step logit bias on replay that derails greedy
-  // decoding (observed MMLU-Pro collapse ~85% -> ~21% with graph on). Double-buffering
-  // (distinct past/present with a per-step swap and two captured graph variants) is proven
-  // bit-faithful to eager, so it is always used when graph capture is enabled.
-  graph_double_buffer_ = !is_webgpu && state_.params_->use_graph_capture;
-  share_buffers_ = !is_webgpu && !graph_double_buffer_;
+  // Under CUDA-graph capture the recurrent (conv + linear-attention) state is updated in
+  // place (present_state aliased onto past_state), and ORT re-runs the model several times
+  // inside the first Run() of each captured shape to warm up and capture. Save/restore around
+  // that first capture (see ShouldFixUpGraphCapture) keeps the update correct while using half
+  // the recurrent-state memory and one graph variant. The environment override can disable
+  // sharing to retain double buffering as a diagnostic fallback.
+  bool share_under_graph_capture = true;
+  GetEnv("ORTGENAI_SHARE_RECURRENT_STATE_UNDER_GRAPH_CAPTURE", share_under_graph_capture);
+  const bool graph_capture_enabled = !is_webgpu && state_.params_->use_graph_capture;
+  share_buffers_ = !is_webgpu &&
+                   (graph_capture_enabled ? share_under_graph_capture : share_buffers_configured);
+  graph_double_buffer_ = graph_capture_enabled && !share_buffers_;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);
@@ -329,6 +331,34 @@ void RecurrentState::RestoreSnapshot() {
   // Copy back into the live buffers in place so their addresses stay stable
   // (required by CUDA-graph replay, which captures fixed buffer pointers).
   CopyStates(snapshot_, presents_);
+}
+
+bool RecurrentState::ShouldFixUpGraphCapture(int graph_id) const {
+  if (layer_indices_.empty() || !share_buffers_ || !state_.params_->use_graph_capture)
+    return false;
+  return std::find(graph_capture_fixed_up_.begin(), graph_capture_fixed_up_.end(), graph_id) ==
+         graph_capture_fixed_up_.end();
+}
+
+void RecurrentState::SaveForGraphCapture() {
+  auto& device = *model_.p_device_kvcache_;
+  graph_capture_backup_.clear();
+  graph_capture_backup_.reserve(presents_.size());
+  for (auto& present : presents_) {
+    auto span = ByteWrapTensor(device, *present);
+    span.CopyDeviceToCpu();
+    graph_capture_backup_.push_back(std::move(span));
+  }
+}
+
+void RecurrentState::RestoreAfterGraphCapture(int graph_id) {
+  auto& device = *model_.p_device_kvcache_;
+  for (auto& span : graph_capture_backup_) {
+    span.CopyCpuToDevice();
+  }
+  device.Synchronize();
+  graph_capture_backup_.clear();
+  graph_capture_fixed_up_.push_back(graph_id);
 }
 
 std::unique_ptr<RecurrentState> CreateRecurrentState(State& state) {

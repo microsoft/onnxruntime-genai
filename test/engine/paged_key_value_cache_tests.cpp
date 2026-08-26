@@ -5,14 +5,20 @@
 
 #include <gtest/gtest.h>
 
+#include "engine/cache_manager.h"
 #include "engine/engine_invariants.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/model_state_manifest.h"
 
 namespace Generators {
 namespace test {
 namespace {
+
+std::unique_ptr<PagedKeyValueCache> MakePagedCache(const std::shared_ptr<Model>& model) {
+  return std::make_unique<PagedKeyValueCache>(model);
+}
 
 class PagedKeyValueCacheTest : public ::testing::Test {
  protected:
@@ -25,7 +31,7 @@ class PagedKeyValueCacheTest : public ::testing::Test {
     model_->config_->engine.dynamic_batching = dynamic_batching;
     assign_target_ =
         MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_)).engine;
-    cache_ = std::make_unique<PagedKeyValueCache>(model_);
+    cache_ = MakePagedCache(model_);
   }
 
   std::shared_ptr<Request> AddCommittedRequest(
@@ -246,7 +252,7 @@ TEST_F(PagedKeyValueCacheTest, BlockedPrefillDoesNotPreventLaterAdmission) {
 
 TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedByIdentity) {
   model_->config_->engine.dynamic_batching->max_batch_size = 3;
-  cache_ = std::make_unique<PagedKeyValueCache>(model_);
+  cache_ = MakePagedCache(model_);
 
   auto omitted = AddCommittedRequest({2, 3, 4, 5});
   auto resident = AddCommittedRequest({6, 7, 8, 9});
@@ -292,6 +298,242 @@ TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
   };
   auto reservation = cache_->Reserve(reservation_requests);
   EXPECT_EQ(reservation.ReservedBlockCount(), 3u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecoderBindings) {
+  auto model = LoadSyntheticPagedModel();
+  ASSERT_TRUE(model->config_->model.decoder.state_groups.has_value());
+  ASSERT_EQ(model->config_->model.decoder.state_groups->size(), 1u);
+  EXPECT_EQ(model->config_->model.decoder.state_groups->front().layer_ids,
+            std::vector<int>({1, 4}));
+
+  auto cache = MakePagedCache(model);
+
+  const auto values = cache->Cache();
+  const auto input_names = cache->Names();
+  const auto output_names = cache->OutputNames();
+
+  ASSERT_EQ(values.size(), 2u);
+  ASSERT_EQ(input_names.size(), 2u);
+  ASSERT_EQ(output_names.size(), 2u);
+  EXPECT_STREQ(input_names[0].first, "past_key_values.1.key");
+  EXPECT_STREQ(input_names[0].second, "past_key_values.1.value");
+  EXPECT_STREQ(output_names[0].first, "present.1.key");
+  EXPECT_STREQ(output_names[0].second, "present.1.value");
+  EXPECT_STREQ(input_names[1].first, "past_key_values.4.key");
+  EXPECT_STREQ(input_names[1].second, "past_key_values.4.value");
+  EXPECT_STREQ(output_names[1].first, "present.4.key");
+  EXPECT_STREQ(output_names[1].second, "present.4.value");
+  EXPECT_EQ(
+      values[0].first->GetTensorTypeAndShapeInfo()->GetElementType(),
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DenseLegacyManifestRetainsSequentialBindings) {
+  auto model = LoadDummyDecoderModel();
+  model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  model->config_->engine.dynamic_batching->block_size = 4;
+  model->config_->engine.dynamic_batching->num_blocks = 3;
+  ASSERT_FALSE(model->config_->model.decoder.state_groups.has_value());
+
+  auto cache = MakePagedCache(model);
+  const auto input_names = cache->Names();
+  const auto output_names = cache->OutputNames();
+
+  ASSERT_EQ(input_names.size(), 1u);
+  ASSERT_EQ(output_names.size(), 1u);
+  EXPECT_STREQ(input_names[0].first, "past_key_values.0.key");
+  EXPECT_STREQ(input_names[0].second, "past_key_values.0.value");
+  EXPECT_STREQ(output_names[0].first, "present.0.key");
+  EXPECT_STREQ(output_names[0].second, "present.0.value");
+  EXPECT_EQ(
+      cache->Cache()[0].first->GetTensorTypeAndShapeInfo()->GetElementType(),
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+}
+
+TEST(PagedKeyValueCacheManifestTest, CacheManagerConstructsFromSparseManifest) {
+  auto manager = CacheManager::Create(LoadSyntheticPagedModel());
+
+  EXPECT_TRUE(manager->SupportsDynamicBatching());
+  EXPECT_EQ(manager->Snapshot().total_blocks, 128u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
+  EXPECT_EQ(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2),
+      144u);
+  EXPECT_EQ(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/6,
+          /*element_size=*/2),
+      48u);
+
+  EXPECT_EQ(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/1024,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2),
+      128u);
+
+  EXPECT_THROW(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/9216,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2),
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
+  auto model = LoadSyntheticPagedModel();
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+
+  auto cache = MakePagedCache(model);
+  const auto values = cache->Cache();
+
+  ASSERT_EQ(values.size(), 2u);
+  EXPECT_EQ(
+      values[0].first->GetTensorTypeAndShapeInfo()->GetShape(),
+      std::vector<int64_t>({16, 4, 1, 1}));
+  EXPECT_EQ(
+      values[1].first->GetTensorTypeAndShapeInfo()->GetShape(),
+      std::vector<int64_t>({128, 4, 1, 1}));
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
+  auto model = LoadSyntheticPagedModel();
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {0};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+
+  EXPECT_THROW(
+      {
+        try {
+          auto cache = MakePagedCache(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find(
+                  "Every sliding-window layer must belong to the paged_kv decoder state group"),
+              std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsMultiplePagedGroups) {
+  auto model = LoadSyntheticPagedModel();
+  auto& groups = *model->config_->model.decoder.state_groups;
+  auto second_paged_group = groups.front();
+  groups.front().layer_ids = {1};
+  second_paged_group.layer_ids = {4};
+  groups.push_back(std::move(second_paged_group));
+
+  EXPECT_THROW(
+      {
+        try {
+          auto manager = CacheManager::Create(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find(
+                  "requires exactly one paged_kv decoder state group"),
+              std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
+  auto model = LoadSyntheticPagedModel();
+  Config::Model::Decoder::StateGroup fixed_group;
+  fixed_group.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
+  fixed_group.layer_ids = {0};
+  model->config_->model.decoder.state_groups->push_back(std::move(fixed_group));
+
+  EXPECT_THROW(
+      {
+        try {
+          auto manager = CacheManager::Create(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find(
+                  "does not yet support fixed decoder state groups"),
+              std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.decoder.state_groups->front().layer_ids.clear();
+
+  EXPECT_THROW(
+      {
+        try {
+          auto cache = MakePagedCache(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find("requires a non-empty paged_kv decoder state group"),
+              std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsEmptyLegacyPagedGroup) {
+  auto model = LoadDummyDecoderModel();
+  model->config_->model.decoder.num_hidden_layers = 0;
+  model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  model->config_->engine.dynamic_batching->block_size = 4;
+  model->config_->engine.dynamic_batching->num_blocks = 3;
+
+  EXPECT_THROW(
+      {
+        try {
+          auto cache = MakePagedCache(model);
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find("at least one paged_kv decoder layer"),
+              std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
 }
 
 }  // namespace
