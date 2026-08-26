@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -74,6 +75,13 @@ class FailingContinuationSearch final : public GreedySearch_Cpu {
   std::shared_ptr<FailingContinuationControl> control_;
 };
 
+class NoOpPositionInputs final : public PositionInputs {
+ public:
+  void Add() override {}
+  void Update(DeviceSpan<int32_t> /*next_tokens*/, int /*total_length*/, int /*new_length*/) override {}
+  void RewindTo(size_t /*index*/) override {}
+};
+
 class FailingContinuationDevice final : public DeviceInterface {
  public:
   FailingContinuationDevice(
@@ -108,6 +116,11 @@ class FailingContinuationDevice final : public DeviceInterface {
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     ++kv_cache_creation_count_;
     return {};
+  }
+  std::unique_ptr<PositionInputs> CreatePositionInputs(State& /*state*/,
+                                                       DeviceSpan<int32_t> /*sequence_lengths*/,
+                                                       const std::string& /*attention_mask_name*/) override {
+    return std::make_unique<NoOpPositionInputs>();
   }
   size_t KvCacheCreationCount() const noexcept { return kv_cache_creation_count_; }
   void Synchronize() override { inner_.Synchronize(); }

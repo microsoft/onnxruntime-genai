@@ -114,7 +114,8 @@ jobs:
         run: |
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
           choco uninstall llvm --yes
-          python -m pip install -r test\python\requirements.txt --user
+          Get-Content test\python\requirements.txt | Where-Object { $_ -notmatch '^numpy<2$' } | Set-Content $env:TEMP\requirements-win-arm64.txt
+          python -m pip install -r $env:TEMP\requirements-win-arm64.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
