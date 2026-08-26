@@ -197,6 +197,98 @@ class TestGemma4MoEQuarkPath:
         assert "model.layers.0.moe.experts.down_proj.zero_points" not in m.values
 
 
+def _mock_quark_int4_moe_layer(hidden, num_experts, moe_inter, group_size):
+    """Mock a plain Quark/AWQ int4 MoE layer. Unlike the factored uint2 checkpoint, these
+    experts have NO input_prescale/rotation, are already emitted interleaved by
+    combine_and_repack_gate_up (no fc1 reorder), and carry INTEGER (uint8) per-group
+    zero-points. Weights pack 2 codes/uint8 (4-bit)."""
+    blocks_in = hidden // group_size
+    blocks_in_fc2 = moe_inter // group_size
+    fc1_out = 2 * moe_inter
+    packed_hidden = hidden // 2  # 2 uint4 codes per uint8
+    packed_inter = moe_inter // 2
+
+    class _Experts:
+        def __init__(self):
+            self.fc1_weights = torch.randint(0, 256, (num_experts, fc1_out, packed_hidden), dtype=torch.uint8)
+            self.fc1_scales = torch.rand(num_experts, fc1_out, blocks_in) + 0.1
+            self.fc1_zero_points = torch.randint(0, 16, (num_experts, fc1_out, blocks_in), dtype=torch.uint8)
+            self.fc2_weights = torch.randint(0, 256, (num_experts, hidden, packed_inter), dtype=torch.uint8)
+            self.fc2_scales = torch.rand(num_experts, hidden, blocks_in_fc2) + 0.1
+            self.fc2_zero_points = torch.randint(0, 16, (num_experts, hidden, blocks_in_fc2), dtype=torch.uint8)
+            # Plain Quark/AWQ experts have no prescale.
+            noprescale = types.SimpleNamespace(input_prescale=None)
+            self._e = {i: types.SimpleNamespace(gate_proj=noprescale) for i in range(num_experts)}
+
+        def keys(self):
+            return self._e.keys()
+
+        def __getitem__(self, i):
+            return self._e[i]
+
+    return types.SimpleNamespace(
+        mlp=types.SimpleNamespace(experts=_Experts()),
+        router=types.SimpleNamespace(
+            proj=types.SimpleNamespace(weight=torch.randn(num_experts, hidden), bias=None),
+            scale=torch.randn(hidden),
+            per_expert_scale=torch.rand(num_experts) + 0.5,
+        ),
+    )
+
+
+class TestGemma4MoEQuarkInt4Path:
+    """Plain Quark/AWQ int4 expert path: the shape-guarded generalization of make_moe_quark
+    (no prescale/rotation, no fc1 reorder, integer zero-points)."""
+
+    def _make_quark_model(self, ep="cpu", group_size=16):
+        m = _make_model(onnx_dtype=ir.DataType.FLOAT)
+        m.quant_type = "quark"
+        m.ep = ep
+        m.moe_attrs["op_type"] = "QMoE"
+        m.moe_attrs["expert_weight_bits"] = 4
+        m.moe_attrs["swiglu_fusion"] = 1 if ep == "cpu" else 2
+        m.moe_attrs["block_size"] = group_size
+        m.shared_input_rotations = {m.hidden_size: torch.randn(m.hidden_size, m.hidden_size)}
+        m.shared_rotation_initializers = set()
+        return m
+
+    def _build_quark_layer(self, m, group_size=16):
+        hidden = m.hidden_size
+        num_experts = m.moe_attrs["num_experts"]
+        layer = _mock_quark_int4_moe_layer(hidden, num_experts, m.moe_intermediate_size, group_size)
+        m.make_value("resid", ir.DataType.FLOAT, ["batch_size", "sequence_length", hidden])
+        m.make_moe_quark(0, layer, "resid", "resid")
+        return layer
+
+    def test_qmoe_node_emits_expert_weight_bits_4(self):
+        """The fused QMoE op carries expert_weight_bits=4 for the int4 Quark path."""
+        m = self._make_quark_model(ep="cpu")
+        self._build_quark_layer(m)
+        qmoe = next(n for n in m.model.graph if n.op_type == "QMoE")
+        assert qmoe.attributes["expert_weight_bits"].as_int() == 4
+
+    def test_no_input_prescale_or_rotation(self):
+        """Without input_prescale the expert input feeds QMoE directly: no prescale Mul / rotation MatMul."""
+        m = self._make_quark_model(ep="cpu")
+        self._build_quark_layer(m)
+        assert not any("input_prescale" in name for name in m.values)
+        assert not any("shared_input_rotation" in name for name in m.values)
+
+    def test_integer_zero_points_not_cast_to_float(self):
+        """Plain int4 experts carry uint8 zero-points, emitted at native dtype (no io_dtype cast)."""
+        m = self._make_quark_model(ep="cpu")
+        self._build_quark_layer(m)
+        zp_name = "model.layers.0.moe.experts.gate_up_proj.zero_points"
+        assert zp_name in m.values
+        assert m.values[zp_name].const_value.dtype == ir.DataType.UINT8
+
+    def test_cuda_int4_keeps_zero_points(self):
+        """The zp-omit path is 2-bit-only; int4 keeps its zero-points even on CUDA."""
+        m = self._make_quark_model(ep="cuda")
+        self._build_quark_layer(m)
+        assert "model.layers.0.moe.experts.gate_up_proj.zero_points" in m.values
+
+
 class TestGemma4MoEModel:
     def test_moe_attrs_mapping(self):
         """num_experts/top_k come from config; activation/fusion/normalize set for fused path."""
