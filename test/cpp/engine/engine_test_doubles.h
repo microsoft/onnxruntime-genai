@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,8 +90,19 @@ struct RecordingCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return allocated_.size(); }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
+    if (std::exchange(throw_planning_bad_alloc_, false)) {
+      throw std::bad_alloc{};
+    }
+    if (std::exchange(throw_planning_consistency_, false)) {
+      throw StepPlanningConsistencyError{
+          "Injected planning consistency failure."};
+    }
     const size_t request_limit =
-        plan.scheduled_request_limit == 0 ? capacity_ : plan.scheduled_request_limit;
+        std::exchange(overselect_planning_once_, false)
+            ? capacity_
+        : plan.scheduled_request_limit == 0
+            ? capacity_
+            : plan.scheduled_request_limit;
     size_t selected_requests = 0;
     size_t selected_new_requests = 0;
     bool capacity_deferred = false;
@@ -132,6 +145,9 @@ struct RecordingCacheManager : CacheManager {
     plan.requests.resize(selected_requests);
 
     if (!plan.requests.empty()) {
+      if (scripted_fixed_plan_) {
+        plan.fixed_state = *scripted_fixed_plan_;
+      }
       return StepPlanningResult{
           true,
           capacity_deferred,
@@ -168,6 +184,27 @@ struct RecordingCacheManager : CacheManager {
             newly_admitted_.push_back(entry.request);
           }
         }
+        // Replay any scripted fixed-state slots so a test can force the Engine's plan/reservation
+        // consistency guard to fire without a real fixed-state pool.
+        fixed_state_slots_ = cache.scripted_fixed_slots_;
+        fixed_state_staging_bytes_ = cache.scripted_fixed_staging_bytes_;
+        throw_prepare_ =
+            std::exchange(cache.throw_prepare_failure_, false);
+      }
+
+      std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
+        return fixed_state_slots_;
+      }
+
+      size_t FixedStateStagingBytes() const override {
+        return fixed_state_staging_bytes_;
+      }
+
+      void PrepareCommit() override {
+        if (throw_prepare_) {
+          throw std::runtime_error(
+              "Injected cache transaction preparation failure.");
+        }
       }
 
       void Commit() override {
@@ -187,6 +224,9 @@ struct RecordingCacheManager : CacheManager {
 
       RecordingCacheManager& cache_;
       std::vector<std::shared_ptr<Request>> newly_admitted_;
+      std::vector<FixedStateSlotHandle> fixed_state_slots_;
+      size_t fixed_state_staging_bytes_{};
+      bool throw_prepare_{};
       bool committed_{};
       bool released_{};
     };
@@ -205,6 +245,24 @@ struct RecordingCacheManager : CacheManager {
   void SetMaxQueryTokensPerRequest(size_t token_count) {
     max_query_tokens_per_request_ = token_count;
   }
+  void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
+  void ThrowPlanningConsistencyOnce() {
+    throw_planning_consistency_ = true;
+  }
+  void OverselectPlanningOnce() {
+    overselect_planning_once_ = true;
+  }
+  void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
+  // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
+  // publishes `plan`, and every reservation reports `slots`/`staging_bytes`, so a test can make the
+  // planned fixed-state resources disagree with the reservation the Engine actually receives.
+  void ScriptFixedStateMismatch(FixedStateResourcePlan plan,
+                                std::vector<FixedStateSlotHandle> slots,
+                                size_t staging_bytes) {
+    scripted_fixed_plan_ = plan;
+    scripted_fixed_slots_ = std::move(slots);
+    scripted_fixed_staging_bytes_ = staging_bytes;
+  }
   size_t AllocatedCount() const { return allocated_.size(); }
 
   // Recorded call counts.
@@ -216,12 +274,19 @@ struct RecordingCacheManager : CacheManager {
  private:
   size_t capacity_;
   size_t max_query_tokens_per_request_{};
+  mutable bool throw_planning_bad_alloc_{};
+  mutable bool throw_planning_consistency_{};
+  mutable bool overselect_planning_once_{};
+  bool throw_prepare_failure_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
   const void* capacity_deferred_request_id_{};
   bool supports_dynamic_batching_{true};
   std::vector<std::shared_ptr<Request>> allocated_;
+  std::optional<FixedStateResourcePlan> scripted_fixed_plan_;
+  std::vector<FixedStateSlotHandle> scripted_fixed_slots_;
+  size_t scripted_fixed_staging_bytes_{};
 };
 
 // A DecoderIO that fabricates logits instead of running the model: for each scheduled request it
@@ -306,6 +371,12 @@ struct RecordingModelExecutor : ModelExecutor {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable execution failure."};
     }
+    // Executes after the pre-execution failure hook but before any in-execution or post-processing
+    // failure, so a test can inspect the reserved fixed-state bindings/slots and write staged
+    // outputs for the row order the Engine actually scheduled.
+    if (on_execute_) {
+      on_execute_(context);
+    }
     if (failure == ScriptedExecutionFailure::RetryableDuringExecution) {
       throw ModelExecutionError{ExecutionFailureKind::RetryableAbort,
                                 "Injected retryable in-execution failure."};
@@ -326,6 +397,9 @@ struct RecordingModelExecutor : ModelExecutor {
 
   void SetNextFailure(ScriptedExecutionFailure failure) { next_failure_ = failure; }
   void SetForcedToken(int32_t token) { forced_token_ = token; }
+  void SetExecutionCallback(std::function<void(ExecutionContext&)> callback) {
+    on_execute_ = std::move(callback);
+  }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
@@ -338,6 +412,7 @@ struct RecordingModelExecutor : ModelExecutor {
   int32_t forced_token_;
   std::shared_ptr<CallTrace> trace_;
   ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
+  std::function<void(ExecutionContext&)> on_execute_;
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those
@@ -348,6 +423,18 @@ struct DoublesEngine {
   RecordingCacheManager* cache;
   RecordingModelExecutor* executor;
   std::shared_ptr<CallTrace> trace;
+};
+
+// A composite Engine wired over the *real* PagedCacheManager (so a real PagedKeyValueCache and, when
+// the model declares fixed groups, a real FixedStatePool are exercised) but driven by the recording
+// model-executor double. The executor fabricates logits and never runs the ONNX graph, so the tests
+// exercise the composite reserve/validate/prepare/publish transaction against real state pools while
+// controlling execution and injecting failures. The engine owns the doubles; the raw pointers stay
+// valid for its lifetime.
+struct CompositeDoublesEngine {
+  std::shared_ptr<Engine> engine;
+  PagedCacheManager* cache;
+  RecordingModelExecutor* executor;
 };
 
 inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capacity, int32_t forced_token) {
@@ -365,6 +452,24 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
   auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
 
   return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
+}
+
+inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> model,
+                                                         int32_t forced_token) {
+  // Bypass the public compatibility gate so this PR can exercise the complete composite resource
+  // manager before the following packed-IO PR enables fixed-state model execution.
+  auto cache = std::make_shared<PagedCacheManager>(model);
+  auto* cache_observer = dynamic_cast<PagedCacheManager*>(cache.get());
+  if (!cache_observer) {
+    throw std::logic_error("Composite Engine tests require a paged cache manager.");
+  }
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token);
+  auto* executor_observer = executor.get();
+
+  EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+  return CompositeDoublesEngine{std::move(engine), cache_observer, executor_observer};
 }
 
 }  // namespace test

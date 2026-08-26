@@ -240,13 +240,31 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
 }
 
-TEST(ModelStateManifestTest, RejectsFixedDynamicEngineContract) {
+TEST(ModelStateManifestTest, RejectsFixedUntilDecoderBindingLands) {
+  // Composite resource management is present, but the compatibility gate stays closed until the
+  // next PR binds fixed tensors into production decoder execution.
   auto decoder = MakeSparseDecoder();
+  EXPECT_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder),
+      std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, RejectsFixedGroupsWithoutPagedGroup) {
+  // Enabling fixed groups must not weaken the "exactly one paged_kv group" rule: a decoder that
+  // declares only fixed groups still has no paged pool to run through and is rejected.
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->erase(
+      std::remove_if(decoder.state_groups->begin(), decoder.state_groups->end(),
+                     [](const auto& group) {
+                       return group.kind ==
+                              Config::Model::Decoder::StateGroupKind::PagedKeyValue;
+                     }),
+      decoder.state_groups->end());
   try {
     ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
-    FAIL() << "Expected the fixed state contract to be rejected";
+    FAIL() << "Expected a decoder without a paged_kv group to be rejected";
   } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string{error.what()}.find("fixed decoder state"), std::string::npos) << error.what();
+    EXPECT_NE(std::string{error.what()}.find("paged_kv"), std::string::npos) << error.what();
   }
 }
 

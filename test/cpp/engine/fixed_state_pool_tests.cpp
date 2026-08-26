@@ -160,6 +160,20 @@ TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   ExpectInputRows(reservation, 0, 0.0f);  // Reused slot must not leak the released request's state.
 }
 
+TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
+  auto pool = MakePool(1);
+  const auto handle = MakeResident(*pool, kRequestA, 1.0f);
+
+  pool->ValidateRelease(handle);
+
+  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 0u);
+  static_assert(noexcept(pool->ReleaseValidated(handle)));
+  pool->ReleaseValidated(handle);
+  EXPECT_FALSE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 1u);
+}
+
 TEST_F(FixedStatePoolTest, StagedOutputsBecomeVisibleOnlyAfterCommit) {
   auto pool = MakePool(1);
   MakeResident(*pool, kRequestA, 4.0f);

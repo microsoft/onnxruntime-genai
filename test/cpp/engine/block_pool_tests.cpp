@@ -205,5 +205,21 @@ TEST(BlockPoolTest, RepeatedAllocateFreeCyclesPreserveTotals) {
   }
 }
 
+TEST(BlockPoolTest, ValidateFreeIsPureAndPublicationIsNoexcept) {
+  BlockPool pool(kBlockSize, 2);
+  auto blocks = pool.AllocateBlocks(2 * kBlockSize);
+  const auto generation = pool.MutationGeneration();
+
+  pool.ValidateFree(blocks);
+
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
+  EXPECT_EQ(pool.MutationGeneration(), generation);
+  const std::span<const std::shared_ptr<Block>> block_span{blocks};
+  static_assert(noexcept(pool.FreeValidated(block_span)));
+  pool.FreeValidated(block_span);
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+  EXPECT_EQ(pool.MutationGeneration(), generation + 1);
+}
+
 }  // namespace
 }  // namespace Generators

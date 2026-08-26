@@ -88,6 +88,17 @@ void RemovePagedCacheBlockTable(
     BlockPool* window_block_pool,
     std::vector<PagedCacheBlockTable>& committed_tables,
     const void* request_id) {
+  ValidateRemovePagedCacheBlockTable(
+      block_pool, window_block_pool, committed_tables, request_id);
+  RemoveValidatedPagedCacheBlockTable(
+      block_pool, window_block_pool, committed_tables, request_id);
+}
+
+void ValidateRemovePagedCacheBlockTable(
+    const BlockPool& block_pool,
+    const BlockPool* window_block_pool,
+    const std::vector<PagedCacheBlockTable>& committed_tables,
+    const void* request_id) {
   const auto table = std::find_if(
       committed_tables.begin(), committed_tables.end(),
       [request_id](const PagedCacheBlockTable& candidate) {
@@ -97,9 +108,29 @@ void RemovePagedCacheBlockTable(
     return;
   }
 
-  block_pool.Free(table->Blocks());
+  block_pool.ValidateFree(table->Blocks());
   if (window_block_pool) {
-    window_block_pool->Free(table->WindowBlocks());
+    window_block_pool->ValidateFree(table->WindowBlocks());
+  }
+}
+
+void RemoveValidatedPagedCacheBlockTable(
+    BlockPool& block_pool,
+    BlockPool* window_block_pool,
+    std::vector<PagedCacheBlockTable>& committed_tables,
+    const void* request_id) noexcept {
+  const auto table = std::find_if(
+      committed_tables.begin(), committed_tables.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == committed_tables.end()) {
+    return;
+  }
+
+  block_pool.FreeValidated(table->Blocks());
+  if (window_block_pool) {
+    window_block_pool->FreeValidated(table->WindowBlocks());
   }
   committed_tables.erase(table);
 }
@@ -315,9 +346,13 @@ PagedCacheReservation::PagedCacheReservation(PagedCacheReservation&& other) noex
       window_block_pool_generation_{std::exchange(other.window_block_pool_generation_, 0)},
       state_{std::exchange(other.state_, PagedCacheReservationState::Released)} {}
 
-PagedCacheReservation::~PagedCacheReservation() {
+PagedCacheReservation::~PagedCacheReservation() noexcept {
   if (state_ == PagedCacheReservationState::Reserved) {
-    Release();
+    block_pool_->RollbackReservedBlocks(reserved_blocks_);
+    if (window_block_pool_) {
+      window_block_pool_->RollbackReservedBlocks(
+          reserved_window_blocks_);
+    }
   }
 }
 
@@ -624,9 +659,13 @@ void PagedCacheReservation::Release() {
     throw std::logic_error("Cannot release a committed paged cache reservation.");
   }
 
-  block_pool_->Free(reserved_blocks_);
+  block_pool_->ValidateFree(reserved_blocks_);
   if (window_block_pool_) {
-    window_block_pool_->Free(reserved_window_blocks_);
+    window_block_pool_->ValidateFree(reserved_window_blocks_);
+  }
+  block_pool_->FreeValidated(reserved_blocks_);
+  if (window_block_pool_) {
+    window_block_pool_->FreeValidated(reserved_window_blocks_);
   }
   reserved_blocks_.clear();
   reserved_window_blocks_.clear();

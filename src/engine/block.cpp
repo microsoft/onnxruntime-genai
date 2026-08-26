@@ -92,10 +92,15 @@ std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
+  ValidateFree(blocks);
+  FreeValidated(blocks);
+}
+
+void BlockPool::ValidateFree(
+    std::span<const std::shared_ptr<Block>> blocks) const {
   // Validate every block before mutating any pool state so that an invalid request (a null block,
   // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
-  // is rejected without partially freeing the batch. Work stays proportional to the batch size
-  // rather than the pool capacity.
+  // is rejected without partially freeing the batch.
   std::vector<size_t> ids;
   ids.reserve(blocks.size());
   for (const auto& block : blocks) {
@@ -116,14 +121,17 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
     ids.push_back(id);
   }
-
   std::sort(ids.begin(), ids.end());
   const auto duplicate = std::adjacent_find(ids.begin(), ids.end());
   if (duplicate != ids.end()) {
-    throw std::runtime_error("Cannot free block with id " + std::to_string(*duplicate) +
-                             " more than once in the same call.");
+    throw std::runtime_error(
+        "Cannot free block with id " + std::to_string(*duplicate) +
+        " more than once in the same call.");
   }
+}
 
+void BlockPool::FreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) noexcept {
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
   }
@@ -134,10 +142,15 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
 void BlockPool::RollbackReservedBlocks(
     const std::vector<std::shared_ptr<Block>>& blocks) noexcept {
+  bool released = false;
   for (const auto& block : blocks) {
-    blocks_[block->Id()].reset();
+    if (block && block->Id() < blocks_.size() &&
+        blocks_[block->Id()] == block) {
+      blocks_[block->Id()].reset();
+      released = true;
+    }
   }
-  if (!blocks.empty()) {
+  if (released) {
     ++mutation_generation_;
   }
 }

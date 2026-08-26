@@ -122,6 +122,13 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestRunsAfterCapacityIsReleased)
   EXPECT_EQ(next_snapshot.requests[0].block_ids.size(), 2u);
 }
 
+TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+
+  EXPECT_EQ(cache_->CommittedSlots(request.get()), 4u);
+  EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
+}
+
 TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapacity) {
   auto unserviceable = AddCommittedRequest({2, 3, 4, 5});
   auto fitting = AddCommittedRequest({6, 7, 8, 9});
@@ -475,7 +482,10 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMultiplePagedGroups) {
       std::runtime_error);
 }
 
-TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
+  // Fixed decoder state groups are now supported (the composite manager owns a FixedStatePool), but
+  // their bindings still have to resolve to real session inputs and outputs. The synthetic-paged
+  // session has no such tensors, so pool construction rejects the group at session validation.
   auto model = LoadSyntheticPagedModel();
   Config::Model::Decoder::StateGroup fixed_group;
   fixed_group.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
@@ -485,12 +495,31 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
   EXPECT_THROW(
       {
         try {
-          auto manager = CacheManager::Create(model);
+          PagedCacheManager manager{model};
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find("was not found"),
+              std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PublicEngineRejectsFixedStateWhileGateIsClosed) {
+  auto model = LoadSyntheticCompositeModel();
+
+  EXPECT_THROW(
+      {
+        try {
+          auto engine = std::make_shared<Engine>(model);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
               std::string{error.what()}.find(
                   "does not yet support fixed decoder state groups"),
-              std::string::npos);
+              std::string::npos)
+              << error.what();
           throw;
         }
       },

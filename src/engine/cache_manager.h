@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <optional>
+
 #include "request.h"
 #include "../models/io/kv_cache.h"
+#include "fixed_state_pool.h"
 #include "paged_key_value_cache.h"
 #include "execution_context.h"
 #include "step_plan.h"
@@ -13,6 +16,16 @@ namespace Generators {
 
 struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  // Fixed decoder-state resources this reservation owns, in scheduled request row order. Empty for
+  // a paged-only reservation.
+  virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
+  virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
+  virtual size_t FixedStateStagingBytes() const { return 0; }
+  // Validate every ownership and capacity precondition of the whole reservation without publishing
+  // or performing device work. PrepareCommit additionally performs all fallible device work (fixed
+  // staging into inactive banks) so the subsequent Commit() crosses the boundary without retry.
+  virtual void ValidateCommit() const {}
+  virtual void PrepareCommit() { ValidateCommit(); }
   virtual void Commit() = 0;
   virtual void Release() = 0;
   virtual ~CacheStepReservation() = default;
@@ -70,6 +83,12 @@ struct CacheManager {
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
   virtual PagedCacheSnapshot Snapshot() const { return {}; }
+  // Snapshot that also reflects an in-flight reservation's proposed deltas, for validating the
+  // combined committed-plus-reserved state mid-transaction. Defaults to the committed snapshot.
+  virtual PagedCacheSnapshot Snapshot(const PagedCacheReservation*) const { return Snapshot(); }
+  // Immutable snapshot of the fixed decoder-state pool, or nullopt when the model has no fixed
+  // groups (so the composite manager owns no pool).
+  virtual std::optional<FixedStatePoolSnapshot> FixedStateSnapshot() const { return std::nullopt; }
 
   virtual StepPlanningResult PlanStepResources(StepPlan&) const {
     throw std::logic_error("Cache manager does not support transactional step planning.");
@@ -145,15 +164,25 @@ struct PagedCacheManager : CacheManager {
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
-  StepPlanningResult PlanStepResources(StepPlan& plan) const override {
-    return key_value_cache_->PlanStepResources(plan);
+  PagedCacheSnapshot Snapshot(const PagedCacheReservation* reservation) const override {
+    return reservation ? key_value_cache_->Snapshot(*reservation)
+                       : key_value_cache_->Snapshot();
   }
+
+  std::optional<FixedStatePoolSnapshot> FixedStateSnapshot() const override {
+    return fixed_state_pool_
+               ? std::optional<FixedStatePoolSnapshot>{fixed_state_pool_->Snapshot()}
+               : std::nullopt;
+  }
+
+  StepPlanningResult PlanStepResources(StepPlan& plan) const override;
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 
  private:
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
+  std::unique_ptr<FixedStatePool> fixed_state_pool_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

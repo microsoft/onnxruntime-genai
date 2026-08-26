@@ -147,6 +147,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.scheduled_request_limit = 0;
   plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
+  plan.fixed_state = {};
   plan.graph_capture_eligible = false;
 
   struct Candidate {
@@ -166,12 +167,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     const bool valid_status =
         newly_admitted ? IsQueued(snapshot.status) : IsExecutable(snapshot.status);
     if (!valid_status) {
-      throw std::runtime_error("Request status is invalid for dynamic step planning.");
+      throw StepPlanningConsistencyError(
+          "Request status is invalid for dynamic step planning.");
     }
     const auto remaining_token_count =
         snapshot.current_sequence_length - snapshot.processed_sequence_length;
     if (remaining_token_count <= 0) {
-      throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
+      throw StepPlanningConsistencyError(
+          "Cannot plan a request with no unprocessed tokens.");
     }
 
     Candidate candidate;
@@ -224,9 +227,13 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   }
 
   const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
-  plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
-      dynamic_batching.max_scheduled_tokens,
-      dynamic_batching.max_batch_size);
+  try {
+    plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
+        dynamic_batching.max_scheduled_tokens,
+        dynamic_batching.max_batch_size);
+  } catch (const std::invalid_argument& error) {
+    throw StepPlanningConsistencyError(error.what());
+  }
 
   auto result = cache_manager_->PlanStepResources(plan);
   if (!result.executable) {
@@ -244,12 +251,18 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
           return value.entry.request_id == entry.request_id;
         });
     if (candidate == candidates.end())
-      throw std::logic_error("Cache planning selected an unknown request.");
+      throw StepPlanningConsistencyError(
+          "Cache planning selected an unknown request.");
     selected_candidates.push_back(candidate->budget);
     selected_processed_lengths.push_back(candidate->processed_sequence_length);
   }
-  const auto token_counts = AllocateDecodeFirstTokenBudget(
-      selected_candidates, dynamic_batching.max_scheduled_tokens);
+  std::vector<size_t> token_counts;
+  try {
+    token_counts = AllocateDecodeFirstTokenBudget(
+        selected_candidates, dynamic_batching.max_scheduled_tokens);
+  } catch (const std::invalid_argument& error) {
+    throw StepPlanningConsistencyError(error.what());
+  }
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row

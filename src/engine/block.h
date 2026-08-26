@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+#include "../span.h"
+
 namespace Generators {
 
 class PagedCacheBlockTable;
@@ -79,6 +81,8 @@ struct BlockPool {
   std::vector<std::shared_ptr<Block>> ReserveBlocks(size_t num_slots);
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
+  void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
+  void FreeValidated(std::span<const std::shared_ptr<Block>> blocks) noexcept;
 
   size_t BlocksNeeded(size_t num_slots);
 
