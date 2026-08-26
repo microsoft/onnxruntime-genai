@@ -32,8 +32,13 @@ namespace {
 
 bool IsAttentionCacheNeeded(const Model& model) {
   const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
-  auto prefix = key_template.substr(0, key_template.find('%'));
-  auto suffix = key_template.substr(key_template.find('%') + 2);
+  const auto placeholder = key_template.find('%');
+  if (placeholder == std::string::npos) {
+    return false;
+  }
+
+  auto prefix = key_template.substr(0, placeholder);
+  auto suffix = key_template.substr(placeholder + 2);
   for (const auto& name : model.session_info_.GetInputNames()) {
     if (name.size() > prefix.size() + suffix.size() &&
         name.compare(0, prefix.size(), prefix) == 0 &&

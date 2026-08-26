@@ -19,6 +19,13 @@ struct GenaiInterface {
   virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) = 0;
   virtual void Sequences_RewindTo(Generators::Sequences* p_this, size_t new_length) = 0;
   virtual std::unique_ptr<Generators::KeyValueCache> CreateStandardKeyValueCache(Generators::State& state) = 0;
+  virtual Generators::DeviceInterface& GetCpuFallbackDevice() = 0;
+  virtual std::unique_ptr<Generators::PositionInputs> CreateStandardPositionInputs(
+      Generators::State& state,
+      Generators::DeviceSpan<int32_t> sequence_lengths,
+      const std::string& attention_mask_name) = 0;
+  virtual int GetKvCacheQuantizationBits(const Generators::Config::SessionOptions& session_options,
+                                         std::string_view provider_name) = 0;
 };
 
 namespace Generators {

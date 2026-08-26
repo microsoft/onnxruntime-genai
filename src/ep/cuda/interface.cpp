@@ -406,8 +406,18 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return gp_genai->CreateStandardKeyValueCache(state);
   }
 
+  DeviceInterface& GetCpuFallbackDevice() override {
+    return gp_genai->GetCpuFallbackDevice();
+  }
+
+  std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                       DeviceSpan<int32_t> sequence_lengths,
+                                                       const std::string& attention_mask_name) override {
+    return gp_genai->CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
+  }
+
   int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
-    return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
+    return gp_genai->GetKvCacheQuantizationBits(session_options, GetExecutionProviderName());
   }
 
   std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t max_batch_size, int vocab_size) override {

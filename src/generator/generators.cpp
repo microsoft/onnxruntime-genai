@@ -240,6 +240,19 @@ struct GenaiInterfaceImpl : GenaiInterface {
   std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) override {
     return Generators::CreateStandardKeyValueCache(state);
   }
+  DeviceInterface& GetCpuFallbackDevice() override {
+    return *Generators::GetDeviceInterface(DeviceType::CPU);
+  }
+  std::unique_ptr<PositionInputs> CreateStandardPositionInputs(
+      State& state,
+      DeviceSpan<int32_t> sequence_lengths,
+      const std::string& attention_mask_name) override {
+    return Generators::CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
+  }
+  int GetKvCacheQuantizationBits(const Config::SessionOptions& session_options,
+                                 std::string_view provider_name) override {
+    return Generators::GetKvCacheQuantizationBits(session_options, provider_name);
+  }
 } g_genai;
 
 #if defined(_WIN32)
@@ -441,16 +454,6 @@ std::string to_string(DeviceType device_type) {
 
 DeviceInterface* GetDeviceInterface(DeviceType type) {
   return GetOrtGlobals()->GetDeviceInterface(type);
-}
-
-DeviceInterface& DeviceInterface::GetCpuFallbackDevice() {
-  return *GetDeviceInterface(DeviceType::CPU);
-}
-
-std::unique_ptr<PositionInputs> DeviceInterface::CreatePositionInputs(State& state,
-                                                                      DeviceSpan<int32_t> sequence_lengths,
-                                                                      const std::string& attention_mask_name) {
-  return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
 }
 
 GeneratorParams::GeneratorParams(const Config& config)

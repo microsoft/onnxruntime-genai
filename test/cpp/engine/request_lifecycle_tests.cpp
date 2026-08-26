@@ -107,7 +107,7 @@ class FailingContinuationDevice final : public DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
     ++kv_cache_creation_count_;
-    return inner_.CreateKeyValueCache(state);
+    return {};
   }
   size_t KvCacheCreationCount() const noexcept { return kv_cache_creation_count_; }
   void Synchronize() override { inner_.Synchronize(); }

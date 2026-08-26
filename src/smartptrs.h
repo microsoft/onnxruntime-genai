@@ -27,6 +27,7 @@ struct Config;
 struct State;
 struct KeyValueCache;
 struct PositionInputs;
+struct DeviceInterface;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -156,6 +157,11 @@ enum struct DeviceType {
   MAX
 };
 
+DeviceInterface* GetDeviceInterface(DeviceType type);
+std::unique_ptr<PositionInputs> CreateStandardPositionInputs(State& state,
+                                                             DeviceSpan<int32_t> sequence_lengths,
+                                                             const std::string& attention_mask_name);
+
 // One windowed state tensor for DeviceInterface::CopyStateSlots: `base` is the start of the whole
 // [W, ...] buffer and `slot_bytes` is the size of one window slot.
 struct StateSlotDesc {
@@ -173,7 +179,7 @@ struct StateSlotDesc {
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 2;
+inline constexpr uint32_t kDeviceInterfaceVersion = 3;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -286,10 +292,14 @@ struct DeviceInterface {
   virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const { return false; }
   virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
   virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
-  virtual DeviceInterface& GetCpuFallbackDevice();
+  virtual DeviceInterface& GetCpuFallbackDevice() {
+    return *GetDeviceInterface(DeviceType::CPU);
+  }
   virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
                                                                DeviceSpan<int32_t> sequence_lengths,
-                                                               const std::string& attention_mask_name);
+                                                               const std::string& attention_mask_name) {
+    return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
