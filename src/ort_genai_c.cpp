@@ -883,6 +883,10 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->fixed_state_replay_descriptor_count;
   else if (key == "fixed_state_replayed_transition_count")
     *value = stats->fixed_state_replayed_transition_count;
+  else if (key == "fixed_state_noncontiguous_slot_fallbacks")
+    *value = stats->fixed_state_noncontiguous_slot_fallbacks;
+  else if (key == "fixed_state_mixed_active_bank_fallbacks")
+    *value = stats->fixed_state_mixed_active_bank_fallbacks;
   else
     throw std::runtime_error(std::string(name) + " is an invalid name for OgaSpeculativeStatsGetCount.");
   return nullptr;

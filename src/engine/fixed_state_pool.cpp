@@ -1618,6 +1618,8 @@ FixedStateBindingMetrics FixedStatePool::BindingMetrics() const noexcept {
       impl_->full_state_bytes_avoided,
       impl_->replay_descriptor_count,
       impl_->replayed_transition_count,
+      impl_->noncontiguous_slot_fallbacks,
+      impl_->mixed_active_bank_fallbacks,
   };
 }
 

@@ -173,6 +173,8 @@ struct FixedStateBindingMetrics {
   uint64_t full_state_bytes_avoided{};
   uint64_t replay_descriptor_count{};
   uint64_t replayed_transition_count{};
+  uint64_t noncontiguous_slot_fallbacks{};
+  uint64_t mixed_active_bank_fallbacks{};
 };
 
 struct FixedStatePoolSnapshot {

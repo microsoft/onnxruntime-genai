@@ -1286,6 +1286,8 @@ SpeculativeStats Engine::GetSpeculativeStats() const noexcept {
   stats.fixed_state_full_state_bytes_avoided = fixed_state.full_state_bytes_avoided;
   stats.fixed_state_replay_descriptor_count = fixed_state.replay_descriptor_count;
   stats.fixed_state_replayed_transition_count = fixed_state.replayed_transition_count;
+  stats.fixed_state_noncontiguous_slot_fallbacks = fixed_state.noncontiguous_slot_fallbacks;
+  stats.fixed_state_mixed_active_bank_fallbacks = fixed_state.mixed_active_bank_fallbacks;
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
                             static_cast<float>(stats.draft_tokens_evaluated);

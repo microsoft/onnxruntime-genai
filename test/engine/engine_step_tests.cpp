@@ -1177,6 +1177,8 @@ TEST_F(EngineStepTest, CompositeReservationExposesRowsAndCommitsBothStates) {
             2 * engine.cache->FixedStateSnapshot()->zeroing_scratch_bytes);
   EXPECT_EQ(stats.fixed_state_replay_descriptor_count, 0u);
   EXPECT_EQ(stats.fixed_state_replayed_transition_count, 0u);
+  EXPECT_EQ(stats.fixed_state_noncontiguous_slot_fallbacks, 0u);
+  EXPECT_EQ(stats.fixed_state_mixed_active_bank_fallbacks, 0u);
   EXPECT_TRUE(ValidateCompositeStateInvariants(
                   engine.cache->Snapshot(), *fixed,
                   {first->Snapshot(), second->Snapshot()})
