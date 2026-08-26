@@ -20,6 +20,8 @@ set(engine_benchmark_srcs
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/decode_baseline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/long_prefill.h
   ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/long_prefill.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/mixed_workload.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/scenarios/mixed_workload.cpp
 )
 
 add_executable(engine_benchmark ${engine_benchmark_srcs})

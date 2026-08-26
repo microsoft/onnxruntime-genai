@@ -20,11 +20,14 @@ conda activate engine-benchmark-venv
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
-python -m pip install patchelf
+python -m pip install -r benchmark/requirements.txt
 
 python --version
 patchelf --version
 ```
+
+The benchmark requirements file must be installed because it provides the `patchelf` dependency
+used while staging the benchmark's runtime libraries.
 
 Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
 compiler must also be installed separately for a CUDA build.
@@ -57,7 +60,7 @@ export LD_LIBRARY_PATH=<cuda_home>/lib64:$PWD/build/Linux/RelWithDebInfo/benchma
 
 python benchmark/engine/run.py \
   --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
-  --config benchmark/engine/config.json \
+  --config benchmark/engine/configs/config.json \
   --out benchmark/engine/out \
   --cuda_visible_devices 0,1,2,3
 ```
@@ -71,7 +74,7 @@ For a single scenario, the executable can still be run directly:
 
 ```bash
 build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
-  --config benchmark/engine/config.json \
+  --config benchmark/engine/configs/config.json \
   --out benchmark/engine/out
 ```
 
@@ -82,7 +85,7 @@ waits for an available GPU, acquires its per-GPU slot, and receives that GPU thr
 ```bash
 python benchmark/engine/run.py \
   --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
-  --config benchmark/engine/config.json \
+  --config benchmark/engine/configs/config.json \
   --out benchmark/engine/out \
   --cuda_visible_devices 0,1,2,3
 ```
@@ -92,7 +95,11 @@ child benchmark output is opt-in with `--verbose`.
 
 ## Configuration
 
-`config.json` is a list of scenario entries:
+The `configs/` directory contains the complete matrix in `config.json`, individual scenario
+matrices in `decode-baseline.json`, `long-prefill.json`, and `mixed-workload.json`, and a
+three-entry smoke test in `smoke-test.json`.
+
+Each config is a list of scenario entries:
 
 ```json
 [
@@ -110,13 +117,24 @@ child benchmark output is opt-in with `--verbose`.
 
 | Field | Notes |
 | --- | --- |
-| `scenario` | `decode_baseline` or `long_prefill`. |
+| `scenario` | `decode_baseline`, `long_prefill`, or `mixed_workload`. |
 | `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
-| `prompt_length_k` | RULER prompt length in thousands of tokens; `long_prefill` supports 32, 64, and 128. |
+| `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
+
+`mixed_workload` runs one long-prefill request alongside active decode requests. The full and
+focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
+smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
+capped to one generated token while decode requests keep `generation_tokens`; this keeps the
+prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
+while still measuring prefill-vs-decode interference.
+
+For `mixed_workload`, the core TTFT percentiles include only active decode requests. The
+scenario-specific `prefill_ttft_ms` array reports the 128K prefill request's TTFT for each measured
+run, and each raw request is labeled with a `prefill` or `decode` role.
 
 ## Adding a scenario
 

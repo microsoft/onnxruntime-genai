@@ -6,10 +6,11 @@ Provide a reproducible native benchmark harness for ONNX Runtime GenAI that runs
 ## High-Level Architecture
 ```mermaid
 flowchart LR
-    A[config.json] --> C[scenario_dispatcher.cpp]
+    A[configs/*.json] --> C[scenario_dispatcher.cpp]
 
     C --> D[decode_baseline.cpp]
     C --> E[long_prefill.cpp]
+    C --> F[mixed_workload.cpp]
     C --> G[other_scenarios.cpp]
 
     D --> H[out/decode_baseline_results_ID.json]
@@ -31,7 +32,12 @@ onnxruntime-genai/benchmark/engine/
 |- benchmark-requirements.md
 |- scenario_dispatcher.cpp
 |- CMakeLists.txt
-|- config.json
+|- configs/
+|   |- config.json
+|   |- decode-baseline.json
+|   |- long-prefill.json
+|   |- mixed-workload.json
+|   |- smoke-test.json
 |- data/
 |   |- README.md
 |   |- ruler/
@@ -40,6 +46,7 @@ onnxruntime-genai/benchmark/engine/
 |- scenarios/
     |- decode_baseline.cpp
     |- long_prefill.cpp
+    |- mixed_workload.cpp
     |- {other_scenarios}.cpp
     |- utils.cpp
 ```
@@ -104,13 +111,15 @@ Each scenario implementation file (under `scenarios/`) is responsible for:
 - running the benchmark and recording scenario-appropriate metrics
 - producing scenario JSON outputs under `out/` (no per-scenario HTML)
 
+`mixed_workload` runs one long RULER prompt with shorter active decode prompts in the same engine.
+
 The dispatcher/visualizer is responsible for:
 
 - generating one `out/visualize.html` per benchmark invocation
 - discovering `out/*_results_*.json` files and rendering each scenario in a tab
 - grouping multiple runs of the same scenario (different `{id}` values)
 
-## Data Contract (ie. config.json)
+## Data Contract (ie. configs/*.json)
 `model_uri` is used below as a short placeholder for the model location.
 Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwen2.5-0.5b-instruct
 
@@ -132,7 +141,7 @@ Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwe
 
 - File naming convention:
   - `<scenario>` is the scenario name from config (for example `decode_baseline`, `long_prefill`).
-  - `<id>` is a zero-padded 3-digit sequence based on scenario order in `config.json` (001, 002, 003, ...).
+  - `<id>` is a zero-padded 3-digit sequence based on scenario order in the selected config (001, 002, 003, ...).
   - Example output set for one invocation:
 
 ```text
