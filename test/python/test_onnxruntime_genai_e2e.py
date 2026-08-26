@@ -74,7 +74,7 @@ def run_whisper():
     if not os.path.exists(ci_data_path):
         return
 
-    num_beams = 4
+    num_beams = 5
     (audio_path, expected_transcription) = (
         os.path.join(cwd, "..", "audios", "1272-141231-0002.mp3"),
         "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
