@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -29,7 +30,7 @@ constexpr int kDefaultGenerationTokens = 64;
 struct ScenarioConfig {
   std::string scenario{"decode_baseline"};
   int concurrency{1};
-  int prompt_length_k{4};
+  std::optional<int> prompt_length_k;
   std::string model_path;
   std::string execution_provider{"cuda"};
   std::string execution_provider_library;

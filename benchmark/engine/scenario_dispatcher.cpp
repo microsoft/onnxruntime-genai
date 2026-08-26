@@ -46,7 +46,9 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
       ScenarioConfig config;
       config.scenario = e.value("scenario", config.scenario);
       config.concurrency = e.value("concurrency", config.concurrency);
-      config.prompt_length_k = e.value("prompt_length_k", config.prompt_length_k);
+      if (e.contains("prompt_length_k")) {
+        config.prompt_length_k = e.at("prompt_length_k").get<int>();
+      }
       config.model_path = e.value("model_path", std::string{});
       config.execution_provider = e.value("execution_provider", config.execution_provider);
       config.execution_provider_library = e.value("execution_provider_library", std::string{});

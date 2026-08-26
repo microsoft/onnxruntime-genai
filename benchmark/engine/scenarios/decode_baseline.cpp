@@ -35,6 +35,9 @@ static const ScenarioBase::Registrar<DecodeBaselineScenario> kRegistrar("decode_
 void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("decode_baseline requires prompt_length_k");
+  }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("decode_baseline requires concurrency in [1,2,4,8]");
   }
@@ -43,12 +46,13 @@ void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const 
 ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string log_tag = Name();
   const std::string tag = "[" + log_tag + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
 
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
             << ", measured_runs=" << config.measured_runs
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", generation_tokens=" << config.generation_tokens
             << std::endl;
 
@@ -57,7 +61,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto prompt_tokens = BuildRulerPromptTokens(config.prompt_length_k, *engineResources.tokenizer, prompt_random);
+  auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
 
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
   std::cout << tag << "Prompt token count: " << prompt_token_count << std::endl;

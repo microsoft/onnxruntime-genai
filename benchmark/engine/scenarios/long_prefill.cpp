@@ -30,25 +30,29 @@ static const ScenarioBase::Registrar<LongPrefillScenario> kRegistrar("long_prefi
 void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("long_prefill requires prompt_length_k");
+  }
   if (config.concurrency != 1) {
     throw std::invalid_argument("long_prefill requires concurrency=1");
   }
   if (config.generation_tokens != 1) {
     throw std::invalid_argument("long_prefill requires generation_tokens=1");
   }
-  if (!IsLongPrefillLength(config.prompt_length_k)) {
+  if (!IsLongPrefillLength(*config.prompt_length_k)) {
     throw std::invalid_argument("long_prefill requires prompt_length_k in [32,64,128]");
   }
 }
 
 ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
 
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
             << ", measured_runs=" << config.measured_runs
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", generation_tokens=" << config.generation_tokens
             << std::endl;
 
@@ -57,7 +61,7 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
   auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto prompt_tokens = BuildRulerPromptTokens(config.prompt_length_k, *engineResources.tokenizer, prompt_random);
+  auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
 
   ScenarioExecutionOutput output;

@@ -41,6 +41,9 @@ static const ScenarioBase::Registrar<ContinuationScenario> kRegistrar("continuat
 void ContinuationScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("continuation requires prompt_length_k");
+  }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("continuation requires concurrency in [4,8]");
   }
@@ -48,11 +51,12 @@ void ContinuationScenario::ValidateConfig(const ScenarioConfig& config) const {
 
 ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
             << ", continuation_turns=" << kContinuationTurns
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", generation_tokens=" << config.generation_tokens << std::endl;
 
   MemorySampler memory;
@@ -60,7 +64,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
   auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto base_prompt = BuildRulerPromptTokens(config.prompt_length_k, *engineResources.tokenizer, prompt_random);
+  auto base_prompt = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
   const size_t base_prompt_count = base_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;

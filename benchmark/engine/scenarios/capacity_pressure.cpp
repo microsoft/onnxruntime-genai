@@ -32,6 +32,10 @@ static const ScenarioBase::Registrar<CapacityPressureScenario> kRegistrar("capac
 void CapacityPressureScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (config.prompt_length_k) {
+    throw std::invalid_argument("capacity_pressure does not accept prompt_length_k; prompt lengths are fixed");
+  }
+
   if (config.concurrency != static_cast<int>(kPromptLengthsK.size())) {
     throw std::invalid_argument("capacity_pressure requires concurrency=8");
   }
@@ -54,7 +58,7 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
   memory.Start();
   auto engineResources = CreateEngineResources(config);
 
-  // Build the fixed pressure set once: eight prompts ramp from 32K toward 128K.
+  // Build the fixed pressure set once: eight prompts ramp from 4K toward 128K.
   // This intentionally pushes the KV/cache budget instead of measuring normal throughput.
   std::mt19937 prompt_random(kRandomSeed);
   std::vector<std::unique_ptr<OgaSequences>> pressure_prompts;

@@ -36,6 +36,9 @@ static const ScenarioBase::Registrar<MixedWorkloadScenario> kRegistrar("mixed_wo
 void MixedWorkloadScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("mixed_workload requires prompt_length_k");
+  }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("mixed_workload requires concurrency in [4,8]");
   }
@@ -43,10 +46,11 @@ void MixedWorkloadScenario::ValidateConfig(const ScenarioConfig& config) const {
 
 ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", prefill_prompt_length_k=" << kPrefillPromptLengthK
             << ", prefill_generation_tokens=" << kPrefillGenerationTokens
             << ", generation_tokens=" << config.generation_tokens << std::endl;
@@ -57,7 +61,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
 
   // Use one long prompt to exercise prefill while shorter prompts represent active decodes.
   std::mt19937 prompt_random(kRandomSeed);
-  auto decode_prompt = BuildRulerPromptTokens(config.prompt_length_k, *engineResources.tokenizer, prompt_random);
+  auto decode_prompt = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
   auto prefill_prompt = BuildRulerPromptTokens(kPrefillPromptLengthK, *engineResources.tokenizer, prompt_random);
   const size_t decode_prompt_count = decode_prompt->SequenceCount(0);
   const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);

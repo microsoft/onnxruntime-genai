@@ -119,7 +119,7 @@ Each config is a list of scenario entries:
 | --- | --- |
 | `scenario` | `decode_baseline`, `long_prefill`, `mixed_workload`, `capacity_pressure`, or `continuation`. |
 | `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
-| `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. |
+| `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. Required by scenarios that use it and rejected by `capacity_pressure`, which has a fixed prompt profile. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
