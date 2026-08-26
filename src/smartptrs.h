@@ -112,6 +112,13 @@ struct DeviceSpan {
   friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
+struct PositionInputs {
+  virtual ~PositionInputs() = default;
+  virtual void Add() = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
+  virtual void RewindTo(size_t index) = 0;
+};
+
 struct BatchedSamplerState {
   virtual ~BatchedSamplerState() = default;
 };
