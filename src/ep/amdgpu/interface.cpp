@@ -297,7 +297,6 @@ struct PinnedInputsImpl : DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
   std::string GetExecutionProviderName() const override { return base_.GetExecutionProviderName(); }
 
-
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());
   }

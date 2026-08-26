@@ -19,14 +19,16 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     : state_{state},
       layer_types_{model_.config_->model.decoder.layer_types},
       layer_count_{model_.config_->model.decoder.num_hidden_layers} {
+  const auto* cache_name = ModelType::IsLFM2(model_.config_->model.type) ? "LFM2Cache" : "ConvKeyValueCache";
+
   // Validate layer_types array size matches num_hidden_layers before accessing elements.
   if (layer_count_ < 0) {
-    throw std::runtime_error("ConvKeyValueCache: num_hidden_layers must be non-negative. Actual: " + std::to_string(layer_count_));
+    throw std::runtime_error(std::string{cache_name} + ": num_hidden_layers must be non-negative. Actual: " + std::to_string(layer_count_));
   }
 
   const size_t expected_layer_types_size = static_cast<size_t>(layer_count_);
   if (layer_types_.size() != expected_layer_types_size) {
-    throw std::runtime_error("ConvKeyValueCache: layer_types array size (" + std::to_string(layer_types_.size()) +
+    throw std::runtime_error(std::string{cache_name} + ": layer_types array size (" + std::to_string(layer_types_.size()) +
                              ") does not match num_hidden_layers (" + std::to_string(layer_count_) + ")");
   }
 
