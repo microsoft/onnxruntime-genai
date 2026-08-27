@@ -28,7 +28,7 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
-        elif quant_type == "modelopt":
+        elif quant_type in {"modelopt", "compressed-tensors"}:
             model = ModeloptModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")

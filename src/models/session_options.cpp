@@ -7,15 +7,15 @@
 #include <functional>
 #include <unordered_map>
 
-#include "../cuda/session_options.h"
-#include "../dml/session_options.h"
-#include "../nvtensorrtrtx/session_options.h"
-#include "../openvino/session_options.h"
-#include "../qnn/session_options.h"
-#include "../ryzenai/session_options.h"
-#include "../amdgpu/session_options.h"
-#include "../vitisai/session_options.h"
-#include "../webgpu/session_options.h"
+#include "ep/cuda/session_options.h"
+#include "ep/dml/session_options.h"
+#include "ep/nvtensorrtrtx/session_options.h"
+#include "ep/openvino/session_options.h"
+#include "ep/qnn/session_options.h"
+#include "ep/ryzenai/session_options.h"
+#include "ep/amdgpu/session_options.h"
+#include "ep/vitisai/session_options.h"
+#include "ep/webgpu/session_options.h"
 
 namespace Generators {
 

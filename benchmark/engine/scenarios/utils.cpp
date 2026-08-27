@@ -177,6 +177,21 @@ std::string ResolveModelPath(const std::string& model_path) {
   return path.string();
 }
 
+EngineResources::EngineResources(const ScenarioConfig& config) {
+  const std::string resolved_model_path = ResolveModelPath(config.model_path);
+
+  oga_config = OgaConfig::Create(resolved_model_path.c_str());
+  oga_config->ClearProviders();
+  oga_config->AppendProvider(config.execution_provider.c_str());
+  model = OgaModel::Create(*oga_config);
+  tokenizer = OgaTokenizer::Create(*model);
+  engine = OgaEngine::Create(*model);
+}
+
+EngineResources CreateEngineResources(const ScenarioConfig& config) {
+  return EngineResources(config);
+}
+
 std::unique_ptr<OgaSequences> BuildRulerPromptTokens(
     int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random) {
   const fs::path prompts_path = fs::path(ORT_GENAI_BENCH_DATA_DIR) / "ruler" / "prompts.json";

@@ -8,19 +8,19 @@ cmake_dependent_option(ENABLE_CUDA_KERNEL_TESTS "Build cuda kernel tests" ON "US
 add_executable(unit_tests)
 
 file(GLOB test_srcs CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/*.cpp"
 )
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
   file(GLOB cuda_kernel_test_srcs CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernel/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernel/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_kernel/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_kernel/*.cpp"
   )
   target_sources(unit_tests PRIVATE ${test_srcs} ${generator_cudalib_srcs} ${cuda_kernel_test_srcs})
   # Enable STABLE_TOPK in Windows so that we have test coverage for stable sort.
@@ -28,6 +28,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
     message(STATUS "Enable STABLE_TOPK in CUDA kernel tests.")
     target_compile_definitions(unit_tests PRIVATE STABLE_TOPK)
   endif()
+  target_compile_definitions(unit_tests PRIVATE ORTGENAI_CUDA_ADDON_COMPILATION)
 else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()
@@ -60,12 +61,12 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   # These tests exercise the internal BatchedSampler interface, so keep them out of unit_tests,
   # which deliberately links only the public shared-library API.
   add_executable(cuda_batched_sampler_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/cuda_batched_sampler_tests/cuda_batched_sampler_tests.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cuda_batched_sampler_tests/cuda_batched_sampler_tests.cpp")
   target_include_directories(cuda_batched_sampler_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
   )
   target_link_libraries(cuda_batched_sampler_tests PRIVATE
     onnxruntime-genai-obj
@@ -103,7 +104,7 @@ add_test(NAME UnitTests COMMAND unit_tests)
 # binary links the genai OBJECT library (not the shared DLL) so it can call internal genai symbols
 # (e.g. GetDeviceInterface) directly for white-box coverage; unit_tests deliberately stays on the
 # public API via the shared library.
-add_executable(reinit_tests "${CMAKE_CURRENT_SOURCE_DIR}/reinit_tests.cpp")
+add_executable(reinit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 target_include_directories(reinit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
@@ -130,12 +131,12 @@ add_test(NAME ReInitTests COMMAND reinit_tests)
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests
-    "${CMAKE_CURRENT_SOURCE_DIR}/telemetry/device_info_tests.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/device_info_tests.cpp")
   target_include_directories(telemetry_device_info_tests PRIVATE
     ${ORT_HEADER_DIR}
     ${onnxruntime_extensions_SOURCE_DIR}/shared/api
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
   )
   target_link_libraries(telemetry_device_info_tests PRIVATE
     onnxruntime-genai-obj
@@ -161,18 +162,18 @@ endif()
 # tests that mint requests from a tiny CPU fixture model; the fixture model only loads and never
 # runs the graph, so the suite still needs no GPU and no real inference.
 file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/engine/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
 )
 list(APPEND engine_unit_test_srcs
-  "${CMAKE_CURRENT_SOURCE_DIR}/search_checkpoint_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
 target_include_directories(engine_unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
   ${CMAKE_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpp
 )
 # onnxruntime-genai-obj propagates its PUBLIC usage requirements (ORT + extensions include dirs and
 # link libs), so those are inherited here.

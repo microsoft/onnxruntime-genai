@@ -117,7 +117,7 @@ ADO pipelines obtain ORT lib/headers via three methods:
 1. **Config parsing** (`src/config.cpp`) - Reads `genai_config.json` model metadata
 2. **ONNX session creation** via `onnxruntime_api.h` wrappers
 3. **Device interface selection** based on provider availability
-4. **KV cache initialization** (`src/models/kv_cache.cpp`) for transformer models
+4. **KV cache initialization** (`src/models/io/kv_cache.cpp`) for transformer models
 
 ### Multi-Modal Support
 
@@ -151,7 +151,7 @@ The repo supports specific model architectures - check `src/models/model_type.h`
 
 - **KV caching** is automatically managed but can be configured via `src/runtime_settings.cpp`
 - **Continuous decoding** (session continuation) requires careful state management
-- **Multi-LoRA** adapters use separate weight loading in `src/models/adapters.cpp`
+- **Multi-LoRA** adapters use separate weight loading in `src/models/io/adapters.cpp`
 
 ## Testing Strategy
 

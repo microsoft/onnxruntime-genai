@@ -12,7 +12,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../models/model.h"
 #include "../models/model_state_manifest.h"
 #include "../models/utils.h"

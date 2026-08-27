@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"

@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import onnx
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
+
+register_plugin_providers(logging.getLogger(__name__))
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
 

@@ -30,42 +30,38 @@ static const ScenarioBase::Registrar<LongPrefillScenario> kRegistrar("long_prefi
 void LongPrefillScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("long_prefill requires prompt_length_k");
+  }
   if (config.concurrency != 1) {
     throw std::invalid_argument("long_prefill requires concurrency=1");
   }
   if (config.generation_tokens != 1) {
     throw std::invalid_argument("long_prefill requires generation_tokens=1");
   }
-  if (!IsLongPrefillLength(config.prompt_length_k)) {
+  if (!IsLongPrefillLength(*config.prompt_length_k)) {
     throw std::invalid_argument("long_prefill requires prompt_length_k in [32,64,128]");
   }
 }
 
 ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
 
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
             << ", measured_runs=" << config.measured_runs
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", generation_tokens=" << config.generation_tokens
             << std::endl;
 
-  const std::string resolved_model_path = ResolveModelPath(config.model_path);
-
   MemorySampler memory;
   memory.Start();
-
-  auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
-  oga_config->ClearProviders();
-  oga_config->AppendProvider(config.execution_provider.c_str());
-  auto model = OgaModel::Create(*oga_config);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto engine = OgaEngine::Create(*model);
+  auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto prompt_tokens = BuildRulerPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
+  auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
 
   ScenarioExecutionOutput output;
@@ -77,16 +73,16 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
 
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
-    auto params = OgaGeneratorParams::Create(*model);
+    auto params = OgaGeneratorParams::Create(*engineResources.model);
     params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
     params->SetSearchOption("random_seed", kRandomSeed);
 
     auto request = OgaRequest::Create(*params);
     request->AddTokens(*prompt_tokens);
-    engine->Add(*request);
+    engineResources.engine->Add(*request);
 
     const auto start = std::chrono::steady_clock::now();
-    auto ready_request = engine->Step();
+    auto ready_request = engineResources.engine->Step();
     const auto first_token = std::chrono::steady_clock::now();
     if (!ready_request || !ready_request->HasUnseenTokens()) {
       throw std::runtime_error("long_prefill did not produce a first token");
@@ -112,10 +108,10 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
     ++measured_run_index;
   }
 
+  memory.Stop();
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
-  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
-  memory.Stop();
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
   output.scenario_metrics = {

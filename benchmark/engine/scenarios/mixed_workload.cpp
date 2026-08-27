@@ -36,6 +36,9 @@ static const ScenarioBase::Registrar<MixedWorkloadScenario> kRegistrar("mixed_wo
 void MixedWorkloadScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("mixed_workload requires prompt_length_k");
+  }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("mixed_workload requires concurrency in [4,8]");
   }
@@ -43,39 +46,31 @@ void MixedWorkloadScenario::ValidateConfig(const ScenarioConfig& config) const {
 
 ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", prefill_prompt_length_k=" << kPrefillPromptLengthK
             << ", prefill_generation_tokens=" << kPrefillGenerationTokens
             << ", generation_tokens=" << config.generation_tokens << std::endl;
 
-  const std::string resolved_model_path = ResolveModelPath(config.model_path);
-
   MemorySampler memory;
   memory.Start();
-
-  auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
-  oga_config->ClearProviders();
-  oga_config->AppendProvider(config.execution_provider.c_str());
-  auto model = OgaModel::Create(*oga_config);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto engine = OgaEngine::Create(*model);
+  auto engineResources = CreateEngineResources(config);
 
   // Use one long prompt to exercise prefill while shorter prompts represent active decodes.
   std::mt19937 prompt_random(kRandomSeed);
-  auto decode_prompt = BuildRulerPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
-  auto prefill_prompt = BuildRulerPromptTokens(kPrefillPromptLengthK, *tokenizer, prompt_random);
+  auto decode_prompt = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
+  auto prefill_prompt = BuildRulerPromptTokens(kPrefillPromptLengthK, *engineResources.tokenizer, prompt_random);
   const size_t decode_prompt_count = decode_prompt->SequenceCount(0);
   const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;
-  std::vector<double> decode_ttft_values;
+  std::vector<double> ttft_values;
   std::vector<double> inter_token_latency_values;
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
-  nlohmann::json prefill_ttft_ms_values = nlohmann::json::array();
   const int total_runs = config.warmup_runs + config.measured_runs;
   int measured_run_index = 0;
 
@@ -104,18 +99,18 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       const int generation_tokens = i == 0 ? kPrefillGenerationTokens : config.generation_tokens;
       prompt_counts[static_cast<size_t>(i)] = prompt_count;
       target_generation_tokens[static_cast<size_t>(i)] = generation_tokens;
-      params.emplace_back(OgaGeneratorParams::Create(*model));
+      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
       params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + generation_tokens));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
       request_tokens[static_cast<size_t>(i)].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
       requests.emplace_back(OgaRequest::Create(*params.back()));
       requests.back()->AddTokens(*prompt);
       requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
-      engine->Add(*requests.back());
+      engineResources.engine->Add(*requests.back());
     }
 
     // Measure whether the long prefill delays decode first-token and inter-token latency.
-    while (auto ready_request = engine->Step()) {
+    while (auto ready_request = engineResources.engine->Step()) {
       const auto now = std::chrono::steady_clock::now();
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
       if (tokens == nullptr) {
@@ -177,12 +172,12 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     ++measured_run_index;
   }
 
-  output.ttft_p5_ms = Percentile(decode_ttft_values, 5.0);
-  output.ttft_p50_ms = Percentile(decode_ttft_values, 50.0);
-  output.ttft_p95_ms = Percentile(decode_ttft_values, 95.0);
+  memory.Stop();
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
+  output.ttft_p50_ms = Percentile(ttft_values, 50.0);
+  output.ttft_p95_ms = Percentile(ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
-  memory.Stop();
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
   output.scenario_metrics = {

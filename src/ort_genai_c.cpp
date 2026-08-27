@@ -8,15 +8,18 @@
 #include <limits>
 #include "span.h"
 #include "ort_genai_c.h"
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
-#include "mtp_generator.h"
+#include "generator/mtp_generator.h"
 #include "engine/engine.h"
-#include "models/streaming_processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/multi_modal_processor.h"
+#include "models/preprocessing/processor.h"
+#include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
@@ -1044,17 +1047,6 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer* tokenizer, const char* template_str,
-                                                                 const char* messages, const char* tools,
-                                                                 const char* template_kwargs, bool add_generation_prompt,
-                                                                 const char** out_string) {
-  OGA_TRY
-  *out_string = AllocOgaString(tokenizer->ApplyChatTemplateWithOptions(template_str, messages, tools,
-                                                                       template_kwargs, add_generation_prompt));
   return nullptr;
   OGA_CATCH
 }

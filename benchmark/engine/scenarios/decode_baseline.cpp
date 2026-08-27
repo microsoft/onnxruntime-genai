@@ -35,6 +35,9 @@ static const ScenarioBase::Registrar<DecodeBaselineScenario> kRegistrar("decode_
 void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const {
   ScenarioBase::ValidateConfig(config);
 
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("decode_baseline requires prompt_length_k");
+  }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("decode_baseline requires concurrency in [1,2,4,8]");
   }
@@ -43,29 +46,22 @@ void DecodeBaselineScenario::ValidateConfig(const ScenarioConfig& config) const 
 ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
   const std::string log_tag = Name();
   const std::string tag = "[" + log_tag + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
 
   std::cout << tag << "Execute start: model_path='" << config.model_path
             << "', provider='" << config.execution_provider
             << "', concurrency=" << config.concurrency
             << ", measured_runs=" << config.measured_runs
-            << ", prompt_length_k=" << config.prompt_length_k
+            << ", prompt_length_k=" << prompt_length_k
             << ", generation_tokens=" << config.generation_tokens
             << std::endl;
 
-  const std::string resolved_model_path = ResolveModelPath(config.model_path);
-
   MemorySampler memory;
   memory.Start();
-
-  auto oga_config = OgaConfig::Create(resolved_model_path.c_str());
-  oga_config->ClearProviders();
-  oga_config->AppendProvider(config.execution_provider.c_str());
-  auto model = OgaModel::Create(*oga_config);
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto engine = OgaEngine::Create(*model);
+  auto engineResources = CreateEngineResources(config);
 
   std::mt19937 prompt_random(kRandomSeed);
-  auto prompt_tokens = BuildRulerPromptTokens(config.prompt_length_k, *tokenizer, prompt_random);
+  auto prompt_tokens = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
 
   const size_t prompt_token_count = prompt_tokens->SequenceCount(0);
   std::cout << tag << "Prompt token count: " << prompt_token_count << std::endl;
@@ -98,7 +94,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     size_t generated_tokens = 0;
 
     for (int i = 0; i < config.concurrency; ++i) {
-      params.emplace_back(OgaGeneratorParams::Create(*model));
+      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
       const size_t max_length = prompt_token_count + static_cast<size_t>(config.generation_tokens);
       params.back()->SetSearchOption(
           "max_length", static_cast<double>(max_length));
@@ -110,10 +106,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       requests.emplace_back(OgaRequest::Create(*params.back()));
       requests.back()->AddTokens(*prompt_tokens);
       requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
-      engine->Add(*requests.back());
+      engineResources.engine->Add(*requests.back());
     }
 
-    while (auto ready_request = engine->Step()) {
+    while (auto ready_request = engineResources.engine->Step()) {
       const auto now = std::chrono::steady_clock::now();
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
       if (tokens == nullptr) {
@@ -186,13 +182,12 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     ++measured_run_index;
   }
 
+  memory.Stop();
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);
   output.ttft_p95_ms = Percentile(ttft_values, 95.0);
-  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
-
-  memory.Stop();
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
   output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
 

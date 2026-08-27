@@ -11,7 +11,7 @@
 #include <limits>
 #include <stdexcept>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "parakeet.h"
 
 namespace Generators {
