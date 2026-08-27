@@ -55,16 +55,6 @@ def _get_model_session_options_overlay(
     return {"model": model_overlay} if model_overlay else {}
 
 
-def _get_effective_ep_options(
-    ep_options: dict[str, str], search_options: dict[str, int]
-) -> dict[str, str]:
-    effective_ep_options = dict(ep_options)
-    if search_options.get("num_beams", 1) > 1:
-        for key in ["enable_cuda_graph", "enableGraphCapture"]:
-            if key in effective_ep_options:
-                # Beam search requires past_present_share_buffer to be false, so graph capture must be disabled.
-                effective_ep_options[key] = "0"
-    return effective_ep_options
 
 
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
@@ -145,12 +135,11 @@ def get_config(
         search_options = {}
     if ep_options is None:
         ep_options = {}
-    effective_ep_options = _get_effective_ep_options(ep_options, search_options)
     config = og.Config(path)
     if not ep_path and ep != "follow_config":
         config.clear_providers()
         model_provider_overlay = _get_model_session_options_overlay(
-            path, ep, effective_ep_options
+            path, ep, ep_options
         )
         if ep != "cpu":
             print(f"Setting model to {ep}")
@@ -160,8 +149,13 @@ def get_config(
             config.append_provider(ep)
 
     # Set any EP-specific options
-    for k, v in effective_ep_options.items():
-        config.set_provider_option(ep, k, v)
+    for k, v in ep_options.items():
+        if k in {"enable_cuda_graph", "enableGraphCapture"} and search_options.get("num_beams", 1) > 1:
+            # Disable graph capture if using beam search (num_beams > 1),
+            # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
+            config.set_provider_option(ep, k, "0")
+        else:
+            config.set_provider_option(ep, k, v)
 
     if "chunk_size" in search_options and search_options["chunk_size"] == 0:
         # Remove chunk_size of 0
