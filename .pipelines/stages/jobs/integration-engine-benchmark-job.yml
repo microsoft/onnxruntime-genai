@@ -106,7 +106,7 @@ jobs:
               -p int4 \
               -e cuda \
               -c "$MODEL_CACHE" \
-              --extra_options use_paged_attention=true gpu_utilization_factor=0.3
+              --extra_options use_paged_attention=true hf_token=false gpu_utilization_factor=0.3
             test -f "$output/genai_config.json"
             test -f "$output/model.onnx"
           done
