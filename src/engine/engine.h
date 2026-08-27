@@ -7,6 +7,8 @@
 #include "model_executor.h"
 #include "scheduler.h"
 
+#include <thread>
+
 /**
  * @file engine.h
  * @brief Defines the Engine class, which serves as the core component for managing
@@ -19,6 +21,41 @@ namespace Generators {
 enum class EngineHealth {
   Healthy,
   Unhealthy,
+};
+
+enum class EngineErrorCode : uint32_t {
+  None = 0,
+  CapacityDeferred = 1,
+  ExecutionCapacityExceeded = 2,
+  RetryableExecution = 3,
+  RequestUnserviceable = 4,
+  EngineContractFailure = 5,
+  EngineExecutionFailure = 6,
+};
+
+enum EngineEventFlag : uint32_t {
+  EngineEventFlagNone = 0,
+  EngineEventFlagToken = 1u << 0,
+  EngineEventFlagTurnFinished = 1u << 1,
+  EngineEventFlagCapacityBlocked = 1u << 2,
+  EngineEventFlagFailed = 1u << 3,
+  EngineEventFlagRetryable = 1u << 4,
+};
+
+struct TurnUsage {
+  uint64_t prompt_tokens{};
+  uint64_t generated_tokens{};
+  uint64_t cached_prompt_tokens{};
+};
+
+struct EngineEvent {
+  std::shared_ptr<Request> request;
+  uint64_t turn_id{};
+  uint32_t flags{};
+  int32_t token{};
+  GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  EngineErrorCode error_code{EngineErrorCode::None};
+  TurnUsage usage{};
 };
 
 /**
@@ -89,7 +126,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
-  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params);
+  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params,
+                                         size_t max_total_tokens);
+  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params) {
+    return CreateRequest(
+        params, static_cast<size_t>(params.search.max_length));
+  }
 
   /**
    * @brief Advances the state of a subset of the Requests the Engine is currently
@@ -101,7 +143,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * model executor and updates the requests' states with the newly generated
    * tokens.
    */
-  std::shared_ptr<Request> Run();
+  EngineEvent Run();
 
   /**
    * @brief Checks if there are any pending requests in the Engine.
@@ -110,15 +152,24 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool HasPendingRequests() const;
 
  private:
-  void BeginTurn(const std::shared_ptr<Request>& request,
-                 std::span<const int32_t> tokens,
-                 std::optional<size_t> max_generated_tokens);
+  void ValidateOwnerThread() const;
+  uint64_t BeginTurn(const std::shared_ptr<Request>& request,
+                     std::span<const int32_t> tokens,
+                     std::optional<size_t> max_generated_tokens);
   void CloseRequest(const std::shared_ptr<Request>& request);
+  bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
-  std::shared_ptr<Request> DrainReadyRequest();
-  std::shared_ptr<Request> RunDynamic();
-  std::shared_ptr<Request> RunStatic();
-  void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
+  EngineEvent DrainPendingEvent();
+  EngineEvent RunDynamic();
+  EngineEvent RunStatic();
+  EngineEvent EventFromStep(const std::shared_ptr<Request>& request,
+                            const RequestStepResult& result) const;
+  EngineEvent EventFromStepError(const EngineStepError& error);
+  std::shared_ptr<Request> FindTrackedRequest(const void* request_id) const;
+  EngineEvent FailUnserviceableRequest(const void* request_id);
+  void ValidateRequestCanContinue(
+      const std::shared_ptr<Request>& request,
+      bool allow_nonresident = false) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
       std::exception_ptr append_error,
@@ -133,6 +184,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};
@@ -140,9 +192,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
   std::vector<std::weak_ptr<Request>> tracked_requests_;
-  std::vector<std::shared_ptr<Request>> ready_requests_;
-  std::vector<std::shared_ptr<Request>> staged_ready_requests_;
-  size_t ready_request_index_{};
+  std::vector<EngineEvent> pending_events_;
+  std::vector<EngineEvent> staged_events_;
+  size_t pending_event_index_{};
 
   friend struct Request;
 };

@@ -10,8 +10,30 @@
 
 namespace Generators {
 
-Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params},
+void TurnParams::ValidateOwnerThread() const {
+  auto bound_request = request.lock();
+  if (!bound_request) {
+    throw std::runtime_error(
+        "Cannot use Turn parameters after their Request has been destroyed.");
+  }
+  bound_request->ValidateOwnerThread();
+}
+
+void Request::ValidateOwnerThread() const {
+  auto engine = engine_.lock();
+  if (!engine) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot use a closed request.");
+    }
+    throw std::runtime_error(
+        "Cannot use a Request after its Engine has been destroyed.");
+  }
+  engine->ValidateOwnerThread();
+}
+
+Request::Request(std::shared_ptr<GeneratorParams> params, size_t max_total_tokens)
+    : max_total_tokens_{max_total_tokens},
+      params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
       search_{CreateSearch(*params)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
@@ -48,7 +70,7 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
-  tokens_host_.reserve(static_cast<size_t>(params_->search.max_length));
+  tokens_host_.reserve(max_total_tokens_);
 }
 
 Request::~Request() = default;
@@ -65,47 +87,7 @@ bool Request::IsExternallyAbandoned() const noexcept {
   return externally_abandoned_.load(std::memory_order_acquire);
 }
 
-void Request::PrepareForStep(size_t max_generated_token_indices) {
-  if (next_unseen_token_index_ > unseen_token_indices_.size()) {
-    throw std::logic_error("The unseen token cursor is outside the generated-token index queue.");
-  }
-
-  const size_t unread_token_count =
-      unseen_token_indices_.size() - next_unseen_token_index_;
-  const bool append_would_grow =
-      max_generated_token_indices >
-      unseen_token_indices_.capacity() - unseen_token_indices_.size();
-  if (next_unseen_token_index_ != 0 &&
-      (append_would_grow ||
-       next_unseen_token_index_ >= unread_token_count)) {
-    const auto unread_begin =
-        unseen_token_indices_.begin() +
-        static_cast<std::vector<size_t>::difference_type>(
-            next_unseen_token_index_);
-    unseen_token_indices_.erase(unseen_token_indices_.begin(), unread_begin);
-    next_unseen_token_index_ = 0;
-  }
-
-  if (max_generated_token_indices >
-      unseen_token_indices_.max_size() - unseen_token_indices_.size()) {
-    throw std::length_error(
-        "The generated-token index queue cannot represent this step.");
-  }
-  const size_t required_capacity =
-      unseen_token_indices_.size() + max_generated_token_indices;
-  if (required_capacity <= unseen_token_indices_.capacity()) {
-    return;
-  }
-
-  // Grow geometrically from the actual unread output needed by this step. Unlike reserving
-  // max_length, this keeps a streaming caller's index storage small while avoiding one allocation
-  // per token when output is allowed to accumulate.
-  const size_t target_capacity =
-      required_capacity > unseen_token_indices_.max_size() / 2
-          ? unseen_token_indices_.max_size()
-          : required_capacity * 2;
-  unseen_token_indices_.reserve(target_capacity);
-}
+void Request::PrepareForStep(size_t) {}
 
 void Request::Schedule() {
   if (status_ != RequestStatus::Assigned) {
@@ -132,12 +114,21 @@ void Request::Close() {
   engine->CloseRequest(shared_from_this());
 }
 
+bool Request::Cancel(uint64_t turn_id) {
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot cancel after the request's engine has been destroyed.");
+  }
+  return engine->CancelRequest(shared_from_this(), turn_id);
+}
+
 void Request::CompleteClose() {
   engine_.reset();
   status_ = RequestStatus::Closed;
 }
 
-void Request::BeginTurn(
+uint64_t Request::BeginTurn(
     std::span<const int32_t> tokens,
     std::optional<size_t> max_generated_tokens) {
   if (IsClosed(status_)) {
@@ -148,7 +139,7 @@ void Request::BeginTurn(
     throw std::runtime_error(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  engine->BeginTurn(
+  return engine->BeginTurn(
       shared_from_this(), tokens, max_generated_tokens);
 }
 
@@ -163,8 +154,10 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.status = status_;
   snapshot.current_sequence_length = current;
   snapshot.processed_sequence_length = processed_sequence_length_;
-  snapshot.seen_sequence_length = seen_sequence_length_;
   snapshot.is_prefill = IsPrefill();
+  snapshot.has_current_turn = has_current_turn_;
+  snapshot.current_turn_id = current_turn_id_;
+  snapshot.finish_reason = finish_reason_;
   return snapshot;
 }
 
@@ -200,26 +193,6 @@ void Request::AdvanceChunk() {
   processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
 }
 
-int32_t Request::UnseenToken() {
-  if (next_unseen_token_index_ >= unseen_token_indices_.size())
-    throw std::runtime_error("All tokens have been seen.");
-
-  const size_t token_index = unseen_token_indices_[next_unseen_token_index_++];
-  if (token_index >= tokens_host_.size())
-    throw std::runtime_error("The unseen token index is outside the host token sequence.");
-  seen_sequence_length_ = std::max(seen_sequence_length_, static_cast<int64_t>(token_index + 1));
-  const int32_t token = tokens_host_[token_index];
-  if (next_unseen_token_index_ == unseen_token_indices_.size()) {
-    unseen_token_indices_.clear();
-    next_unseen_token_index_ = 0;
-  }
-  return token;
-}
-
-bool Request::HasUnseenTokens() const {
-  return next_unseen_token_index_ < unseen_token_indices_.size();
-}
-
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
   return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
@@ -236,14 +209,6 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
 
 bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
-}
-
-void Request::SetOpaqueData(void* data) noexcept {
-  opaque_data_ = data;
-}
-
-void* Request::GetOpaqueData() const noexcept {
-  return opaque_data_;
 }
 
 bool Request::IsPrefill() const {
@@ -352,15 +317,16 @@ void Request::CommitStateForTransaction() {
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
   if (result.token_appended) {
-    // ScheduledRequests reserved this append before model execution. tokens_host_ retains its
-    // existing max-length reservation, so neither push allocates at this commit boundary.
-    const size_t token_index = tokens_host_.size();
+    // tokens_host_ retains its existing max-length reservation, so this append cannot allocate at
+    // the commit boundary.
     tokens_host_.push_back(result.token);
-    unseen_token_indices_.push_back(token_index);
     ++turn_generated_tokens_;
   }
   processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
+  if (result.done) {
+    finish_reason_ = result.finish_reason;
+  }
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
@@ -393,20 +359,30 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   search_->CompleteGeneration();
   const bool search_done = search_->IsDone();
   const bool token_appended = CurrentSequenceLength() > sequence_length_before;
-  int32_t token = 0;
-  if (token_appended) {
-    token = search_->GetNextTokens().CpuSpan().back();
-  }
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
+  const int32_t token = next_tokens.empty() ? 0 : next_tokens.back();
   const size_t generated_tokens_after_step =
       turn_generated_tokens_ + static_cast<size_t>(token_appended);
   const bool turn_limit_reached =
       turn_max_generated_tokens_ &&
       generated_tokens_after_step >= *turn_max_generated_tokens_;
-  const bool done = search_done || turn_limit_reached;
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_total_tokens_;
+  GenerationFinishReason finish_reason = GenerationFinishReason::None;
+  if (search_done && !next_tokens.empty() &&
+      contains(params_->config.model.eos_token_id, token)) {
+    finish_reason = GenerationFinishReason::EosToken;
+  } else if (turn_limit_reached) {
+    finish_reason = GenerationFinishReason::TurnLimit;
+  } else if (context_limit_reached || search_done) {
+    finish_reason = GenerationFinishReason::ContextLimit;
+  }
+  const bool done = finish_reason != GenerationFinishReason::None;
   RequestStepResult result{
       token,
       token_appended,
       done,
+      finish_reason,
   };
   CommitGuidanceToken(result);
   if (done && guidance_logits_processor_) {
@@ -449,22 +425,21 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
   return *batched_sampler_state_;
 }
 
-void Request::CompleteGeneration() {
+RequestStepResult Request::CompleteGeneration() {
   search_->CompleteGeneration();
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  size_t new_token_count{};
+  int32_t token{};
   if (sequence_length > tokens_host_.size()) {
-    const size_t new_token_count = sequence_length - tokens_host_.size();
-    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    new_token_count = sequence_length - tokens_host_.size();
     if (new_token_count > next_tokens.size())
       throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
     auto new_tokens = next_tokens.last(new_token_count);
 
-    const size_t first_new_token = tokens_host_.size();
     tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
-    for (size_t token_index = first_new_token; token_index < tokens_host_.size(); ++token_index) {
-      unseen_token_indices_.push_back(token_index);
-    }
+    token = new_tokens.back();
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }
@@ -474,12 +449,28 @@ void Request::CompleteGeneration() {
   const bool turn_limit_reached =
       turn_max_generated_tokens_ &&
       turn_generated_tokens_ >= *turn_max_generated_tokens_;
-  if (search_->IsDone() || turn_limit_reached) {
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_total_tokens_;
+  if (search_->IsDone() || turn_limit_reached || context_limit_reached) {
     status_ = RequestStatus::TurnComplete;
+    if (search_->IsDone() && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      finish_reason_ = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason_ = GenerationFinishReason::TurnLimit;
+    } else {
+      finish_reason_ = GenerationFinishReason::ContextLimit;
+    }
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();
     }
   }
+  return RequestStepResult{
+      token,
+      new_token_count != 0,
+      Generators::IsTurnComplete(status_),
+      finish_reason_,
+  };
 }
 
 }  // namespace Generators

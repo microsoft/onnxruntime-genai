@@ -103,15 +103,16 @@ void ScheduledRequests::AddDecoderState(std::unique_ptr<DecoderIO> decoder_state
   decoder_state_ = std::move(decoder_state);
 }
 
-void ScheduledRequests::GenerateNextTokens() {
+void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
 
   try {
     auto logits = ProcessLogits();
+    results.assign(requests_.size(), RequestStepResult{});
 
-    if (TryGenerateNextTokensBatched(logits))
+    if (TryGenerateNextTokensBatched(logits, &results))
       return;
 
     // Every request owns an independent single-sequence search, so token selection runs once per
@@ -128,7 +129,7 @@ void ScheduledRequests::GenerateNextTokens() {
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
       if (IsExecuting(requests_[request_idx]->status_) &&
           requests_[request_idx]->IsChunkComplete()) {
-        requests_[request_idx]->CompleteGeneration();
+        results[request_idx] = requests_[request_idx]->CompleteGeneration();
       }
     }
 
@@ -162,7 +163,9 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 
 // Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
 // and groups rows by resolved sampling parameters, while each Request owns its persistent RNG state.
-bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits) {
+bool ScheduledRequests::TryGenerateNextTokensBatched(
+    std::vector<DeviceSpan<float>>& logits,
+    std::vector<RequestStepResult>* results) {
   if (!PrepareBatchedSamplingPlan(false))
     return false;
 
@@ -192,7 +195,17 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
   next_tokens.CopyDeviceToCpu();
 
   for (auto* request : sampling_plan_->requests) {
-    request->CompleteGeneration();
+    const auto result = request->CompleteGeneration();
+    if (results) {
+      const auto it = std::find_if(
+          requests_.begin(), requests_.end(),
+          [request](const std::shared_ptr<Request>& candidate) {
+            return candidate.get() == request;
+          });
+      if (it == requests_.end())
+        throw std::logic_error("Batched sampling request is not in the scheduled batch.");
+      (*results)[static_cast<size_t>(it - requests_.begin())] = result;
+    }
   }
   for (const auto& request : requests_) {
     if (IsExecuting(request->status_) &&

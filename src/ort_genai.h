@@ -902,49 +902,65 @@ struct OgaAdapters : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
+struct OgaTurnParams : OgaAbstract {
+  static std::unique_ptr<OgaTurnParams> Create(OgaRequest& request) {
+    OgaTurnParams* params{};
+    OgaCheckResult(OgaRequestCreateTurnParams(&request, &params));
+    return std::unique_ptr<OgaTurnParams>(params);
+  }
+
+  void SetMaxGeneratedTokens(uint64_t value) {
+    OgaCheckResult(OgaTurnParamsSetMaxGeneratedTokens(this, value));
+  }
+  void SetTemperature(float value) {
+    OgaCheckResult(OgaTurnParamsSetTemperature(this, value));
+  }
+  void SetTopP(float value) {
+    OgaCheckResult(OgaTurnParamsSetTopP(this, value));
+  }
+  void SetTopK(int32_t value) {
+    OgaCheckResult(OgaTurnParamsSetTopK(this, value));
+  }
+  void SetSeed(uint64_t value) {
+    OgaCheckResult(OgaTurnParamsSetSeed(this, value));
+  }
+  void SetStopSequences(const char* const* values, uint64_t count) {
+    OgaCheckResult(OgaTurnParamsSetStopSequences(this, values, count));
+  }
+  void SetGuidance(const char* type, const char* data) {
+    OgaCheckResult(OgaTurnParamsSetGuidance(this, type, data));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyTurnParams(reinterpret_cast<OgaTurnParams*>(p));
+  }
+};
+
 struct OgaRequest : OgaAbstract {
-  void BeginTurn(const int32_t* input_ids, size_t input_ids_count,
-                 const OgaTurnOptions* options = nullptr) {
+  uint64_t BeginTurn(const int32_t* input_ids, size_t input_ids_count,
+                     const OgaTurnParams* params = nullptr) {
+    uint64_t turn_id{};
     OgaCheckResult(OgaRequestBeginTurn(
-        this, options, input_ids, input_ids_count));
+        this, params, input_ids, static_cast<uint64_t>(input_ids_count),
+        &turn_id));
+    return turn_id;
   }
 
 #if OGA_USE_SPAN
-  void BeginTurn(std::span<const int32_t> input_ids,
-                 const OgaTurnOptions* options = nullptr) {
-    BeginTurn(input_ids.data(), input_ids.size(), options);
+  uint64_t BeginTurn(std::span<const int32_t> input_ids,
+                     const OgaTurnParams* params = nullptr) {
+    return BeginTurn(input_ids.data(), input_ids.size(), params);
   }
 #endif
 
-  /**
-   * \brief Returns whether the current generation turn is complete.
-   */
-  bool IsTurnComplete() const {
-    bool is_turn_complete{};
-    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
-    return is_turn_complete;
+  std::unique_ptr<OgaTurnParams> CreateTurnParams() {
+    return OgaTurnParams::Create(*this);
   }
 
-  bool HasUnseenTokens() const {
-    bool has_unseen_tokens{};
-    OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
-    return has_unseen_tokens;
-  }
-
-  int32_t GetUnseenToken() {
-    int32_t token;
-    OgaCheckResult(OgaRequestGetUnseenToken(this, &token));
-    return token;
-  }
-
-  void SetOpaqueData(void* data) {
-    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
-  }
-
-  void* GetOpaqueData() {
-    void* data{};
-    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
-    return data;
+  bool CancelTurn(uint64_t turn_id) {
+    bool cancelled{};
+    OgaCheckResult(OgaRequestCancelTurn(this, turn_id, &cancelled));
+    return cancelled;
   }
 
   void Close() {
@@ -968,17 +984,18 @@ struct OgaEngine : OgaAbstract {
   }
 
   std::unique_ptr<OgaRequest> CreateRequest(
-      const OgaGeneratorParams& params) {
+      const OgaGeneratorParams& params,
+      const OgaRequestOptions* options = nullptr) {
     OgaRequest* request{};
-    OgaCheckResult(OgaEngineCreateRequest(this, &params, &request));
+    OgaCheckResult(OgaEngineCreateRequest(this, &params, options, &request));
     return std::unique_ptr<OgaRequest>(request);
   }
 
-  OgaRequest* Run() {
-    // Borrowed alias: valid only while the owned CreateRequest() handle remains alive.
-    OgaRequest* request{};
-    OgaCheckResult(OgaEngineRun(this, &request));
-    return request;
+  OgaEngineEvent Run() {
+    OgaEngineEvent event{};
+    event.struct_size = sizeof(event);
+    OgaCheckResult(OgaEngineRun(this, &event));
+    return event;
   }
 
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }

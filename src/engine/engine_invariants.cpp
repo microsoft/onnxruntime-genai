@@ -211,8 +211,7 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
 
   const std::string id = PtrId(request.request_id);
 
-  if (request.current_sequence_length < 0 || request.processed_sequence_length < 0 ||
-      request.seen_sequence_length < 0) {
+  if (request.current_sequence_length < 0 || request.processed_sequence_length < 0) {
     add("Request " + id + " has a negative sequence-length counter.");
   }
 
@@ -221,9 +220,30 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
         ") exceeds current length (" + std::to_string(request.current_sequence_length) + ").");
   }
 
-  if (request.seen_sequence_length > request.current_sequence_length) {
-    add("Request " + id + " seen length (" + std::to_string(request.seen_sequence_length) +
-        ") exceeds current length (" + std::to_string(request.current_sequence_length) + ").");
+  if (IsExecutable(request.status)) {
+    if (!request.has_current_turn) {
+      add("Executable Request " + id + " has no assigned turn id.");
+    }
+    if (request.finish_reason != GenerationFinishReason::None) {
+      add("Executable Request " + id + " has a terminal generation finish reason.");
+    }
+  }
+
+  if (IsTurnComplete(request.status)) {
+    if (!request.has_current_turn) {
+      add("Turn-complete Request " + id + " has no assigned turn id.");
+    }
+    if (request.finish_reason == GenerationFinishReason::None) {
+      add("Turn-complete Request " + id + " has no generation finish reason.");
+    }
+    // Cancellation is observed between Engine::Run calls and deliberately retains accepted input.
+    // Fatal failure can likewise stop before all accepted input is processed.
+    if (request.is_prefill &&
+        request.finish_reason != GenerationFinishReason::Canceled &&
+        request.finish_reason != GenerationFinishReason::Failed) {
+      add("Turn-complete Request " + id +
+          " still has unprocessed input without cancellation or failure.");
+    }
   }
 
   return violations;

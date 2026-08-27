@@ -89,22 +89,23 @@ def _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, *
     return request
 
 
-def _drain(ready, sinks) -> bool:
+def _drain(event, sinks) -> bool:
+    ready = event.request
     canonical = next((request for request in sinks if request is ready), None)
-    assert canonical is not None, "Engine.run() must return the existing borrowed Request object"
+    assert canonical is not None, "EngineEvent.request must be the existing borrowed Request object"
     sink = sinks[ready]
-    while ready.has_unseen_tokens():
-        sink.tokens.append(ready.get_unseen_token())
-    return ready.is_turn_complete()
+    if event.flags & og.EngineEventFlags.TOKEN:
+        sink.tokens.append(event.token)
+    return bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
 
 
 def _run(engine, sinks, *, max_steps=_MAX_STEPS) -> None:
     steps = 0
     while engine.has_pending_requests():
-        ready = engine.run()
-        assert ready is not None, "engine.run() returned no request while work remained"
-        if _drain(ready, sinks):
-            ready.close()
+        event = engine.run()
+        assert event.flags != og.EngineEventFlags.NONE, "engine.run() returned idle while work remained"
+        if _drain(event, sinks):
+            event.request.close()
         steps += 1
         assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
@@ -115,7 +116,6 @@ def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0
     sinks = {}
     request = _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
     _run(engine, sinks)
-    assert not request.is_turn_complete()
     del engine
     gc.collect()
     return sink.tokens
@@ -201,11 +201,11 @@ def test_staggered_admission(bundle):
     for _ in range(3):
         if not engine.has_pending_requests():
             break
-        ready = engine.run()
-        if ready is None:
+        event = engine.run()
+        if event.flags == og.EngineEventFlags.NONE:
             break
-        if _drain(ready, sinks):
-            ready.close()
+        if _drain(event, sinks):
+            event.request.close()
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
@@ -215,8 +215,6 @@ def test_staggered_admission(bundle):
 
     assert sink_a.tokens == isolated_a
     assert sink_b.tokens == isolated_b
-    assert not request_a.is_turn_complete()
-    assert not request_b.is_turn_complete()
 
 
 def test_isolated_matches_batched(bundle):
@@ -236,7 +234,6 @@ def test_isolated_matches_batched(bundle):
     _run(engine, sinks_by_request)
 
     assert sinks[prompt].tokens == isolated, "batched output diverged from the isolated run"
-    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_output_isolation(bundle):
@@ -258,7 +255,6 @@ def test_output_isolation(bundle):
 
     assert s0.tokens == isolated0
     assert s1.tokens == isolated1
-    assert all(not request.is_turn_complete() for request in requests)
 
 
 def test_completion_isolation(bundle):
@@ -286,8 +282,6 @@ def test_completion_isolation(bundle):
 
     assert len(short_sink.tokens) == short_new, "forced-length request did not stop at its bound"
     assert long_sink.tokens == long_isolated, "survivor diverged after its sibling completed"
-    assert not short_request.is_turn_complete()
-    assert not long_request.is_turn_complete()
 
 
 def test_max_length_stops(bundle):
@@ -339,11 +333,11 @@ def test_close_request_stops_output(bundle):
     for _ in range(4):
         if not engine.has_pending_requests():
             break
-        ready = engine.run()
-        if ready is None:
+        event = engine.run()
+        if event.flags == og.EngineEventFlags.NONE:
             break
-        if _drain(ready, sinks):
-            ready.close()
+        if _drain(event, sinks):
+            event.request.close()
     assert len(sink_a.tokens) > 0, "request A produced nothing before close"
 
     request_a.close()
@@ -353,7 +347,6 @@ def test_close_request_stops_output(bundle):
 
     assert len(sink_a.tokens) == frozen_a, "closed request kept producing tokens"
     assert sink_b.tokens == sibling_isolated, "sibling diverged after request close"
-    assert not request_b.is_turn_complete()
 
 
 def test_engine_teardown_and_recreation(bundle):
@@ -367,7 +360,6 @@ def test_engine_teardown_and_recreation(bundle):
     first_request = _create_request(first, bundle.model, prompt_tokens, max_new, sink1, first_sinks)
     _run(first, first_sinks)
     assert sink1.tokens == expected
-    assert not first_request.is_turn_complete()
     del first
     gc.collect()
 
@@ -378,4 +370,3 @@ def test_engine_teardown_and_recreation(bundle):
     second_request = _create_request(second, bundle.model, prompt_tokens, max_new, sink2, second_sinks)
     _run(second, second_sinks)
     assert sink2.tokens == expected
-    assert not second_request.is_turn_complete()

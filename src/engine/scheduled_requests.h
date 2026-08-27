@@ -71,7 +71,7 @@ struct ScheduledRequests {
 
   std::vector<DeviceSpan<float>> ProcessLogits();
 
-  void GenerateNextTokens();
+  void GenerateNextTokens(std::vector<RequestStepResult>& results);
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
       const StepPlan& plan,
@@ -81,7 +81,8 @@ struct ScheduledRequests {
 
  private:
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
-  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
+  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
+                                    std::vector<RequestStepResult>* results = nullptr);
 
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;

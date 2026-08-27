@@ -256,6 +256,73 @@ TEST_F(RequestLifecycleTest, NewRequestIsUnassignedUntilBeginTurn) {
   auto request = NewRequest();
 
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+  EXPECT_EQ(request->CurrentTurnId(), 0u);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+}
+
+TEST_F(RequestLifecycleTest, CancelRejectsRequestsWithoutAnActiveTurn) {
+  auto request = NewRequest();
+  EXPECT_THROW(request->Cancel(0), std::runtime_error);
+
+  request->Close();
+  EXPECT_THROW(request->Cancel(0), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, CancelQueuedTurnPublishesTerminalReadyAndCanContinue) {
+  auto request = NewRequest();
+  const auto prompt = Prompt();
+  const auto turn_id = request->BeginTurn(prompt);
+  ASSERT_EQ(turn_id, 0u);
+
+  EXPECT_TRUE(request->Cancel(turn_id));
+  EXPECT_FALSE(request->Cancel(turn_id));
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Canceled);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size()));
+  EXPECT_TRUE(engine_.engine->HasPendingRequests());
+
+  const std::vector<int32_t> continuation{5};
+  EXPECT_THROW(request->BeginTurn(continuation), std::runtime_error);
+  EXPECT_EQ(engine_.engine->Run().request, request);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+
+  EXPECT_EQ(request->BeginTurn(continuation), 1u);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size() + continuation.size()));
+}
+
+TEST_F(RequestLifecycleTest, CancelActiveTurnPreservesResidentState) {
+  auto request = CreateRequestWithPrompt(
+      engine_.engine, *model_, Prompt());
+  engine_.cache->Allocate({request});
+  request->Schedule();
+  ASSERT_EQ(request->status_, RequestStatus::Active);
+
+  EXPECT_TRUE(request->Cancel(request->CurrentTurnId()));
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Canceled);
+  EXPECT_EQ(engine_.engine->Run().request, request);
+
+  request->BeginTurn(std::vector<int32_t>{5});
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+}
+
+TEST_F(RequestLifecycleTest, CancelCompletedTurnPreservesOriginalFinishReason) {
+  auto request = NewRequest();
+  engine_.executor->SetForcedToken(EosToken(*model_));
+  request->BeginTurn(Prompt());
+  ASSERT_EQ(engine_.engine->Run().request, request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+
+  EXPECT_FALSE(request->Cancel(request->CurrentTurnId()));
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
   EXPECT_FALSE(engine_.engine->HasPendingRequests());
 }
 
@@ -343,16 +410,18 @@ TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
   const int64_t assigned_length = static_cast<int64_t>(prompt.size());
+  EXPECT_EQ(request->CurrentTurnId(), 0u);
 
   engine_.engine->Run();
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   std::vector<int32_t> more{5, 6};
   request->BeginTurn(more);
 
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
   EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
   EXPECT_FALSE(request->IsTurnComplete());
-  EXPECT_EQ(engine_.engine->Run(), request);
+  EXPECT_EQ(engine_.engine->Run().request, request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_TRUE(request->IsTurnComplete());
 }
@@ -384,9 +453,8 @@ TEST_F(RequestLifecycleTest, FailedContinuationAppendPreservesCompletedTurnState
   auto request = CreateEngineRequest(engine_.engine, *params);
   engine_.executor->SetForcedToken(/*token=*/5);
   request->BeginTurn(Prompt(), std::optional<size_t>{1});
-  ASSERT_EQ(engine_.engine->Run(), request);
+  ASSERT_EQ(engine_.engine->Run().request, request);
   ASSERT_TRUE(request->IsTurnComplete());
-  ASSERT_TRUE(request->HasUnseenTokens());
   const auto before = request->Snapshot();
 
   control->fail_append = true;
@@ -399,13 +467,11 @@ TEST_F(RequestLifecycleTest, FailedContinuationAppendPreservesCompletedTurnState
   EXPECT_EQ(request->Snapshot().status, before.status);
   EXPECT_EQ(request->Snapshot().current_sequence_length,
             before.current_sequence_length);
-  EXPECT_TRUE(request->HasUnseenTokens());
 
   control->fail_append = false;
   EXPECT_NO_THROW(request->BeginTurn(
       std::vector<int32_t>{6},
       std::optional<size_t>{2}));
-  EXPECT_TRUE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEngine) {
@@ -415,7 +481,7 @@ TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEng
   params->p_device = &device;
   auto request = CreateEngineRequest(engine_.engine, *params);
   request->BeginTurn(Prompt());
-  ASSERT_EQ(engine_.engine->Run(), request);
+  ASSERT_EQ(engine_.engine->Run().request, request);
   ASSERT_TRUE(request->IsTurnComplete());
   ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
 
@@ -453,7 +519,6 @@ TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputToken
   const auto first_result = request->ApplyLogitsForTransaction(first_logits);
   request->CommitStateForTransaction();
   request->CommitStep(first_plan, first_result);
-  ASSERT_TRUE(request->HasUnseenTokens());
 
   RequestStepPlan completion_plan;
   completion_plan.request = request;
@@ -474,9 +539,7 @@ TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputToken
   request->BeginTurn(continuation);
 
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
-  ASSERT_TRUE(request->HasUnseenTokens());
-  EXPECT_EQ(request->UnseenToken(), generated_token);
-  EXPECT_FALSE(request->HasUnseenTokens());
+  EXPECT_EQ(first_result.token, generated_token);
 }
 
 TEST_F(RequestLifecycleTest, ContinuationIsRejectedOutsideTurnComplete) {
@@ -573,8 +636,7 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsStageUntilCommit) {
   EXPECT_EQ(committed.status, RequestStatus::Active);
   EXPECT_EQ(committed.processed_sequence_length, before.current_sequence_length);
   EXPECT_FALSE(committed.is_prefill);
-  ASSERT_TRUE(request->HasUnseenTokens());
-  EXPECT_EQ(request->UnseenToken(), next_token);
+  EXPECT_EQ(result.token, next_token);
 }
 
 TEST_F(RequestLifecycleTest, PerTurnLimitStagesUntilTransactionCommit) {
@@ -597,14 +659,12 @@ TEST_F(RequestLifecycleTest, PerTurnLimitStagesUntilTransactionCommit) {
   EXPECT_TRUE(result.token_appended);
   EXPECT_TRUE(result.done);
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
-  EXPECT_FALSE(request->HasUnseenTokens());
 
   request->CommitStateForTransaction();
   request->CommitStep(plan, result);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
-  ASSERT_TRUE(request->HasUnseenTokens());
-  EXPECT_EQ(request->UnseenToken(), 5);
+  EXPECT_EQ(result.token, 5);
 }
 
 TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
@@ -622,7 +682,6 @@ TEST_F(RequestLifecycleTest, TransactionalLogitsRollbackRestoresSearchState) {
   EXPECT_EQ(restored.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(restored.processed_sequence_length, before.processed_sequence_length);
   EXPECT_EQ(restored.is_prefill, before.is_prefill);
-  EXPECT_FALSE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, TransactionalRollbackRestoresSamplingState) {
@@ -675,7 +734,6 @@ TEST_F(RequestLifecycleTest, PartialPrefillAdvancesOnlyAtCommit) {
   EXPECT_EQ(committed.processed_sequence_length, 2);
   // Two of the three prompt tokens are in the cache, so the request is still prefilling.
   EXPECT_TRUE(committed.is_prefill);
-  EXPECT_FALSE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, EosCompletesWithoutAppendingVisibleToken) {
@@ -698,7 +756,6 @@ TEST_F(RequestLifecycleTest, EosCompletesWithoutAppendingVisibleToken) {
   EXPECT_TRUE(result.done);
   EXPECT_FALSE(result.token_appended);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
-  EXPECT_FALSE(request->HasUnseenTokens());
 }
 
 TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
@@ -797,14 +854,12 @@ TEST_F(RequestLifecycleTest, StaticCpuGenerationAdvancesGuidanceCursor) {
   auto first_logits = LogitsFavoringToken(
       *guidance_model, second_tokens.front(), first_tokens.front());
   request->GenerateNextTokens(first_logits);
-  request->CompleteGeneration();
-  EXPECT_EQ(request->UnseenToken(), first_tokens.front());
+  EXPECT_EQ(request->CompleteGeneration().token, first_tokens.front());
 
   auto second_logits = LogitsFavoringToken(
       *guidance_model, first_tokens.front(), second_tokens.front());
   request->GenerateNextTokens(second_logits);
-  request->CompleteGeneration();
-  EXPECT_EQ(request->UnseenToken(), second_tokens.front());
+  EXPECT_EQ(request->CompleteGeneration().token, second_tokens.front());
 }
 #endif
 

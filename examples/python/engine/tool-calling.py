@@ -29,13 +29,13 @@ def generate(engine, request, tokenizer):
     fragments = []
     token_ids = []
     while engine.has_pending_requests():
-        ready_request = engine.run()
-        if ready_request is None:
-            raise RuntimeError("Engine returned no request while work remained")
-        if ready_request is not request:
+        event = engine.run()
+        if event.flags == og.EngineEventFlags.NONE:
+            raise RuntimeError("Engine returned idle while work remained")
+        if event.request is not request:
             raise RuntimeError("Engine returned an unknown request")
-        while ready_request.has_unseen_tokens():
-            token_id = ready_request.get_unseen_token()
+        if event.flags & og.EngineEventFlags.TOKEN:
+            token_id = event.token
             token_ids.append(token_id)
             fragments.append(stream.decode(token_id))
     return "".join(fragments), token_ids

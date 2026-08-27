@@ -80,11 +80,81 @@ typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
 typedef struct OgaRequest OgaRequest;
+typedef struct OgaTurnParams OgaTurnParams;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
-typedef struct OgaTurnOptions {
-  size_t max_generated_tokens;
-} OgaTurnOptions;
+/**
+ * \brief Reason why an Engine Request's generation turn stopped.
+ */
+typedef enum OgaFinishReason {
+  OgaFinishReason_None = 0,
+  OgaFinishReason_Eos = 1,
+  OgaFinishReason_StopSequence = 2,
+  OgaFinishReason_MaxGeneratedTokens = 3,
+  OgaFinishReason_MaxSessionTokens = 4,
+  OgaFinishReason_Cancelled = 5,
+  OgaFinishReason_Failed = 6,
+} OgaFinishReason;
+
+/** \brief Bit flags describing the payload present in an OgaEngineEvent. */
+typedef enum OgaEngineEventFlags {
+  OgaEngineEventFlag_None = 0,
+  OgaEngineEventFlag_Token = 1u << 0,
+  OgaEngineEventFlag_TurnFinished = 1u << 1,
+  OgaEngineEventFlag_CapacityBlocked = 1u << 2,
+  OgaEngineEventFlag_Failed = 1u << 3,
+  OgaEngineEventFlag_Retryable = 1u << 4,
+} OgaEngineEventFlags;
+
+/** \brief Stable behavioral classification for an Engine event. */
+typedef enum OgaErrorCode {
+  OgaErrorCode_None = 0,
+  OgaErrorCode_CapacityDeferred = 1,
+  OgaErrorCode_ExecutionCapacityExceeded = 2,
+  OgaErrorCode_RetryableExecution = 3,
+  OgaErrorCode_RequestUnserviceable = 4,
+  OgaErrorCode_EngineContractFailure = 5,
+  OgaErrorCode_EngineExecutionFailure = 6,
+} OgaErrorCode;
+
+/**
+ * \brief Versioned options copied by OgaEngineCreateRequest.
+ *
+ * Zero-initialize the structure and set struct_size to sizeof(OgaRequestOptions). reserved must
+ * remain zero. Larger structures are accepted and unknown trailing bytes are ignored.
+ */
+typedef struct OgaRequestOptions {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t max_session_tokens;
+} OgaRequestOptions;
+
+/** \brief Token accounting for one generation Turn. */
+typedef struct OgaTurnUsage {
+  uint64_t prompt_tokens;
+  uint64_t generated_tokens;
+  uint64_t cached_prompt_tokens;
+} OgaTurnUsage;
+
+/**
+ * \brief One caller-buffered Engine event.
+ *
+ * Zero-initialize the structure and set struct_size to sizeof(OgaEngineEvent) before every
+ * OgaEngineRun call. request is borrowed and remains valid only while the caller retains the owned
+ * OgaRequest handle. Larger structures are accepted and trailing bytes are not written. Payload
+ * validity is determined by flags; Token and TurnFinished may be combined.
+ */
+typedef struct OgaEngineEvent {
+  uint32_t struct_size;
+  uint32_t flags;
+  OgaRequest* request;
+  uint64_t turn_id;
+  int32_t token;
+  uint32_t reserved;
+  OgaFinishReason finish_reason;
+  OgaErrorCode error_code;
+  OgaTurnUsage usage;
+} OgaEngineEvent;
 
 //! @}
 
@@ -1196,25 +1266,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
 
 /**
- * \brief Runs synchronous Engine progress and returns one ready request.
+ * \brief Runs synchronous Engine progress and copies one typed event to caller-owned storage.
  *
- * This function advances the state of the engine by processing a subset of the currently pending requests.
- * It schedules and executes model inference for requests that are ready, updates their state with the generated results,
- * and manages batching and resource allocation as needed. This function should be called repeatedly (e.g., in a loop)
- * to ensure all requests are processed efficiently. It is a core part of the engine's request processing pipeline.
- * If the engine has ready requests from a previous call, it will return one of them in the request parameter.
- * If there are no ready requests, a new subset of requests will be scheduled for processing and the request parameter
- * will be set to the first request from this subset that is ready to be queried for results.
- *
- * \param[in] engine The engine instance to run.
- * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
- *                     This is a borrowed alias of the handle returned by OgaEngineCreateRequest.
- *                     Do not release it with OgaDestroyRequest. The alias remains valid only while
- *                     that owned handle remains alive, including across Close or Engine destruction.
- *                     It is nullptr only when no work remains.
- * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ * Set out_event->struct_size before every call. The size is validated before model progress.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(OgaEngine* engine, OgaRequest** request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(OgaEngine* engine, OgaEngineEvent* out_event);
 
 /**
  * \brief Checks if the engine has any pending requests to process.
@@ -1238,114 +1294,70 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * \param[in] engine The owning Engine.
  * \param[in] params The fixed request-level generation parameters.
+ * \param[in] options Nullable request-scoped options. Zero max_session_tokens uses params.max_length.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
-    OgaEngine* engine, const OgaGeneratorParams* params, OgaRequest** out);
+    OgaEngine* engine, const OgaGeneratorParams* params,
+    const OgaRequestOptions* options, OgaRequest** out);
 
 /**
- * \brief Begins the initial or a subsequent generation turn.
- *
- * The request must be newly created or turn-complete. A completed turn's ready notification must
- * already have been returned by OgaEngineRun. Input is copied before return. Unread generated output
- * from earlier turns remains available in FIFO order. Static-batch continuation is supported only
- * while the resident static batch contains one request.
- *
- * \param[in] request The Request to queue.
- * \param[in] options Nullable turn-scoped options. nullptr applies no per-turn generation limit
- *                    beyond the Request's retained cumulative max_length. A non-null object must
- *                    specify max_generated_tokens greater than zero. Its value is copied before
- *                    this function returns.
- * \param[in] input_ids A non-empty token array.
- * \param[in] input_ids_count Number of tokens in input_ids.
- * \return OgaResult containing the error message if the turn could not be queued, or nullptr on success.
+ * \brief Creates reusable Turn parameters bound to one Request.
  */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnParams(
+    OgaRequest* request, OgaTurnParams** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTurnParams(OgaTurnParams* params);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetMaxGeneratedTokens(
+    OgaTurnParams* params, uint64_t max_generated_tokens);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTemperature(
+    OgaTurnParams* params, float temperature);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopP(
+    OgaTurnParams* params, float top_p);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopK(
+    OgaTurnParams* params, int32_t top_k);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetSeed(
+    OgaTurnParams* params, uint64_t seed);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetStopSequences(
+    OgaTurnParams* params, const char* const* stop_sequences,
+    uint64_t stop_sequence_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetGuidance(
+    OgaTurnParams* params, const char* guidance_type,
+    const char* guidance_data);
+
+/** \brief Begins a Turn, copying input and supported parameters before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
-    OgaRequest* request, const OgaTurnOptions* options,
-    const int32_t* input_ids, size_t input_ids_count);
+    OgaRequest* request, const OgaTurnParams* turn_params,
+    const int32_t* input_ids, uint64_t input_ids_count,
+    uint64_t* out_turn_id);
+
+/**
+ * \brief Cancels the named queued or active Turn.
+ *
+ * Cancellation is synchronous and owner-thread-only. A matching queued or active Turn produces one
+ * terminal Cancelled event. Stale, unknown, and completed IDs return success with false.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
+    OgaRequest* request, uint64_t turn_id, bool* out_cancelled);
 
 /**
  * \brief Permanently closes a Request and releases its Engine resources.
  *
  * Close is valid from every lifecycle state and is idempotent. Dynamic cache ownership is released
  * immediately; a resident static-batch row may remain physically retained until its shared batch is
- * recycled. Already committed unseen output remains readable until the owned Request handle is destroyed.
+ * recycled. Undelivered events for the Request are discarded.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 
 /**
  * \brief Destroys the given request.
  *
- * This function releases the owned handle returned by OgaEngineCreateRequest. A borrowed handle
- * returned by OgaEngineRun must not be released. Releasing the final owned handle without first
- * calling OgaRequestClose marks the Request abandoned for deferred Engine reclamation.
+ * Releasing the final owned handle without first calling OgaRequestClose marks the Request
+ * abandoned for deferred Engine reclamation.
  *
  * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
-
-/**
- * \brief Sets application-owned data that is opaque to GenAI.
- *
- * GenAI stores the pointer value but never dereferences or frees it. The caller owns the pointed-to
- * object and must keep it alive whenever the pointer is accessed. Setting nullptr clears the
- * association. The value is not used by the Engine and remains attached across turns and Close.
- *
- * \param[in] request The request on which to store the pointer.
- * \param[in] opaque_data The caller-owned pointer value, or nullptr.
- * \return OgaResult containing an error message if the operation failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetOpaqueData(
-    OgaRequest* request, void* opaque_data);
-
-/**
- * \brief Gets the application-owned opaque data pointer stored on the request.
- *
- * \param[in] request The request whose pointer should be returned.
- * \param[out] opaque_data Receives the stored pointer, or nullptr if none was set.
- * \return OgaResult containing an error message if the operation failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(
-    OgaRequest* request, void** opaque_data);
-
-/**
- * \brief Checks if the request has any unseen tokens.
- *
- * This function checks if the request has any unseen tokens that have not yet been queried by the user
- * or application yet. Unseen tokens are those that have been generated by the model but not yet
- * retrieved by the user.
- *
- * \param[in] request The request to check for unseen tokens.
- * \param[out] out Boolean flag that will be set to true if there are unseen tokens, or false otherwise.
- * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out);
-
-/**
- * \brief Gets an unseen token from the request.
- *
- * This function retrieves the next unseen token from the request. If there are no unseen tokens,
- * it will return an error. The unseen token is a token that has been generated by the model but
- * has not yet been queried by the user.
- *
- * \param[in] request The request to get the unseen token from.
- * \param[out] out Pointer to where the unseen token will be stored.
- * \return OgaResult containing the error message if the getting of the unseen token failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
-
-/**
- * \brief Checks if the current generation turn is complete.
- *
- * This function reports completion of the current turn. It does not mean that the request is permanently closed;
- * OgaRequestBeginTurn may queue another turn while state remains resident.
- *
- * \param[in] request The request whose current turn should be checked.
- * \param[out] out Boolean flag that will be set to true if the current turn is complete, or false otherwise.
- * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsTurnComplete(const OgaRequest* request, bool* out);
 
 /**
  * \brief Registers an execution provider library with ONNXRuntime API.

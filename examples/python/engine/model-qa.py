@@ -65,13 +65,13 @@ def run(args: argparse.Namespace):
             print("🤖 :", end="", flush=True)
 
             while engine.has_pending_requests():
-                ready_request = engine.run()
-                if ready_request is None:
-                    raise RuntimeError("Engine returned no request while work remained")
-                if ready_request is not request:
+                event = engine.run()
+                if event.flags == og.EngineEventFlags.NONE:
+                    raise RuntimeError("Engine returned idle while work remained")
+                if event.request is not request:
                     raise RuntimeError("Engine returned an unknown request")
-                while ready_request.has_unseen_tokens():
-                    token = int(ready_request.get_unseen_token())
+                if event.flags & og.EngineEventFlags.TOKEN:
+                    token = int(event.token)
                     session_token_count += 1
                     print(
                         streaming_tokenizer.decode(token),

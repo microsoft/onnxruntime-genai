@@ -35,8 +35,10 @@ struct RequestStateSnapshot {
   RequestStatus status{RequestStatus::Unassigned};
   int64_t current_sequence_length{};    // Total tokens the Request's search currently holds.
   int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
-  int64_t seen_sequence_length{};       // High-water sequence index of consumed generated output.
   bool is_prefill{};
+  bool has_current_turn{};
+  uint64_t current_turn_id{};
+  GenerationFinishReason finish_reason{GenerationFinishReason::None};
 };
 
 // Immutable view of one Request's block ownership within the paged cache.

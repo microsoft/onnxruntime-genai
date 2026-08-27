@@ -43,14 +43,20 @@ PagedCacheSnapshot MakeValidCache() {
 }
 
 RequestStateSnapshot MakeValidRequest(const void* id, RequestStatus status, int64_t current,
-                                      int64_t processed, int64_t seen) {
+                                      int64_t processed, int64_t) {
   RequestStateSnapshot request;
   request.request_id = id;
   request.status = status;
   request.current_sequence_length = current;
   request.processed_sequence_length = processed;
-  request.seen_sequence_length = seen;
   request.is_prefill = false;
+  request.has_current_turn = status != RequestStatus::Unassigned;
+  request.current_turn_id =
+      status == RequestStatus::Unassigned ? 0 : 1;
+  request.finish_reason =
+      status == RequestStatus::TurnComplete
+          ? GenerationFinishReason::ContextLimit
+          : GenerationFinishReason::None;
   return request;
 }
 
@@ -303,9 +309,11 @@ TEST(InvariantValidatorTest, ProcessedBeyondCurrentReported) {
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, SeenBeyondCurrentReported) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 11);
-  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
+TEST(InvariantValidatorTest, ZeroTurnIdIsValidWhenAssigned) {
+  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 10);
+  request.current_turn_id = 0;
+  request.has_current_turn = true;
+  EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, TurnCompleteRequestWithFinalUnprocessedTokenIsValid) {
@@ -319,6 +327,29 @@ TEST(InvariantValidatorTest, TurnCompleteRequestFullyProcessedIsValid) {
   EXPECT_TRUE(ValidateRequestInvariants(
                   MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10))
                   .empty());
+}
+
+TEST(InvariantValidatorTest, ExecutableRequestRequiresTurnMetadata) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::Active, 10, 10, 10);
+  request.has_current_turn = false;
+  request.finish_reason = GenerationFinishReason::Canceled;
+  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
+}
+
+TEST(InvariantValidatorTest, TurnCompleteRequestRequiresFinishReason) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10);
+  request.finish_reason = GenerationFinishReason::None;
+  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
+}
+
+TEST(InvariantValidatorTest, CanceledTurnMayRetainUnprocessedInput) {
+  auto request =
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 4, 4);
+  request.is_prefill = true;
+  request.finish_reason = GenerationFinishReason::Canceled;
+  EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
 // ---------------------------------------------------------------------------------------------

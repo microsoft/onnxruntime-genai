@@ -68,9 +68,11 @@ class RequestPool:
         )
         request = self.engine.create_request(params)
         self.requests[request] = client_request
+        turn_params = og.TurnParams(request)
+        turn_params.set_max_generated_tokens(128)
         request.begin_turn(
             np.asarray(tokens, dtype=np.int32),
-            max_generated_tokens=128,
+            turn_params,
         )
 
     def admit_initial_requests(self):
@@ -83,16 +85,17 @@ class RequestPool:
         self.admit(self.delayed_prompts.popleft())
         self.next_admission_time = time.monotonic() + 1
 
-    def drain(self, request: og.Request):
+    def drain(self, event: og.EngineEvent):
+        request = event.request
         client_request = self.requests.get(request)
         assert client_request is not None, "Canonical request not found in the pool"
         token_count = 0
-        while request.has_unseen_tokens():
-            token = request.get_unseen_token()
+        if event.flags & og.EngineEventFlags.TOKEN:
+            token = event.token
             client_request.token_stream += client_request.streaming_tokenizer.decode(token)
             token_count += 1
 
-        if request.is_turn_complete():
+        if event.flags & og.EngineEventFlags.TURN_FINISHED:
             if self.debug:
                 print(f"🫵  : {client_request.prompt}")
                 print(f"🤖 : {client_request.token_stream}")
@@ -126,10 +129,10 @@ class Engine:
             while self.engine.has_pending_requests() or request_pool.delayed_prompts:
                 request_pool.admit_due_request()
                 if self.engine.has_pending_requests():
-                    request = self.engine.run()
-                    if request is None:
-                        raise RuntimeError("Engine returned no request while work remained")
-                    self.tokens_decoded += request_pool.drain(request)
+                    event = self.engine.run()
+                    if event.flags == og.EngineEventFlags.NONE:
+                        raise RuntimeError("Engine returned idle while work remained")
+                    self.tokens_decoded += request_pool.drain(event)
                     continue
                 request_pool.wait_for_next_admission()
         finally:

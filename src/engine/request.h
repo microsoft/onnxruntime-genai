@@ -20,6 +20,13 @@ struct Request;
 struct ScheduledRequests;
 struct StaticBatchScheduler;
 
+struct TurnParams {
+  std::weak_ptr<Request> request;
+  std::optional<size_t> max_generated_tokens;
+
+  void ValidateOwnerThread() const;
+};
+
 template <>
 struct ExternalRefCountedTraits<Request> {
   static constexpr bool notify_external_reference_changes = true;
@@ -29,6 +36,7 @@ struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
   bool done{};
+  GenerationFinishReason finish_reason{GenerationFinishReason::None};
 };
 
 // Every Engine Request has one sequence and one beam, so a chunk-complete step can append at most
@@ -52,7 +60,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Constructs a Request object with the given generator parameters.
    * @param params Shared pointer to GeneratorParams containing generation configuration.
    */
-  Request(std::shared_ptr<GeneratorParams> params);
+  Request(std::shared_ptr<GeneratorParams> params, size_t max_total_tokens);
   ~Request();
 
   /**
@@ -60,24 +68,10 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void Schedule();
 
-  void BeginTurn(
+  uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
-
-  /**
-   * @brief Retrieves the next unseen token in the request.
-   * @return The next unseen token ID.
-   *
-   * Newly generated tokens that have not been decoded by the calling application.
-   * Applications looking to stream decode should call this method to get the next token
-   *
-   * while request.HasUnseenTokens():
-   *     token = request.UnseenToken();
-   *
-   * Once an unseen token is seen, it is marked as seen and will not show up in
-   * subsequent calls to this method.
-   */
-  int32_t UnseenToken();
+  void ValidateOwnerThread() const;
 
   /**
    * @brief Returns a span of unprocessed tokens on the device.
@@ -99,12 +93,6 @@ struct Request : std::enable_shared_from_this<Request>,
    * one full stream synchronization per request per step.
    */
   std::span<const int32_t> UnprocessedTokensCpu() const;
-
-  /**
-   * @brief Checks if there are any unseen tokens in the request.
-   * @return True if there are unseen tokens, false otherwise.
-   */
-  bool HasUnseenTokens() const;
 
   /**
    * @brief Launches the generation of the next token based on the provided logits.
@@ -135,31 +123,23 @@ struct Request : std::enable_shared_from_this<Request>,
    *
    * Updates the host-side token mirror and the request status.
    */
-  void CompleteGeneration();
+  RequestStepResult CompleteGeneration();
 
   /**
    * @brief Checks if the current generation turn reached a stopping condition.
    * @return True in TurnComplete; the request may still be continued or closed.
    */
   bool IsTurnComplete() const;
+  uint64_t CurrentTurnId() const noexcept { return current_turn_id_; }
+  bool HasCurrentTurn() const noexcept { return has_current_turn_; }
+  GenerationFinishReason FinishReason() const noexcept { return finish_reason_; }
+  size_t TurnPromptTokens() const noexcept { return turn_prompt_tokens_; }
+  size_t TurnGeneratedTokens() const noexcept { return turn_generated_tokens_; }
 
   RequestStatus Status() const noexcept { return status_; }
 
   void Close();
-
-  /**
-   * @brief Stores application-owned data that is opaque to the Request and Engine.
-   *
-   * The pointer is never dereferenced or freed by GenAI. The application must keep the pointed-to
-   * object alive for every access and may replace or clear the pointer at any request lifecycle
-   * state.
-   */
-  void SetOpaqueData(void* data) noexcept;
-
-  /**
-   * @brief Returns the application-owned opaque pointer, or nullptr if none was set.
-   */
-  void* GetOpaqueData() const noexcept;
+  bool Cancel(uint64_t turn_id);
 
   /**
    * @brief Checks if the request is in prefill mode.
@@ -264,14 +244,9 @@ struct Request : std::enable_shared_from_this<Request>,
  private:
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
-  // seen_sequence_length_ is the high-water sequence index of generated output consumed by the
-  // application. Continuation input creates gaps, so it is not an unseen-token count.
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
-  std::vector<size_t> unseen_token_indices_;
-  size_t next_unseen_token_index_{};
-  int64_t seen_sequence_length_{};
   friend struct Engine;
   friend struct ExternalRefCounted<Request>;
   friend struct ScheduledRequests;
@@ -281,8 +256,7 @@ struct Request : std::enable_shared_from_this<Request>,
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
   bool IsExternallyAbandoned() const noexcept;
-  // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
-  // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
+  // Runs before a scheduled step can execute.
   void PrepareForStep(size_t max_generated_token_indices);
 
   int64_t processed_sequence_length_{};
@@ -291,7 +265,14 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
   std::optional<size_t> turn_max_generated_tokens_;
+  size_t turn_prompt_tokens_{};
   size_t turn_generated_tokens_{};
+  const size_t max_total_tokens_;
+  uint64_t current_turn_id_{};
+  uint64_t next_turn_id_{};
+  bool has_current_turn_{};
+  bool turn_id_exhausted_{};
+  GenerationFinishReason finish_reason_{GenerationFinishReason::None};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
@@ -301,7 +282,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
-  void* opaque_data_{nullptr};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void SelectNextToken();

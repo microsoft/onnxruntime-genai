@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 /**
  * @file request_status.h
  * @brief Defines the lifecycle status of an engine Request.
@@ -20,6 +22,16 @@ enum class RequestStatus {
   Active,        // The current generation turn is executable and owned by the Engine.
   TurnComplete,  // The current turn stopped; output and resident model state remain available.
   Closed,        // Permanently terminal; never scheduled again. Static batch storage may linger.
+};
+
+enum class GenerationFinishReason : uint32_t {
+  None = 0,
+  EosToken = 1,
+  StopToken = 2,
+  TurnLimit = 3,
+  ContextLimit = 4,
+  Canceled = 5,
+  Failed = 6,
 };
 
 constexpr bool IsQueued(RequestStatus status) noexcept {
