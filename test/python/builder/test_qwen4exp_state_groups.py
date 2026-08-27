@@ -212,12 +212,12 @@ def test_ple_conv_state_is_widened_and_dilation_sized():
     ]
 
 
-def test_ple_token_history_is_int64_and_ngram_sized():
+def test_ple_token_history_is_int32_and_ngram_sized():
     model = _make_model()
     model._add_ple_and_indexer_cache_io()
 
-    assert model.input_types["past_state.0.ple_tokens"] == ir.DataType.INT64
-    assert model.output_types["present_state.0.ple_tokens"] == ir.DataType.INT64
+    assert model.input_types["past_state.0.ple_tokens"] == ir.DataType.INT32
+    assert model.output_types["present_state.0.ple_tokens"] == ir.DataType.INT32
     assert model.input_shapes["past_state.0.ple_tokens"] == ["batch_size", NGRAM_SIZE - 1]
 
 

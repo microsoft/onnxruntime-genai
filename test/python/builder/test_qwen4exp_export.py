@@ -348,6 +348,8 @@ def test_multimodal_genai_config_describes_all_three_graphs(_multimodal_export_r
     assert config["embedding"]["filename"] == "embedding.onnx"
     assert config["embedding"]["outputs"]["inputs_embeds"] == "inputs_embeds"
     assert config["vision"]["filename"] == "vision.onnx"
+    assert config["vision"]["inputs"]["image_grid_thw"] == "image_grid_thw"
+    assert config["vision"]["num_position_embeddings"] == 16
     assert config["vision"]["outputs"]["image_features"] == "image_features"
     assert config["vision"]["spatial_merge_size"] == 2
     assert "image_token_id" in config and "vision_start_token_id" in config

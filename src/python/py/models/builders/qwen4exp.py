@@ -36,13 +36,13 @@ The four features above are emitted as ``com.microsoft`` operators.  These schem
 ``test/python/builder/test_qwen4exp_*.py`` pins every one of them.
 
 ``NGramHashMapping`` (attribute ``version = 2``)
-    inputs  : ``input_ids``   int64 ``[B, S]``
+    inputs  : ``input_ids`` int32 ``[B, S]``
               ``layer_multipliers`` int64 ``[ngram_size]``
               ``head_vocab_sizes``  int64 ``[ngram_heads]``
               ``head_offsets``      int64 ``[ngram_heads]``
-              ``past_token_state``  int64 ``[B, ngram_size - 1]``
-    outputs : ``ngram_ids``    int64 ``[B, S, ngram_heads]``
-              ``present_token_state`` int64 ``[B, ngram_size - 1]``
+              ``past_token_state``  int32 ``[B, ngram_size - 1]``
+    outputs : ``ngram_ids``    int32 ``[B, S, ngram_heads]``
+              ``present_token_state`` int32 ``[B, ngram_size - 1]``
     attrs   : ``ngram_size``, ``heads_per_ngram``, ``eos_token_id``, ``version``
     The token state is the trailing ``ngram_size - 1`` tokens of the previous forward, EOS
     filled on the first step (*not* zero filled).  ``version = 2`` selects the
@@ -306,7 +306,7 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
         # in multimodal mode where the base class drops it in favour of `inputs_embeds`.
         if self.ple_layer_ids:
             self.input_names["input_ids"] = "input_ids"
-            self.input_types["input_ids"] = ir.DataType.INT64
+            self.input_types["input_ids"] = ir.DataType.INT32
             self.input_shapes["input_ids"] = (
                 ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
             )
@@ -359,11 +359,11 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
 
                 token_shape = ["batch_size", self.ngram_size - 1]
                 self.input_names[f"past_state.{layer_id}.ple_tokens"] = f"past_key_values.{layer_id}.ple_tokens"
-                self.input_types[f"past_state.{layer_id}.ple_tokens"] = ir.DataType.INT64
+                self.input_types[f"past_state.{layer_id}.ple_tokens"] = ir.DataType.INT32
                 self.input_shapes[f"past_state.{layer_id}.ple_tokens"] = list(token_shape)
 
                 self.output_names[f"present_state.{layer_id}.ple_tokens"] = f"present.{layer_id}.ple_tokens"
-                self.output_types[f"present_state.{layer_id}.ple_tokens"] = ir.DataType.INT64
+                self.output_types[f"present_state.{layer_id}.ple_tokens"] = ir.DataType.INT32
                 self.output_shapes[f"present_state.{layer_id}.ple_tokens"] = list(token_shape)
 
     def make_decoder_state_groups(self, inputs, outputs):
@@ -643,8 +643,8 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
             eos_token_id=self.ngram_eos_token_id,
             version=2,
         )
-        self.make_value(ngram_ids, ir.DataType.INT64, shape=["batch_size", seq_dim, self.ngram_heads])
-        self.make_value(present_tokens, ir.DataType.INT64, shape=["batch_size", self.ngram_size - 1])
+        self.make_value(ngram_ids, ir.DataType.INT32, shape=["batch_size", seq_dim, self.ngram_heads])
+        self.make_value(present_tokens, ir.DataType.INT32, shape=["batch_size", self.ngram_size - 1])
 
         # --- n-gram embedding table ---
         head_dim_per_ngram = self.ple_embed_dim // self.ngram_heads
@@ -1127,7 +1127,7 @@ class Qwen4ExpEmbeddingModel(Model):
     def make_inputs_and_outputs(self):
         self.model.graph.inputs.extend(
             [
-                self.make_value("input_ids", ir.DataType.INT64, shape=["batch_size", "sequence_length"]),
+                self.make_value("input_ids", ir.DataType.INT32, shape=["batch_size", "sequence_length"]),
                 self.make_value("image_features", self.io_dtype, shape=["num_image_tokens", self.hidden_size]),
             ]
         )
@@ -1238,7 +1238,7 @@ class Qwen4ExpVisionModel(Model):
         ``pos_embed_indices``      int64 ``[num_patches, 4]``  -- bilinear source cells
         ``pos_embed_weights``      ``[num_patches, 4]``        -- bilinear weights
         ``vision_cos`` / ``vision_sin`` ``[num_patches, head_dim]``
-        ``vision_attention_bias``  ``[1, 1, num_patches, num_patches]`` -- 0 inside an image, -inf across images
+        ``vision_attention_bias``  ``[1, 1, num_patches, num_patches]`` -- 0 within a frame, -inf across frames/images
     outputs
         ``image_features`` ``[num_patches / spatial_merge_size ** 2, out_hidden_size]``
 
@@ -1663,8 +1663,10 @@ class Qwen4ExpModel(Qwen4ExpTextModel):
             genai_config["model"]["vision"] = {
                 "filename": self.vision_model.filename,
                 "spatial_merge_size": self.vision_model.spatial_merge_size,
+                "num_position_embeddings": self.vision_model.vision_config.num_position_embeddings,
                 "inputs": {
                     "pixel_values": "pixel_values",
+                    "image_grid_thw": "image_grid_thw",
                     "pos_embed_indices": "pos_embed_indices",
                     "pos_embed_weights": "pos_embed_weights",
                     "vision_cos": "vision_cos",

@@ -417,7 +417,7 @@ def test_ple_token_state_is_one_shorter_than_the_ngram_order():
     model._make_ple_layer(0, _ple_module(), "stream")
 
     present = next(value for value in model.values if value.name == "present.0.ple_tokens")
-    assert present.dtype == ir.DataType.INT64
+    assert present.dtype == ir.DataType.INT32
     assert present.shape == ["batch_size", NGRAM_SIZE - 1]
 
 

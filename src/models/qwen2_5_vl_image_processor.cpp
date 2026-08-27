@@ -4,9 +4,12 @@
 #include "../generators.h"
 #include "model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include <array>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <regex>
+#include <tuple>
 
 namespace Generators {
 
@@ -164,6 +167,107 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   return {std::move(input_ids_value), std::move(num_img_tokens)};
 }
 
+void AddQwen4ExpVisionInputs(
+    NamedTensors& named_tensors,
+    std::span<const int64_t> grid_thw,
+    int64_t spatial_merge_size,
+    int64_t position_grid_size,
+    int64_t head_dim,
+    ONNXTensorElementDataType value_type,
+    const std::string& pos_embed_indices_name,
+    const std::string& pos_embed_weights_name,
+    const std::string& vision_cos_name,
+    const std::string& vision_sin_name,
+    const std::string& vision_attention_bias_name,
+    Ort::Allocator& allocator) {
+  if (grid_thw.empty() || grid_thw.size() % 3 != 0)
+    throw std::runtime_error("Qwen4Exp image_grid_thw must contain [T, H, W] entries.");
+  if (spatial_merge_size <= 0 || position_grid_size <= 0 || head_dim <= 0 || head_dim % 4 != 0)
+    throw std::runtime_error("Invalid Qwen4Exp vision geometry configuration.");
+
+  int64_t num_patches = 0;
+  for (size_t image = 0; image < grid_thw.size(); image += 3) {
+    const int64_t t = grid_thw[image];
+    const int64_t h = grid_thw[image + 1];
+    const int64_t w = grid_thw[image + 2];
+    if (t <= 0 || h <= 0 || w <= 0 || h % spatial_merge_size != 0 || w % spatial_merge_size != 0)
+      throw std::runtime_error("Qwen4Exp image_grid_thw dimensions must be positive and divisible by spatial_merge_size.");
+    if (t > std::numeric_limits<int64_t>::max() / h || t * h > std::numeric_limits<int64_t>::max() / w ||
+        num_patches > std::numeric_limits<int64_t>::max() - t * h * w)
+      throw std::runtime_error("Qwen4Exp image_grid_thw is too large.");
+    num_patches += t * h * w;
+  }
+
+  auto indices = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{num_patches, 4});
+  auto weights = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_patches, 4});
+  auto cos = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_patches, head_dim});
+  auto sin = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_patches, head_dim});
+  auto attention_bias = OrtValue::CreateTensor<float>(
+      allocator, std::vector<int64_t>{1, 1, num_patches, num_patches});
+
+  const auto interpolation = [position_grid_size](int64_t position, int64_t length) {
+    const float source = length == 1 ? 0.f : static_cast<float>(position * (position_grid_size - 1)) / (length - 1);
+    const int64_t lower = std::clamp(static_cast<int64_t>(std::floor(source)), int64_t{0}, position_grid_size - 1);
+    const int64_t upper = std::min(lower + 1, position_grid_size - 1);
+    return std::tuple{lower, upper, source - std::floor(source)};
+  };
+
+  std::fill_n(attention_bias->GetTensorMutableData<float>(), static_cast<size_t>(num_patches * num_patches),
+              -std::numeric_limits<float>::infinity());
+  int64_t offset = 0;
+  for (size_t image = 0; image < grid_thw.size(); image += 3) {
+    const int64_t t = grid_thw[image];
+    const int64_t h = grid_thw[image + 1];
+    const int64_t w = grid_thw[image + 2];
+    for (int64_t frame = 0; frame < t; ++frame) {
+      const int64_t frame_offset = offset;
+      for (int64_t block_h = 0; block_h < h / spatial_merge_size; ++block_h) {
+        for (int64_t block_w = 0; block_w < w / spatial_merge_size; ++block_w) {
+          for (int64_t in_h = 0; in_h < spatial_merge_size; ++in_h) {
+            for (int64_t in_w = 0; in_w < spatial_merge_size; ++in_w, ++offset) {
+              const int64_t row = block_h * spatial_merge_size + in_h;
+              const int64_t col = block_w * spatial_merge_size + in_w;
+              const auto [h_lower, h_upper, h_fraction] = interpolation(row, h);
+              const auto [w_lower, w_upper, w_fraction] = interpolation(col, w);
+              auto* index = indices->GetTensorMutableData<int64_t>() + offset * 4;
+              auto* weight = weights->GetTensorMutableData<float>() + offset * 4;
+              for (int64_t h_tap = 0; h_tap < 2; ++h_tap) {
+                for (int64_t w_tap = 0; w_tap < 2; ++w_tap) {
+                  const int64_t tap = h_tap * 2 + w_tap;
+                  index[tap] = (h_tap ? h_upper : h_lower) * position_grid_size + (w_tap ? w_upper : w_lower);
+                  const float h_weight = h_tap ? h_fraction : 1.f - h_fraction;
+                  const float w_weight = w_tap ? w_fraction : 1.f - w_fraction;
+                  weight[tap] = h_weight * w_weight;
+                }
+              }
+              auto* cos_data = cos->GetTensorMutableData<float>() + offset * head_dim;
+              auto* sin_data = sin->GetTensorMutableData<float>() + offset * head_dim;
+              for (int64_t i = 0; i < head_dim / 4; ++i) {
+                const float frequency = std::pow(10000.f, -static_cast<float>(2 * i) / (head_dim / 2));
+                const float h_angle = row * frequency;
+                const float w_angle = col * frequency;
+                cos_data[i] = cos_data[head_dim / 4 + i] = cos_data[head_dim / 2 + i] = cos_data[3 * head_dim / 4 + i] = std::cos(h_angle);
+                sin_data[i] = sin_data[head_dim / 4 + i] = sin_data[head_dim / 2 + i] = sin_data[3 * head_dim / 4 + i] = std::sin(h_angle);
+                cos_data[head_dim / 4 + i] = cos_data[3 * head_dim / 4 + i] = std::cos(w_angle);
+                sin_data[head_dim / 4 + i] = sin_data[3 * head_dim / 4 + i] = std::sin(w_angle);
+              }
+            }
+          }
+        }
+      }
+      for (int64_t row = frame_offset; row < offset; ++row)
+        std::fill_n(attention_bias->GetTensorMutableData<float>() + row * num_patches + frame_offset,
+                    static_cast<size_t>(offset - frame_offset), 0.f);
+    }
+  }
+
+  named_tensors.emplace(pos_embed_indices_name, std::make_shared<Tensor>(std::move(indices)));
+  named_tensors.emplace(pos_embed_weights_name, std::make_shared<Tensor>(ConvertPixelValues(*weights, value_type, allocator)));
+  named_tensors.emplace(vision_cos_name, std::make_shared<Tensor>(ConvertPixelValues(*cos, value_type, allocator)));
+  named_tensors.emplace(vision_sin_name, std::make_shared<Tensor>(ConvertPixelValues(*sin, value_type, allocator)));
+  named_tensors.emplace(vision_attention_bias_name, std::make_shared<Tensor>(ConvertPixelValues(*attention_bias, value_type, allocator)));
+}
+
 }  // namespace
 
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
@@ -183,6 +287,27 @@ QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& sessio
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
+  if (config.model.type == "qwen4exp") {
+    if (config.model.vision.num_position_embeddings <= 0 ||
+        config.model.vision.inputs.pos_embed_indices.empty() ||
+        config.model.vision.inputs.pos_embed_weights.empty() ||
+        config.model.vision.inputs.vision_cos.empty() ||
+        config.model.vision.inputs.vision_sin.empty() ||
+        config.model.vision.inputs.vision_attention_bias.empty()) {
+      throw std::runtime_error("Qwen4Exp requires vision position interpolation, rotary, and attention-bias inputs.");
+    }
+    const auto vision_cos_shape = session_info.GetInputShape(config.model.vision.inputs.vision_cos);
+    qwen4exp_position_grid_size_ = static_cast<int64_t>(std::sqrt(config.model.vision.num_position_embeddings));
+    qwen4exp_head_dim_ = vision_cos_shape.empty() ? 0 : vision_cos_shape.back();
+    if (qwen4exp_position_grid_size_ * qwen4exp_position_grid_size_ != config.model.vision.num_position_embeddings) {
+      throw std::runtime_error("Qwen4Exp num_position_embeddings must be a perfect square.");
+    }
+    qwen4exp_pos_embed_indices_name_ = config.model.vision.inputs.pos_embed_indices;
+    qwen4exp_pos_embed_weights_name_ = config.model.vision.inputs.pos_embed_weights;
+    qwen4exp_vision_cos_name_ = config.model.vision.inputs.vision_cos;
+    qwen4exp_vision_sin_name_ = config.model.vision.inputs.vision_sin;
+    qwen4exp_vision_attention_bias_name_ = config.model.vision.inputs.vision_attention_bias;
+  }
 }
 
 std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
@@ -418,8 +543,21 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     auto grid_tensor = OrtValue::CreateTensor<int64_t>(allocator, grid_target_shape);
     std::copy(grid_data, grid_data + num_grid_elements, grid_tensor->GetTensorMutableData<int64_t>());
 
+    if (qwen4exp_position_grid_size_) {
+      AddQwen4ExpVisionInputs(*named_tensors, std::span(grid_tensor->GetTensorData<int64_t>(), static_cast<size_t>(num_grid_elements)),
+                              spatial_merge_size_, qwen4exp_position_grid_size_, qwen4exp_head_dim_, pixel_values_type_,
+                              qwen4exp_pos_embed_indices_name_, qwen4exp_pos_embed_weights_name_, qwen4exp_vision_cos_name_,
+                              qwen4exp_vision_sin_name_, qwen4exp_vision_attention_bias_name_, allocator);
+    }
     named_tensors->emplace("image_grid_thw", std::make_shared<Tensor>(std::move(grid_tensor)));
   } else if (computed_image_grid_thw) {
+    if (qwen4exp_position_grid_size_) {
+      AddQwen4ExpVisionInputs(*named_tensors,
+                              std::span(computed_image_grid_thw->GetTensorData<int64_t>(), size_t{3}),
+                              spatial_merge_size_, qwen4exp_position_grid_size_, qwen4exp_head_dim_, pixel_values_type_,
+                              qwen4exp_pos_embed_indices_name_, qwen4exp_pos_embed_weights_name_, qwen4exp_vision_cos_name_,
+                              qwen4exp_vision_sin_name_, qwen4exp_vision_attention_bias_name_, allocator);
+    }
     named_tensors->emplace("image_grid_thw",
                            std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
   }

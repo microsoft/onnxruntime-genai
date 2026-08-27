@@ -932,6 +932,16 @@ struct VisionInputs_Element : JSON::Element {
       v_.image_grid_thw = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "pos_embed_indices") {
+      v_.pos_embed_indices = JSON::Get<std::string_view>(value);
+    } else if (name == "pos_embed_weights") {
+      v_.pos_embed_weights = JSON::Get<std::string_view>(value);
+    } else if (name == "vision_cos") {
+      v_.vision_cos = JSON::Get<std::string_view>(value);
+    } else if (name == "vision_sin") {
+      v_.vision_sin = JSON::Get<std::string_view>(value);
+    } else if (name == "vision_attention_bias") {
+      v_.vision_attention_bias = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1047,6 +1057,8 @@ struct Vision_Element : JSON::Element {
       v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "window_size") {
       v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "num_position_embeddings") {
+      v_.num_position_embeddings = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
