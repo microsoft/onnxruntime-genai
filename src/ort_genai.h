@@ -420,14 +420,6 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
-  OgaString ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
-                                         const char* template_kwargs, bool add_generation_prompt) const {
-    const char* p{};
-    OgaCheckResult(OgaTokenizerApplyChatTemplateWithOptions(this, template_str, messages, tools, template_kwargs,
-                                                            add_generation_prompt, &p));
-    return p;
-  }
-
 #if OGA_USE_SPAN
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
