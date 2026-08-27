@@ -3,6 +3,7 @@
 
 #include <array>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -193,6 +194,59 @@ TEST(PagedCacheReservationTest, ChunkedPrefillHoldsWholePromptButCommitsOnlyTheC
   next.Commit();
   EXPECT_EQ(tables[0].CommittedSlots(), 6u);
   EXPECT_EQ(tables[0].Blocks().size(), 3u);
+}
+
+TEST(PagedCacheReservationTest, FutureReservedCapacityRemainsImmutableAfterValidation) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, /*target_slots=*/1, /*newly_admitted=*/true,
+          /*reserved_slots=*/2 * kBlockSize},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+  ASSERT_EQ(reservation.ReservedBlocks().size(), 2u);
+  static_assert(!std::is_assignable_v<Block&, const Block&>);
+  const size_t future_block_id = reservation.ReservedBlocks()[1]->Id();
+
+  reservation.ValidateCommit();
+  reservation.CommitValidated();
+
+  ASSERT_EQ(tables.size(), 1u);
+  ASSERT_EQ(tables[0].Blocks().size(), 2u);
+  EXPECT_EQ(tables[0].Blocks()[1]->Id(), future_block_id);
+  EXPECT_EQ(tables[0].Blocks()[1]->Size(), 0u);
+  EXPECT_TRUE(pool.Owns(tables[0].Blocks()[1]));
+}
+
+TEST(PagedCacheReservationTest, AliasReservationInvalidatesOriginalPublication) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, /*target_slots=*/1, /*newly_admitted=*/true,
+          /*reserved_slots=*/2 * kBlockSize},
+  };
+  PagedCacheReservation original{pool, tables, requests};
+  original.ValidateCommit();
+
+  std::vector<std::shared_ptr<Block>> alias_blocks{
+      original.ReservedBlocks().begin(), original.ReservedBlocks().end()};
+  std::vector<PagedCacheBlockTable> alias_tables{
+      PagedCacheBlockTable{kRequestB, kBlockSize, std::move(alias_blocks)},
+  };
+  const std::array alias_requests{
+      PagedCacheReservationRequest{
+          kRequestB, /*target_slots=*/kBlockSize + 1,
+          /*newly_admitted=*/false,
+          /*reserved_slots=*/2 * kBlockSize},
+  };
+  PagedCacheReservation alias{pool, alias_tables, alias_requests};
+  alias.Commit();
+
+  EXPECT_THROW(original.CommitValidated(), std::logic_error);
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(original.State(), PagedCacheReservationState::Reserved);
 }
 
 TEST(PagedCacheReservationTest, ReleaseReturnsWindowRingBlocks) {
@@ -599,28 +653,6 @@ TEST(PagedCacheReservationTest, ValidateCommitRejectsTokenBoundaryChangeBeforePu
   // Validation did not further change the boundary or append the reserved block.
   EXPECT_EQ(tables[0].CommittedSlots(), 2u);
   EXPECT_EQ(tables[0].Blocks().size(), blocks_before);
-  EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
-}
-
-TEST(PagedCacheReservationTest, ValidateCommitRejectsChangedCommittedBlockOccupancy) {
-  BlockPool pool{kBlockSize, 3};
-  std::vector<PagedCacheBlockTable> tables{
-      PagedCacheBlockTable{kRequestA, 3, pool.AllocateBlocks(3)},
-  };
-  const std::array requests{
-      PagedCacheReservationRequest{kRequestA, 5, false},
-  };
-  PagedCacheReservation reservation{pool, tables, requests};
-  const size_t available_before = pool.AvailableBlocks();
-
-  // The scalar boundary is unchanged, but the physical block now claims one extra committed slot.
-  tables[0].AddCommittedBlockSlot(0);
-
-  EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
-  EXPECT_EQ(tables[0].CommittedSlots(), 3u);
-  ASSERT_EQ(tables[0].Blocks().size(), 1u);
-  EXPECT_EQ(tables[0].Blocks()[0]->Size(), 4u);
-  EXPECT_EQ(pool.AvailableBlocks(), available_before);
   EXPECT_EQ(reservation.State(), PagedCacheReservationState::Reserved);
 }
 

@@ -13,7 +13,6 @@ class PagedCacheBlockTable;
 class PagedCacheReservation;
 struct PagedKeyValueCache;
 struct BlockPool;
-struct BlockTestAccess;
 
 /*
  * Block represents a contiguous set of slots in the paged key-value cache.
@@ -22,6 +21,10 @@ struct BlockTestAccess;
  */
 struct Block {
   Block(size_t id, size_t slots, size_t block_size);
+  Block(const Block&) = default;
+  Block(Block&&) = default;
+  Block& operator=(const Block&) = delete;
+  Block& operator=(Block&&) = delete;
 
   size_t Id() const;
 
@@ -40,8 +43,6 @@ struct Block {
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;
   friend struct BlockPool;
-  friend struct BlockTestAccess;
-
   void AddSlot();
   void AddSlots(size_t slots);
 
@@ -83,9 +84,11 @@ struct BlockPool {
 
  private:
   friend class PagedCacheReservation;
+  friend struct PagedKeyValueCache;
 
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots, bool mark_slots_used);
   void RollbackReservedBlocks(const std::vector<std::shared_ptr<Block>>& blocks) noexcept;
+  void RecordOccupancyMutation() noexcept { ++mutation_generation_; }
 
   const size_t block_size_;
   const size_t capacity_;

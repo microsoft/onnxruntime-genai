@@ -608,8 +608,10 @@ publishing any of them. Changing cache ownership, slot occupancy, block identity
 headroom after validation invalidates the publish preconditions and is a fatal
 transaction-contract error. A transaction must aggregate all paged-cache changes that share a
 block pool into one `PagedCacheReservation`. This is a caller-enforced precondition: pool
-generations reject overlapping reservations that allocate or free blocks, but a reservation whose
-growth fits existing preallocated capacity does not mutate the pool.
+generations reject overlapping reservations that allocate, free, or advance block occupancy.
+`Block` identity and occupancy cannot be assigned through exposed handles; only the pool, cache,
+and reservation mutation paths can advance occupancy, and each records the change in the pool
+generation.
 
 ## Sliding-window paged layers
 

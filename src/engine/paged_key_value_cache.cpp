@@ -336,8 +336,19 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
   if (required_slots <= used_slots) {
     return;
   }
-  size_t num_slots = required_slots - used_slots;
+  const size_t growth = required_slots - used_slots;
+  const size_t committed_capacity =
+      block_table_it->blocks_.size() * block_pool_->BlockSize();
+  const size_t tail_capacity = committed_capacity - used_slots;
+  const size_t new_slots = growth > tail_capacity ? growth - tail_capacity : 0;
+  const size_t new_block_count = block_pool_->BlocksNeeded(new_slots);
 
+  // Complete every fallible allocation before changing existing block occupancy.
+  block_table_it->blocks_.reserve(
+      block_table_it->blocks_.size() + new_block_count);
+  auto allocated_blocks = block_pool_->AllocateBlocks(new_slots);
+
+  size_t num_slots = growth - new_slots;
   size_t block_index = used_slots / block_pool_->BlockSize();
   while (num_slots > 0 && block_index < block_table_it->blocks_.size()) {
     auto& block = block_table_it->blocks_[block_index++];
@@ -345,14 +356,11 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
     block->AddSlots(slots);
     num_slots -= slots;
   }
-
-  if (num_slots > 0) {
-    auto allocated_blocks = block_pool_->AllocateBlocks(num_slots);
-    std::move(allocated_blocks.begin(), allocated_blocks.end(),
-              std::back_inserter(block_table_it->blocks_));
-  }
+  std::move(allocated_blocks.begin(), allocated_blocks.end(),
+            std::back_inserter(block_table_it->blocks_));
   block_table_it->committed_slots_ = required_slots;
   ++block_table_it->mutation_generation_;
+  block_pool_->RecordOccupancyMutation();
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {

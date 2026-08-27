@@ -563,6 +563,7 @@ void PagedCacheReservation::CommitValidated() {
   }
 
   size_t new_table_index = 0;
+  bool occupancy_changed = false;
   for (const auto& delta : deltas_) {
     PagedCacheBlockTable* table = FindTable(*committed_tables_, delta.request_id);
     if (delta.newly_admitted) {
@@ -577,11 +578,15 @@ void PagedCacheReservation::CommitValidated() {
         table->window_blocks_.end(), window_first,
         window_first + static_cast<ptrdiff_t>(delta.reserved_window_block_count));
     AdvanceCommittedSlots(*table, delta.target_slots);
+    occupancy_changed |= delta.target_slots != delta.committed_slots;
     ++table->mutation_generation_;
 
     if (delta.newly_admitted) {
       committed_tables_->push_back(std::move(*table));
     }
+  }
+  if (occupancy_changed) {
+    block_pool_->RecordOccupancyMutation();
   }
 
   reserved_blocks_.clear();

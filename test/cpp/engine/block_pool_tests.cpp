@@ -8,6 +8,7 @@
 
 #include <limits>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -15,16 +16,6 @@
 #include "engine/block.h"
 
 namespace Generators {
-
-struct BlockTestAccess {
-  static void AddSlot(Block& block) {
-    block.AddSlot();
-  }
-
-  static void AddSlots(Block& block, size_t slots) {
-    block.AddSlots(slots);
-  }
-};
 
 namespace {
 
@@ -62,37 +53,11 @@ TEST(BlockTest, ConstructFull) {
             (std::vector<size_t>{kBlockSize, kBlockSize + 1, kBlockSize + 2, kBlockSize + 3}));
 }
 
-TEST(BlockTest, AddSlotProgression) {
-  Block block(/*id=*/0, /*slots=*/0, kBlockSize);
-  for (size_t expected = 1; expected <= kBlockSize; ++expected) {
-    BlockTestAccess::AddSlot(block);
-    EXPECT_EQ(block.Size(), expected);
-    EXPECT_EQ(block.EmptySlots(), kBlockSize - expected);
-    EXPECT_EQ(block.SlotIds().size(), expected);
-  }
-  EXPECT_TRUE(block.IsFull());
-}
-
-TEST(BlockTest, AddSlotOverflowRejected) {
-  Block block(/*id=*/0, /*slots=*/kBlockSize, kBlockSize);
-  ASSERT_TRUE(block.IsFull());
-  EXPECT_THROW(BlockTestAccess::AddSlot(block), std::runtime_error);
-  // The rejected AddSlot must not have mutated the block.
-  EXPECT_EQ(block.Size(), kBlockSize);
-}
-
-TEST(BlockTest, AddSlotsAdvancesInBulk) {
-  Block block(/*id=*/0, /*slots=*/1, kBlockSize);
-  BlockTestAccess::AddSlots(block, 3);
-  EXPECT_EQ(block.Size(), kBlockSize);
-  EXPECT_THROW(BlockTestAccess::AddSlots(block, 1), std::runtime_error);
-  EXPECT_EQ(block.Size(), kBlockSize);
-}
-
 TEST(BlockTest, IdentityAndSlotIdsAreStable) {
-  Block block(/*id=*/3, /*slots=*/0, kBlockSize);
-  BlockTestAccess::AddSlot(block);
-  BlockTestAccess::AddSlot(block);
+  static_assert(std::is_copy_constructible_v<Block>);
+  static_assert(!std::is_copy_assignable_v<Block>);
+  static_assert(!std::is_move_assignable_v<Block>);
+  Block block(/*id=*/3, /*slots=*/2, kBlockSize);
   EXPECT_EQ(block.Id(), 3u);
   EXPECT_EQ(block.SlotIds(), (std::vector<size_t>{3 * kBlockSize, 3 * kBlockSize + 1}));
 }
@@ -237,41 +202,6 @@ TEST(BlockPoolTest, RepeatedAllocateFreeCyclesPreserveTotals) {
     pool.Free(blocks);
     EXPECT_EQ(pool.AvailableBlocks(), kNumBlocks);
     EXPECT_EQ(pool.Capacity(), kNumBlocks);
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// BlockPool: production reservation pattern
-// ---------------------------------------------------------------------------------------------
-
-// Mirrors how the cache reserves capacity ahead of time and then fills slots one token at a time:
-// reserve block_size + 1 slots, advance the returned blocks slot-by-slot, and verify the state
-// transitions converge on what an allocation of block_size + 1 slots would have produced.
-TEST(BlockPoolTest, ReserveThenAdvanceMatchesAllocation) {
-  BlockPool pool(kBlockSize, /*num_blocks=*/4);
-  auto reserved = pool.ReserveBlocks(kBlockSize + 1);
-  ASSERT_EQ(reserved.size(), 2u);
-
-  // Fill the first block one slot at a time.
-  for (size_t i = 0; i < kBlockSize; ++i) {
-    EXPECT_EQ(reserved[0]->Size(), i);
-    EXPECT_FALSE(reserved[0]->IsFull());
-    BlockTestAccess::AddSlot(*reserved[0]);
-  }
-  EXPECT_TRUE(reserved[0]->IsFull());
-
-  // Fill the single trailing slot of the second block.
-  EXPECT_EQ(reserved[1]->Size(), 0u);
-  BlockTestAccess::AddSlot(*reserved[1]);
-
-  // Compare against a direct allocation of the same slot count.
-  BlockPool allocated_pool(kBlockSize, /*num_blocks=*/4);
-  auto allocated = allocated_pool.AllocateBlocks(kBlockSize + 1);
-  ASSERT_EQ(allocated.size(), reserved.size());
-  for (size_t i = 0; i < reserved.size(); ++i) {
-    EXPECT_EQ(reserved[i]->Size(), allocated[i]->Size());
-    EXPECT_EQ(reserved[i]->IsFull(), allocated[i]->IsFull());
-    EXPECT_EQ(reserved[i]->EmptySlots(), allocated[i]->EmptySlots());
   }
 }
 

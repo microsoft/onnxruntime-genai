@@ -43,10 +43,6 @@ class PagedCacheBlockTable {
     committed_slots_ = committed_slots;
     ++mutation_generation_;
   }
-  void AddCommittedBlockSlot(size_t index) {
-    blocks_.at(index)->AddSlot();
-    ++mutation_generation_;
-  }
   void SwapCommittedBlocks(size_t left, size_t right) {
     auto& left_block = blocks_.at(left);
     auto& right_block = blocks_.at(right);
