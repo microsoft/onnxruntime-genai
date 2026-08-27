@@ -112,8 +112,7 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    @staticmethod
-    def _validate_state_update_options(capacity, use_paged_attention, linear_attn_op, state_window):
+    def validate_state_update_options(self, capacity, use_paged_attention, linear_attn_op, state_window):
         if capacity < 0 or capacity > 8:
             raise ValueError("state_update_capacity must be between 0 and 8")
         if capacity and not use_paged_attention:
@@ -123,8 +122,7 @@ class Qwen35TextModel(Model):
         if capacity and state_window < capacity + 1:
             raise ValueError("state_window must be at least state_update_capacity + 1")
 
-    @staticmethod
-    def _parse_state_update_capacity(value):
+    def parse_state_update_capacity(self, value):
         if isinstance(value, bool):
             raise ValueError("state_update_capacity must be an integer")
         try:
@@ -139,20 +137,20 @@ class Qwen35TextModel(Model):
         self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
         if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
-        self.state_update_capacity = self._parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
+        self.state_update_capacity = self.parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         state_window = getattr(self, "context_length_attrs", {}).get(
             "state_window", int(extra_options.get("state_window", 0))
         )
-        self._validate_state_update_options(
+        self.validate_state_update_options(
             self.state_update_capacity,
             getattr(self, "use_paged_attention", False),
             self.linear_attn_op,
             state_window,
         )
-        self._configure_gated_delta_net_io()
+        self.configure_gated_delta_net_io()
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
@@ -165,7 +163,7 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
 
-    def _configure_gated_delta_net_io(self):
+    def configure_gated_delta_net_io(self):
         linear_layers = [
             layer_id
             for layer_id, layer_type in enumerate(getattr(self, "layer_types", []))
@@ -247,7 +245,7 @@ class Qwen35TextModel(Model):
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
         if self.layer_types[layer_id] == "linear_attention":
-            self.make_gated_delta_net(layer_id, attention, root_input)
+            self.make_qwen_gated_delta_net(layer_id, attention, root_input)
         else:
             super().make_attention(layer_id, attention, root_input, **kwargs)
 
@@ -323,7 +321,7 @@ class Qwen35TextModel(Model):
 
         super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
-    def make_gated_delta_net(self, layer_id, linear_attn, root_input):
+    def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
         """Build the Qwen linear-attention layer for dense or packed token layouts.
 
         Uses com.microsoft contrib ops:
@@ -364,7 +362,7 @@ class Qwen35TextModel(Model):
                     self.linear_conv_dim,
                 ],
             )
-            linear_output = self._make_packed_gated_delta_net(
+            linear_output = self.make_packed_gated_delta_net(
                 layer_id,
                 linear_attn,
                 f"{conv_op_name}/output_0",
@@ -395,7 +393,7 @@ class Qwen35TextModel(Model):
         )
 
         if self.linear_attn_op == "gated_delta_net":
-            linear_output = self._make_dense_gated_delta_net(
+            linear_output = self.make_dense_gated_delta_net(
                 layer_id,
                 linear_attn,
                 conv_out_t_output,
@@ -434,7 +432,7 @@ class Qwen35TextModel(Model):
         # Gated RMSNorm + output projection
         self.make_linear_attention_output_proj(layer_id, linear_attn, la_output, z_name)
 
-    def _make_packed_gated_delta_net(self, layer_id, linear_attn, conv_output, b_name, a_name):
+    def make_packed_gated_delta_net(self, layer_id, linear_attn, conv_output, b_name, a_name):
         basename = f"/model/layers.{layer_id}/linear_attn"
         key_dim = self.linear_key_dim
         value_dim = self.linear_value_dim
@@ -520,7 +518,7 @@ class Qwen35TextModel(Model):
         )
         return f"{reshape_name}/output_0"
 
-    def _make_dense_gated_delta_net(self, layer_id, linear_attn, conv_output, b_name, a_name):
+    def make_dense_gated_delta_net(self, layer_id, linear_attn, conv_output, b_name, a_name):
         basename = f"/model/layers.{layer_id}/linear_attn"
         key_dim = self.linear_key_dim
         value_dim = self.linear_value_dim

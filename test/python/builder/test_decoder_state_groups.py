@@ -249,6 +249,58 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
     assert "arithmetic_mode" not in gdn
 
 
+def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
+    model = _recording_model()
+    model.make_varlen_causal_conv_with_state(
+        "/conv",
+        root_input="x",
+        weight="weight",
+        cumulative_sequence_length="cu",
+        bias="bias",
+        past_conv_state="past",
+        present_conv_state="present",
+        state_update_capacity=0,
+        output_shape=["num_tokens", 48],
+        present_conv_shape=["batch_size", 48, 3],
+    )
+    conv = model.nodes[-1][1]
+    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past"]
+    assert conv["outputs"] == ["/conv/output_0", "present"]
+    assert "state_update_capacity" not in conv
+
+    model.make_varlen_gated_delta_net(
+        "/gdn",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        decay="a",
+        beta="b",
+        a_log="a_log",
+        dt_bias="dt_bias",
+        gate_shape=["num_tokens", 3],
+        state_update_capacity=0,
+        output_shape=["num_tokens", 3, 8],
+        present_recurrent_shape=["batch_size", 3, 8, 4],
+    )
+    gdn = model.nodes[-1][1]
+    assert gdn["inputs"] == [
+        "q",
+        "k",
+        "v",
+        "cu",
+        "/gdn/decay_fp32/Cast/output_0",
+        "/gdn/beta_fp32/Cast/output_0",
+        "past",
+        "a_log",
+        "dt_bias",
+    ]
+    assert gdn["outputs"] == ["/gdn/output_0", "present"]
+    assert "state_update_capacity" not in gdn
+
+
 def test_varlen_ops_reject_obsolete_checkpoint_outputs():
     model = _recording_model()
     with pytest.raises(ValueError, match="checkpoint outputs are no longer supported"):
@@ -289,8 +341,9 @@ def test_qwen38_compact_state_update_option_validation(
     state_window,
     message,
 ):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match=message):
-        Qwen35TextModel._validate_state_update_options(
+        model.validate_state_update_options(
             capacity,
             use_paged_attention,
             linear_attn_op,
@@ -300,10 +353,11 @@ def test_qwen38_compact_state_update_option_validation(
 
 @pytest.mark.parametrize("capacity", [True, 1.5, "1.5", None])
 def test_qwen38_compact_state_update_capacity_requires_integer(capacity):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match="must be an integer"):
-        Qwen35TextModel._parse_state_update_capacity(capacity)
+        model.parse_state_update_capacity(capacity)
 
-    assert Qwen35TextModel._parse_state_update_capacity("3") == 3
+    assert model.parse_state_update_capacity("3") == 3
 
 
 def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
@@ -326,7 +380,7 @@ def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
     model.output_types = {"present.conv": model.io_dtype, "present.recurrent": model.io_dtype}
     model.output_shapes = {"present.conv": [4, "old"], "present.recurrent": [4, "old"]}
 
-    model._configure_gated_delta_net_io()
+    model.configure_gated_delta_net_io()
 
     assert model.input_shapes["past.conv"] == ["batch_size", 48, 3]
     assert model.output_shapes["present.conv"] == ["batch_size", 48, 3]
@@ -337,9 +391,7 @@ def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
         "batch_size",
         3 * (3 + 2 * 4 + 3 * 8),
     ]
-    assert model.output_names["state_update.recurrent_capsule"] == {
-        0: "state_update.0.recurrent_capsule"
-    }
+    assert model.output_names["state_update.recurrent_capsule"] == {0: "state_update.0.recurrent_capsule"}
 
 
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
@@ -362,7 +414,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
     a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
-    output = model._make_dense_gated_delta_net(
+    output = model.make_dense_gated_delta_net(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
         "conv_output",
