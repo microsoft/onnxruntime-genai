@@ -13,7 +13,7 @@ Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  output_raw_ = std::make_unique<Tensor>(model_.p_device_logits_, type_);
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
@@ -42,10 +42,10 @@ DeviceSpan<float> Logits::Get() {
     const size_t num_beams = state_.params_->search.num_beams;
 
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
-    output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_last, type_);
+    output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_logits_->GetAllocator(), shape_last, type_);
 
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>)
-      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
+      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_logits_->GetAllocator(), shape_);
 
     logits_of_last_token = output_last_tokens_.get();
 
@@ -53,7 +53,7 @@ DeviceSpan<float> Logits::Get() {
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     auto logits_raw = output_raw_->GetByteSpan();
-    auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);
+    auto logits_last_tokens = ByteWrapTensor(*model_.p_device_logits_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Find the first non pad token from the end
@@ -71,12 +71,12 @@ DeviceSpan<float> Logits::Get() {
 
   // Convert from float16/bfloat16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t> || type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
-    Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
+    Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_logits_, Ort::TypeToTensorType<float>);
     logits_of_last_token = logits_of_last_token_fp32_.get();
   }
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
-    logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
+    logits_ = WrapTensor<float>(*model_.p_device_logits_, *logits_of_last_token);
 
   return logits_;
 }
@@ -107,7 +107,10 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   shape_[1] = new_kv_length;
-  output_raw_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+  const int max_cap = state_.params_->max_graph_capture_length;
+  const bool use_static = state_.params_->use_graph_capture && shape_[1] >= 1 && shape_[1] <= max_cap;
+  const size_t static_cap_bytes = use_static ? static_cast<size_t>(shape_[0]) * max_cap * shape_[2] * Ort::SizeOf(type_) : 0;
+  output_raw_->CreateTensor(shape_, use_static, static_cap_bytes);
   state_.outputs_[output_index_] = output_raw_->GetOrtTensor();
 }
 

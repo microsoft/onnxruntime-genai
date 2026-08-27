@@ -13,8 +13,8 @@ resolved ``QuantConfig`` later without changing this file.
 Scope note: this covers the targets the model builder implements today — dense
 ``weights`` (MatMul), ``moe`` (QMoE) experts, and layout-only ``runtime`` knobs —
 together with per-node/per-layer ``overrides`` (used for mixed precision). The
-KV-cache and auxiliary-model (MTP) targets from the broader design are out of
-scope here.
+KV cache is out of scope. Auxiliary models such as MTP consume an independent
+``QuantConfig`` instance rather than adding an auxiliary-model target here.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+import onnx_ir as ir
 
 # ---------------------------------------------------------------------------
 # 1. Unified quant-dtype vocabulary
@@ -65,10 +67,10 @@ _DTYPES: dict[str, DtypeDescriptor] = {
 
 IO_DTYPES = ("fp16", "bf16", "fp32")
 
-# Accepted values for the `kv_cache_quant_type` extra option: a bit width plus a scale
+# Accepted values for the `kv_cache_quant_scheme` extra option: a bit width plus a scale
 # granularity. The KV cache is not part of `QuantConfig` yet (see the scope note above), so
 # this stays a standalone vocabulary that both `check_extra_options()` and the builder read.
-KV_CACHE_QUANT_TYPES = frozenset(
+KV_CACHE_QUANT_SCHEMES = frozenset(
     {"none"}
     | {
         f"{bit_width}_{granularity}"
@@ -327,6 +329,26 @@ class QuantConfig:
         if self.io_dtype not in IO_DTYPES:
             raise ValueError(f"io_dtype must be one of {list(IO_DTYPES)}, got '{self.io_dtype}'")
 
+    def to_onnx_dtypes(self) -> tuple[ir.DataType, ir.DataType]:
+        io_dtype = {
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "fp32": ir.DataType.FLOAT,
+        }[self.io_dtype]
+        weights = resolve_dtype(self.weights.type)
+        if weights.kind == "mx":
+            raise ValueError(
+                f"Dense weights.type={weights.name} is not supported; use int4/int8/none for dense weights "
+                "and select mxfp4/nvfp4 independently through moe.type"
+            )
+        if weights.kind != "int":
+            return io_dtype, io_dtype
+
+        signed = weights.signed is not False and self.weights.symmetric
+        if weights.bits == 8:
+            return io_dtype, ir.DataType.INT8 if signed else ir.DataType.UINT8
+        return io_dtype, ir.DataType.INT4 if signed else ir.DataType.UINT4
+
     # -- Loading -----------------------------------------------------------
 
     @classmethod
@@ -364,7 +386,7 @@ class QuantConfig:
     def from_extra_options(
         cls,
         extra_options: dict[str, Any],
-        precision: str = "int4",
+        precision: ir.DataType | str = ir.DataType.INT4,
         execution_provider: str = "cuda",
     ) -> "QuantConfig":
         """Desugar today's flat ``extra_options`` (+ ``precision``) into a ``QuantConfig``.
@@ -374,6 +396,7 @@ class QuantConfig:
         ``Model`` (``resolve_quant_config`` / ``moe_quant_type`` handling) so the
         two surfaces stay in lock-step.
         """
+        precision = onnx_dtype_to_precision(precision)
         extra_options = dict(extra_options or {})
 
         weights_type = _PRECISION_TO_WEIGHTS_TYPE.get(precision, "none")
@@ -403,9 +426,11 @@ class QuantConfig:
         # --- moe ---------------------------------------------------------
         moe_quant_type = extra_options.get("moe_quant_type")
         if moe_quant_type is None:
-            # int8 precision quantizes MoE experts to 8-bit to match the dense weights.
+            # Match the model precision unless the MoE target is configured independently.
             if precision == "int8" or extra_options.get("use_8bits_moe", False):
                 moe_quant_type = "int8"
+            elif precision in IO_DTYPES:
+                moe_quant_type = "none"
             else:
                 moe_quant_type = "int4"
         # QMoE default block size: 128 on TRT-RTX, 32 elsewhere (mxfp4 is pinned to 32 in MoEConfig).
@@ -461,9 +486,26 @@ def _normalize_mixed_precision(value: Any) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for selector, quant_type in items:
         if selector not in MATCH_PRESETS:
-            raise ValueError(
-                f"matmul_mixed_precision selector must be one of {list(MATCH_PRESETS)}, got '{selector}'."
-            )
+            raise ValueError(f"matmul_mixed_precision selector must be one of {list(MATCH_PRESETS)}, got '{selector}'.")
         resolve_dtype(quant_type)  # validate the quant type name
         normalized[selector] = quant_type
     return normalized
+
+
+def onnx_dtype_to_precision(onnx_dtype: ir.DataType | str) -> str:
+    """Map the resolved ONNX weight dtype to a `QuantConfig` precision string.
+
+    Only used to seed the QuantConfig's `weights.type` / `io_dtype`; the builder's numeric
+    quantization knobs are read from the resolved config, not from this precision.
+    """
+    if isinstance(onnx_dtype, str):
+        return onnx_dtype.lower()
+    return {
+        ir.DataType.INT4: "int4",
+        ir.DataType.UINT4: "int4",
+        ir.DataType.INT8: "int8",
+        ir.DataType.UINT8: "int8",
+        ir.DataType.BFLOAT16: "bf16",
+        ir.DataType.FLOAT16: "fp16",
+        ir.DataType.FLOAT: "fp32",
+    }.get(onnx_dtype, "fp16")

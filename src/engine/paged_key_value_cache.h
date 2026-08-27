@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <algorithm>
 #include <stdint.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <list>
 
@@ -14,6 +16,32 @@
 #include "step_plan.h"
 
 namespace Generators {
+
+inline constexpr size_t kMinGraphBlockTableColumns = 8;
+
+inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
+  if (max_columns == 0) {
+    throw std::runtime_error("Graph block-table capacity must be non-zero.");
+  }
+
+  size_t columns = std::min(kMinGraphBlockTableColumns, max_columns);
+  while (columns < max_blocks) {
+    if (columns > max_columns / 2) {
+      return max_columns;
+    }
+    columns *= 2;
+  }
+  return columns;
+}
+
+size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
+                                 float gpu_utilization_factor,
+                                 size_t reserved_memory_bytes,
+                                 size_t block_size,
+                                 size_t num_key_value_heads,
+                                 size_t head_size,
+                                 size_t full_layer_count,
+                                 size_t element_size);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -27,7 +55,7 @@ namespace Generators {
  */
 struct PagedKeyValueCache {
  public:
-  PagedKeyValueCache(std::shared_ptr<Model> model);
+  explicit PagedKeyValueCache(std::shared_ptr<Model> model);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -42,7 +70,7 @@ struct PagedKeyValueCache {
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
-  StepPlanningResult PlanStepResources(StepPlan& plan, size_t committed_request_count) const;
+  StepPlanningResult PlanStepResources(StepPlan& plan) const;
 
   // Returns the K, V cache.
   std::vector<std::pair<OrtValue*, OrtValue*>> Cache();
@@ -75,6 +103,21 @@ struct PagedKeyValueCache {
       const PagedCacheReservation& reservation,
       size_t columns);
 
+  // Block table for the sliding-window layers, same shape as BlockTables() but filled by repeating
+  // each request's ring of blocks: column j holds ring[j % ring_blocks]. The operator indexes it
+  // with the token's true position, so position p resolves to slot p % (ring_blocks * block_size)
+  // and positions that have fallen out of the window are overwritten in place.
+  //
+  //   ring = [5, 9], block_size = 4, so the table is
+  //   [5, 9, 5, 9, 5, 9, ...]
+  //
+  // Only valid when WindowedLayers() is non-empty.
+  std::pair<OrtValue*, const char*> WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests);
+  std::pair<OrtValue*, const char*> WindowBlockTables(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      const PagedCacheReservation& reservation,
+      size_t columns);
+
   // Number of columns in the block table handed to the model on the most recent BlockTables() call.
   // With graph capture this is a bucketed capacity rather than the exact longest table, so the shape
   // is stable across steps; it also bounds the KV length any sequence in the batch can reach, which
@@ -83,6 +126,9 @@ struct PagedKeyValueCache {
   size_t MaxBlockTableColumns() const { return max_block_table_columns_; }
   size_t MaxBlockTableRows() const { return max_block_table_rows_; }
   bool GraphCaptureEnabled() const { return graph_capture_; }
+  size_t MaxQueryTokensPerRequest() const {
+    return Windowed() ? window_live_span_ - window_size_ + 1 : 0;
+  }
 
   void UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests);
   void UpdateState(State& state,
@@ -131,11 +177,28 @@ struct PagedKeyValueCache {
   //   N = num_blocks per layer
   //   M = block_size per block
 
+  // Fills `data` with `columns` block ids per request, in the order the requests were given.
+  void FillBlockTables(const std::vector<std::shared_ptr<Request>>& requests, bool windowed,
+                       int32_t* data, size_t columns);
   std::shared_ptr<Model> model_;
   std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
   std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<OrtValue> block_tables_value_;    // Block tables for all requests in the cache
+
+  // Sliding-window layers hold their KV in a ring of `window_ring_blocks_` blocks rather than one
+  // block per position, so they get their own much smaller pool and their own block table. The
+  // ring has to span the whole live set of a step: the queries reach back `window_size` positions
+  // and a chunked prefill advances by up to `chunk_size` at once, so it must cover
+  // `chunk_size + window_size - 1` positions. Zero when the model has no windowed layers.
+  size_t window_size_{};
+  size_t window_ring_blocks_{};
+  size_t window_live_span_{};  // chunk_size + window_size - 1, checked against each step
+  std::unique_ptr<BlockPool> window_block_pool_;
+  std::unique_ptr<OrtValue> window_block_tables_value_;
+  std::unique_ptr<Tensor> window_block_tables_tensor_;
+
+  bool Windowed() const { return window_ring_blocks_ > 0; }
 
   // Graph capture needs the block table at a device address that never moves and at a shape that
   // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.

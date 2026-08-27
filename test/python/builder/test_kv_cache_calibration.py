@@ -25,14 +25,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+QUANTIZATION_DIR = (
+    Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
+)
 
 
 def _load_calibration_module():
     sys.modules.setdefault("models", types.ModuleType("models"))
-    spec = importlib.util.spec_from_file_location("models.kv_cache_calibration", MODELS_DIR / "kv_cache_calibration.py")
+    module_name = "models.quantization.kv_cache_calibration"
+    spec = importlib.util.spec_from_file_location(module_name, QUANTIZATION_DIR / "kv_cache_calibration.py")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["models.kv_cache_calibration"] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -426,19 +429,27 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
         _FakeInput("input_ids", ["batch", "sequence"], "tensor(int64)"),
         _FakeInput("attention_mask", ["batch", "total_sequence"], "tensor(int64)"),
         _FakeInput("position_ids", ["batch", "sequence"], "tensor(int64)"),
-        _FakeInput("past_key_values.0.key", ["batch", 1, "past_sequence", 4], "tensor(float)"),
-        _FakeInput("past_key_values.0.value", ["batch", 1, "past_sequence", 4], "tensor(float)"),
+        _FakeInput("past_key_values.3.key", ["batch", 1, "past_sequence", 4], "tensor(float)"),
+        _FakeInput("past_key_values.3.value", ["batch", 1, "past_sequence", 4], "tensor(float)"),
+        _FakeInput("past_key_values.1.conv_state", ["batch", 8, 3], "tensor(float16)"),
+        _FakeInput("past_key_values.1.recurrent_state", ["batch", 2, 4, 4], "tensor(float)"),
     ]
     outputs = [
-        types.SimpleNamespace(name="present.0.key"),
-        types.SimpleNamespace(name="present.0.value"),
+        types.SimpleNamespace(name="present.3.key"),
+        types.SimpleNamespace(name="present.3.value"),
     ]
 
     def run(output_names, feeds):
-        assert output_names == ["present.0.key", "present.0.value"]
+        assert output_names == ["present.3.key", "present.3.value"]
         np.testing.assert_array_equal(feeds["position_ids"], np.arange(target_seq).reshape(1, target_seq))
-        assert feeds["past_key_values.0.key"].dtype == np.float32
-        assert feeds["past_key_values.0.value"].dtype == np.float32
+        assert feeds["past_key_values.3.key"].dtype == np.float32
+        assert feeds["past_key_values.3.value"].dtype == np.float32
+        assert feeds["past_key_values.3.key"].shape == (1, 1, 0, 4)
+        assert feeds["past_key_values.3.value"].shape == (1, 1, 0, 4)
+        np.testing.assert_array_equal(feeds["past_key_values.1.conv_state"], np.zeros((1, 8, 3), dtype=np.float16))
+        np.testing.assert_array_equal(
+            feeds["past_key_values.1.recurrent_state"], np.zeros((1, 2, 4, 4), dtype=np.float32)
+        )
         shape = (1, 1, target_seq, 4)
         return [np.full(shape, 2.0, dtype=np.float32), np.full(shape, 4.0, dtype=np.float32)]
 
@@ -478,6 +489,8 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
     assert result == str(output_path.resolve())
     # Unavailable providers must be filtered out so CPU-only onnxruntime installs work.
     assert requested_providers == ["CPUExecutionProvider"]
-    scales = json.loads(output_path.read_text())["scales"]
+    scale_data = json.loads(output_path.read_text())
+    assert scale_data["layer_ids"] == [3]
+    scales = scale_data["scales"]
     np.testing.assert_allclose(scales["k_scales"], [[2.0 / 128.0] * 4])
     np.testing.assert_allclose(scales["v_scales"], [[4.0 / 128.0] * 4])

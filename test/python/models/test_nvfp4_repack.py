@@ -22,24 +22,16 @@ code<->(N, K) mapping, so the kernel reconstructs Model Optimizer's weights
 bit-for-bit (no re-quantization).
 """
 
-import importlib.util
-import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
-def _load_modelopt_class():
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "quantized_model.py"
-    )
-    spec = importlib.util.spec_from_file_location("_genai_quantized_model_under_test", os.path.abspath(path))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.ModeloptModel
-
-
-ModeloptModel = _load_modelopt_class()
+from loaders.modelopt import ModeloptModel
 
 _FP4_E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
@@ -87,14 +79,20 @@ def _kernel_dequant_from_qmoe_layout(packed_kn2, scale_nk16, global_scale, n, k)
 
 
 def test_nvfp4_repack_roundtrip_matches_modelopt():
-    model = ModeloptModel.__new__(ModeloptModel)
+    model = object.__new__(ModeloptModel)
     for seed, (n, k) in enumerate([(8, 64), (16, 128), (32, 512), (2048, 512)]):
         packed_nk2, scale_bytes, global_scale, ref = _make_modelopt_nvfp4_projection(n, k, seed)
 
-        # Model Optimizer repack: K-unpack -> per-element codes [N, K] -> N-pack [K, N/2].
-        codes_nk = model.repack_nvfp4_weight_codes(torch.from_numpy(packed_nk2))
-        assert tuple(codes_nk.shape) == (n, k)
-        qweight_kn2 = model.pack_nvfp4_codes_for_qmoe(codes_nk)
+        projection = SimpleNamespace(
+            weight=torch.from_numpy(packed_nk2),
+            weight_scale=torch.from_numpy(scale_bytes),
+            weight_scale_2=torch.tensor(global_scale),
+        )
+        expert = SimpleNamespace(gate_proj=projection, up_proj=projection, down_proj=projection)
+
+        # The loader repacks Model Optimizer's K-packed weights into QMoE's N-packed layout.
+        prepared = model.prepare_qmoe_experts([expert])
+        qweight_kn2 = prepared.down_qweight[0]
         assert tuple(qweight_kn2.shape) == (k, n // 2)
 
         # Block scales are unchanged ([N, K/16]); global scale passed through.

@@ -62,6 +62,9 @@ struct ModelExecutor {
  */
 struct DecoderModelExecutor : ModelExecutor {
   DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  DecoderModelExecutor(std::shared_ptr<Model> model,
+                       std::shared_ptr<CacheManager> cache_manager,
+                       std::unique_ptr<Decoder> decoder);
 
   void Encode(ScheduledRequests& scheduled_requests);
 

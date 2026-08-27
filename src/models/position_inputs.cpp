@@ -190,7 +190,10 @@ void DefaultPositionInputs::CreateNextPositionIDsTensor() {
     position_ids_ = std::move(position_ids_next_);
     position_ids_next_ = nullptr;
   } else {
-    position_ids_->CreateTensor(position_ids_shape_, state_.params_->use_graph_capture && position_ids_shape_[1] == 1);
+    const int max_cap = state_.params_->max_graph_capture_length;
+    const bool use_static = state_.params_->use_graph_capture && position_ids_shape_[1] >= 1 && position_ids_shape_[1] <= max_cap;
+    const size_t static_cap_bytes = use_static ? static_cast<size_t>(position_ids_shape_[0]) * max_cap * Ort::SizeOf(type_) : 0;
+    position_ids_->CreateTensor(position_ids_shape_, use_static, static_cap_bytes);
   }
 }
 

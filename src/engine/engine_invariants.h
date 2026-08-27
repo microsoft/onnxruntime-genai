@@ -35,7 +35,7 @@ struct RequestStateSnapshot {
   RequestStatus status{RequestStatus::Unassigned};
   int64_t current_sequence_length{};    // Total tokens the Request's search currently holds.
   int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
-  int64_t seen_sequence_length{};       // Tokens already streamed to (seen by) the application.
+  int64_t seen_sequence_length{};       // High-water sequence index of consumed generated output.
   bool is_prefill{};
 };
 
@@ -55,6 +55,14 @@ struct RequestReservationSnapshot {
   std::vector<size_t> reserved_block_ids;
 };
 
+struct WindowBlockPoolSnapshot {
+  size_t total_blocks{};
+  size_t free_blocks{};
+  size_t blocks_per_request{};
+  std::vector<RequestBlockSnapshot> requests;
+  std::vector<size_t> transaction_reserved_block_ids;
+};
+
 // Immutable view of the paged cache's block accounting. Produced by PagedKeyValueCache::Snapshot().
 struct PagedCacheSnapshot {
   size_t block_size{};
@@ -64,6 +72,7 @@ struct PagedCacheSnapshot {
   std::vector<RequestBlockSnapshot> requests;
   std::vector<size_t> transaction_reserved_block_ids;
   std::vector<RequestReservationSnapshot> reservations;
+  WindowBlockPoolSnapshot window_blocks;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).
   size_t AllocatedBlocks() const;

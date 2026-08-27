@@ -141,6 +141,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                            out double /* double* */ value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSpeculativeBool(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                         byte[] /* const char* */ name,
+                                                                                         [MarshalAs(UnmanagedType.I1)] bool value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsGetSpeculativeBool(IntPtr /* const OgaGeneratorParams* */ generatorParams,
+                                                                                         byte[] /* const char* */ name,
+                                                                                         [MarshalAs(UnmanagedType.I1)] out bool /* bool* */ value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);

@@ -177,12 +177,6 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
     model.head_size = head_dim
     model.context_length = config_dict["max_position_embeddings"]
 
-    # Reproduce the original_context_length logic from Model.__init__
-    if isinstance(rs, Mapping) and "original_max_position_embeddings" in rs:
-        model.original_context_length = rs["original_max_position_embeddings"]
-    else:
-        model.original_context_length = model.context_length
-
     # Build a mock config that looks like what AutoConfig.from_pretrained returns.
     # Crucially, rope_scaling is a dict (not an object). Some models (e.g.
     # Ministral-3-3B) store rope_theta only inside rope_scaling, while others
@@ -195,19 +189,12 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
     if "rope_theta" in config_dict:
         mock_kwargs["rope_theta"] = config_dict["rope_theta"]
     mock_config = types.SimpleNamespace(**mock_kwargs)
+    model.make_config_init(mock_config)
 
-    # Resolve rope_theta using the same fallback chain as Model.__init__
-    rope_theta = (
-        mock_config.rope_theta
-        if hasattr(mock_config, "rope_theta")
-        else mock_config.rope_embedding_base
-        if hasattr(mock_config, "rope_embedding_base")
-        else mock_config.rope_scaling["rope_theta"]
-        if hasattr(mock_config, "rope_scaling")
-        and isinstance(mock_config.rope_scaling, Mapping)
-        and "rope_theta" in mock_config.rope_scaling
-        else 10000
+    model.original_context_length = getattr(
+        mock_config, "original_max_position_embeddings", model.context_length
     )
+    rope_theta = getattr(mock_config, "rope_theta", 10000)
 
     # Initialize rope_attrs with defaults (as Model.__init__ does)
     model.rope_attrs = {
@@ -253,9 +240,8 @@ def _make_builder_cos_sin_rope_field(
 
     ``field`` selects where the rope settings live on the mock config:
     ``"rope_scaling"`` (legacy transformers) or ``"rope_parameters"``
-    (transformers v5). Settings are resolved via ``Model.get_rope_parameters``,
-    mirroring the current builder ``__init__``, so both fields are exercised by
-    the real code path rather than hard-coding ``rope_scaling``.
+    (transformers v5). Settings are canonicalized via
+    ``Model.make_config_init``, mirroring the current builder initialization.
     """
     rs = config_dict["rope_scaling"]
     head_dim = config_dict["head_dim"]
@@ -272,23 +258,12 @@ def _make_builder_cos_sin_rope_field(
     if "rope_theta" in config_dict:
         mock_kwargs["rope_theta"] = config_dict["rope_theta"]
     mock_config = types.SimpleNamespace(**mock_kwargs)
+    model.make_config_init(mock_config)
 
-    rope_params = model.get_rope_parameters(mock_config)
-
-    # original_context_length resolution (mirrors Model.__init__)
-    if isinstance(rope_params, Mapping) and "original_max_position_embeddings" in rope_params:
-        model.original_context_length = rope_params["original_max_position_embeddings"]
-    else:
-        model.original_context_length = model.context_length
-
-    # rope_theta resolution (mirrors Model.__init__)
-    rope_theta = (
-        mock_config.rope_theta
-        if hasattr(mock_config, "rope_theta")
-        else rope_params["rope_theta"]
-        if isinstance(rope_params, Mapping) and "rope_theta" in rope_params
-        else 10000
+    model.original_context_length = getattr(
+        mock_config, "original_max_position_embeddings", model.context_length
     )
+    rope_theta = getattr(mock_config, "rope_theta", 10000)
 
     model.rope_attrs = {
         "create_caches": True,
@@ -432,6 +407,7 @@ class TestYarnRopeCacheParity:
         assert config["rope_scaling"]["mscale"] == 1.0
 
         # Exercise the real make_rope_init code path
+        model.make_config_init(mock_config)
         model.make_rope_init(mock_config)
 
         assert model.rope_attrs["mscale"] == 1.0, f"Expected mscale=1.0, got {model.rope_attrs['mscale']}"
@@ -586,6 +562,7 @@ class TestYarnRopeCacheParity:
         model.original_context_length = rs["original_max_position_embeddings"]
 
         mock_config = types.SimpleNamespace(**config)
+        model.make_config_init(mock_config)
         model.make_rope_init(mock_config)
 
         # mscale should be computed (not 1.0) since config has no explicit mscale
@@ -662,6 +639,7 @@ class TestYarnRopeCacheParity:
         model.original_context_length = rs["original_max_position_embeddings"]
 
         mock_config = types.SimpleNamespace(**config)
+        model.make_config_init(mock_config)
         model.make_rope_init(mock_config)
 
         # mscale should be computed via make_mscale_yarn(32)
@@ -686,36 +664,49 @@ class TestYarnRopeCacheParity:
     # -----------------------------------------------------------------------
     # transformers v5 `rope_parameters` support (PR: rope_parameters)
     # -----------------------------------------------------------------------
-    def test_get_rope_parameters_prefers_rope_parameters(self):
-        """get_rope_parameters returns rope_parameters when present (transformers v5)."""
+    def test_make_config_init_merges_rope_scaling_into_rope_parameters(self):
+        """Legacy RoPE values are merged into and promoted from the canonical mapping."""
         model = object.__new__(Model)
         config = types.SimpleNamespace(
             rope_parameters={"rope_type": "yarn", "factor": 32.0},
-            rope_scaling={"rope_type": "linear", "factor": 8.0},
+            rope_scaling={"rope_type": "linear", "factor": 8.0, "beta_fast": 16.0},
         )
-        assert model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
+        model.make_config_init(config)
 
-    def test_get_rope_parameters_empty_rope_parameters_not_overridden(self):
-        """A present-but-empty rope_parameters ({}) must not fall back to rope_scaling."""
+        assert config.rope_parameters == {"rope_type": "linear", "factor": 8.0, "beta_fast": 16.0}
+        assert config.rope_type == "linear"
+        assert config.factor == 8.0
+        assert config.beta_fast == 16.0
+
+    def test_make_config_init_populates_empty_rope_parameters(self):
+        """An empty canonical mapping is populated from legacy RoPE settings."""
         model = object.__new__(Model)
         config = types.SimpleNamespace(
             rope_parameters={},
             rope_scaling={"rope_type": "yarn", "factor": 32.0},
         )
-        assert model.get_rope_parameters(config) == {}
+        model.make_config_init(config)
 
-    def test_get_rope_parameters_falls_back_to_rope_scaling(self):
-        """When rope_parameters is absent, fall back to rope_scaling (older transformers)."""
+        assert config.rope_parameters == {"rope_type": "yarn", "factor": 32.0}
+
+    def test_make_config_init_canonicalizes_rope_scaling(self):
+        """Legacy RoPE settings are copied and promoted when canonical settings are absent."""
         model = object.__new__(Model)
         config = types.SimpleNamespace(rope_scaling={"rope_type": "yarn", "factor": 32.0})
         assert not hasattr(config, "rope_parameters")
-        assert model.get_rope_parameters(config) == {"rope_type": "yarn", "factor": 32.0}
+        model.make_config_init(config)
 
-    def test_get_rope_parameters_none_when_absent(self):
-        """When neither field is present, get_rope_parameters returns None."""
+        assert config.rope_parameters == {"rope_type": "yarn", "factor": 32.0}
+        assert config.rope_type == "yarn"
+        assert config.factor == 32.0
+
+    def test_make_config_init_no_op_without_rope_settings(self):
+        """Config initialization leaves configs without RoPE settings unchanged."""
         model = object.__new__(Model)
         config = types.SimpleNamespace(max_position_embeddings=131072)
-        assert model.get_rope_parameters(config) is None
+        model.make_config_init(config)
+
+        assert not hasattr(config, "rope_parameters")
 
     def test_make_rope_init_no_op_without_rope_params(self):
         """make_rope_init must not raise when no rope parameters are present."""
@@ -724,6 +715,16 @@ class TestYarnRopeCacheParity:
         config = types.SimpleNamespace(max_position_embeddings=131072)
         model.make_rope_init(config)  # no-op, must not raise on `"beta_fast" in None`
         assert "rescale_inv_freq" not in model.rope_attrs
+
+    def test_make_rope_init_accepts_default_rope(self):
+        """Explicit default RoPE keeps the standard RotaryEmbedding configuration."""
+        model = object.__new__(Model)
+        model.rope_attrs = {"op_type": "RotaryEmbedding", "mrope_section": []}
+        config = types.SimpleNamespace(rope_parameters={"rope_type": "default"})
+
+        model.make_rope_init(config)
+
+        assert model.rope_attrs == {"op_type": "RotaryEmbedding", "mrope_section": []}
 
     def test_rope_parameters_only_config_matches_rope_scaling(self):
         """A config exposing only rope_parameters (transformers v5) yields the same
@@ -737,7 +738,9 @@ class TestYarnRopeCacheParity:
         )
         assert not hasattr(mock, "rope_scaling")
         model = object.__new__(Model)
-        assert model.get_rope_parameters(mock) == GPTOSS_20B_CONFIG["rope_scaling"]
+        model.make_config_init(mock)
+        assert mock.rope_parameters == GPTOSS_20B_CONFIG["rope_scaling"]
+        assert mock.original_max_position_embeddings == 4096
 
         hf_cos, hf_sin = _make_hf_reference_cos_sin(GPTOSS_20B_CONFIG, CACHE_LENGTH)
         params_cos, params_sin = _make_builder_cos_sin_rope_field(
@@ -783,8 +786,7 @@ class TestYarnRopeCacheParity:
             max_position_embeddings=GPTOSS_20B_CONFIG["max_position_embeddings"],
             rope_parameters=GPTOSS_20B_CONFIG["rope_scaling"],
         )
-        rope_params = model.get_rope_parameters(mock)
-        assert isinstance(rope_params, Mapping)
-        assert rope_params["original_max_position_embeddings"] == 4096
+        model.make_config_init(mock)
+        assert mock.original_max_position_embeddings == 4096
         # Guard against the regression where the extended length (131072) leaks in.
-        assert rope_params["original_max_position_embeddings"] != mock.max_position_embeddings
+        assert mock.original_max_position_embeddings != mock.max_position_embeddings

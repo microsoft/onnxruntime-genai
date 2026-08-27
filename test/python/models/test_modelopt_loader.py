@@ -3,40 +3,33 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""Structural + numerical test for the Model Optimizer (NVFP4/FP8) loader.
+"""Structural test for the Model Optimizer (NVFP4/FP8) loader.
 
 Builds a tiny synthetic modelopt-style checkpoint (one linear-attention layer,
 one full-attention layer, plus globals) and verifies that ModeloptModel:
   * builds the module tree the ONNX Runtime GenAI builder walks,
-  * exposes dequantized weights as plain TensorModule.weight (no `qweight`, so
-    make_matmul takes the float path),
-  * dequantizes FP8 attention and NVFP4 shared-expert/lm_head correctly, and
-  * skips (streams) the routed experts.
+    * preserves FP8 and NVFP4 tensors in their original quantized formats, and
+    * prepacks routed experts for native QMoE export.
 """
 
-import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
+import onnx_ir as ir
 import torch
 from safetensors.torch import load_file, save_file
 
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
-def _load_quantized_model_module():
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "src", "python", "py", "models", "quantized_model.py"
-    )
-    spec = importlib.util.spec_from_file_location("_genai_quantized_model_under_test", os.path.abspath(path))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-QM = _load_quantized_model_module()
+from loaders import modelopt as model_opt_module
+from loaders import quant_model as quant_model_module
+from loaders.base import QuantizedModel
 
 _FP4_LUT = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
@@ -116,26 +109,32 @@ def _build_synthetic_checkpoint(d):
         add_nvfp4(f"{p}.mlp.shared_expert.up_proj", inter, hidden)
         add_nvfp4(f"{p}.mlp.shared_expert.down_proj", hidden, inter)
         tensors[f"{p}.mlp.shared_expert_gate.weight"] = torch.zeros(1, hidden, dtype=torch.bfloat16)
-        # A routed expert that the loader must ignore (streamed by the builder).
+        # One routed expert retained in native NVFP4 form.
         add_nvfp4(f"{p}.mlp.experts.0.gate_proj", inter, hidden)
+        add_nvfp4(f"{p}.mlp.experts.0.up_proj", inter, hidden)
+        add_nvfp4(f"{p}.mlp.experts.0.down_proj", hidden, inter)
+        tensors[f"{p}.mlp.experts.0.up_proj.weight_scale_2"] = tensors[
+            f"{p}.mlp.experts.0.gate_proj.weight_scale_2"
+        ].clone()
 
     save_file(tensors, os.path.join(d, "model.safetensors"))
     with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
         json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
-    cfg = {"text_config": {"num_hidden_layers": 2, "hidden_size": hidden}}
+    cfg = {"text_config": {"num_hidden_layers": 2, "hidden_size": hidden, "num_experts": 1}}
     with open(os.path.join(d, "config.json"), "w") as f:
         json.dump(cfg, f)
     return refs
 
 
-def test_modelopt_loader_tree_and_dequant():
+def test_modelopt_loader_tree_preserves_quantized_tensors():
     with tempfile.TemporaryDirectory() as d:
-        refs = _build_synthetic_checkpoint(d)
-        model = QM.QuantModel.from_pretrained(
+        _build_synthetic_checkpoint(d)
+        model = quant_model_module.QuantModel.from_pretrained(
             "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
         )
 
-        assert isinstance(model, QM.QuantizedModel)
+        assert isinstance(model, QuantizedModel)
+        assert isinstance(model.lm_head, model_opt_module.TensorModule)
         mods = model.modules()
         assert mods[0] is model.embedding and mods[-1] is model.lm_head
         assert len(model.layers) == 2
@@ -146,33 +145,44 @@ def test_modelopt_loader_tree_and_dequant():
         assert l0.linear_attn is not None and l0.self_attn is None
         assert l1.self_attn is not None and l1.linear_attn is None
 
-        # Dequantized linear layers are plain TensorModules (no qweight -> float path).
-        assert not hasattr(l0.linear_attn.in_proj_qkv, "qweight")
-        assert l0.linear_attn.in_proj_qkv.weight.dtype == torch.bfloat16
+        # FP8 projections retain their weights and scales for native contrib-op export.
+        assert l0.linear_attn.in_proj_qkv.quant_type == "fp8"
+        assert l0.linear_attn.in_proj_qkv.weight.dtype == torch.float8_e4m3fn
+        assert l0.linear_attn.in_proj_qkv.weight_scale is not None
         assert l0.linear_attn.A_log is not None and l0.linear_attn.conv1d.weight is not None
 
-        # FP8 attention dequant is exact.
-        torch.testing.assert_close(
-            l0.linear_attn.in_proj_qkv.weight, refs["model.language_model.layers.0.linear_attn.in_proj_qkv"]
-        )
-        torch.testing.assert_close(l1.self_attn.q_proj.weight, refs["model.language_model.layers.1.self_attn.q_proj"])
-        # NVFP4 shared-expert + lm_head dequant is exact.
-        torch.testing.assert_close(
-            l0.mlp.shared_expert.gate_proj.weight, refs["model.language_model.layers.0.mlp.shared_expert.gate_proj"]
-        )
-        torch.testing.assert_close(model.lm_head.weight, refs["lm_head"])
+        # NVFP4 modules retain packed E2M1 weights, E4M3 block scales, and global scales.
+        assert l0.mlp.shared_expert.gate_proj.quant_type == "nvfp4"
+        assert l0.mlp.shared_expert.gate_proj.weight.dtype == torch.uint8
+        assert l0.mlp.shared_expert.gate_proj.weight_scale.dtype == torch.uint8
+        assert l0.mlp.shared_expert.gate_proj.weight_scale_2.numel() == 1
+        assert model.lm_head.weight.dtype == torch.uint8
 
-        # Routed experts are NOT materialized by the loader (streamed later).
-        assert l0.mlp.experts is None
+        # Routed experts are prepacked once by the loader for native QMoE export.
+        assert isinstance(l0.mlp.experts, model_opt_module.QuantizedExperts)
+        assert l0.mlp.experts.gate_up_qweight.shape[:2] == (1, model.embedding.weight.shape[1])
+        assert l0.mlp.experts.scale_dtype == ir.DataType.FLOAT8E4M3FN
+        assert l0.mlp.experts.scales_raw
+        assert l0.mlp.experts.down_qweight.shape == (
+            1,
+            l0.mlp.experts.gate_up_qweight.shape[2],
+            model.embedding.weight.shape[1] // 2,
+        )
+        assert l0.mlp.experts.gate_up_scales.dtype == torch.uint8
+        assert l0.mlp.experts.gate_up_global_scales.shape == (1,)
         # Router / shared-expert-gate are present as plain tensors.
         assert l0.mlp.gate.weight is not None and l0.mlp.shared_expert_gate.weight is not None
+        assert l0.mlp.gate.exclude_from_quantization
+        assert l0.mlp.shared_expert_gate.exclude_from_quantization
+        assert l0.linear_attn.in_proj_a.exclude_from_quantization
+        assert l0.linear_attn.in_proj_b.exclude_from_quantization
         # All safetensors handles are released once loading finishes.
-        assert not model._open_handles
-    print("OK: ModeloptModel builds the tree and dequantizes FP8/NVFP4 correctly.")
+        assert not model.handles
+    print("OK: ModeloptModel builds the tree and preserves FP8/NVFP4 tensors.")
 
 
 def _load(d):
-    return QM.QuantModel.from_pretrained(
+    return quant_model_module.QuantModel.from_pretrained(
         "modelopt", input_path=d, quant_attrs={}, q_size=32, kv_size=32, intermediate_size=16, num_layers=2
     )
 
@@ -207,23 +217,32 @@ def test_modelopt_loader_rejects_bad_checkpoints():
             json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
         with pytest.raises(ValueError, match="attention variant cannot be determined"):
             _load(d)
+
+    # Fused gate/up QMoE weights require one shared global scale per expert.
+    with tempfile.TemporaryDirectory() as d:
+        _build_synthetic_checkpoint(d)
+        tensors = load_file(os.path.join(d, "model.safetensors"))
+        tensors["model.language_model.layers.0.mlp.experts.0.up_proj.weight_scale_2"] *= 2
+        save_file(tensors, os.path.join(d, "model.safetensors"))
+        with pytest.raises(ValueError, match="gate/up global scales must match"):
+            _load(d)
     print("OK: ModeloptModel rejects ambiguous and incomplete checkpoints.")
 
 
-def test_modelopt_loader_accepts_raw_uint8_block_scales():
+def test_modelopt_loader_preserves_raw_uint8_block_scales():
     """Some exporters store the E4M3 block scales as raw uint8 bytes."""
     with tempfile.TemporaryDirectory() as d:
-        refs = _build_synthetic_checkpoint(d)
+        _build_synthetic_checkpoint(d)
         tensors = load_file(os.path.join(d, "model.safetensors"))
         tensors["lm_head.weight_scale"] = tensors["lm_head.weight_scale"].view(torch.uint8)
         save_file(tensors, os.path.join(d, "model.safetensors"))
         with open(os.path.join(d, "model.safetensors.index.json"), "w") as f:
             json.dump({"weight_map": dict.fromkeys(tensors, "model.safetensors")}, f)
-        torch.testing.assert_close(_load(d).lm_head.weight, refs["lm_head"])
-    print("OK: ModeloptModel decodes uint8-stored E4M3 block scales.")
+        assert _load(d).lm_head.weight_scale.dtype == torch.uint8
+    print("OK: ModeloptModel preserves uint8-stored E4M3 block scales.")
 
 
 if __name__ == "__main__":
-    test_modelopt_loader_tree_and_dequant()
+    test_modelopt_loader_tree_preserves_quantized_tensors()
     test_modelopt_loader_rejects_bad_checkpoints()
-    test_modelopt_loader_accepts_raw_uint8_block_scales()
+    test_modelopt_loader_preserves_raw_uint8_block_scales()
