@@ -16,8 +16,12 @@
 // manager and model executor, so the ONNX graph is never executed and the suite still needs no GPU
 // and no real inference. Everything runs in seconds on every CPU and CUDA native PR build.
 
+#include <filesystem>
+#include <string>
+
 #include <gtest/gtest.h>
 
+#include "ep_registration.h"
 #include "generators.h"
 #include "telemetry_test_environment.h"
 
@@ -26,6 +30,19 @@ int main(int argc, char** argv) {
   Generators::test::SuppressTelemetryForTests();
 
   ::testing::InitGoogleTest(&argc, argv);
+
+  // --ep_dir <dir>: register plugin EP libraries found under <dir> before creating any models.
+  std::filesystem::path ep_dir;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--ep_dir" && i + 1 < argc)
+      ep_dir = argv[++i];
+  }
+
+  test_ep::EpRegistrar ep_registrar;
+  ep_registrar.DiscoverFromDirectory(ep_dir);
+  ep_registrar.RegisterAll();
+
   const int result = RUN_ALL_TESTS();
   // Tear genai down while ORT and CUDA are still alive. Left to the process-exit static
   // destructor, releasing the CUDA trivial session faults inside the CUDA EP.
