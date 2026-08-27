@@ -32,6 +32,28 @@ jobs:
     displayName: 'Initialize benchmark output'
 
   - bash: |
+      echo '=== CUDA environment ==='
+      echo "PATH=$PATH"
+      echo "CUDA_HOME=${CUDA_HOME:-<unset>}"
+      echo "CUDA_PATH=${CUDA_PATH:-<unset>}"
+      echo "nvcc on PATH: $(command -v nvcc 2>/dev/null || echo '<not found>')"
+
+      echo '=== Common CUDA locations ==='
+      for location in /usr/local /usr/local/cuda /usr/local/cuda-* /opt /opt/cuda /opt/cuda-* /usr/lib/cuda /usr/bin; do
+        if [ -e "$location" ]; then
+          echo
+          echo "--- $location ---"
+          ls -la "$location" || true
+        fi
+      done
+
+      echo
+      echo '=== nvcc files under /usr/local and /opt ==='
+      find /usr/local /opt -maxdepth 5 -name nvcc -print 2>/dev/null || true
+      true
+    displayName: 'List CUDA installation locations'
+
+  - bash: |
       set -euo pipefail
       python -m pip install --upgrade pip
       python -m pip install -r requirements-dev.txt
