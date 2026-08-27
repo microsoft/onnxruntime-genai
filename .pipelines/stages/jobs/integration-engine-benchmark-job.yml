@@ -162,7 +162,6 @@ jobs:
 
   - task: PublishPipelineArtifact@1
     displayName: 'Publish engine benchmark results'
-    condition: always()
     inputs:
       artifactName: 'engine-benchmark-results'
       targetPath: '$(benchmarkOut)'
