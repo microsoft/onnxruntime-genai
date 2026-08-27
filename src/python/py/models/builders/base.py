@@ -537,6 +537,11 @@ class Model:
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
+            self.make_causal_conv_with_state = TRT_RTX.make_causal_conv_with_state.__get__(self, self.__class__)
+            self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
+            self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
+            self.make_linear_attention = TRT_RTX.make_linear_attention.__get__(self, self.__class__)
+            self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
 
         elif self.ep == "dml":
             from .expansions import DML
@@ -1983,74 +1988,31 @@ class Model:
         ]
         output = f"{name}/output_0"
 
-        attributes = {
-            "ndim": kwargs.get("ndim", 1),
-            "activation": kwargs.get("activation", "silu"),
-        }
-        if self.context_length_attrs["state_window"]:
-            attributes["state_window"] = self.context_length_attrs["state_window"]
-
+        # state_window=W widens past_conv_state / present_conv_state to [W, B, C, K-1]: the carry
+        # states after the last W positions, right-aligned. Slot W-1 is the state after the final
+        # position (i.e. what the unwindowed op produces) and is the only slot the op reads.
         self.make_node(
             "CausalConvWithState",
             inputs=inputs,
             outputs=[output, kwargs["present_conv_state"]],
             name=name,
             domain="com.microsoft",
-            **attributes,
+            ndim=kwargs.get("ndim", 1),
+            activation=kwargs.get("activation", "silu"),
+            state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
-        norm_shape = shape
-        norm_input = root_input
-        norm_output = f"{name}/SimplifiedLayerNormalization/output_0"
-        hidden_dim = shape[-1]
-
-        if hidden_dim == self.linear_value_dim:
-            norm_shape = [*shape[:-1], self.linear_num_value_heads, self.linear_value_head_dim]
-            reshape_name = f"{name}/input_flat/Reshape"
-            self.make_reshape(
-                reshape_name,
-                [root_input, f"/model/constants/INT64/[0, 0, {self.linear_num_value_heads}, {self.linear_value_head_dim}]"],
-                self.io_dtype,
-                norm_shape,
-            )
-            norm_input = f"{reshape_name}/output_0"
-
         self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=[norm_input, scale],
-            outputs=[norm_output],
-            name=f"{name}/SimplifiedLayerNormalization",
+            "GatedRMSNorm",
+            inputs=[root_input, scale, gate],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
             epsilon=epsilon,
-            axis=-1,
-            stash_type=1,
         )
-        self.make_value(norm_output, self.io_dtype, shape=norm_shape)
-
-        if norm_shape != shape:
-            reshape_name = f"{name}/norm_unflat/Reshape"
-            self.make_reshape(
-                reshape_name,
-                [norm_output, f"/model/constants/INT64/[0, 0, {hidden_dim}]"],
-                self.io_dtype,
-                shape,
-            )
-            norm_output = f"{reshape_name}/output_0"
-
-        gate_cast = f"{name}/gate_cast/Cast/output_0"
-        self.make_cast(f"{name}/gate_cast/Cast", gate, ir.DataType.FLOAT, shape)
-        gate_sigmoid = f"{name}/gate_sigmoid/Sigmoid/output_0"
-        self.make_sigmoid(f"{name}/gate_sigmoid/Sigmoid", gate_cast, ir.DataType.FLOAT, shape)
-        gate_silu = f"{name}/gate_silu/Mul/output_0"
-        self.make_mul(f"{name}/gate_silu/Mul", [gate_cast, gate_sigmoid], ir.DataType.FLOAT, shape)
-
-        norm_cast = f"{name}/norm_cast/Cast/output_0"
-        self.make_cast(f"{name}/norm_cast/Cast", norm_output, ir.DataType.FLOAT, shape)
-        gated = f"{name}/gated/Mul/output_0"
-        self.make_mul(f"{name}/gated/Mul", [norm_cast, gate_silu], ir.DataType.FLOAT, shape)
-        self.make_node("Cast", inputs=[gated], outputs=[output], name=f"{name}/output/Cast", to=self.io_dtype)
         self.make_value(output, self.io_dtype, shape=shape)
 
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
@@ -2953,160 +2915,39 @@ class Model:
         self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
 
     def make_mrotary_embedding(self, name, root_input, output, **kwargs):
+        # Applies MRoPE (multi-modal rotary position embeddings) to `root_input` using the
+        # MRotaryEmbedding (com.microsoft) contrib op.
+        #
+        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts a 3D
+        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
+        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
+        # internally combines the three streams per-column according to the `mrope_section`
+        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
+        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
+        #
+        #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
+        #                  \                    |                    /
+        #                   +-------------------+-------------------+
+        #                                        |
+        #                          MRotaryEmbedding (com.microsoft)
+        #                                        |
+        #                                 output (B, S, N*H)
         num_heads = kwargs.pop("num_heads")
-        position_ids = kwargs.pop("position_ids")
-        cos_cache_name = kwargs.pop("cos_cache_name")
-        sin_cache_name = kwargs.pop("sin_cache_name")
-        dtype = kwargs.pop("dtype")
-        rotary_embedding_dim = self.rope_attrs["rotary_embedding_dim"]
-        rotary_dim = rotary_embedding_dim or self.head_size
-        rotary_half_dim = rotary_dim // 2
-        cache_shape = ["batch_size", "sequence_length", rotary_half_dim]
+        inputs = [root_input, kwargs.pop("position_ids"), kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
 
-        def make_axis_cache(cache_name, cache_kind, axis):
-            gather_position_name = f"{name}/{cache_kind}/position_ids_dim{axis}/Gather"
-            self.make_gather(
-                gather_position_name,
-                [position_ids, f"/model/constants/INT64/[{axis}]"],
-                ir.DataType.INT64,
-                [1, "batch_size", "sequence_length"],
-                axis=0,
-            )
-            squeeze_position_name = f"{name}/{cache_kind}/position_ids_dim{axis}/Squeeze"
-            self.make_squeeze(
-                squeeze_position_name,
-                [f"{gather_position_name}/output_0", "/model/constants/INT64/[0]"],
-                ir.DataType.INT64,
-                ["batch_size", "sequence_length"],
-            )
-
-            gather_cache_name = f"{name}/{cache_kind}/dim{axis}/Gather"
-            self.make_gather(
-                gather_cache_name,
-                [cache_name, f"{squeeze_position_name}/output_0"],
-                dtype,
-                cache_shape,
-                axis=0,
-            )
-            return f"{gather_cache_name}/output_0"
-
-        def make_mixed_cache(cache_name, cache_kind):
-            axis_caches = [make_axis_cache(cache_name, cache_kind, axis) for axis in range(3)]
-            if self.rope_attrs["mrope_layout"] == 0:
-                sections = self.rope_attrs["mrope_section"]
-                if sum(sections) != rotary_half_dim:
-                    raise ValueError("Chunked MRoPE sections must sum to half the rotary embedding dimension.")
-                chunks = []
-                start = 0
-                for axis, section in enumerate(sections):
-                    slice_name = f"{name}/{cache_kind}/dim{axis}/Slice"
-                    self.make_slice(
-                        slice_name,
-                        [
-                            axis_caches[axis],
-                            f"/model/constants/INT64/[{start}]",
-                            f"/model/constants/INT64/[{start + section}]",
-                            "/model/constants/INT64/[-1]",
-                        ],
-                        dtype,
-                        ["batch_size", "sequence_length", section],
-                    )
-                    chunks.append(f"{slice_name}/output_0")
-                    start += section
-                concat_name = f"{name}/{cache_kind}/Concat"
-                self.make_concat(concat_name, chunks, dtype, cache_shape, axis=-1)
-                mixed_cache = f"{concat_name}/output_0"
-            elif self.rope_attrs["mrope_layout"] == 1:
-                sections = self.rope_attrs["mrope_section"]
-                h_mask = np.zeros(rotary_half_dim, dtype=np.bool_)
-                w_mask = np.zeros(rotary_half_dim, dtype=np.bool_)
-                for idx in range(1, sections[1] * 3, 3):
-                    if idx < rotary_half_dim:
-                        h_mask[idx] = True
-                for idx in range(2, sections[2] * 3, 3):
-                    if idx < rotary_half_dim:
-                        w_mask[idx] = True
-
-                h_mask_name = f"{name}/{cache_kind}/h_mask"
-                w_mask_name = f"{name}/{cache_kind}/w_mask"
-                self.make_initializer(h_mask, h_mask_name)
-                self.make_initializer(w_mask, w_mask_name)
-                where_h_name = f"{name}/{cache_kind}/h/Where"
-                self.make_where(where_h_name, [h_mask_name, axis_caches[1], axis_caches[0]], dtype, cache_shape)
-                where_w_name = f"{name}/{cache_kind}/w/Where"
-                self.make_where(where_w_name, [w_mask_name, axis_caches[2], f"{where_h_name}/output_0"], dtype, cache_shape)
-                mixed_cache = f"{where_w_name}/output_0"
-            else:
-                raise ValueError(f"Unsupported MRoPE layout: {self.rope_attrs['mrope_layout']}")
-
-            flat_name = f"{name}/{cache_kind}_flat/Reshape"
-            self.make_reshape(
-                flat_name,
-                [mixed_cache, f"/model/constants/INT64/[-1, {rotary_half_dim}]"],
-                dtype,
-                ["total_token_count", rotary_half_dim],
-            )
-            return f"{flat_name}/output_0"
-
-        flat_cos = make_mixed_cache(cos_cache_name, "cos")
-        flat_sin = make_mixed_cache(sin_cache_name, "sin")
-
-        shape_name = f"{name}/position_ids/Shape"
-        self.make_shape(shape_name, position_ids, [3])
-        batch_seq_shape_name = f"{name}/position_ids/batch_seq/Slice"
-        self.make_slice(
-            batch_seq_shape_name,
-            [f"{shape_name}/output_0", "/model/constants/INT64/[1]", "/model/constants/INT64/[3]", "/model/constants/INT64/[0]"],
-            ir.DataType.INT64,
-            [2],
-        )
-        batch_name = f"{name}/position_ids/batch/Gather"
-        self.make_gather(batch_name, [f"{shape_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], axis=0)
-        sequence_name = f"{name}/position_ids/sequence/Gather"
-        self.make_gather(sequence_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], ir.DataType.INT64, [], axis=0)
-        total_name = f"{name}/position_ids/total/Mul"
-        self.make_mul(total_name, [f"{batch_name}/output_0", f"{sequence_name}/output_0"], ir.DataType.INT64, [])
-        range_name = f"{name}/position_ids/Range"
-        self.make_range(range_name, ["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, ["total_token_count"])
-        flat_position_name = f"{name}/position_ids/Reshape"
-        self.make_reshape(flat_position_name, [f"{range_name}/output_0", f"{batch_seq_shape_name}/output_0"], ir.DataType.INT64, ["batch_size", "sequence_length"])
-
-        input_shape = ["batch_size", "sequence_length", num_heads, self.head_size]
-        rotary_shape = ["batch_size", num_heads, "sequence_length", self.head_size]
-        input_reshape_name = f"{name}/input/Reshape"
-        self.make_reshape(
-            input_reshape_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"],
-            dtype,
-            input_shape,
-        )
-        input_transpose_name = f"{name}/input/Transpose"
-        self.make_transpose(input_transpose_name, f"{input_reshape_name}/output_0", dtype, rotary_shape, perm=[0, 2, 1, 3])
-
-        rotary_name = f"{name}/RotaryEmbedding"
-        rotary_output = f"{rotary_name}/output_0"
         self.make_node(
-            "RotaryEmbedding",
-            [f"{input_transpose_name}/output_0", f"{flat_position_name}/output_0", flat_cos, flat_sin],
-            [rotary_output],
-            name=rotary_name,
+            "MRotaryEmbedding",
+            inputs=inputs,
+            outputs=[output],
+            name=name,
             domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
-            rotary_embedding_dim=rotary_embedding_dim,
+            rotary_embedding_dim=self.rope_attrs["rotary_embedding_dim"],
             num_heads=num_heads,
+            mrope_section=self.rope_attrs["mrope_section"],
+            mrope_layout=self.rope_attrs["mrope_layout"],
         )
-        self.make_value(rotary_output, dtype, shape=rotary_shape)
-
-        output_transpose_name = f"{name}/output/Transpose"
-        self.make_transpose(output_transpose_name, rotary_output, dtype, input_shape, perm=[0, 2, 1, 3])
-        output_shape = ["batch_size", "sequence_length", self.head_size * num_heads]
-        self.make_node(
-            "Reshape",
-            inputs=[f"{output_transpose_name}/output_0", f"/model/constants/INT64/[0, 0, {self.head_size * num_heads}]"],
-            outputs=[output],
-            name=f"{name}/output/Reshape",
-        )
-        self.make_value(output, dtype, shape=output_shape)
+        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3873,37 +3714,34 @@ class Model:
         ]
         output = f"{name}/output_0"
 
-        attributes = {
-            "q_num_heads": kwargs["q_num_heads"],
-            "kv_num_heads": kwargs["kv_num_heads"],
-            "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 1.0),
-        }
-        if self.context_length_attrs["state_window"]:
-            attributes["state_window"] = self.context_length_attrs["state_window"]
-
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=[output, kwargs["present_recurrent_state"]],
             name=name,
             domain="com.microsoft",
-            **attributes,
+            q_num_heads=kwargs["q_num_heads"],
+            kv_num_heads=kwargs["kv_num_heads"],
+            update_rule=kwargs.get("update_rule", "gated_delta"),
+            scale=kwargs.get("scale", 1.0),
+            # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+            # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+            # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+            state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
         decay = f"{name}/output_0"
         beta = f"{name}/output_1"
-
-        add = f"{name}/Add/output_0"
-        self.make_add(f"{name}/Add", [a, dt_bias], self.io_dtype, shape)
-        softplus = f"{name}/Softplus/output_0"
-        self.make_softplus(f"{name}/Softplus", add, self.io_dtype, shape)
-
-        self.make_node("Mul", inputs=[softplus, decay_scale], outputs=[decay], name=f"{name}/Mul", domain="")
+        self.make_node(
+            "LinearAttentionGate",
+            inputs=[a, dt_bias, decay_scale, b],
+            outputs=[decay, beta],
+            name=name,
+            domain="com.microsoft",
+        )
         self.make_value(decay, self.io_dtype, shape=shape)
-        self.make_node("Sigmoid", inputs=[b], outputs=[beta], name=f"{name}/Sigmoid", domain="")
         self.make_value(beta, self.io_dtype, shape=shape)
 
     def make_sparse_attention(self, name, **kwargs):

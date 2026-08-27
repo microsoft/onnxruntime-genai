@@ -55,8 +55,6 @@ def _get_model_session_options_overlay(
     return {"model": model_overlay} if model_overlay else {}
 
 
-
-
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
     Register an execution provider from an explicit path, Windows ML, or an installed plugin package.
