@@ -1,250 +1,109 @@
 # GenAI Engine Benchmark Design
 
-## Goal
-Provide a reproducible native benchmark harness for ONNX Runtime GenAI that runs scenario-driven tests, captures latency/throughput metrics, and writes human-readable outputs for regression tracking.
+## Architecture
 
-## High-Level Architecture
 ```mermaid
 flowchart LR
-    A[configs/*.json] --> C[scenario_dispatcher.cpp]
-
-    C --> D[decode_baseline.cpp]
-    C --> E[long_prefill.cpp]
-    C --> F[mixed_workload.cpp]
-    C --> G[other_scenarios.cpp]
-
-    D --> H[out/decode_baseline_results_ID.json]
-    E --> J[out/long_prefill_results_ID.json]
-    G --> N[out/SCENARIO_results_ID.json]
-
-    H --> V[out/visualize.html - tabbed]
-    J --> V
-    N --> V
+    A[configs/*.json] --> B[run.py]
+    B -->|one process per entry| C[engine_benchmark]
+    C --> D[scenario registry]
+    D --> E[scenario implementation]
+    E --> F[out/SCENARIO_results_ID.json]
 ```
 
-## File Structure
-Current benchmark engine layout:
+`run.py` is the recommended entry point for a matrix. It:
+
+- validates that the config is a non-empty JSON array;
+- replaces the output directory at the start of the run;
+- assigns one configured GPU to each scenario process;
+- runs scenarios concurrently up to the number of GPUs;
+- moves each result to its matrix-order filename; and
+- returns nonzero when any scenario fails.
+
+A fresh process keeps CUDA state, ONNX Runtime allocators, and paged-cache capacity decisions from
+leaking between scenarios.
+
+## Native executable
+
+`scenario_dispatcher.cpp` parses config entries, registers provider libraries, dispatches scenarios,
+and writes JSON results. CUDA and WebGPU provider paths default to libraries staged beside the
+executable; `execution_provider_library` remains available as an override.
+
+Scenarios register themselves with `ScenarioBase::Registrar`. Adding a scenario requires its source
+files and a `CMakeLists.txt` entry, but no dispatcher branch.
+
+`ScenarioBase::Run` owns the common result envelope and failure handling. Scenario implementations
+own semantic validation, workload execution, and scenario-specific metrics.
+
+## Runtime layout
+
+`build.py --build_engine_benchmark` stages this Linux x64 runtime beside the executable:
 
 ```text
-onnxruntime-genai/benchmark/engine/
-|- .gitignore
-|- benchmark-design.md
-|- benchmark-requirements.md
-|- scenario_dispatcher.cpp
-|- CMakeLists.txt
-|- configs/
-|   |- config.json
-|   |- decode-baseline.json
-|   |- long-prefill.json
-|   |- mixed-workload.json
-|   |- capacity-pressure.json
-|   |- continuation.json
-|   |- smoke-test.json
-|- data/
-|   |- README.md
-|   |- ruler/
-|       |- prompts.json
-|- README.md
-|- scenarios/
-    |- decode_baseline.cpp
-    |- capacity_pressure.cpp
-    |- continuation.cpp
-    |- long_prefill.cpp
-    |- mixed_workload.cpp
-    |- {other_scenarios}.cpp
-    |- utils.cpp
+build/Linux/<config>/benchmark/engine/
+|- engine_benchmark
+|- libonnxruntime.so
+|- libonnxruntime.so.1 -> libonnxruntime.so
+|- libonnxruntime_providers_cuda.so
+|- libonnxruntime-genai.so
+|- libonnxruntime-genai-cuda.so
+`- versions.json
 ```
 
-## Data Setup (RULER)
+The ONNX Runtime and CUDA plugin packages are pinned in
+`tools/python/util/dependency_resolver.py`. Locally built GenAI libraries are copied into the same
+directory and patched to use `$ORIGIN` as their RPATH.
 
-For reproducible long-context benchmarks, we keep a pinned prompt subset (adapted from https://github.com/NVIDIA/RULER) in this repository.
+## Data flow
 
-Example prompts.json:
-```json
-{
-  "dataset": "RULER",
-  "version": "subset_v1",
-  "source_branch": "rulerv2-ns",
-  "description": "Single-file curated subset with 5 prompts per prompt token-length bucket.",
-  "length_buckets": {
-    "4k": [
-      "[RULER 4K token length sample 0] Full prompt text goes here.",
-      "[RULER 4K token length sample 1] Full prompt text goes here.",
-      "[RULER 4K token length sample 2] Full prompt text goes here.",
-      "[RULER 4K token length sample 3] Full prompt text goes here.",
-      "[RULER 4K token length sample 4] Full prompt text goes here."
-    ],
-    "16k": [
-      "[RULER 16K token length sample 0] Full prompt text goes here.",
-      "..."
-    ],
-    "18k": [
-      "..."
-    ],
-    "32k": [
-      "..."
-    ],
-    "48k": [
-      "..."
-    ],
-    "64k": [
-      "..."
-    ],
-    "96k": [
-      "..."
-    ],
-    "128k": [
-      "..."
-    ]
-  }
-}
-```
+Each scenario uses deterministic RULER prompts from `data/ruler/prompts.json`. The model path points
+to a paged-attention GenAI model. Scenario defaults and constraints are documented in the
+[README](../README.md#configuration).
 
-## Scenario Dispatcher Responsibilities
-
-The scenario dispatcher is responsible for:
-
-- validating that required config entries/fields are present (without enforcing scenario-specific semantic validity)
-- iterating over multiple scenario entries in a single config file
-- dispatching each entry to the appropriate scenario implementation and coordinating multiple scenario runs per invocation
-
-## Scenario Responsibilities
-Each scenario implementation file (under `scenarios/`) is responsible for:
-
-- validating that inputs are valid for that scenario
-- running the benchmark and recording scenario-appropriate metrics
-- producing scenario JSON outputs under `out/` (no per-scenario HTML)
-
-`mixed_workload` runs one long RULER prompt with shorter active decode prompts in the same engine.
-
-`continuation` runs repeated appended turns by resubmitting each logical request with the tokens
-generated by its previous turn appended to the prompt.
-
-`capacity_pressure` submits a fixed set of eight prompts from 4K through 128K to test admission
-behavior under memory pressure. It rejects `prompt_length_k` because the scenario owns this fixed
-profile. The current scenario reports admitted and rejected request counts only; preemption is
-explicitly deferred.
-
-The dispatcher/visualizer is responsible for:
-
-- generating one `out/visualize.html` per benchmark invocation
-- discovering `out/*_results_*.json` files and rendering each scenario in a tab
-- grouping multiple runs of the same scenario (different `{id}` values)
-
-## Data Contract (ie. configs/*.json)
-`model_uri` is used below as a short placeholder for the model location.
-Example full value: https://foundrylocalmodels.blob.core.windows.net/staging/qwen2.5-0.5b-instruct
-
-- Input config fields per entry:
-
-```json
-{
-    "scenario": "decode_baseline", // choices=[other scenarios, ...]
-    "concurrency": 1, // choices=[1, 2, 4, 8]
-    "prompt_length_k": 4, // choices=[4, 16, 18, 32, 48, 64, 96, 128]
-    "model_path": $model_uri,
-    "execution_provider": "cuda"
-}
-```
-
-- Output artifacts:
-  - `out/<scenario>_results_<id>.json`: run status, metadata, summary percentiles, and raw request-level records.
-  - `out/visualize.html`: single tabbed local chart/table view over all result files found in `out/`.
-
-- File naming convention:
-  - `<scenario>` is the scenario name from config (for example `decode_baseline`, `long_prefill`).
-  - `<id>` is a zero-padded 3-digit sequence based on scenario order in the selected config (001, 002, 003, ...).
-  - Example output set for one invocation:
+The executable writes one file per config entry:
 
 ```text
-out/
-|- decode_baseline_results_001.json
-|- long_prefill_results_002.json
-|- other_scenarios_results_003.json
-|- visualize.html
+out/<scenario>_results_<three-digit matrix index>.json
 ```
 
-## Metrics Strategy
-
-Core Metrics (all scenarios)
-
-- config metadata:
-    - scenario, model_path, execution_provider, concurrency, prompt length
-    - ort_version, genai_version
-- run status:
-	- status, error (if any)
-- request-level latency/throughput:
-	- ttft_ms, e2e_ms, generated_tokens_per_s
-- summary percentiles:
-	- ttft_p50_ms, ttft_p95_ms
-	- e2e_p50_ms, e2e_p95_ms
-	- tokens_per_s_p50
-- memory baseline:
-	- peak_memory_bytes (required for all scenarios)
-
-Scenario-Specific Metrics (optional extensions)
-
-- ex. decode_baseline:
-	- ~~output text capture for correctness checks~~ **(Decided later: deprioritized, see note below)**
-	- optional inter-token latency distribution details
-
-Example `out/decode_baseline_results_001.json` shape:
+The common result envelope is:
 
 ```json
 {
-    "scenario": "decode_baseline",
-    "config_metadata": {
-        "model_path": $model_uri,
-        "ort_version": "1.27.0",
-        "genai_version": "0.14.1",
-        "execution_provider": "cuda",
-        "concurrency": 4,
-        "prompt_length_k": 4,
-        "generation_tokens": 128,
-        "measured_runs": 2
+  "scenario": "decode_baseline",
+  "config_metadata": {
+    "model_path": "~/models/qwen2.5-0.5b-instruct",
+    "ort_version": "...",
+    "genai_version": "...",
+    "cuda_plugin_ep_version": "...",
+    "execution_provider": "cuda",
+    "concurrency": 1,
+    "prompt_length_k": 4,
+    "generation_tokens": 256,
+    "warmup_runs": 5,
+    "measured_runs": 20
+  },
+  "status": "success",
+  "error": null,
+  "core_metrics": {
+    "summary": {
+      "ttft_ms": { "p5": 0, "p50": 0, "p95": 0 },
+      "inter_token_latency_ms": { "p50": 0, "p95": 0 },
+      "peak_device_memory_mb": 0,
+      "steady_state_device_memory_mb": 0
     },
-    "status": "success",
-    "error": null,
-    "core_metrics": {
-        "summary": {
-            "ttft_ms": {
-                "p50": 0,
-                "p95": 0
-            },
-            "e2e_ms": {
-                "p50": 0,
-                "p95": 0
-            },
-            "tokens_per_s": {
-                "p50": 0
-            },
-            "peak_memory_bytes": 0
-        },
-        "raw_requests": [
-            {
-                "request_id": 0,
-                "ttft_ms": 0,
-                "e2e_ms": 0,
-                "generated_tokens_per_s": 0,
-                "completed": true
-            }
-        ]
-    },
-    "scenario_metrics": {
-        "inter_token_latency_ms": {
-            "p50": 0,
-            "p95": 0
-        }
-    }
+    "raw_requests": []
+  },
+  "scenario_metrics": {}
 }
 ```
 
-<!-- "outputs": [] was originally planned in scenario_metrics for captured-output correctness
-     checks; deprioritized post-review in favor of performance work, see benchmark-requirements.md. -->
+A caught exception produces the same envelope with `status: "failed"`, the exception text in
+`error`, and empty metric objects. Incomplete requests also fail the result.
 
-This hybrid model keeps cross-scenario comparison clean while still allowing each scenario to report what matters most.
+## Memory sampling
 
-## Build and Runtime
-- Build system: CMake + C++17.
-- Links against onnxruntime-genai and onnxruntime libraries.
-- Runs as a native C++ executable (no Python required to execute).
+`MemorySampler` polls host and NVIDIA device memory on a background thread. It prefers process-level
+NVML usage. If that is unavailable, it reports device-wide growth from the pre-model baseline. GPU
+metrics are zero when NVML cannot be loaded; device-wide measurements require an otherwise idle GPU
+to be meaningful.

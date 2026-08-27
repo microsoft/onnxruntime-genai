@@ -18,7 +18,6 @@
 
 #include "scenarios/utils.h"
 #include "scenarios/scenario_base.h"
-#include "scenarios/decode_baseline.h"  // Included so its self-registration runs; not referenced directly.
 
 namespace fs = std::filesystem;
 
@@ -39,6 +38,10 @@ nlohmann::json ReadStagedVersions(const fs::path& executable) {
 }
 
 std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
+  if (!root.is_array()) {
+    throw std::invalid_argument("config must contain a JSON array of scenarios");
+  }
+
   std::vector<ScenarioConfig> configs;
   try {
     configs.reserve(root.size());
@@ -65,7 +68,7 @@ std::vector<ScenarioConfig> ParseScenarioConfigs(const nlohmann::json& root) {
 }
 
 // Provider libraries can only be registered once per process, so this runs before any scenario.
-void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& configs) {
+void RegisterExecutionProviderLibraries(const fs::path& executable, const std::vector<ScenarioConfig>& configs) {
   std::set<std::string> registered;
 
   for (const auto& config : configs) {
@@ -76,12 +79,12 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
     const char* registration_name =
         config.execution_provider == "cuda" ? "CUDAExecutionProvider" : "WebGpuExecutionProvider";
 
-    if (config.execution_provider_library.empty()) {
-      throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is '" + config.execution_provider + "'");
-    }
-
-    const fs::path provider_library = fs::absolute(config.execution_provider_library);
+    const char* library_name =
+        config.execution_provider == "cuda" ? "libonnxruntime_providers_cuda.so" : "libonnxruntime_providers_webgpu.so";
+    // Normal configs use the staged plugin beside the executable; the field is only an override.
+    const fs::path provider_library = config.execution_provider_library.empty()
+                                                   ? executable.parent_path() / library_name
+                                                   : fs::absolute(config.execution_provider_library);
     if (!fs::exists(provider_library)) {
       throw std::invalid_argument("execution provider library does not exist: " + provider_library.string());
     }
@@ -124,7 +127,7 @@ int DispatchScenarios(const fs::path& executable, const fs::path& config_path, c
 
   fs::create_directories(out_dir);
 
-  RegisterExecutionProviderLibraries(configs);
+  RegisterExecutionProviderLibraries(executable, configs);
 
   const nlohmann::json staged_versions = ReadStagedVersions(executable);
 

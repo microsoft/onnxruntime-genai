@@ -36,7 +36,6 @@ target_include_directories(engine_benchmark PRIVATE
   ${CMAKE_SOURCE_DIR}/src
 )
 
-target_compile_features(engine_benchmark PRIVATE cxx_std_17)
 target_compile_definitions(engine_benchmark PRIVATE
   ORT_GENAI_BENCH_GENAI_VERSION="${VERSION_INFO}"
   ORT_GENAI_BENCH_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
@@ -44,6 +43,7 @@ target_compile_definitions(engine_benchmark PRIVATE
 
 target_link_libraries(engine_benchmark PRIVATE
   onnxruntime-genai
+  Threads::Threads
   ${CMAKE_DL_LIBS}
 )
 

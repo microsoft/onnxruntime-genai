@@ -6,7 +6,7 @@ and results are written to per-scenario JSON files.
 See [benchmark-design.md](docs/benchmark-design.md) for the architecture and
 [benchmark-requirements.md](docs/benchmark-requirements.md) for the metrics contract.
 
-**Note:** currently hardcoded for linux platform, tested on a100 linux-x64 vm
+The dependency staging flow currently supports Linux x64 with CUDA.
 
 ## Environment setup
 
@@ -20,14 +20,15 @@ conda activate engine-benchmark-venv
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
-python -m pip install -r benchmark/requirements.txt
+python -m pip install patchelf
 
 python --version
 patchelf --version
 ```
 
-The benchmark requirements file must be installed because it provides the `patchelf` dependency
-used while staging the benchmark's runtime libraries.
+`requirements-dev.txt` provides the Python build dependencies, including `requests`. Install
+`patchelf` separately because the benchmark build uses its command-line tool while staging runtime
+libraries.
 
 Run these commands from the `onnxruntime-genai` repository root. The CUDA Toolkit and a C++20
 compiler must also be installed separately for a CUDA build.
@@ -38,17 +39,18 @@ Opt in with `--build_engine_benchmark`; it is not built by default:
 
 ```bash
 python build.py --update --build --config RelWithDebInfo --parallel --skip_tests --skip_examples \
-  --build_engine_benchmark --cuda_home <cuda_home>
+  --use_cuda --cuda_home <cuda_home> --build_engine_benchmark
 ```
 
 The build stages the benchmark's runtime dependencies next to the executable in
 `build/Linux/RelWithDebInfo/benchmark/engine/`:
 
 - ONNX Runtime and the CUDA plugin EP, downloaded at the versions pinned in
-  `tools/python/util/dependency_resolver.py` and cached under `benchmark/engine/dependencies/`
+  `tools/python/util/dependency_resolver.py` and cached under the staged
+  `build/Linux/RelWithDebInfo/benchmark/engine/dependencies/` directory
 - the locally built `libonnxruntime-genai.so` and `libonnxruntime-genai-cuda.so`
 
-Delete the `dependencies/` folder to force a re-download after changing the pinned versions.
+Delete that `dependencies/` directory to force a re-download after changing the pinned versions.
 
 `patchelf` must be on `PATH` (`pip install patchelf`) so the staged GenAI libraries load the pinned
 ONNX Runtime rather than the one baked into their build-time RPATH.
@@ -62,33 +64,19 @@ python benchmark/engine/run.py \
   --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
   --config benchmark/engine/configs/config.json \
   --out benchmark/engine/out \
-  --cuda_visible_devices 0,1,2,3
+  --cuda_visible_devices 0 \
+  --verbose
 ```
 
 Use `run.py` for configs containing multiple scenarios. It runs each entry in a separate
 `engine_benchmark` process, so CUDA, ONNX Runtime allocators, and the paged-cache capacity check
 start cleanly for every scenario. The wrapper preserves numbered result files such as
-`decode_baseline_results_001.json` and `long_prefill_results_002.json`.
+`decode_baseline_results_001.json` and `long_prefill_results_002.json`. It replaces the output
+directory at the start of each invocation, prints a completion/failure summary, and returns nonzero
+if any scenario fails.
 
-For a single scenario, the executable can still be run directly:
-
-```bash
-build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
-  --config benchmark/engine/configs/config.json \
-  --out benchmark/engine/out
-```
-
-To run scenarios in parallel across selected GPUs, pass a comma-separated list. Each scenario
-waits for an available GPU, acquires its per-GPU slot, and receives that GPU through
-`CUDA_VISIBLE_DEVICES`, so no scenario uses more than one GPU:
-
-```bash
-python benchmark/engine/run.py \
-  --executable build/Linux/RelWithDebInfo/benchmark/engine/engine_benchmark \
-  --config benchmark/engine/configs/config.json \
-  --out benchmark/engine/out \
-  --cuda_visible_devices 0,1,2,3
-```
+To run scenarios in parallel, pass a comma-separated GPU list such as `0,1,2,3`. Each scenario
+waits for a GPU slot and receives one device through `CUDA_VISIBLE_DEVICES`.
 
 The runner requires `--executable`, `--config`, `--out`, and `--cuda_visible_devices`. Verbose
 child benchmark output is opt-in with `--verbose`.
@@ -109,37 +97,46 @@ Each config is a list of scenario entries:
     "prompt_length_k": 4,
     "model_path": "/models/qwen2.5-0.5b-instruct",
     "execution_provider": "cuda",
-    "execution_provider_library": "build/Linux/RelWithDebInfo/libonnxruntime_providers_cuda.so",
     "generation_tokens": 64
   }
 ]
 ```
 
-| Field | Notes |
-| --- | --- |
-| `scenario` | `decode_baseline`, `long_prefill`, `mixed_workload`, `capacity_pressure`, or `continuation`. |
-| `concurrency` | Requests issued per run. One of 1, 2, 4, 8; `long_prefill` requires 1. |
-| `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. Required by scenarios that use it and rejected by `capacity_pressure`, which has a fixed prompt profile. |
-| `model_path` | Folder containing the ONNX model and `genai_config.json`. |
-| `execution_provider` | e.g. `cuda`. |
-| `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
-| `generation_tokens` | Tokens generated per request. |
+| Field | Default | Notes |
+| --- | --- | --- |
+| `scenario` | `decode_baseline` | Scenario name from the table below. |
+| `concurrency` | `1` | Number of requests issued per measured run; scenarios further restrict it. |
+| `prompt_length_k` | none | RULER prompt bucket in thousands of tokens. Required except for `capacity_pressure`. |
+| `model_path` | required | Folder containing the ONNX model and `genai_config.json`; `~` is expanded. |
+| `execution_provider` | `cuda` | Execution provider used by the model. |
+| `execution_provider_library` | beside executable | Optional plugin override. CUDA and WebGPU default to their staged provider library beside `engine_benchmark`. |
+| `generation_tokens` | `64` | Tokens generated per request; some scenarios require a fixed value. |
+| `warmup_runs` | `5` | Runs excluded from reported metrics. May be zero. |
+| `measured_runs` | `20` | Runs included in reported metrics; must be positive. |
 
-`mixed_workload` runs one long-prefill request alongside active decode requests. The full and
-focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
-smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
-capped to one generated token while decode requests keep `generation_tokens`; this keeps the
-prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
-while still measuring prefill-vs-decode interference.
+The checked-in configs intentionally omit `execution_provider_library`; use it only when the
+provider plugin is not staged beside the executable.
+
+## Scenarios
+
+| Scenario | Concurrency | Prompt length | Generation tokens | Purpose |
+| --- | --- | --- | --- | --- |
+| `decode_baseline` | 1, 2, 4, or 8 | Required | Configurable | Steady decode TTFT, inter-token latency, end-to-end time, and throughput. |
+| `long_prefill` | 1 | 32K, 64K, or 128K | 1 | Prefill TTFT, prompt-processing throughput, and memory scaling. |
+| `mixed_workload` | 4 or 8 | Required for active decode requests | Configurable for decode; long prefill uses 1 | One 128K prefill alongside active decode requests; summary TTFT covers decode requests. |
+| `capacity_pressure` | 8 | Must be omitted | 1 | Admission pressure using fixed 4K, 4K, 32K, 32K, 48K, 64K, 96K, and 128K prompts. |
+| `continuation` | 4 or 8 | Required | Configurable | Three appended turns per logical request to measure session-cache reuse. |
+
+`mixed_workload` records the prefill request's TTFT separately in `scenario_metrics.prefill_ttft_ms`.
+Core TTFT percentiles contain only active decode requests, avoiding a mixed prefill/decode
+population. Inter-token latency covers all emitted inter-token gaps.
 
 `continuation` runs three appended turns for each logical request. Each turn submits the previous
 turn's generated tokens as part of the next prompt, so the benchmark measures session-cache reuse
 under concurrency 4 and 8.
 
-`capacity_pressure` submits eight concurrent prompts that ramp from 32K toward 128K. This first
-version measures explicit admission under memory pressure: admitted requests generate one token,
-and rejected admissions are reported in `scenario_metrics`. Preemption is intentionally not modeled
-yet and will be added in a later benchmark iteration.
+`capacity_pressure` measures explicit admission under memory pressure. Admitted requests generate
+one token, rejected admissions are reported in `scenario_metrics`, and preemption is not modeled.
 
 ## Adding a scenario
 
@@ -163,7 +160,8 @@ out/
 ```
 
 Each result file contains the run status, config metadata, TTFT / inter-token latency percentiles,
-per-request records, and scenario-specific metrics.
+per-request records, and scenario-specific metrics. A scenario exception or any request that emits
+fewer tokens than requested sets `status` to `failed` and makes the process return nonzero.
 
 Device memory is sampled on a background thread while the scenario runs. NVML is loaded lazily, so
 `peak_device_memory_mb` and `steady_state_device_memory_mb` are 0 on machines without an NVIDIA

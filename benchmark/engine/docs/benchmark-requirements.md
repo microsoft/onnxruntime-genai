@@ -1,71 +1,56 @@
-## Benchmarking workstream
+# Engine Benchmark Requirements
 
-Build a reusable benchmark tool as part of the baseline, before performance-oriented Engine
-changes. It must exercise realistic agent workloads rather than report aggregate throughput only.
+## Current scope
 
-The tool should support:
+The benchmark qualifies realistic paged-attention engine workloads with deterministic RULER prompts,
+warmup runs, repeated measured runs, and machine-readable JSON output.
 
-- 1, 2, 4, and 8 concurrent requests with configurable RULER prompt and generation lengths;
-- deterministic RULER prompt fixtures for reproducible capacity and representative latency tests;
-- shared-prefix, partially shared-prefix, and unrelated-prefix workloads;
-- staggered arrivals, request cancellation, continuation, and memory-pressure scenarios;
-- prefill-only, decode-only, and mixed prefill/decode phases;
-- ~~fixed seeds and captured outputs so performance changes also detect correctness regressions;~~
-  **(Decided later: deprioritized, see note below)**
-- warmup and repeated measured runs with JSON/CSV output suitable for before/after comparison;
-- configurable model, execution provider, block count/size, token budget, chunk size, and
-  concurrency without modifying the benchmark source.
+Implemented scenarios:
 
-Record at minimum:
+| Scenario | Coverage |
+| --- | --- |
+| `decode_baseline` | Steady decode latency and throughput at concurrency 1, 2, 4, and 8. |
+| `long_prefill` | 32K, 64K, and 128K prefill latency, throughput, and memory at concurrency 1. |
+| `mixed_workload` | One 128K prefill request alongside active decodes at concurrency 4 and 8. |
+| `capacity_pressure` | Admission and rejection behavior for a fixed eight-prompt pressure profile. |
+| `continuation` | Three appended turns at concurrency 4 and 8 to exercise session-cache reuse. |
 
-- request-level TTFT, end-to-end latency, generated tokens/second, and cancellation latency;
-- p50/p95/p99 inter-token latency, including active decode latency while another request prefills;
-- scheduler queue time, per-step token count, prefill/decode split, and fairness/starvation;
-- peak and steady device memory, model/workspace/cache bytes, blocks used/free, prefix-cache hit
-  rate, preemption count, recomputed tokens, preemption resume latency, and peak transient
-  prefill-chunk activation/workspace memory;
-- ~~failures, rejected admissions, output mismatches, and incomplete requests.~~
-  **(Decided later: keep failures/rejected admissions/incomplete requests; output mismatches deprioritized, see note below)**
-- failures, rejected admissions, and incomplete requests.
+The exact config contract and scenario constraints live in the [README](../README.md#configuration).
 
-The primary benchmark matrix is:
+## Result contract
 
-| Scenario | Concurrency | Prompt length | Purpose |
-| --- | ---: | ---: | --- |
-| Decode baseline | 1, 4, 8 | 4K | Steady-state inter-token overhead |
-| Long prefill | 1 | 32K, 64K, 128K | TTFT, peak memory, chunk scaling |
-| Mixed workload | 4, 8 | One 128K prefill plus active decodes | Responsiveness and fairness |
-| Shared coding context | 4, 8 | 32K-128K shared prefix | Prefix-cache value |
-| Capacity pressure | 8 | Growing toward 128K each | Admission now; preemption later |
-| Cancellation | 4, 8 | Cancel during long prefill | 500 ms cancellation target |
-| Continuation | 4, 8 | Repeated appended turns | Session-cache reuse |
+Every scenario reports:
 
-Initial performance gates:
+- status and error text;
+- model, runtime version, provider, concurrency, prompt, and run metadata;
+- request-level TTFT, median inter-token latency, completion state, and workload role;
+- TTFT p5/p50/p95 and inter-token-latency p50/p95;
+- peak and steady device memory; and
+- scenario-specific metrics.
 
-- all admitted requests complete correctly without Engine-wide failure;
-- cancellation latency is at most 500 ms at p95;
-- active decode p95 inter-token latency during another request's prefill is at most 1.5x its
-  steady decode baseline;
-- last-token LM-head work makes prefill logits memory independent of prompt length;
-- no request starves, and memory-pressure admission is explicit and reproducible;
-- under the mixed workload, every runnable decode request is scheduled at least once within a
-  configured maximum scheduling delay; report the bound and fail the run when it is exceeded;
-- ~~a fixed-seed request produces the same token stream alone and when co-scheduled with unrelated
-  requests;~~ **(Decided later: deprioritized, see note below)**
-- benchmark results include enough environment metadata to compare commits and model builds.
+Scenario-specific metrics include:
 
-Implement the benchmark as a native C++ executable using the public C++ interface and C ABI where
-ABI coverage is required. Python may orchestrate optional experiments or visualize saved results,
-but must not be required to run or qualify the benchmark. Back it with native Engine telemetry;
-do not derive core scheduler/cache measurements from Python wall-clock timing alone.
+- decode end-to-end time, throughput, prompt tokens, and peak host memory;
+- long-prefill duration and prompt-processing throughput;
+- mixed-workload prefill TTFT and decode/prefill prompt sizes;
+- capacity-pressure admitted/rejected counts and the fixed prompt profile; and
+- continuation turn count and final context size.
 
-> **Note (post-review decision):** Full correctness verification (captured/hashed outputs,
-> fixed-seed token-stream comparison across standalone and co-scheduled runs, output-mismatch
-> detection) is deprioritized for now in favor of performance work; the crossed-out items above
-> reflect the original design intent. We still detect and report **incomplete requests**
-> (a request generating fewer tokens than requested) via a `completed` flag per request in
-> `raw_requests`, which now fails the run's `status` instead of silently reporting `success`.
+A scenario fails when execution throws or an admitted request emits fewer tokens than requested.
+Rejected admissions in `capacity_pressure` are measured results, not automatic failures.
 
-> **Note (capacity pressure scope):** The current `capacity_pressure` scenario implements admission
-> coverage only. It submits memory-pressure prompts, records admitted requests and rejected
-> admissions, and leaves preemption/resume behavior for a later benchmark iteration.
+## Deferred scope
+
+These remain useful future benchmark extensions but are not implemented by the current harness:
+
+- shared-prefix and partially shared-prefix workloads;
+- staggered arrivals and cancellation latency;
+- preemption, recomputation, and resume latency;
+- scheduler queue time, fairness, and starvation gates;
+- prefix-cache hit rates and cache block telemetry;
+- output-token correctness comparisons; and
+- CSV or HTML report generation.
+
+New metrics should be added to `scenario_metrics` unless they apply uniformly to every scenario. New
+qualification gates should produce `status: "failed"` and a useful `error` message rather than
+requiring consumers to infer failure from metric values.

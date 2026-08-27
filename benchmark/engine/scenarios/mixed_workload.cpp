@@ -67,7 +67,8 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;
-  std::vector<double> ttft_values;
+  std::vector<double> prefill_ttft_ms_values;
+  std::vector<double> decode_ttft_values;
   std::vector<double> inter_token_latency_values;
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
@@ -173,9 +174,9 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   }
 
   memory.Stop();
-  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
-  output.ttft_p50_ms = Percentile(ttft_values, 50.0);
-  output.ttft_p95_ms = Percentile(ttft_values, 95.0);
+  output.ttft_p5_ms = Percentile(decode_ttft_values, 5.0);
+  output.ttft_p50_ms = Percentile(decode_ttft_values, 50.0);
+  output.ttft_p95_ms = Percentile(decode_ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());

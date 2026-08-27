@@ -31,6 +31,9 @@ void ScenarioBase::ValidateConfig(const ScenarioConfig& config) const {
   if (config.generation_tokens < 1) {
     throw std::invalid_argument("generation_tokens must be >= 1.");
   }
+  if (config.warmup_runs < 0) {
+    throw std::invalid_argument("warmup_runs must be >= 0.");
+  }
   if (config.measured_runs < 1) {
     throw std::invalid_argument("measured_runs must be >= 1.");
   }
@@ -47,6 +50,7 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
       {"generation_tokens", config.generation_tokens},
+      {"warmup_runs", config.warmup_runs},
       {"measured_runs", config.measured_runs}};
   if (config.prompt_length_k) {
     result["config_metadata"]["prompt_length_k"] = *config.prompt_length_k;

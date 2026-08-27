@@ -1,2 +1,0 @@
-patchelf
-requests
