@@ -29,7 +29,7 @@ jobs:
       packages: write # needed for GHCR push
     env:
       PYTHON_EXECUTABLE: "/opt/python/cp312-cp312/bin/python3.12"
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10", "JobId=linux-cuda-x64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
