@@ -22,7 +22,6 @@ struct HybridDecoderIO : DecoderIO {
 
  private:
   void BindFixedState(const ExecutionContext& execution_context);
-
   VarlenDecoderIO varlen_io_;
 };
 
