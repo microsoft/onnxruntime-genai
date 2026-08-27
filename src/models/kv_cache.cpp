@@ -5,6 +5,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "kv_cache.h"
+#include "kv_cache_block_size.h"
 #include "windowed_kv_cache.h"
 #include "../config_utils.h"
 #include "../openvino/interface.h"
@@ -491,6 +492,24 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         layer_shapes_[i][2] = cache_seq_len;
       }
     }
+  }
+
+  // kv_cache_block_size: round the pre-allocated KV cache sequence length up to a
+  // multiple of the block size (see kv_cache_block_size.h). Skipped for
+  // fixed-KV-shape models and for uniform sliding-window caches (every layer is
+  // local); on the alternating windowed path only the local layers are spared.
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  const bool windowed_cache = windowed_cache_size > 0 && state_.params_->search.num_beams == 1;
+  const bool sliding_window_layers_empty = !sliding_window.has_value() || sliding_window->layers.empty();
+  if (ShouldRoundKvCacheToBlock(past_present_share_buffer_, fixed_kv_seq_len, windowed_cache,
+                                sliding_window_layers_empty, state_.params_->search.kv_cache_block_size)) {
+    const int64_t block_size = static_cast<int64_t>(state_.params_->search.kv_cache_block_size.value());
+    // Only the alternating windowed path gives some layers a smaller (local) cache.
+    const std::vector<int> local_layers =
+        (windowed_cache && !sliding_window_layers_empty) ? sliding_window->layers : std::vector<int>{};
+    const std::vector<std::uint8_t> is_local_attention =
+        ComputeLocalAttentionSlots(layer_count_, kv_layer_indices_, local_layers);
+    ApplyKvCacheBlockSize(block_size, is_local_attention, shape_, layer_shapes_);
   }
 
   try {
