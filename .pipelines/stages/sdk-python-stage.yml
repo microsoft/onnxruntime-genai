@@ -182,7 +182,7 @@ stages:
     - job: python_win_arm64_winml
       displayName: 'python · win-arm64 · winml'
       pool:
-        name: onnxruntime-medium-arm64-scus
+        name: 'onnxruntime-medium-arm64-scus'
         hostArchitecture: Arm64
         os: windows
       timeoutInMinutes: 120
