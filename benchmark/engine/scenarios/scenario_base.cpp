@@ -25,7 +25,7 @@ void ScenarioBase::ValidateConfig(const ScenarioConfig& config) const {
   if (config.concurrency < 1) {
     throw std::invalid_argument("concurrency must be >= 1.");
   }
-  if (config.prompt_length_k < 1) {
+  if (config.prompt_length_k && *config.prompt_length_k < 1) {
     throw std::invalid_argument("prompt_length_k must be >= 1.");
   }
   if (config.generation_tokens < 1) {
@@ -46,9 +46,11 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"cuda_plugin_ep_version", context.cuda_plugin_ep_version},
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
-      {"prompt_length_k", config.prompt_length_k},
       {"generation_tokens", config.generation_tokens},
       {"measured_runs", config.measured_runs}};
+  if (config.prompt_length_k) {
+    result["config_metadata"]["prompt_length_k"] = *config.prompt_length_k;
+  }
 
   try {
     ValidateConfig(config);

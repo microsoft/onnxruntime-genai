@@ -21,16 +21,17 @@ class QwenMTPModel:
         layer_config,
         preserve_quantization=False,
         load_quantized_model=None,
+        is_moe=True,
     ):
-        if quant_type == "modelopt":
+        if quant_type in {"modelopt", "compressed-tensors"}:
             if load_quantized_model is None:
-                raise ValueError("A quantized model loader is required for ModelOpt MTP weights.")
+                raise ValueError("A quantized model loader is required for ModelOpt/compressed-tensors MTP weights.")
             model = load_quantized_model(input_path)
-            return cls.from_modelopt(model, layer_config, preserve_quantization)
-        return cls.from_safetensors(model_dir, layer_config)
+            return cls.from_modelopt(model, layer_config, preserve_quantization, is_moe)
+        return cls.from_safetensors(model_dir, layer_config, is_moe)
 
     @classmethod
-    def from_modelopt(cls, model, layer_config, preserve_quantization):
+    def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):
         if model.mtp is None:
             raise ValueError("The ModelOpt checkpoint has no MTP head.")
         if preserve_quantization:
@@ -51,10 +52,10 @@ class QwenMTPModel:
             model.lm_head.weight_scale_2,
             "lm_head.weight",
         )
-        return cls.from_state(mtp_state, model.embedding.weight, lm_head_weight, layer_config)
+        return cls.from_state(mtp_state, model.embedding.weight, lm_head_weight, layer_config, is_moe)
 
     @classmethod
-    def from_safetensors(cls, model_dir, layer_config):
+    def from_safetensors(cls, model_dir, layer_config, is_moe=True):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
         shards = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
@@ -85,24 +86,28 @@ class QwenMTPModel:
             )
         if lm_head_weight is None:
             raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
-        return cls.from_state(mtp_state, embed_weight, lm_head_weight, layer_config)
+        return cls.from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe)
 
     @staticmethod
-    def from_state(mtp_state, embed_weight, lm_head_weight, layer_config):
+    def from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe=True):
         try:
-            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (  # noqa: PLC0415
-                Qwen3_5MoeDecoderLayer,
-            )
+            if is_moe:
+                from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (  # noqa: PLC0415
+                    Qwen3_5MoeDecoderLayer as DecoderLayer,
+                )
+            else:
+                from transformers.models.qwen3_5.modeling_qwen3_5 import (  # noqa: PLC0415
+                    Qwen3_5DecoderLayer as DecoderLayer,
+                )
         except ImportError as exc:
+            model_name = "qwen3_5_moe" if is_moe else "qwen3_5"
             raise ImportError(
-                "Building the Qwen3.6 MTP head requires the 'qwen3_5_moe' modeling code in transformers."
+                f"Building the Qwen3.6 MTP head requires the '{model_name}' modeling code in transformers."
             ) from exc
 
-        mtp_layer = Qwen3_5MoeDecoderLayer(layer_config, layer_idx=0)
+        mtp_layer = DecoderLayer(layer_config, layer_idx=0)
         layer_state = {
-            key[len("mtp.layers.0.") :]: value
-            for key, value in mtp_state.items()
-            if key.startswith("mtp.layers.0.")
+            key[len("mtp.layers.0.") :]: value for key, value in mtp_state.items() if key.startswith("mtp.layers.0.")
         }
         missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
         if missing or unexpected:

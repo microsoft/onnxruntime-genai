@@ -46,13 +46,12 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen25VLTextModel,
-    Qwen35TextModel,
     QwenModel,
     SmolLM3Model,
     VideoChatFlashQwenModel,
     WhisperModel,
 )
-from builders.qwen import Qwen35MoEModel
+from builders.qwen import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
 
@@ -313,7 +312,7 @@ def check_extra_options(
         extra_options["num_hidden_layers"] = num_hidden_layers
 
     quantization_config = getattr(config, "quantization_config", {})
-    if quantization_config.get("quant_method") == "modelopt":
+    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
@@ -551,7 +550,7 @@ def create_model(
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_vl_text"
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        onnx_model = Qwen35TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
