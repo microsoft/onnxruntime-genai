@@ -122,6 +122,7 @@ jobs:
         config='benchmark/engine/configs/config.json'
       fi
 
+      benchmark_status=0
       docker run --rm --gpus all \
         -e HOME=/ort_genai_src/build/engine-benchmark-home \
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
@@ -146,7 +147,16 @@ jobs:
             --out /benchmark-out \
             --cuda_visible_devices \"\$gpu_ids\" \
             --verbose
-        "
+        " || benchmark_status=$?
+
+      echo 'Benchmark output files:'
+      while IFS= read -r -d '' output_file; do
+        printf '\n===== %s =====\n' "$output_file"
+        cat "$output_file"
+        printf '\n===== end %s =====\n' "$output_file"
+      done < <(find '$(benchmarkOut)' -type f -print0 | sort -z)
+
+      exit "$benchmark_status"
     displayName: 'Run engine benchmark'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
