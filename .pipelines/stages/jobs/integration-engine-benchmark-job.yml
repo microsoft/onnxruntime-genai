@@ -20,19 +20,18 @@ jobs:
     clean: true
     submodules: recursive
 
-  - displayName: 'Initialize benchmark output'
-    bash: mkdir -p '$(benchmarkOut)'
+  - bash: mkdir -p '$(benchmarkOut)'
+    displayName: 'Initialize benchmark output'
 
   # ACR login and the CUDA build-container pattern follow integration-build-job.yml.
-  - displayName: 'Login to Azure container registry'
-    task: Docker@2
+  - task: Docker@2
+    displayName: 'Login to Azure container registry'
     inputs:
       containerRegistry: 'onnxruntimebuildcache'
       command: 'login'
       addPipelineData: false
 
-  - displayName: 'Build engine benchmark in CUDA container'
-    bash: |
+  - bash: |
       set -e -x
       docker run --rm \
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
@@ -56,10 +55,10 @@ jobs:
             --skip_examples \
             --build_engine_benchmark
         '
+    displayName: 'Build engine benchmark in CUDA container'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - displayName: 'Build benchmark models in CUDA container'
-    bash: |
+  - bash: |
       set -e -x
       docker run --rm \
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
@@ -111,11 +110,11 @@ jobs:
             test -f "$output/model.onnx"
           done
         '
+    displayName: 'Build benchmark models in CUDA container'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   # GPU-enabled container execution follows integration-pytest-step.yml.
-  - displayName: 'Run engine benchmark in CUDA container'
-    bash: |
+  - bash: |
       set -e -x
       config='benchmark/engine/configs/smoke-test.json'
       if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
@@ -147,10 +146,11 @@ jobs:
             --cuda_visible_devices \"\$gpu_ids\" \
             --verbose
         "
+    displayName: 'Run engine benchmark in CUDA container'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - displayName: 'Publish engine benchmark results'
-    task: PublishPipelineArtifact@1
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish engine benchmark results'
     condition: always()
     inputs:
       artifactName: 'engine-benchmark-results'
