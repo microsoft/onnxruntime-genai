@@ -39,39 +39,6 @@ class PagedCacheBlockTable {
   const std::vector<std::shared_ptr<Block>>& WindowBlocks() const { return window_blocks_; }
   uint64_t MutationGeneration() const { return mutation_generation_; }
 
-  void SetCommittedSlots(size_t committed_slots) {
-    committed_slots_ = committed_slots;
-    ++mutation_generation_;
-  }
-  void SwapCommittedBlocks(size_t left, size_t right) {
-    auto& left_block = blocks_.at(left);
-    auto& right_block = blocks_.at(right);
-    std::swap(left_block, right_block);
-    ++mutation_generation_;
-  }
-  void ReplaceCommittedBlock(size_t index, std::shared_ptr<Block> block) {
-    blocks_.at(index) = std::move(block);
-    ++mutation_generation_;
-  }
-  void ReplaceCommittedBlocks(std::vector<std::shared_ptr<Block>> blocks) {
-    blocks_ = std::move(blocks);
-    ++mutation_generation_;
-  }
-  void ShrinkCommittedBlockCapacity() {
-    blocks_.shrink_to_fit();
-    ++mutation_generation_;
-  }
-  void SwapWindowBlocks(size_t left, size_t right) {
-    auto& left_block = window_blocks_.at(left);
-    auto& right_block = window_blocks_.at(right);
-    std::swap(left_block, right_block);
-    ++mutation_generation_;
-  }
-  void ReplaceWindowBlocks(std::vector<std::shared_ptr<Block>> blocks) {
-    window_blocks_ = std::move(blocks);
-    ++mutation_generation_;
-  }
-
  private:
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;

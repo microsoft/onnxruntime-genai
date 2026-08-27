@@ -47,6 +47,17 @@ size_t CheckedBlockSlots(
   return block_count * block_size;
 }
 
+size_t CheckedAdd(
+    size_t left,
+    size_t right,
+    std::string_view description) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::overflow_error(
+        "Paged cache " + std::string{description} + " overflow.");
+  }
+  return left + right;
+}
+
 }  // namespace
 
 PagedCacheBlockTable& PagedCacheBlockTable::operator=(
@@ -107,7 +118,8 @@ PagedCacheReservation::PagedCacheReservation(
   }
   deltas_.reserve(requests.size());
   new_tables_.reserve(requests.size());
-  committed_tables.reserve(committed_tables.size() + requests.size());
+  committed_tables.reserve(CheckedAdd(
+      committed_tables.size(), requests.size(), "table capacity"));
 
   size_t reserved_block_count = 0;
   size_t reserved_window_block_count = 0;
@@ -169,8 +181,7 @@ PagedCacheReservation::PagedCacheReservation(
       const size_t block_size = block_pool.BlockSize();
       const size_t first_block = committed_slots / block_size;
       const size_t end_block = std::min(
-          committed_blocks,
-          (request.target_slots + block_size - 1) / block_size);
+          committed_blocks, block_pool.BlocksNeeded(request.target_slots));
       for (size_t block_index = first_block; block_index < end_block; ++block_index) {
         const auto& block = committed_table->blocks_[block_index];
         const size_t expected_size =
@@ -212,14 +223,20 @@ PagedCacheReservation::PagedCacheReservation(
         request_advance_blocks,
         request.newly_admitted,
     });
-    reserved_block_count += new_blocks;
-    advance_block_count += request_advance_blocks;
+    reserved_block_count = CheckedAdd(
+        reserved_block_count, new_blocks, "reserved block count");
+    advance_block_count = CheckedAdd(
+        advance_block_count, request_advance_blocks,
+        "advance block count");
     if (request.newly_admitted) {
-      reserved_window_block_count += window_ring_blocks_;
+      reserved_window_block_count = CheckedAdd(
+          reserved_window_block_count, window_ring_blocks_,
+          "reserved window block count");
     }
 
     if (committed_table) {
-      committed_table->blocks_.reserve(committed_blocks + new_blocks);
+      committed_table->blocks_.reserve(CheckedAdd(
+          committed_blocks, new_blocks, "committed block capacity"));
     } else {
       PagedCacheBlockTable table;
       table.request_id_ = request.request_id;
@@ -474,7 +491,9 @@ void PagedCacheReservation::ValidateCommit() const {
     }
 
     const size_t committed_blocks = table ? table->blocks_.size() : 0;
-    const size_t total_blocks = committed_blocks + delta.reserved_block_count;
+    const size_t total_blocks = CheckedAdd(
+        committed_blocks, delta.reserved_block_count,
+        "target block capacity");
     if (delta.target_slots >
         CheckedBlockSlots(
             total_blocks, block_pool_->BlockSize(), "target")) {
@@ -499,8 +518,8 @@ void PagedCacheReservation::ValidateCommit() const {
   if (assigned_reserved_blocks != reserved_blocks_.size() ||
       assigned_reserved_window_blocks != reserved_window_blocks_.size() ||
       new_table_count != new_tables_.size() ||
-      committed_tables_->capacity() <
-          committed_tables_->size() + new_table_count) {
+      new_table_count >
+          committed_tables_->capacity() - committed_tables_->size()) {
     throw std::logic_error(
         "Paged cache reservation commit resources are inconsistent.");
   }
@@ -548,16 +567,16 @@ void PagedCacheReservation::CommitValidated() {
     const auto& target_table =
         table ? *table : new_tables_.at(preflight_new_table_index++);
     if (table &&
-        table->blocks_.capacity() <
-            table->blocks_.size() + delta.reserved_block_count) {
+        delta.reserved_block_count >
+            table->blocks_.capacity() - table->blocks_.size()) {
       throw std::logic_error(
           "Paged cache reservation lost preallocated commit capacity after validation.");
     }
     preflight_new_table_count += delta.newly_admitted ? 1 : 0;
     ValidateAdvancePreconditions(delta, target_table);
   }
-  if (committed_tables_->capacity() <
-      committed_tables_->size() + preflight_new_table_count) {
+  if (preflight_new_table_count >
+      committed_tables_->capacity() - committed_tables_->size()) {
     throw std::logic_error(
         "Paged cache reservation lost table capacity after validation.");
   }
