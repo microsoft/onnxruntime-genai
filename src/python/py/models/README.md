@@ -29,6 +29,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Export a ModelOpt or compressed-tensors NVFP4/FP8 Checkpoint](#export-a-modelopt-or-compressed-tensors-nvfp4fp8-checkpoint)
     - [MTP Head (Qwen3.6)](#mtp-head-qwen36)
+    - [Compact State Updates (Qwen3.5/3.8)](#compact-state-updates-qwen3538)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
@@ -411,6 +412,20 @@ Supplying `mtp_quant_config` explicitly dequantizes native ModelOpt or compresse
 The head always exports `hidden_states_out` (its own post-final-norm hidden state), which a multi-token loop feeds back as the next chained draft's `hidden_states` input. It is required for `num_speculative_tokens > 1` and ignored otherwise.
 
 A multi-token verify forward can additionally carry a window of recurrent/conv states so a partial accept can be handled by cropping instead of replaying the main model. Pass `state_window=W` (with `W >= num_speculative_tokens + 1`) to widen `past/present_key_values.%d.{conv,recurrent}_state` to `[W, B, ...]` and emit the matching attribute on `CausalConvWithState` / `LinearAttention`. This requires ONNX Runtime kernels that understand the attribute; leave it at the default `0` otherwise.
+
+#### Compact State Updates (Qwen3.5/3.8)
+
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `linear_attn_op=gated_delta_net` to select the GatedDeltaNet path and `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled), must be an integer from `0` through `8`, and requires `use_paged_attention=true` and `state_window >= state_update_capacity + 1`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true linear_attn_op=gated_delta_net state_update_capacity=3 state_window=4
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true linear_attn_op=gated_delta_net state_update_capacity=3 state_window=4
+```
+
+For non-paged Qwen3.5/3.8 exports, `linear_attn_op` also accepts `linear_attention`, which is the default. Compact state-update inputs and outputs are omitted when `state_update_capacity=0`. Both modes require ONNX Runtime kernels that implement the selected contrib operators.
 
 #### Enable WebGPU Graph Capture
 
