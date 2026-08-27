@@ -141,6 +141,8 @@ jobs:
           export LD_LIBRARY_PATH=\$CUDA_LIB_DIR:\$BENCHMARK_LIB_DIR:\${LD_LIBRARY_PATH:-}
           echo \"LD_LIBRARY_PATH=\$LD_LIBRARY_PATH\"
 
+          nvidia-smi
+
           \$PYTHON_EXE benchmark/engine/run.py \
             --executable /ort_genai_src/build/Linux/$(buildConfig)/benchmark/engine/engine_benchmark \
             --config \"$config\" \
