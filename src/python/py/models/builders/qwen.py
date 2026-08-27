@@ -167,10 +167,7 @@ class Qwen35TextModel(Model):
         rs_qg_output = f"{rs_qg_name}/output_0"
         self.make_reshape(
             rs_qg_name,
-            [
-                self.attention_attrs["q_path"],
-                f"/model/constants/INT64/[0, 0, {self.num_attn_heads}, {self.head_size * 2}]",
-            ],
+            [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, 0, {self.num_attn_heads}, {self.head_size * 2}]"],
             self.io_dtype,
             ["batch_size", "sequence_length", self.num_attn_heads, self.head_size * 2],
         )
@@ -355,10 +352,7 @@ class Qwen35TextModel(Model):
         v_out = f"{split_qkv_name}/output_2"
         self.make_split(
             split_qkv_name,
-            inputs=[
-                conv_out_3d,
-                f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]",
-            ],
+            inputs=[conv_out_3d, f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]"],
             outputs=[q_out, k_out, v_out],
             dtypes=[self.io_dtype] * 3,
             shapes=[
@@ -376,12 +370,7 @@ class Qwen35TextModel(Model):
         # Scale Q by 1/sqrt(head_k_dim)
         scale_name = f"/model/constants/{self.io_dtype}/{float(1.0 / np.sqrt(self.linear_key_head_dim))}"
         q_scaled_name = f"{basename}/q_scaled/Mul"
-        self.make_mul(
-            q_scaled_name,
-            [q_norm_out, scale_name],
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.linear_key_dim],
-        )
+        self.make_mul(q_scaled_name, [q_norm_out, scale_name], self.io_dtype, ["batch_size", "sequence_length", self.linear_key_dim])
         q_scaled_output = f"{q_scaled_name}/output_0"
 
         # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
@@ -473,7 +462,6 @@ class Qwen35TextModel(Model):
         )
         return unflat_out
 
-
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
@@ -486,7 +474,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
     The attention side (GatedDeltaNet linear + gated full) is inherited
     unchanged from the parent class.
     """
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 

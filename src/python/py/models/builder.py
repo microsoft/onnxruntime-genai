@@ -181,9 +181,15 @@ def check_extra_options(
         extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
-        incompatible_options = [key for key in ("exclude_embeds", "exclude_lm_head") if extra_options.get(key, False)]
+        incompatible_options = [
+            key
+            for key in ("exclude_embeds", "exclude_lm_head")
+            if extra_options.get(key, False)
+        ]
         if incompatible_options:
-            raise ValueError("use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + ".")
+            raise ValueError(
+                "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
+            )
 
         for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
             if key not in extra_options:
@@ -275,9 +281,7 @@ def check_extra_options(
 
     if precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
-        raise NotImplementedError(
-            "int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default)."
-        )
+        raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
     if "kv_cache_quant_scheme" in extra_options:
         quant_scheme = extra_options["kv_cache_quant_scheme"].lower()
@@ -375,7 +379,15 @@ def parse_extra_options(
             kv_pairs[key.strip()] = value.strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(model_name, input_path, output_dir, precision, execution_provider, cache_dir, kv_pairs)
+    check_extra_options(
+        model_name,
+        input_path,
+        output_dir,
+        precision,
+        execution_provider,
+        cache_dir,
+        kv_pairs
+    )
     return kv_pairs
 
 
@@ -385,9 +397,7 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = (
-        precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-    )
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
     if precision == "fp32" or cpu_quant or fp32_webgpu:
         # FP32 precision
@@ -441,9 +451,7 @@ def create_model(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception(
-            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
-        )
+        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -465,20 +473,14 @@ def create_model(
     elif config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
-        print(
-            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
-        )
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
-        print(
-            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
-        )
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
-        print(
-            "WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default."
-        )
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
@@ -513,38 +515,19 @@ def create_model(
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3ForCausalLM"
-        and config.max_position_embeddings == config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3ForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "PhiMoEForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
-        print(
-            "WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default."
-        )
-        print(
-            "WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default."
-        )
+    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3SmallForCausalLM"
-        and config.max_position_embeddings == config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-    elif (
-        config.architectures[0] == "Phi3SmallForCausalLM"
-        and config.max_position_embeddings != config.original_max_position_embeddings
-    ):
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
