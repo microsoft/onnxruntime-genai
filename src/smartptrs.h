@@ -184,9 +184,33 @@ struct StateSlotDesc {
   }
 };
 
+enum class StateUpdateReplayKind : uint32_t {
+  CausalConv = 1,
+  GatedDeltaNet = 2,
+};
+
+struct StateUpdateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  StateUpdateReplayKind kind;
+};
+
+static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
+
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 2;
+inline constexpr uint32_t kDeviceInterfaceVersion = 4;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -317,6 +341,9 @@ struct DeviceInterface {
     return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
   }
 #endif
+  virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
+    throw std::logic_error("Device does not support compact fixed-state replay.");
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

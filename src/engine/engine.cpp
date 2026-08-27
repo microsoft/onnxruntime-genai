@@ -303,6 +303,9 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }();
     ExecutionContext context{&step_plan_};
     context.cache_reservation = reservation->PagedReservation();
+    context.fixed_state_slots = reservation->FixedStateSlots();
+    context.fixed_state_bindings = reservation->FixedStateBindings();
+    context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
 
     bool request_transaction_active = false;
     const auto rollback_transaction = [&]() {
@@ -420,8 +423,11 @@ std::shared_ptr<Request> Engine::StepDynamic() {
     }
 
     try {
-      // Commit order is deliberate: make staged search state durable, publish cache growth, then
-      // advance the lightweight Request bookkeeping that readers observe.
+      // Validate every cache precondition and finish fallible fixed-state device work before any
+      // cooperating component crosses the transaction boundary.
+      reservation->PrepareCommit();
+      // Commit order is deliberate: make staged search state durable, publish cache growth and the
+      // fixed bank flip, then advance the lightweight Request bookkeeping that readers observe.
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();

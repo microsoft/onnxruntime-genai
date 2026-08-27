@@ -475,22 +475,24 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMultiplePagedGroups) {
       std::runtime_error);
 }
 
-TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroups) {
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
   auto model = LoadSyntheticPagedModel();
   Config::Model::Decoder::StateGroup fixed_group;
-  fixed_group.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
+  fixed_group.kind = Config::Model::Decoder::StateGroupKind::Fixed;
   fixed_group.layer_ids = {0};
+  fixed_group.state = Config::Model::Decoder::StateBinding{
+      "past_fixed.%d", "present_fixed.%d"};
   model->config_->model.decoder.state_groups->push_back(std::move(fixed_group));
 
   EXPECT_THROW(
       {
         try {
-          auto manager = CacheManager::Create(model);
+            PagedCacheManager manager{model};
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find(
-                  "does not yet support fixed decoder state groups"),
-              std::string::npos);
+              std::string{error.what()}.find("was not found"),
+              std::string::npos)
+              << error.what();
           throw;
         }
       },

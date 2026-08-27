@@ -482,6 +482,23 @@ struct StateSlotDescGpu {
   uint64_t slot_bytes;
 };
 
+struct StateUpdateReplayDescGpu {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t kind;
+};
+
 constexpr int kSlotCopyThreads = 256;
 constexpr int kSlotCopyBlocksPerTensor = 128;
 
@@ -510,6 +527,63 @@ __global__ void CopyStateSlotsKernel(const StateSlotDescGpu* __restrict__ descs,
   }
 }
 
+__global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restrict__ descs) {
+  const StateUpdateReplayDescGpu descriptor = descs[blockIdx.y];
+  const uint64_t state_elements =
+      descriptor.channel_count * descriptor.state_width *
+      (descriptor.kind == 1 ? uint64_t{1} : descriptor.key_width);
+  const uint64_t stride = static_cast<uint64_t>(gridDim.x) * blockDim.x;
+  const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+  for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
+    if (descriptor.kind == 1) {
+      const uint64_t channel = state_index / descriptor.state_width;
+      const uint64_t position = state_index - channel * descriptor.state_width;
+      const uint64_t shifted_position = position + descriptor.kept_count;
+      const uint64_t source_index = shifted_position < descriptor.state_width
+                                        ? channel * descriptor.state_width + shifted_position
+                                        : (shifted_position - descriptor.state_width) *
+                                                  descriptor.channel_count +
+                                              channel;
+      if (descriptor.element_size == 2) {
+        const auto* source = shifted_position < descriptor.state_width
+                                 ? static_cast<const uint16_t*>(descriptor.source_state)
+                                 : static_cast<const uint16_t*>(descriptor.value);
+        static_cast<uint16_t*>(descriptor.destination_state)[state_index] = source[source_index];
+      } else if (descriptor.element_size == 4) {
+        const auto* source = shifted_position < descriptor.state_width
+                                 ? static_cast<const uint32_t*>(descriptor.source_state)
+                                 : static_cast<const uint32_t*>(descriptor.value);
+        static_cast<uint32_t*>(descriptor.destination_state)[state_index] = source[source_index];
+      }
+      continue;
+    }
+
+    const uint64_t key_index = state_index % descriptor.key_width;
+    const uint64_t value_index =
+        (state_index / descriptor.key_width) % descriptor.state_width;
+    const uint64_t value_head =
+        state_index / (descriptor.state_width * descriptor.key_width);
+    const uint64_t key_head =
+        value_head * descriptor.key_head_count / descriptor.channel_count;
+    float state = static_cast<const float*>(descriptor.source_state)[state_index];
+    for (uint32_t transition = 0; transition < descriptor.kept_count; ++transition) {
+      state = __fmul_rn(
+          state,
+          descriptor.decay[static_cast<uint64_t>(transition) * descriptor.channel_count + value_head]);
+      state = __fmaf_rn(
+          descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
+                             descriptor.key_width +
+                         key_index],
+          descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
+                               descriptor.state_width +
+                           value_index],
+          state);
+    }
+    static_cast<float*>(descriptor.destination_state)[state_index] = state;
+  }
+}
+
 }  // namespace
 
 void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream) {
@@ -517,6 +591,14 @@ void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_sl
   const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
   CopyStateSlotsKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
       reinterpret_cast<const StateSlotDescGpu*>(descs), src_slot, dst_slot);
+}
+
+void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream) {
+  if (count <= 0) return;
+  const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
+  ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
+      reinterpret_cast<const StateUpdateReplayDescGpu*>(descs));
+  CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace cuda

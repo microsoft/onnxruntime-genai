@@ -1,10 +1,10 @@
 {
   "model": {
-    "type": "gpt2",
+    "type": "decoder",
     "bos_token_id": 0,
     "eos_token_id": 1,
     "pad_token_id": 0,
-    "vocab_size": 16,
+    "vocab_size": 64,
     "context_length": 128,
     "decoder": {
       "session_options": {
@@ -19,11 +19,18 @@
       "num_hidden_layers": 6,
       "inputs": {
         "input_ids": "input_ids",
-        "attention_mask": "attention_mask",
-        "position_ids": "position_ids"
+        "block_table": "block_table",
+        "cumulative_sequence_lengths": "cumulative_sequence_lengths",
+        "past_sequence_lengths": "past_sequence_lengths",
+        "attention_metadata": "attention_metadata",
+        "position_ids": "position_ids",
+        "past_key_names": "legacy_past.%d.key",
+        "past_value_names": "legacy_past.%d.value"
       },
       "outputs": {
-        "logits": "logits"
+        "logits": "logits",
+        "present_key_names": "legacy_present.%d.key",
+        "present_value_names": "legacy_present.%d.value"
       },
       "state_groups": [
         {
@@ -42,8 +49,24 @@
             "kind": "causal_conv",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
-            "active": "state_update_active",
             "value": "state_update.%d.conv_value"
+          }
+        },
+        {
+          "kind": "paged_kv",
+          "layer_ids": [
+            1,
+            4
+          ],
+          "bindings": {
+            "key": {
+              "input": "past_key_values.%d.key",
+              "output": "present.%d.key"
+            },
+            "value": {
+              "input": "past_key_values.%d.value",
+              "output": "present.%d.value"
+            }
           }
         },
         {
@@ -62,7 +85,6 @@
             "kind": "gated_delta_net",
             "capacity": 3,
             "capture_count": "state_update_capture_count",
-            "active": "state_update_active",
             "capsule": "state_update.%d.recurrent_capsule",
             "key_head_count": 1
           }
@@ -73,5 +95,12 @@
   "search": {
     "max_length": 128,
     "do_sample": false
+  },
+  "engine": {
+    "dynamic_batching": {
+      "block_size": 4,
+      "num_blocks": 128,
+      "max_batch_size": 8
+    }
   }
 }
