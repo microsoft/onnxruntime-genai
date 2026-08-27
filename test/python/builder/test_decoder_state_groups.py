@@ -116,7 +116,16 @@ def _recording_model():
 def test_common_paged_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(monkeypatch, tmp_path, _make_config_model(Model))
 
-    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
+    assert config["model"]["decoder"]["state_groups"] == [
+        {
+            "kind": "paged_kv",
+            "layer_ids": list(range(64)),
+            "bindings": {
+                "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
+                "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"},
+            },
+        }
+    ]
 
 
 def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_path):
@@ -136,19 +145,49 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
         _make_config_model(Qwen35TextModel, layer_types=["full_attention"] * 64),
     )
 
-    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
+    assert config["model"]["decoder"]["state_groups"][0]["kind"] == "paged_kv"
+    assert config["model"]["decoder"]["state_groups"][0]["layer_ids"] == list(range(64))
 
 
 @pytest.mark.parametrize(
     ("layer_types", "expected"),
     [
-        (["sliding_attention"], [{"kind": "paged_kv", "layer_ids": [0]}]),
-        (["conv"], [{"kind": "fixed_conv", "layer_ids": [0]}]),
+        (
+            ["sliding_attention"],
+            [
+                {
+                    "kind": "paged_kv",
+                    "layer_ids": [0],
+                    "bindings": {
+                        "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
+                        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"},
+                    },
+                }
+            ],
+        ),
+        (
+            ["conv"],
+            [
+                {
+                    "kind": "fixed",
+                    "layer_ids": [0],
+                    "bindings": {"state": {"input": "past.%d.conv", "output": "present.%d.conv"}},
+                }
+            ],
+        ),
         (
             ["linear_attention"],
             [
-                {"kind": "fixed_conv", "layer_ids": [0]},
-                {"kind": "fixed_recurrent", "layer_ids": [0]},
+                {
+                    "kind": "fixed",
+                    "layer_ids": [0],
+                    "bindings": {"state": {"input": "past.%d.conv", "output": "present.%d.conv"}},
+                },
+                {
+                    "kind": "fixed",
+                    "layer_ids": [0],
+                    "bindings": {"state": {"input": "past.%d.recurrent", "output": "present.%d.recurrent"}},
+                },
             ],
         ),
     ],
@@ -156,7 +195,19 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
 def test_state_groups_are_added_only_for_matching_layers(layer_types, expected):
     model = _make_config_model(Model, layer_types=layer_types)
 
-    assert model.make_decoder_state_groups({}, {}) == expected
+    inputs = {
+        "past_key_names": "past_key_values.%d.key",
+        "past_value_names": "past_key_values.%d.value",
+        "past_conv_names": "past.%d.conv",
+        "past_recurrent_names": "past.%d.recurrent",
+    }
+    outputs = {
+        "present_key_names": "present.%d.key",
+        "present_value_names": "present.%d.value",
+        "present_conv_names": "present.%d.conv",
+        "present_recurrent_names": "present.%d.recurrent",
+    }
+    assert model.make_decoder_state_groups(inputs, outputs) == expected
 
 
 def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_path):
@@ -170,8 +221,8 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     groups = config["model"]["decoder"]["state_groups"]
     assert [group["kind"] for group in groups] == [
         "paged_kv",
-        "fixed_conv",
-        "fixed_recurrent",
+        "fixed",
+        "fixed",
     ]
     assert groups[0]["layer_ids"] == list(range(3, 64, 4))
     assert groups[1]["layer_ids"] == [i for i in range(64) if (i + 1) % 4 != 0]
@@ -181,6 +232,38 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
     assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
+
+
+def test_qwen38_compact_state_groups_are_checkpoint_free(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen35TextModel,
+        layer_types=["linear_attention", "full_attention"],
+    )
+    model.num_layers = 2
+    model.state_update_capacity = 3
+    model.linear_num_key_heads = 2
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    conv_group, recurrent_group = config["model"]["decoder"]["state_groups"][1:]
+    assert conv_group["state_update"] == {
+        "kind": "causal_conv",
+        "capacity": 3,
+        "capture_count": "state_update_capture_count",
+        "active": "state_update_active",
+        "value": "state_update.%d.conv_value",
+    }
+    assert recurrent_group["state_update"] == {
+        "kind": "gated_delta_net",
+        "capacity": 3,
+        "capture_count": "state_update_capture_count",
+        "active": "state_update_active",
+        "capsule": "state_update.%d.recurrent_capsule",
+        "key_head_count": 2,
+    }
+    for group in (conv_group, recurrent_group):
+        assert "checkpoints" not in group["bindings"]["state"]
+        assert "checkpoint_count" not in group
+        assert "checkpoint_alignment" not in group
 
 
 def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
@@ -351,7 +434,7 @@ def test_qwen38_compact_state_update_option_validation(
         )
 
 
-@pytest.mark.parametrize("capacity", [True, 1.5, "1.5", None])
+@pytest.mark.parametrize("capacity", [True, 1.0, 1.5, "1.5", None])
 def test_qwen38_compact_state_update_capacity_requires_integer(capacity):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match="must be an integer"):

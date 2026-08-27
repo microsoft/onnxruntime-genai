@@ -5,6 +5,7 @@
 
 #include "request.h"
 #include "../models/io/kv_cache.h"
+#include "fixed_state_pool.h"
 #include "paged_key_value_cache.h"
 #include "execution_context.h"
 #include "step_plan.h"
@@ -13,6 +14,11 @@ namespace Generators {
 
 struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
+  virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
+  virtual size_t FixedStateStagingBytes() const { return 0; }
+  virtual void ValidateCommit() const {}
+  virtual void PrepareCommit() { ValidateCommit(); }
   virtual void Commit() = 0;
   virtual void Release() = 0;
   virtual ~CacheStepReservation() = default;
@@ -145,15 +151,14 @@ struct PagedCacheManager : CacheManager {
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
-  StepPlanningResult PlanStepResources(StepPlan& plan) const override {
-    return key_value_cache_->PlanStepResources(plan);
-  }
+  StepPlanningResult PlanStepResources(StepPlan& plan) const override;
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 
  private:
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
+  std::unique_ptr<FixedStatePool> fixed_state_pool_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

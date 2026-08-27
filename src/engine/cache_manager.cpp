@@ -11,11 +11,12 @@ namespace Generators {
 
 namespace {
 
-class PagedCacheStepReservation final : public CacheStepReservation {
+class CompositeCacheStepReservation final : public CacheStepReservation {
  public:
-  PagedCacheStepReservation(PagedKeyValueCache& cache,
-                            std::vector<std::shared_ptr<Request>>& allocated_requests,
-                            const StepPlan& plan)
+  CompositeCacheStepReservation(PagedKeyValueCache& cache,
+                                FixedStatePool* fixed_state_pool,
+                                std::vector<std::shared_ptr<Request>>& allocated_requests,
+                                const StepPlan& plan)
       : allocated_requests_{allocated_requests} {
     std::vector<PagedCacheReservationRequest> requests;
     requests.reserve(plan.requests.size());
@@ -33,18 +34,68 @@ class PagedCacheStepReservation final : public CacheStepReservation {
     }
 
     allocated_requests_.reserve(allocated_requests_.size() + newly_admitted_.size());
-    reservation_.emplace(cache.Reserve(requests));
+    paged_reservation_.emplace(cache.Reserve(requests));
+    if (fixed_state_pool) {
+      std::vector<FixedStateReservationRequest> fixed_requests;
+      fixed_requests.reserve(plan.requests.size());
+      for (const auto& entry : plan.requests) {
+        fixed_requests.push_back(FixedStateReservationRequest{
+            entry.request_id, entry.target_cache_slots, 0});
+      }
+      fixed_reservation_.emplace(fixed_state_pool->Reserve(fixed_requests));
+    }
   }
 
   PagedCacheReservation* PagedReservation() override {
-    return &*reservation_;
+    return &*paged_reservation_;
+  }
+
+  std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
+    return fixed_reservation_ ? fixed_reservation_->Handles()
+                              : std::span<const FixedStateSlotHandle>{};
+  }
+
+  std::span<const FixedStateBinding> FixedStateBindings() const override {
+    return fixed_reservation_ ? fixed_reservation_->Bindings()
+                              : std::span<const FixedStateBinding>{};
+  }
+
+  size_t FixedStateStagingBytes() const override {
+    return fixed_reservation_ ? fixed_reservation_->PlannedStagingBytes() : 0;
+  }
+
+  void ValidateCommit() const override {
+    if (committed_) {
+      throw std::logic_error("Composite cache step reservation can only be committed once.");
+    }
+    if (fixed_reservation_) {
+      fixed_reservation_->ValidateCommit();
+    }
+    paged_reservation_->ValidateCommit();
+  }
+
+  void PrepareCommit() override {
+    if (prepared_) {
+      throw std::logic_error("Composite cache step reservation can only be prepared once.");
+    }
+    ValidateCommit();
+    if (fixed_reservation_) {
+      fixed_reservation_->PrepareCommit();
+    }
+    prepared_ = true;
   }
 
   void Commit() override {
     if (committed_) {
-      throw std::logic_error("Paged cache step reservation can only be committed once.");
+      throw std::logic_error("Composite cache step reservation can only be committed once.");
     }
-    reservation_->Commit();
+    if (!prepared_) {
+      PrepareCommit();
+    }
+    paged_reservation_->CommitValidated();
+    if (fixed_reservation_) {
+      fixed_reservation_->PublishCommit();
+    }
     allocated_requests_.insert(allocated_requests_.end(),
                                newly_admitted_.begin(),
                                newly_admitted_.end());
@@ -55,22 +106,46 @@ class PagedCacheStepReservation final : public CacheStepReservation {
     if (committed_) {
       throw std::logic_error("Cannot release a committed paged cache step reservation.");
     }
-    reservation_->Release();
+    std::exception_ptr release_error;
+    if (fixed_reservation_) {
+      try {
+        fixed_reservation_->Discard();
+      } catch (...) {
+        release_error = std::current_exception();
+      }
+    }
+    try {
+      paged_reservation_->Release();
+    } catch (...) {
+      if (!release_error) {
+        release_error = std::current_exception();
+      }
+    }
+    if (release_error) {
+      std::rethrow_exception(release_error);
+    }
   }
 
  private:
   std::vector<std::shared_ptr<Request>>& allocated_requests_;
   std::vector<std::shared_ptr<Request>> newly_admitted_;
-  std::optional<PagedCacheReservation> reservation_;
+  std::optional<PagedCacheReservation> paged_reservation_;
+  std::optional<FixedStateReservation> fixed_reservation_;
+  bool prepared_{};
   bool committed_{};
 };
 
 }  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
+  const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     return std::make_unique<PagedCacheManager>(model);
+  }
+  if (manifest.HasFixedStateGroups()) {
+    throw std::runtime_error(
+        "Fixed decoder state groups require engine.dynamic_batching");
   }
 
   return std::make_unique<StaticCacheManager>(model);
@@ -176,8 +251,13 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
     : CacheManager(model),
-      params_(std::make_shared<GeneratorParams>(*model_)),
-      key_value_cache_(std::make_unique<PagedKeyValueCache>(model)) {
+      params_(std::make_shared<GeneratorParams>(*model_)) {
+  const ModelStateManifest manifest{model->config_->model.decoder};
+  if (manifest.HasFixedStateGroups()) {
+    fixed_state_pool_ = std::make_unique<FixedStatePool>(
+        model, model_->config_->engine.dynamic_batching->max_batch_size);
+  }
+  key_value_cache_ = std::make_unique<PagedKeyValueCache>(model);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 
@@ -236,6 +316,18 @@ void PagedCacheManager::PrepareStep(
 }
 
 void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
+  std::vector<FixedStateSlotHandle> fixed_handles;
+  if (fixed_state_pool_) {
+    fixed_handles.reserve(requests.size());
+    for (const auto& request : requests) {
+      if (IsResident(request)) {
+        fixed_handles.push_back(fixed_state_pool_->HandleFor(request.get()));
+      }
+    }
+  }
+  for (const auto& handle : fixed_handles) {
+    fixed_state_pool_->Release(handle);
+  }
   for (auto& request : requests) {
     key_value_cache_->Remove(request);
   }
@@ -259,9 +351,27 @@ bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) cons
          cache_allocated_requests_.end();
 }
 
+StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
+  auto result = key_value_cache_->PlanStepResources(plan);
+  if (!fixed_state_pool_ || !result.executable) {
+    return result;
+  }
+  size_t new_slot_count = 0;
+  for (const auto& entry : plan.requests) {
+    if (entry.newly_admitted) {
+      ++new_slot_count;
+    }
+  }
+  if (new_slot_count > fixed_state_pool_->AvailableSlots()) {
+    throw std::logic_error(
+        "Paged planning selected more admissions than fixed state can reserve.");
+  }
+  return result;
+}
+
 std::unique_ptr<CacheStepReservation> PagedCacheManager::ReserveStep(const StepPlan& plan) {
-  return std::make_unique<PagedCacheStepReservation>(
-      *key_value_cache_, cache_allocated_requests_, plan);
+  return std::make_unique<CompositeCacheStepReservation>(
+      *key_value_cache_, fixed_state_pool_.get(), cache_allocated_requests_, plan);
 }
 
 }  // namespace Generators

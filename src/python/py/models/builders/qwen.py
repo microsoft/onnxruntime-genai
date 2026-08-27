@@ -123,14 +123,12 @@ class Qwen35TextModel(Model):
             raise ValueError("state_window must be at least state_update_capacity + 1")
 
     def parse_state_update_capacity(self, value):
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
             raise ValueError("state_update_capacity must be an integer")
         try:
             capacity = int(value)
         except (TypeError, ValueError):
             raise ValueError("state_update_capacity must be an integer") from None
-        if not isinstance(value, str) and capacity != value:
-            raise ValueError("state_update_capacity must be an integer")
         return capacity
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -771,6 +769,54 @@ class Qwen35TextModel(Model):
             ["batch_size", "sequence_length", total_dim],
         )
         return unflat_out
+
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
+        ]
+        linear_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
+
+        for state_name, input_key, output_key in (
+            ("conv", "past_conv_names", "present_conv_names"),
+            ("recurrent", "past_recurrent_names", "present_recurrent_names"),
+        ):
+            if not linear_attention_layers:
+                continue
+            group = {
+                "kind": "fixed",
+                "layer_ids": linear_attention_layers,
+                "bindings": {
+                    "state": {
+                        "input": inputs[input_key],
+                        "output": outputs[output_key],
+                    }
+                },
+            }
+            state_update_capacity = getattr(self, "state_update_capacity", 0)
+            if state_update_capacity:
+                state_update = {
+                    "kind": "causal_conv" if state_name == "conv" else "gated_delta_net",
+                    "capacity": state_update_capacity,
+                    "capture_count": "state_update_capture_count",
+                    "active": "state_update_active",
+                }
+                if state_name == "conv":
+                    state_update["value"] = "state_update.%d.conv_value"
+                else:
+                    state_update["capsule"] = "state_update.%d.recurrent_capsule"
+                    state_update["key_head_count"] = self.linear_num_key_heads
+                group["state_update"] = state_update
+            state_groups.append(group)
+
+        return state_groups
 
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.

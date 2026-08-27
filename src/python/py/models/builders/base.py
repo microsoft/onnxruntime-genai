@@ -1302,12 +1302,51 @@ class Model:
 
         state_groups = []
         if full_attention_layers:
-            state_groups.append({"kind": "paged_kv", "layer_ids": full_attention_layers})
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
         if conv_layers:
-            state_groups.append({"kind": "fixed_conv", "layer_ids": conv_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed",
+                    "layer_ids": conv_layers,
+                    "bindings": {
+                        "state": {
+                            "input": inputs["past_conv_names"],
+                            "output": outputs["present_conv_names"],
+                        }
+                    },
+                }
+            )
         if recurrent_layers:
-            state_groups.append({"kind": "fixed_recurrent", "layer_ids": recurrent_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed",
+                    "layer_ids": recurrent_layers,
+                    "bindings": {
+                        "state": {
+                            "input": inputs["past_recurrent_names"],
+                            "output": outputs["present_recurrent_names"],
+                        }
+                    },
+                }
+            )
         return state_groups
+
+    @staticmethod
+    def make_paged_key_value_state_group(layer_ids, inputs, outputs):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": layer_ids,
+            "bindings": {
+                "key": {
+                    "input": inputs["past_key_names"],
+                    "output": outputs["present_key_names"],
+                },
+                "value": {
+                    "input": inputs["past_value_names"],
+                    "output": outputs["present_value_names"],
+                },
+            },
+        }
 
     def make_key_value_cache_names(self, layer_id):
         """

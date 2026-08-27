@@ -384,13 +384,38 @@ struct Config {
       enum class StateGroupKind {
         Invalid,
         PagedKeyValue,
-        FixedConv,
-        FixedRecurrent,
+        Fixed,
+      };
+
+      struct StateBinding {
+        std::string input;
+        std::string output;
+      };
+
+      enum class StateUpdateKind {
+        Invalid,
+        CausalConv,
+        GatedDeltaNet,
+      };
+
+      struct StateUpdate {
+        StateUpdateKind kind{StateUpdateKind::Invalid};
+        int capacity{};
+        std::string capture_count;
+        std::string value;
+        bool enabled{true};
+        std::string active;
+        std::string capsule;
+        int key_head_count{};
       };
 
       struct StateGroup {
         StateGroupKind kind{StateGroupKind::Invalid};
         std::vector<int> layer_ids;
+        std::optional<StateBinding> key;
+        std::optional<StateBinding> value;
+        std::optional<StateBinding> state;
+        std::optional<StateUpdate> state_update;
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.

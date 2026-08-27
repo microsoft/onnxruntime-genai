@@ -31,11 +31,11 @@ class ModelStateManifest {
   // Read-only access to the validated decoder state groups, in declaration order. Owners of a
   // specific kind (for example the fixed-state pool) select the groups they manage from this view.
   const std::vector<Config::Model::Decoder::StateGroup>& StateGroups() const { return state_groups_; }
+  bool HasStateGroupKind(Config::Model::Decoder::StateGroupKind kind) const;
+  bool HasFixedStateGroups() const;
 
  private:
   std::vector<Config::Model::Decoder::StateGroup> state_groups_;
-  Config::Model::Decoder::Inputs inputs_;
-  Config::Model::Decoder::Outputs outputs_;
 };
 
 }  // namespace Generators
