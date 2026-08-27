@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
@@ -51,6 +51,12 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.use_windowed_paged_kv_cache = False
     model.past_present_share_buffer = False
     model.context_length = 262144
+    model.context_length_attrs = {
+        "state_window": 0,
+        "state_window_dims": [],
+        "window_kv_cache": True,
+        "window_kv_cache_slack": 0,
+    }
     model.filename = "model.onnx"
     model.head_size = 256
     model.hidden_size = 5120
@@ -70,30 +76,32 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
         "attention_metadata": "attention_metadata",
         "past_key_values.key": "past_key_values.%d.key",
         "past_key_values.value": "past_key_values.%d.value",
+        "past.conv": "past.%d.conv",
+        "past.recurrent": "past.%d.recurrent",
     }
     model.output_names = {
         "logits": "logits",
         "present.key": "present.%d.key",
         "present.value": "present.%d.value",
+        "present.conv": "present.%d.conv",
+        "present.recurrent": "present.%d.recurrent",
     }
-    if layer_types is not None:
-        model.layer_types = layer_types
+    model.layer_types = layer_types if layer_types is not None else ["full_attention"] * model.num_layers
     return model
 
 
 def _write_config(monkeypatch, tmp_path, model):
     hf_config = SimpleNamespace(eos_token_id=[248044], bos_token_id=248045, pad_token_id=248044)
-    monkeypatch.setattr(base_module, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: hf_config))
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
     make_config = Model.make_genai_config.__get__(model)
-    make_config("model_name_or_path", {}, str(tmp_path))
+    make_config(hf_config, {}, str(tmp_path))
     return json.loads((tmp_path / "genai_config.json").read_text())
 
 
-def test_common_paged_builder_preserves_legacy_manifest_absence(monkeypatch, tmp_path):
+def test_common_paged_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(monkeypatch, tmp_path, _make_config_model(Model))
 
-    assert "state_groups" not in config["model"]["decoder"]
+    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
 
 
 def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_path):
@@ -106,14 +114,34 @@ def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_pat
     assert "state_groups" not in config["model"]["decoder"]
 
 
-def test_qwen_all_attention_builder_preserves_legacy_manifest_absence(monkeypatch, tmp_path):
+def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(
         monkeypatch,
         tmp_path,
         _make_config_model(Qwen35TextModel, layer_types=["full_attention"] * 64),
     )
 
-    assert "state_groups" not in config["model"]["decoder"]
+    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected"),
+    [
+        (["sliding_attention"], [{"kind": "paged_kv", "layer_ids": [0]}]),
+        (["conv"], [{"kind": "fixed_conv", "layer_ids": [0]}]),
+        (
+            ["linear_attention"],
+            [
+                {"kind": "fixed_conv", "layer_ids": [0]},
+                {"kind": "fixed_recurrent", "layer_ids": [0]},
+            ],
+        ),
+    ],
+)
+def test_state_groups_are_added_only_for_matching_layers(layer_types, expected):
+    model = _make_config_model(Model, layer_types=layer_types)
+
+    assert model.make_decoder_state_groups({}, {}) == expected
 
 
 def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_path):
@@ -134,31 +162,7 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert groups[1]["layer_ids"] == [i for i in range(64) if (i + 1) % 4 != 0]
     assert groups[2]["layer_ids"] == groups[1]["layer_ids"]
     decoder = config["model"]["decoder"]
-    assert decoder["inputs"]["past_conv_names"] == "past_key_values.%d.conv_state"
-    assert decoder["inputs"]["past_recurrent_names"] == "past_key_values.%d.recurrent_state"
-    assert decoder["outputs"]["present_conv_names"] == "present.%d.conv_state"
-    assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent_state"
-
-
-def test_qwen38_layer_types_support_reduced_official_fixture():
-    official_layer_types = [
-        "full_attention" if (layer_id + 1) % 4 == 0 else "linear_attention" for layer_id in range(64)
-    ]
-    config = SimpleNamespace(text_config=SimpleNamespace(layer_types=official_layer_types))
-
-    assert Qwen35TextModel._resolve_layer_types(config, 4) == [
-        "linear_attention",
-        "linear_attention",
-        "linear_attention",
-        "full_attention",
-    ]
-
-
-def test_qwen38_layer_types_reject_invalid_configurations():
-    short_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
-    with pytest.raises(ValueError, match="1 entries"):
-        Qwen35TextModel._resolve_layer_types(short_config, 2)
-
-    unknown_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["unknown"]))
-    with pytest.raises(ValueError, match="Unsupported"):
-        Qwen35TextModel._resolve_layer_types(unknown_config, 1)
+    assert decoder["inputs"]["past_conv_names"] == "past.%d.conv"
+    assert decoder["inputs"]["past_recurrent_names"] == "past.%d.recurrent"
+    assert decoder["outputs"]["present_conv_names"] == "present.%d.conv"
+    assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"

@@ -156,7 +156,7 @@ int DispatchScenarios(const fs::path& executable, const fs::path& config_path, c
 
 int main(int argc, char** argv) {
   try {
-    fs::path config_path = "config.json";
+    fs::path config_path = "configs/config.json";
     fs::path out_dir = "out";
 
     for (int i = 1; i < argc; ++i) {

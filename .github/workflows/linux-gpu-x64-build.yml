@@ -13,8 +13,13 @@ concurrency:
 
 env:
   ORT_BUILD_VERSION: "1.26.0"
-  ORT_RUNTIME_VERSION: "1.28.0"
-  ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
+  ORT_RUNTIME_VERSION: "1.30.0-dev-20260825-0522-9cbf665b59"
+  ORT_BUILD_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
+  ORT_RUNTIME_PACKAGE_NAME: microsoft.ml.onnxruntime
+  ORT_EP_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.EP.Cuda12.linux-x64
+  ORT_EP_NUGET_VERSION: "0.2.0-dev.20260819+f1d07f0d"
+  ORT_EP_PYPI_VERSION: "0.2.0.dev20260819"
+  ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -71,16 +76,20 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
 
-      - name: Download build-time and runtime CUDA 12 OnnxRuntime
+      - name: Download build-time ONNX Runtime and test runtime packages
         run: |
           curl -fsSL \
-            "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_BUILD_VERSION }}/content?api-version=6.0-preview.1" \
+            "https://pkgs.dev.azure.com/aiinfra/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_apis/packaging/feeds/7982ae20-ed19-4a35-a362-a96ac99897b7/nuget/packages/${{ env.ORT_BUILD_PACKAGE_NAME }}/versions/${{ env.ORT_BUILD_VERSION }}/content?api-version=6.0-preview.1" \
             -o ort-build.zip
           curl -fsSL \
-            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/onnxruntime-cuda-12/nuget/packages/${{ env.ORT_PACKAGE_NAME }}/versions/${{ env.ORT_RUNTIME_VERSION }}/content?api-version=6.0-preview.1" \
+            "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/flat2/${{ env.ORT_RUNTIME_PACKAGE_NAME }}/${{ env.ORT_RUNTIME_VERSION }}/${{ env.ORT_RUNTIME_PACKAGE_NAME }}.${{ env.ORT_RUNTIME_VERSION }}.nupkg" \
             -o ort-runtime.zip
+          curl -fsSL \
+            "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/feeds/ORT-Nightly/nuget/packages/${{ env.ORT_EP_PACKAGE_NAME }}/versions/${{ env.ORT_EP_NUGET_VERSION }}/content?api-version=6.0-preview.1" \
+            -o ort-ep.zip
           unzip -q ort-build.zip -d ort-build-package
           unzip -q ort-runtime.zip -d ort-runtime-package
+          unzip -q ort-ep.zip -d ort-ep-package
 
       - name: list files
         shell: bash
@@ -88,18 +97,21 @@ jobs:
           ls -l
           ls -R ort-build-package
           ls -R ort-runtime-package
+          ls -R ort-ep-package
         continue-on-error: true
 
-      - name: Extract OnnxRuntime library and header files
+      - name: Stage build-time and runtime ONNX Runtime files
         run: |
           set -e -x
-          mkdir -p ort-build/lib ort/lib
+          mkdir -p ort-build/lib ort/lib ort/ep
           mv ort-build-package/buildTransitive/native/include ort-build/
           mv ort-build-package/runtimes/linux-x64/native/* ort-build/lib/
           mv ort-runtime-package/runtimes/linux-x64/native/* ort/lib/
+          mv ort-ep-package/runtimes/linux-x64/native/* ort/ep/
           cp ort-build/lib/libonnxruntime.so ort-build/lib/libonnxruntime.so.1
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
-
+          test -f ort/ep/libonnxruntime_providers_cuda.so
+          test ! -f ort/lib/libonnxruntime_providers_cuda.so
 
       - name: Get Docker Image
         run: |
@@ -187,9 +199,12 @@ jobs:
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:\${LD_LIBRARY_PATH} && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip uninstall -y onnxruntime-gpu && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PYPI_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --force-reinstall --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
@@ -208,9 +223,16 @@ jobs:
       - name: Docker -- Run unit tests
         run: |
           echo "Running docker image onnxruntimecudabuildx64"
+          rm -f build/cuda/Release/libonnxruntime_providers_cuda.so
+          test ! -f build/cuda/Release/libonnxruntime_providers_cuda.so
           docker run \
             --gpus all \
             --rm \
             --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/ort/lib:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/unit_tests && ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/ort/lib:/ort_genai_src/build/cuda/Release/ /ort_genai_src/build/cuda/Release/engine_unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              export ORTGENAI_LOG_ORT_LIB=1 && \
+              export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:/ort_genai_src/build/cuda/Release/:\${LD_LIBRARY_PATH} && \
+              /ort_genai_src/build/cuda/Release/unit_tests --ep_dir /ort_genai_src/ort/ep && \
+              /ort_genai_src/build/cuda/Release/reinit_tests --ep_dir /ort_genai_src/ort/ep && \
+              /ort_genai_src/build/cuda/Release/engine_unit_tests --ep_dir /ort_genai_src/ort/ep"

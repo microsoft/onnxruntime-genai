@@ -26,7 +26,7 @@
     "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
     "generation_tokens": 256
   },
-    {
+  {
     "scenario": "decode_baseline",
     "concurrency": 1,
     "prompt_length_k": 4,
@@ -53,7 +53,7 @@
     "execution_provider_library": "build/Linux/RelWithDebInfo/benchmark/engine/libonnxruntime_providers_cuda.so",
     "generation_tokens": 256
   },
-    {
+  {
     "scenario": "decode_baseline",
     "concurrency": 1,
     "prompt_length_k": 4,
