@@ -52,18 +52,22 @@ with an Engine-bound opaque `OgaRequestParams` is deferred until that ownership 
 typedef struct OgaRequestOptions {
   uint32_t struct_size;
   uint32_t reserved; /* Must be zero. */
-  uint64_t max_session_tokens; /* 0 = configured/model-qualified limit. */
+  uint64_t max_session_tokens; /* 0 = snapshotted generation_params.search.max_length. */
 } OgaRequestOptions;
 ```
 
 Rules:
 
+- `OgaRequestOptions` is a public fixed-field structure, not an opaque handle.
 - The caller zero-initializes the structure and sets `struct_size`.
 - An undersized structure is rejected before Request mutation.
 - A larger structure is accepted; unknown trailing bytes are ignored.
 - `reserved` must be zero.
 - Conversion from `uint64_t` to internal sizes is checked before mutation.
-- A nonzero `max_session_tokens` may not exceed the configured/model-qualified maximum.
+- Null options or zero `max_session_tokens` use the Request's snapshotted
+  `OgaGeneratorParams.search.max_length`. That search value normally defaults from the model context
+  length, but the caller may set it lower before Request creation.
+- A nonzero `max_session_tokens` may not exceed that snapshotted `search.max_length`.
 - The value counts the initial input, generated tokens, and continuation input over the complete
   resident Request.
 
@@ -98,8 +102,7 @@ OgaResult* OgaTurnParamsSetSeed(
 
 OgaResult* OgaTurnParamsSetStopSequences(
     OgaTurnParams* params,
-    const char* const* stop_sequences,
-    uint64_t stop_sequence_count);
+    const OgaSequences* stop_sequences);
 
 OgaResult* OgaTurnParamsSetGuidance(
     OgaTurnParams* params,
@@ -113,7 +116,7 @@ Initial implementation status:
 | --- | --- |
 | `max_generated_tokens` | Implemented end to end; zero uses the configured/default limit |
 | `temperature`, `top_p`, `top_k`, `seed` | Setter returns an explicit not-implemented error |
-| stop sequences | Setter returns an explicit not-implemented error and does not retain/dereference input |
+| token-ID stop sequences | Setter accepts the existing ragged `OgaSequences` collection, returns an explicit not-implemented error, and does not retain or dereference it |
 | guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
 
 Unsupported requested behavior must never be accepted and ignored. `OgaTurnParams` may be reused, but
@@ -145,6 +148,11 @@ typedef enum OgaEngineEventFlags {
 
 `OgaEngineEventFlags` is a bitmask, not a mutually exclusive type. In particular, a final model step
 may emit one event with both `Token` and `TurnFinished`.
+
+The public token loop is `Tokens(request, turn_id)`: callers pump `OgaEngineRun`, test the `Token`
+bit rather than comparing flags for equality, treat `event.request` as a borrowed identity alias for
+their owned Request handle, use `event.turn_id` as the Request-local Turn identity, and consume
+`event.token` only when `Token` is set.
 
 `OgaFinishReason_StopSequence` reserves the intended vocabulary but is not emitted until stop
 sequences are implemented end to end.
@@ -253,6 +261,16 @@ OgaResult* OgaEngineHasPendingRequests(
     bool* out);
 ```
 
+On successful `OgaCreateEngine`, the Engine retains shared ownership of the underlying Model. The
+caller may immediately release its `OgaModel` handle with `OgaDestroyModel`; that releases only the
+caller's handle ownership. The Model remains alive until the Engine and any other retaining objects
+are destroyed. The input Model handle must be valid during `OgaCreateEngine` and is not usable by the
+caller after that handle is released.
+
+Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
+valid closed tombstones that the caller must still destroy. A resident static batch is released as
+shared Engine storage during teardown, not through independent per-Request deallocation.
+
 Input IDs are copied before `BeginTurn` returns. The public count is fixed-width and is converted to
 `size_t` only after range validation. A pointer/count pair is canonical because an Engine Request is
 one sequence; accepting multi-sequence `OgaSequences` would obscure that constraint.
@@ -354,6 +372,9 @@ return B and C without executing another model step. Only after all retained eve
 the Engine schedule more work.
 
 `OgaEngineHasPendingRequests` returns true when either pending events or schedulable work exist.
+Before answering, it reclaims Requests whose final public handle was released. This is an
+owner-thread Engine boundary, so abandonment cannot leave stale schedulable work or retained events
+hidden behind a false result.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -362,6 +383,12 @@ does not drain, Engine progress pauses and memory remains bounded.
 Closing a Request removes its undelivered internal events. Events already copied by the application
 are application-owned and must be discarded there if no longer useful. Destroying an Engine closes
 its Requests and discards pending events.
+
+Close and final-handle abandonment both logically remove a Request from scheduling and purge its
+undelivered events. On the dynamic path, committed paged-cache ownership is released immediately.
+On the static path, a resident row is part of a shared batch allocation and cannot be physically
+released per Request; the closed/abandoned Request is no longer scheduled or returned, but its row,
+Request/Search storage, and shared cache allocation may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -385,6 +412,10 @@ copies `event.token` directly to caller storage.
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at
 commit, no `GeneratedTokenRecord` or per-Turn token range is required.
+
+Callers must never read `event.token` merely because an event is non-idle. They check
+`event.flags & OgaEngineEventFlag_Token`; the same event can also carry
+`OgaEngineEventFlag_TurnFinished`.
 
 ## Failure and capacity behavior
 
@@ -458,6 +489,8 @@ element stride, partial-drain, and backpressure semantics and should be justifie
 
 - `Request.begin_turn(tokens, turn_params=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
+- `TurnParams.set_stop_sequences(token_id_sequences)` accepts a ragged collection of token-ID
+  sequences and currently raises the explicit not-implemented error.
 - `Engine.run() -> EngineEvent`.
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
   and usage.
@@ -474,7 +507,7 @@ not turn cancellation into a callback that races the owner-thread `Run`.
 
 ## Implemented phases
 
-1. Added fixed-width `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
+1. Added fixed-width public `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
    usage, and caller-sized event declarations.
 2. Implemented Turn parameter creation, supported limit snapshotting, explicit unsupported setters,
    zero-based Turn IDs, and named cancellation.

@@ -432,6 +432,19 @@ def test_request_parameters_are_snapshotted(model):
     assert sink.tokens == predicted_tokens(_PROMPT_LONG, 4)
 
 
+def test_stop_sequences_accept_token_id_sequences_and_remain_unsupported(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=16)
+    request = engine.create_request(params)
+    turn_params = og.TurnParams(request)
+
+    with pytest.raises(RuntimeError, match="not implemented"):
+        turn_params.set_stop_sequences([[7, 8], [9]])
+
+    request.close()
+
+
 @pytest.mark.parametrize("state", ["created", "active", "turn-complete"])
 def test_close_is_valid_and_idempotent_from_every_state(model, state):
     engine = og.Engine(model)

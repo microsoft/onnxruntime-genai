@@ -147,9 +147,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
   /**
    * @brief Checks if there are any pending requests in the Engine.
+   *
+   * Reclaims Requests whose final public handle was released before checking retained events and
+   * schedulable work.
    * @return True if there are pending requests; otherwise, false.
    */
-  bool HasPendingRequests() const;
+  bool HasPendingRequests();
 
  private:
   void ValidateOwnerThread() const;

@@ -16,6 +16,9 @@ The current dynamic path manages paged KV decoder state together with per-reques
 > zero-based, monotonically increasing request-local IDs. `Run()` performs synchronous progress and
 > returns one typed `EngineEvent`; token and completion payloads are selected by event flags.
 > `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
+> `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
+> `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
+> and the release of any other retaining objects.
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
 > including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`,
@@ -167,10 +170,13 @@ input, continuation input, and the previously generated token replayed during co
 do not count. A later turn may begin whenever its input still leaves room for at least one generated
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
-`OgaRequestOptions` is a sized Version 1 structure. Callers zero-initialize it, set `struct_size`,
-and leave `reserved` zero. Null options and zero `max_session_tokens` default to `max_length`.
-Undersized structures fail before mutation; larger structures are accepted and trailing bytes are
-ignored. `OgaTurnParams` is opaque and reusable; `BeginTurn()` snapshots supported values.
+`OgaRequestOptions` is a public sized Version 1 structure, not an opaque handle. Callers
+zero-initialize it, set `struct_size`, and leave `reserved` zero. Null options and zero
+`max_session_tokens` use the Request's snapshotted `OgaGeneratorParams.search.max_length`. That
+search value normally defaults from the model context length, but a caller may set it lower before
+Request creation. Undersized structures fail before mutation; larger structures are accepted and
+trailing bytes are ignored. `OgaTurnParams` is opaque and reusable; `BeginTurn()` snapshots
+supported values.
 
 ### `Active`
 
@@ -209,7 +215,7 @@ A turn-complete request remains Engine-owned. Once admitted, it normally remains
 canceled before initial admission has not allocated cache state. `Close()` ends logical ownership
 immediately and releases dynamic cache resources; static batch storage may remain until batch
 recycling. If every external handle is released instead, the request is marked abandoned and
-reclaimed at the next serialized Engine boundary.
+reclaimed at the next serialized Engine boundary, including `HasPendingRequests()`.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
@@ -220,7 +226,8 @@ longer need continuation when deterministic immediate reclamation is required.
 `Close()` is legal from every state, is sequentially idempotent, and moves the request to terminal
 `Closed`. On the dynamic path, close immediately erases scheduler membership and releases
 committed paged-cache ownership. The Engine also removes any undrained pending events for that
-request.
+request. Final-handle abandonment performs the same logical removal and event purge when the Engine
+next reaches an owner-thread boundary.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request; surviving external handles are closed tombstones and still must be destroyed.
@@ -308,7 +315,8 @@ This distinction is important:
 - One call to `Run()` does not always mean one model invocation.
 - Draining a previously committed batch does not change model or cache state.
 - `Request::Close()` purges undrained events for that Request.
-- `HasPendingRequests()` is true while either the ready queue or scheduler contains work.
+- `HasPendingRequests()` first reclaims abandoned Requests, then is true while either the ready
+  queue or scheduler contains work.
 
 If the engine has previously encountered a fatal transaction or execution failure, `Run()` rethrows
 the stored error instead of attempting more work.
@@ -882,7 +890,12 @@ be recycled for new work. Static continuation is therefore valid only while the 
 single-request batch remains resident. The per-turn generated-token budget applies on this path
 too, although static execution does not use the dynamic reservation/checkpoint transaction.
 
-A closed request that is already resident in a static batch remains physically retained until that shared batch is recycled. It is not sampled or returned again, but its Request/Search storage can remain alive for the lifetime of the batch.
+Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
+A closed Request that is already resident in a static batch nevertheless remains part of that
+shared physical allocation until the batch is recycled. It is not sampled or returned again, but
+its row, Request/Search storage, and cache allocation can remain alive for the lifetime of the
+batch. Static cleanup therefore must not be described or tested as immediate per-Request
+deallocation.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -899,6 +912,7 @@ turn_id = request.begin_turn(initial_tokens, turn_params)
 while engine.has_pending_requests():
     event = engine.run()
     if event.flags & og.EngineEventFlags.TOKEN:
+        # event.request is a borrowed identity alias; event.turn_id is Request-local.
         token = event.token
         # Stream or process the token.
     if event.flags & og.EngineEventFlags.TURN_FINISHED:
@@ -911,9 +925,11 @@ turn_id = request.begin_turn(next_turn_tokens, turn_params)
 request.close()
 ```
 
-One event is returned at a time. A turn-complete dynamic request remains cache-resident until
-explicit close, which releases dynamic cache ownership immediately. Every token and terminal event
-carries the request-local Turn ID.
+One event is returned at a time. Flags are a bitmask, so callers test the `TOKEN` bit rather than
+comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and `event.token` is consumed
+only when `TOKEN` is set. `event.request` is a borrowed alias of the caller-owned Request handle,
+while `event.turn_id` identifies the Request-local Turn. A turn-complete dynamic request remains
+cache-resident until explicit close, which releases dynamic cache ownership immediately.
 
 ## Keeping this document current
 

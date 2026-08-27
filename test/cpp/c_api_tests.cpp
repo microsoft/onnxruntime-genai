@@ -982,6 +982,55 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
             std::string::npos);
   owner_thread_request->Close();
 
+  auto unsupported_request = engine->CreateRequest(*params);
+  auto unsupported_params = unsupported_request->CreateTurnParams();
+  auto stop_sequences = OgaSequences::Create();
+  const std::array<int32_t, 2> stop_sequence{7, 8};
+  stop_sequences->Append(stop_sequence.data(), stop_sequence.size());
+  EXPECT_THROW(
+      unsupported_params->SetStopSequences(*stop_sequences),
+      std::runtime_error);
+
+  std::unique_ptr<OgaResult> null_stop_sequences_result{
+      OgaTurnParamsSetStopSequences(unsupported_params.get(), nullptr)};
+  ASSERT_NE(null_stop_sequences_result, nullptr);
+  EXPECT_NE(
+      std::string(null_stop_sequences_result->GetError()).find(
+          "stop_sequences must not be null"),
+      std::string::npos);
+
+  // The setter is explicitly unsupported, so a non-null collection is validated only as a handle:
+  // it must not be dereferenced or retained before returning the not-implemented result.
+  std::unique_ptr<OgaResult> sentinel_stop_sequences_result{
+      OgaTurnParamsSetStopSequences(
+          unsupported_params.get(),
+          reinterpret_cast<const OgaSequences*>(uintptr_t{1}))};
+  ASSERT_NE(sentinel_stop_sequences_result, nullptr);
+  EXPECT_NE(
+      std::string(sentinel_stop_sequences_result->GetError()).find(
+          "not implemented"),
+      std::string::npos);
+  unsupported_request->Close();
+
+  OgaRequest* abandoned_created{};
+  OgaCheckResult(OgaEngineCreateRequest(
+      engine.get(), params.get(), nullptr, &abandoned_created));
+  ASSERT_NE(abandoned_created, nullptr);
+  OgaDestroyRequest(abandoned_created);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  OgaRequest* abandoned_queued{};
+  OgaCheckResult(OgaEngineCreateRequest(
+      engine.get(), params.get(), nullptr, &abandoned_queued));
+  ASSERT_NE(abandoned_queued, nullptr);
+  uint64_t abandoned_turn_id{};
+  OgaCheckResult(OgaRequestBeginTurn(
+      abandoned_queued, nullptr, input_tokens.data(),
+      input_tokens.size(), &abandoned_turn_id));
+  EXPECT_EQ(abandoned_turn_id, 0u);
+  OgaDestroyRequest(abandoned_queued);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
   struct FutureEvent {
     OgaEngineEvent event;
     uint64_t untouched;
@@ -991,6 +1040,34 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   OgaCheckResult(OgaEngineRun(engine.get(), &idle.event));
   EXPECT_EQ(idle.event.flags, OgaEngineEventFlag_None);
   EXPECT_EQ(idle.untouched, 42u);
+}
+
+TEST(CAPITests, EngineRetainsModelAfterPublicHandleRelease) {
+  OgaModel* model{};
+  ASSERT_EQ(
+      OgaCreateModel(MODEL_PATH "engine/synthetic-paged", &model),
+      nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaEngine* engine{};
+  ASSERT_EQ(OgaCreateEngine(model, &engine), nullptr);
+  ASSERT_NE(engine, nullptr);
+
+  OgaDestroyModel(model);
+  model = nullptr;
+
+  bool has_pending_requests = true;
+  EXPECT_EQ(
+      OgaEngineHasPendingRequests(engine, &has_pending_requests),
+      nullptr);
+  EXPECT_FALSE(has_pending_requests);
+
+  OgaEngineEvent idle{};
+  idle.struct_size = sizeof(idle);
+  EXPECT_EQ(OgaEngineRun(engine, &idle), nullptr);
+  EXPECT_EQ(idle.flags, OgaEngineEventFlag_None);
+
+  OgaDestroyEngine(engine);
 }
 
 // DML doesn't support batch_size > 1

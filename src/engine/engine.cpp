@@ -379,8 +379,9 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
 
 void Engine::ReclaimAbandonedRequests() {
   // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
-  // can safely perform the normal removal sequence: scheduler/cache release, ready-notification
-  // purge, and terminal close.
+  // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
+  // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
+  // batch row can remain physically retained until its shared batch is recycled.
   std::vector<std::shared_ptr<Request>> abandoned_requests;
   abandoned_requests.reserve(tracked_requests_.size());
   tracked_requests_.erase(
@@ -884,8 +885,9 @@ EngineEvent Engine::EventFromStepError(const EngineStepError& error) {
   std::rethrow_exception(fatal_error_);
 }
 
-bool Engine::HasPendingRequests() const {
+bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
+  ReclaimAbandonedRequests();
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();
 }

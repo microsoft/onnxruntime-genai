@@ -118,10 +118,13 @@ typedef enum OgaErrorCode {
 } OgaErrorCode;
 
 /**
- * \brief Versioned options copied by OgaEngineCreateRequest.
+ * \brief Public Version 1 options copied by OgaEngineCreateRequest.
  *
  * Zero-initialize the structure and set struct_size to sizeof(OgaRequestOptions). reserved must
  * remain zero. Larger structures are accepted and unknown trailing bytes are ignored.
+ * max_session_tokens == 0 uses the Request's snapshotted OgaGeneratorParams search.max_length.
+ * That search limit normally defaults from the model context length, but the caller may set it
+ * lower before Request creation.
  */
 typedef struct OgaRequestOptions {
   uint32_t struct_size;
@@ -140,9 +143,11 @@ typedef struct OgaTurnUsage {
  * \brief One caller-buffered Engine event.
  *
  * Zero-initialize the structure and set struct_size to sizeof(OgaEngineEvent) before every
- * OgaEngineRun call. request is borrowed and remains valid only while the caller retains the owned
- * OgaRequest handle. Larger structures are accepted and trailing bytes are not written. Payload
- * validity is determined by flags; Token and TurnFinished may be combined.
+ * OgaEngineRun call. Pump OgaEngineRun while work remains and inspect flags as a bitmask: Token and
+ * TurnFinished may be combined. request is a borrowed identity alias for the caller-owned
+ * OgaRequest, and turn_id identifies the Request-local Turn. Consume token only when Token is set.
+ * The borrowed request remains valid only while the caller retains the owned OgaRequest handle.
+ * Larger structures are accepted and trailing bytes are not written.
  */
 typedef struct OgaEngineEvent {
   uint32_t struct_size;
@@ -1250,7 +1255,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
  * initializes a new engine instance using the provided model, allowing requests to be added, removed, and
  * processed through the engine's API. The engine must be destroyed with OgaDestroyEngine when no longer needed.
  *
- * \param[in] model The model to use for the engine. The model must remain valid for the lifetime of the engine.
+ * On success, the Engine retains the underlying Model internally. The caller may release its
+ * OgaModel handle with OgaDestroyModel immediately after this call; the Model remains alive until
+ * the Engine and any other retaining objects are destroyed.
+ *
+ * \param[in] model The model to use for the engine. The handle must be valid for this call but need
+ * not remain owned by the caller after successful Engine creation.
  * \param[out] out Pointer to the created engine instance. On success, *out will be set to the new engine object.
  * \return OgaResult containing the error message if the engine creation failed, or nullptr on success.
  */
@@ -1260,7 +1270,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
  * \brief Destroys the given engine.
  *
  * Destroying an engine closes every request bound to it. Surviving request handles remain valid
- * closed handles and must still be released with OgaDestroyRequest.
+ * closed handles and must still be released with OgaDestroyRequest. A resident static batch is
+ * released as shared Engine storage during teardown, not by independent per-Request deallocation.
  * \param[in] engine The engine to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
@@ -1275,9 +1286,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(OgaEngine* engine, OgaEngineEven
 /**
  * \brief Checks if the engine has any pending requests to process.
  *
- * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
+ * This owner-thread operation first reclaims Requests whose final public handle was released, then
+ * reports whether undelivered events or schedulable work remain.
  * A false result does not mean the engine owns no requests: turn-complete requests remain owned
- * until removed or abandoned.
+ * until closed or abandoned.
  *
  * \param[in] engine The engine instance to check for pending requests.
  * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
@@ -1294,7 +1306,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * \param[in] engine The owning Engine.
  * \param[in] params The fixed request-level generation parameters.
- * \param[in] options Nullable request-scoped options. Zero max_session_tokens uses params.max_length.
+ * \param[in] options Nullable request-scoped options. Null options or zero max_session_tokens use
+ * the Request's snapshotted params.search.max_length. search.max_length normally defaults from the
+ * model context length but may have been set lower by the caller.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
@@ -1318,9 +1332,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopK(
     OgaTurnParams* params, int32_t top_k);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetSeed(
     OgaTurnParams* params, uint64_t seed);
+/**
+ * \brief Sets token-ID stop sequences for a Turn.
+ *
+ * This operation is currently not implemented. stop_sequences is not dereferenced or retained
+ * before the not-implemented result is returned.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetStopSequences(
-    OgaTurnParams* params, const char* const* stop_sequences,
-    uint64_t stop_sequence_count);
+    OgaTurnParams* params, const OgaSequences* stop_sequences);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetGuidance(
     OgaTurnParams* params, const char* guidance_type,
     const char* guidance_data);
@@ -1343,9 +1362,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
 /**
  * \brief Permanently closes a Request and releases its Engine resources.
  *
- * Close is valid from every lifecycle state and is idempotent. Dynamic cache ownership is released
- * immediately; a resident static-batch row may remain physically retained until its shared batch is
- * recycled. Undelivered events for the Request are discarded.
+ * Close is valid from every lifecycle state and is idempotent. It logically removes the Request
+ * from scheduling and discards its undelivered events. Dynamic cache ownership is released
+ * immediately. A resident static-batch row and its shared cache allocation may remain physically
+ * retained until the whole batch is recycled.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 
@@ -1353,7 +1373,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * \brief Destroys the given request.
  *
  * Releasing the final owned handle without first calling OgaRequestClose marks the Request
- * abandoned for deferred Engine reclamation.
+ * abandoned for reclamation at the next owner-thread Engine boundary. Reclamation has the same
+ * logical scheduling and event-purge behavior as Close. A resident static-batch row and shared
+ * cache allocation may still remain until the batch is recycled.
  *
  * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */

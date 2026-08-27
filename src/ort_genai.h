@@ -924,8 +924,8 @@ struct OgaTurnParams : OgaAbstract {
   void SetSeed(uint64_t value) {
     OgaCheckResult(OgaTurnParamsSetSeed(this, value));
   }
-  void SetStopSequences(const char* const* values, uint64_t count) {
-    OgaCheckResult(OgaTurnParamsSetStopSequences(this, values, count));
+  void SetStopSequences(const OgaSequences& values) {
+    OgaCheckResult(OgaTurnParamsSetStopSequences(this, &values));
   }
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnParamsSetGuidance(this, type, data));

@@ -772,12 +772,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_top_k", &OgaTurnParams::SetTopK)
       .def("set_seed", &OgaTurnParams::SetSeed)
       .def("set_stop_sequences", [](OgaTurnParams& params,
-                                     const std::vector<std::string>& values) {
-        std::vector<const char*> pointers;
-        pointers.reserve(values.size());
+                                     const std::vector<std::vector<int32_t>>& values) {
+        auto sequences = OgaSequences::Create();
         for (const auto& value : values)
-          pointers.push_back(value.c_str());
-        params.SetStopSequences(pointers.data(), pointers.size());
+          sequences->Append(value.data(), value.size());
+        params.SetStopSequences(*sequences);
       })
       .def("set_guidance", &OgaTurnParams::SetGuidance);
 

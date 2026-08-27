@@ -1590,13 +1590,25 @@ OGA_UNIMPLEMENTED_TURN_SETTER(
 OGA_UNIMPLEMENTED_TURN_SETTER(
     OgaTurnParamsSetSeed, (OgaTurnParams* params, uint64_t))
 OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnParamsSetStopSequences,
-    (OgaTurnParams* params, const char* const*, uint64_t))
-OGA_UNIMPLEMENTED_TURN_SETTER(
     OgaTurnParamsSetGuidance,
     (OgaTurnParams* params, const char*, const char*))
 
 #undef OGA_UNIMPLEMENTED_TURN_SETTER
+
+OgaResult* OgaTurnParamsSetStopSequences(
+    OgaTurnParams* params, const OgaSequences* stop_sequences) {
+  OGA_TRY
+  if (!params) {
+    throw std::runtime_error("params must not be null.");
+  }
+  if (!stop_sequences) {
+    throw std::runtime_error("stop_sequences must not be null.");
+  }
+  params->ValidateOwnerThread();
+  throw std::runtime_error(
+      "OgaTurnParamsSetStopSequences is not implemented.");
+  OGA_CATCH
+}
 
 OgaResult* OgaRequestBeginTurn(
     OgaRequest* request,

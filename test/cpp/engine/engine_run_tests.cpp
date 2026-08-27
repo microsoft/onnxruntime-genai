@@ -9,9 +9,11 @@
 // without redundant model runs, and forms a fresh batch across runs under capacity backpressure.
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -127,6 +129,18 @@ class EngineRunTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST(EngineLifetimeTest, EngineRetainsModelForItsLifetime) {
+  auto model = LoadSyntheticPagedModel();
+  std::weak_ptr<Model> model_observer = model;
+  auto engine = std::make_shared<Engine>(model);
+
+  model.reset();
+  EXPECT_FALSE(model_observer.expired());
+
+  engine.reset();
+  EXPECT_TRUE(model_observer.expired());
+}
 
 // One request: Run decodes the proposed batch exactly once, commits its cache allocation, and
 // returns the request.
@@ -478,6 +492,131 @@ TEST_F(EngineRunTest, RunWithNoRequestsReturnsNull) {
   EXPECT_EQ(engine.executor->decode_calls, 0);
 }
 
+TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedUnassignedRequest) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  ExternalRequestReference public_handle{*request};
+
+  public_handle.Release();
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+  EXPECT_EQ(engine.executor->decode_calls, 0);
+}
+
+TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedQueuedRequest) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  ExternalRequestReference public_handle{*request};
+
+  public_handle.Release();
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+  EXPECT_EQ(engine.executor->decode_calls, 0);
+}
+
+TEST_F(EngineRunTest, HasPendingRequestsValidatesOwnerThreadBeforeReclamation) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  ExternalRequestReference public_handle{*request};
+  public_handle.Release();
+
+  std::exception_ptr off_thread_error;
+  std::thread off_owner_thread([&] {
+    try {
+      static_cast<void>(engine.engine->HasPendingRequests());
+    } catch (...) {
+      off_thread_error = std::current_exception();
+    }
+  });
+  off_owner_thread.join();
+
+  ASSERT_NE(off_thread_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_error),
+               std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+}
+
+TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedActiveResidentRequest) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  ExternalRequestReference public_handle{*request};
+  engine.cache->Allocate({request});
+  request->Schedule();
+  ASSERT_EQ(request->status_, RequestStatus::Active);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  public_handle.Release();
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+  EXPECT_EQ(engine.executor->decode_calls, 0);
+}
+
+TEST_F(EngineRunTest, HasPendingRequestsPurgesDestroyedTurnCompleteEventWithoutAffectingPeer) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
+  auto survivor = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  auto abandoned = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(20));
+  ExternalRequestReference survivor_handle{*survivor};
+  ExternalRequestReference abandoned_handle{*abandoned};
+
+  ASSERT_EQ(engine.engine->Run().request, survivor);
+  ASSERT_EQ(survivor->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(abandoned->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 2u);
+
+  abandoned_handle.Release();
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(abandoned->status_, RequestStatus::Closed);
+  EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+
+  survivor->BeginTurn(std::array<int32_t, 1>{5},
+                      std::optional<size_t>{1});
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(engine.engine->Run().request, survivor);
+  EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
+
+  survivor->Close();
+  survivor_handle.Release();
+}
+
+TEST_F(EngineRunTest, DestroyingEngineClosesRequestWhosePublicHandleSurvives) {
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/8);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, EosToken(*model_));
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(
+      model_, std::move(dependencies));
+  auto request = CreateRequestWithPrompt(
+      engine, *model_, Prompt(10));
+  ExternalRequestReference public_request{*request};
+
+  engine.reset();
+
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_NO_THROW(public_request.Release());
+}
+
 TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuation) {
   model_->config_->engine.dynamic_batching.reset();
   auto trace = std::make_shared<CallTrace>();
@@ -535,7 +674,7 @@ TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhe
   EXPECT_FALSE(engine->HasPendingRequests());
 }
 
-TEST_F(EngineRunTest, StaticRunClosesAbandonedResidentWithoutIndividualDeallocation) {
+TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDeallocation) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
       model_, /*capacity=*/1, nullptr, /*supports_dynamic_batching=*/false);
@@ -556,7 +695,7 @@ TEST_F(EngineRunTest, StaticRunClosesAbandonedResidentWithoutIndividualDeallocat
   ASSERT_EQ(cache->AllocatedCount(), 1u);
   external.Release();
 
-  EXPECT_EQ(engine->Run().flags, EngineEventFlagNone);
+  EXPECT_FALSE(engine->HasPendingRequests());
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(executor_observer->decode_calls, 1);
   EXPECT_EQ(cache->AllocatedCount(), 1u);
