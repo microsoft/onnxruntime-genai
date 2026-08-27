@@ -1,4 +1,4 @@
-#include "../generators.h"
+#include "generator/generators.h"
 #include "decoder_only.h"
 
 namespace Generators {
@@ -15,9 +15,9 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequen
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      kv_cache_(CreateKeyValueCache(*this)),
+      kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       recurrent_state_(CreateRecurrentState(*this)),
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
   logits_.Add();

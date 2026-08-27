@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
+#include "generator/generators.h"
+#include "models/io/static_kv_cache.h"
 #include "whisper.h"
 
 namespace Generators {
@@ -51,7 +52,7 @@ DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
     : State{params, model},
       model_{model},
-      kv_cache_(CreateKeyValueCache(*this)),
+      kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       num_frames_{num_frames} {
   input_ids_.Add();
   logits_.Add();

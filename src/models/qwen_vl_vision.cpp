@@ -3,7 +3,7 @@
 // Qwen VL Vision pipeline implementation.
 
 #include "qwen_vl_vision.h"
-#include "../generators.h"
+#include "generator/generators.h"
 
 #include <fstream>
 #include <stdexcept>

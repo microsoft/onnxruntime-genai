@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "step_plan.h"
 
 namespace Generators {

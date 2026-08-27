@@ -23,31 +23,26 @@
 #include <sys/stat.h>
 #endif
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
 #include "model_package.h"
-#include "tokenizer_tag_utils.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
-#include "parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
-#include "qwen2_5_vl_image_processor.h"
-#include "videochat_flash_processor.h"
-#include "mistral3_image_processor.h"
-#include "../dml/interface.h"
-#include "../openvino/interface.h"
-#include "../qnn/interface.h"
-#include "../ryzenai/interface.h"
+#include "ep/dml/interface.h"
+#include "ep/openvino/interface.h"
+#include "ep/qnn/interface.h"
+#include "ep/ryzenai/interface.h"
 #include "session_options.h"
 
 namespace Generators {
@@ -68,7 +63,7 @@ std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_
 
 std::string SharedInitializerFileIdentity(const fs::path& path) {
 #ifndef _WIN32
-  struct stat file_info{};
+  struct stat file_info = {};
   if (::stat(path.c_str(), &file_info) == 0) {
     return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
   }
@@ -302,187 +297,9 @@ State::~State() {
   }
 }
 
-std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
-  bool pad_right_{true};
-
-  size_t max_length = 0;
-  for (auto& sequence : sequences)
-    max_length = std::max(max_length, sequence.size());
-
-  std::vector<int32_t> result(max_length * sequences.size());
-  std::span<int32_t> result_span(result);
-
-  // Copy and pad the sequences with pad_token_id
-  for (size_t i = 0; i < sequences.size(); i++) {
-    auto output_span = result_span.subspan(i * max_length, max_length);
-    auto input_span = sequences[i];
-
-    auto pad_count = max_length - input_span.size();
-    if (pad_right_) {
-      std::copy(input_span.begin(), input_span.end(), output_span.begin());
-      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
-    } else {
-      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
-      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
-    }
-  }
-
-  return result;
-}
-
 void CheckResult(extError_t error) {
   if (error != kOrtxOK)
     throw std::runtime_error(OrtxGetLastErrorMessage());
-}
-
-TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
-    : tokenizer_{tokenizer.shared_from_this()} {
-  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
-}
-
-const std::string& TokenizerStream::Decode(int32_t token) {
-  const char* string;
-  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
-  chunk_ = string;
-  return chunk_;
-}
-
-Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
-                                       eos_token_id_{config.model.eos_token_id},
-                                       pad_token_id_{config.model.pad_token_id},
-                                       bot_token_id_{config.model.bot_token_id},
-                                       eot_token_id_{config.model.eot_token_id},
-                                       bor_token_id_{config.model.bor_token_id},
-                                       eor_token_id_{config.model.eor_token_id} {
-  // Default tokenizer options
-  const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
-  const char* values[] = {"false", "true"};
-
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
-  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
-
-  // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
-  // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.
-  if (!bot_token_id_) bot_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::BotTokenIdName), *this);
-  if (!eot_token_id_) eot_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::EotTokenIdName), *this);
-  if (!bor_token_id_) bor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::BorTokenIdName), *this);
-  if (!eor_token_id_) eor_token_id_ = ResolveFallbackTokenId(config.model.type, std::string(Config::Defaults::EorTokenIdName), *this);
-}
-
-int32_t Tokenizer::GetBotTokenId() const {
-  if (!bot_token_id_) throw std::runtime_error("bot_token_id is not defined for this model");
-  return *bot_token_id_;
-}
-
-int32_t Tokenizer::GetEotTokenId() const {
-  if (!eot_token_id_) throw std::runtime_error("eot_token_id is not defined for this model");
-  return *eot_token_id_;
-}
-
-int32_t Tokenizer::GetBorTokenId() const {
-  if (!bor_token_id_) throw std::runtime_error("bor_token_id is not defined for this model");
-  return *bor_token_id_;
-}
-
-int32_t Tokenizer::GetEorTokenId() const {
-  if (!eor_token_id_) throw std::runtime_error("eor_token_id is not defined for this model");
-  return *eor_token_id_;
-}
-
-std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
-  return std::make_unique<TokenizerStream>(*this);
-}
-
-void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
-  // Tap into ORT Extensions API
-  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
-}
-
-std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-  OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
-
-  const extTokenId_t* tokens;
-  size_t count;
-  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
-  return {tokens, tokens + count};
-}
-
-std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
-  OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
-
-  const char* string;
-  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
-  return string;
-}
-
-std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
-  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
-
-  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
-  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
-
-  const char* text_ptr{};
-  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
-
-  return text_ptr;
-}
-
-std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
-  std::vector<std::vector<int32_t>> sequences;
-  std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i].c_str()));
-    span_sequences.emplace_back(sequences.back());
-  }
-
-  return PadInputs(span_sequences, pad_token_id_);
-}
-
-std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
-  if (strings.empty()) {
-    throw std::runtime_error("EncodeBatch: input strings must not be empty");
-  }
-  for (size_t i = 0; i < strings.size(); i++) {
-    if (strings[i] == nullptr) {
-      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
-    }
-  }
-
-  std::vector<std::vector<int32_t>> sequences;
-  std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i]));
-    span_sequences.emplace_back(sequences.back());
-  }
-
-  auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
-
-  auto shape = std::array<int64_t, 2>{static_cast<int64_t>(strings.size()), static_cast<int64_t>(encoded.size() / strings.size())};
-  auto ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
-  auto tensor = std::make_shared<Tensor>(std::move(ort_tensor_));
-  std::copy(encoded.begin(), encoded.end(), tensor->GetMutableData<int32_t>());
-
-  return tensor;
-}
-
-std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
-  if (sequences.size() % count != 0)
-    throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
-  size_t sequence_length = sequences.size() / count;
-  std::vector<std::string> strings;
-  for (size_t i = 0; i < count; i++)
-    strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
-  return strings;
-}
-
-int32_t Tokenizer::TokenToTokenId(const char* token) const {
-  extTokenId_t token_id;
-  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
-  return token_id;
 }
 
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
@@ -505,14 +322,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // re-use it for all models.
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
-  // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI", "AMDGPU"};
-  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  const char* provider_name = device_type_names[static_cast<int>(type)];
+  std::string provider_name = device.GetExecutionProviderName();
   Config::ProviderOptions init_session_provider_options{provider_name, {}};
 
   // Look up the user-supplied provider options entry for this provider (if any),
@@ -522,7 +335,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
   const auto user_provider_options_it = std::find_if(
       user_provider_options_list.begin(), user_provider_options_list.end(),
-      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+      [&provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
   const Config::ProviderOptions* user_provider_options =
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
   if (user_provider_options)
@@ -531,7 +344,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
-  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  const std::vector<std::string> providers{provider_name};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
@@ -1062,14 +875,6 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   return session;
 }
 
-std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
-  return std::make_shared<Tokenizer>(*config_);
-}
-
-std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
-}
-
 bool Model::IsPruned() const {
   const auto& logits_name = config_->model.decoder.outputs.logits;
   if (!session_info_.HasOutput(logits_name))
@@ -1242,40 +1047,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
     }
   }
   return expanded;
-}
-
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : tokenizer_{std::make_shared<Tokenizer>(config)},
-      processor_factory_{
-          {"phi3v", Processor::Create<PhiImageProcessor>},
-          {"whisper", Processor::Create<WhisperProcessor>},
-          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
-          {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
-          {"gemma3", Processor::Create<GemmaImageProcessor>},
-          {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
-          {"mistral3", Processor::Create<Mistral3ImageProcessor>},
-          {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
-          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
-  auto processor = processor_factory_.find(config.model.type);
-  if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
-  } else {
-    throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
-  }
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, {}, images, audios};
-  return processor_->Process(*tokenizer_, payload);
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
-  Payload payload{"", prompts, images, audios};
-  return processor_->Process(*tokenizer_, payload);
 }
 
 }  // namespace Generators
