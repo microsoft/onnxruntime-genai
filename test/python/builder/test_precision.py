@@ -344,9 +344,14 @@ def _run_check_extra_options(
     execution_provider="cpu",
     tie_word_embeddings=True,
     layer_types=None,
+    architectures=None,
 ):
     # Avoid Hugging Face network/config loading and provide only the config fields needed.
-    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings, layer_types=layer_types)
+    fake_config = types.SimpleNamespace(
+        tie_word_embeddings=tie_word_embeddings,
+        layer_types=layer_types,
+        architectures=architectures or ["FakeForCausalLM"],
+    )
 
     def _fake_get_hf_details(*_args, **_kwargs):
         return {

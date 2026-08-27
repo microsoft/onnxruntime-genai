@@ -53,9 +53,11 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35MoEModel
-from builders.qwen35_vlm_export import export_qwen35_vlm_components, maybe_load_qwen35_config
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
+
+
+_QWEN_VLM_ARCHITECTURES = {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}
 
 
 def add_special_token_ids(config, tokenizer):
@@ -105,6 +107,10 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     try:
         config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     except (KeyError, ValueError) as error:
+        if not extra_options.get("qwen_vlm", False):
+            raise
+        from builders.expansions.trt_rtx_qwen35_vlm_export import maybe_load_qwen35_config
+
         config = maybe_load_qwen35_config(hf_name, token=hf_token, cache_dir=extra_kwargs.get("cache_dir"), error=error)
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
@@ -309,8 +315,10 @@ def check_extra_options(
     extra_options["hf_details"] = hf_details
 
     if extra_options.get("qwen_vlm", False):
-        if getattr(config, "architectures", [None])[0] != "Qwen3_5ForConditionalGeneration":
-            raise ValueError("qwen_vlm=true currently supports Qwen3_5ForConditionalGeneration models only.")
+        if execution_provider not in {"NvTensorRtRtx", "trt-rtx"}:
+            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
+        if getattr(config, "architectures", [None])[0] not in _QWEN_VLM_ARCHITECTURES:
+            raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
         if extra_options.get("exclude_embeds") is False:
             raise ValueError("qwen_vlm=true requires exclude_embeds=true so the decoder consumes inputs_embeds.")
         extra_options["exclude_embeds"] = True
@@ -599,8 +607,12 @@ def create_model(
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
 
     if not config_only and extra_options.get("qwen_vlm", False):
-        if config.architectures[0] != "Qwen3_5ForConditionalGeneration":
-            raise ValueError("qwen_vlm=true currently supports Qwen3_5ForConditionalGeneration models only.")
+        if execution_provider != "trt-rtx":
+            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
+        if config.architectures[0] not in _QWEN_VLM_ARCHITECTURES:
+            raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
+        from builders.expansions.trt_rtx_qwen35_vlm_export import export_qwen35_vlm_components
+
         export_qwen35_vlm_components(
             hf_name,
             output_dir,
@@ -728,8 +740,8 @@ def get_args():
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
-                qwen_vlm = true/false: Export Qwen3.5 VLM auxiliary embedding and vision models alongside the text decoder. Default is false.
-                    Requires Qwen3_5ForConditionalGeneration and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
+                qwen_vlm = true/false: Export Qwen3.5 VLM auxiliary embedding and vision models for TRT-RTX alongside the text decoder. Default is false.
+                    Requires execution_provider=NvTensorRtRtx, a Qwen3.5/Qwen3.6 VLM architecture, and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.

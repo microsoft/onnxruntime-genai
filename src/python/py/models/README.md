@@ -18,7 +18,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
-    - [Export Qwen3.5 VLM Components](#export-qwen35-vlm-components)
+    - [Export Qwen3.5/Qwen3.6 VLM Components for TRT-RTX](#export-qwen35-vlm-components-for-trt-rtx)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
@@ -229,11 +229,11 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
 ```
 
-#### Export Qwen3.5 VLM Components
+#### Export Qwen3.5/Qwen3.6 VLM Components for TRT-RTX
 
-Set `qwen_vlm=true` to export a full Qwen3.5 VLM package from one builder invocation. The option exports the text decoder plus `embedding.onnx`, `vision.onnx`, and `processor_config.json`, and patches `genai_config.json` for multimodal loading. The default is `false`.
+Set `qwen_vlm=true` with `-e NvTensorRtRtx` to export a full Qwen3.5/Qwen3.6 VLM package from one builder invocation. The option exports the text decoder plus `embedding.onnx`, `vision.onnx`, and `processor_config.json`, and patches `genai_config.json` for multimodal loading. The default is `false`.
 
-This option currently supports Hugging Face configs whose architecture is `Qwen3_5ForConditionalGeneration`. It requires the decoder to consume `inputs_embeds`; the builder sets `exclude_embeds=true` automatically unless `exclude_embeds=false` is explicitly provided, which raises a `ValueError`.
+This option currently supports TRT-RTX exports for Hugging Face configs whose architecture is `Qwen3_5ForConditionalGeneration` or `Qwen3_5MoeForConditionalGeneration`. It requires the decoder to consume `inputs_embeds`; the builder sets `exclude_embeds=true` automatically unless `exclude_embeds=false` is explicitly provided, which raises a `ValueError`.
 
 ```bash
 # From wheel:

@@ -137,7 +137,7 @@ def main(args):
         # Encode combined system + user prompt and append inputs to model
         inputs = processor(prompt, images=images, audios=audios)
         generator.set_inputs(inputs)
-        input_token_count = generator.token_count()
+        input_tokens = generator.token_count()
 
         if args.verbose:
             print("Running generation loop...")
@@ -179,7 +179,7 @@ def main(args):
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(
-                f"Prompt length: {input_token_count}, New tokens: {len(new_tokens)}, Total tokens: {total_tokens}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {input_token_count / prompt_time:.2f} tps, New tokens per second: {len(new_tokens) / run_time:.2f} tps"
+                f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Total tokens: {total_tokens}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens) / prompt_time:.2f} tps, New tokens per second: {len(new_tokens) / run_time:.2f} tps"
             )
 
         # If non-interactive is requested, it will just run the model for the user prompt and exit

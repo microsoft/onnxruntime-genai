@@ -1046,7 +1046,8 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
 }
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
-  // Check for Qwen-VL family models which require 3D mRoPE position IDs
+  // Qwen2VLPositionInputs is shared by the Qwen-VL family, including Qwen3.5 VLM,
+  // because they use the same 3D mRoPE position IDs and attention-mask layout.
   if (ModelType::IsQwenVLFamily(state.model_.config_->model.type)) {
     return std::make_unique<Qwen2VLPositionInputs>(state.model_, state, sequence_lengths);
   }
