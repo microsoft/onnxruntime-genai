@@ -20,7 +20,9 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
+    spec = importlib.util.spec_from_file_location(
+        f"models.builders.{module_name}", BUILDERS_DIR.joinpath(*module_name.split(".")).with_suffix(".py")
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
     spec.loader.exec_module(module)
@@ -33,11 +35,13 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
+trt_rtx_module = _load_builder_module("expansions.trt_rtx")
 Model = base_module.Model
 Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
+TRT_RTX = trt_rtx_module.TRT_RTX
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -186,7 +190,7 @@ def test_qwen35_paged_decoder_uses_packed_3d_position_ids(monkeypatch):
         (1, [24, 20, 20]),
     ],
 )
-def test_qwen_vl_lowers_mrotary_embedding_to_rotary_embedding(layout, sections):
+def test_trt_rtx_lowers_mrotary_embedding_to_rotary_embedding(layout, sections):
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.hidden_size = 2048
@@ -217,7 +221,8 @@ def test_qwen_vl_lowers_mrotary_embedding_to_rotary_embedding(layout, sections):
     model.make_value = lambda name, dtype, shape: model.values.append((name, dtype, shape))
     model.make_initializer = lambda tensor, name, **_kwargs: model.initializers.append((tensor, name))
 
-    model.make_mrotary_embedding(
+    TRT_RTX.make_mrotary_embedding(
+        model,
         "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
         "q",
         "q_rotated",
@@ -689,7 +694,7 @@ def test_qwen35_moe_uses_base_layer_route():
     assert "make_layer" not in Qwen35MoETextModel.__dict__
 
 
-def test_gated_rms_norm_emitter_decomposes_to_supported_ops():
+def test_trt_rtx_gated_rms_norm_emitter_decomposes_to_supported_ops():
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_value_dim = 2048
@@ -703,7 +708,7 @@ def test_gated_rms_norm_emitter_decomposes_to_supported_ops():
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
     shape = ["batch_size", "sequence_length", 2048]
 
-    model.make_gated_rms_norm("/gated", "x", "scale", "gate", shape, epsilon=1e-6)
+    TRT_RTX.make_gated_rms_norm(model, "/gated", "x", "scale", "gate", shape, epsilon=1e-6)
 
     assert [node[0] for node in nodes] == [
         "Reshape",
@@ -767,7 +772,7 @@ def test_gated_add_emitter():
         (3, {"ndim": 1, "activation": "silu", "state_window": 3}),
     ],
 )
-def test_causal_conv_with_state_emits_state_window_only_when_enabled(state_window, expected_attributes):
+def test_trt_rtx_causal_conv_with_state_emits_state_window_only_when_enabled(state_window, expected_attributes):
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
     model.context_length_attrs = {"state_window": state_window}
@@ -778,7 +783,8 @@ def test_causal_conv_with_state_emits_state_window_only_when_enabled(state_windo
     )
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
 
-    model.make_causal_conv_with_state(
+    TRT_RTX.make_causal_conv_with_state(
+        model,
         "/conv",
         root_input="x",
         weight="w",
@@ -808,7 +814,7 @@ def test_causal_conv_with_state_emits_state_window_only_when_enabled(state_windo
         (3, {"q_num_heads": 4, "kv_num_heads": 2, "update_rule": "gated_delta", "scale": 0.5, "state_window": 3}),
     ],
 )
-def test_linear_attention_emits_state_window_only_when_enabled(state_window, expected_attributes):
+def test_trt_rtx_linear_attention_emits_state_window_only_when_enabled(state_window, expected_attributes):
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_value_dim = 16
@@ -820,7 +826,8 @@ def test_linear_attention_emits_state_window_only_when_enabled(state_window, exp
     )
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
 
-    model.make_linear_attention(
+    TRT_RTX.make_linear_attention(
+        model,
         "/linear_attention",
         q_path="q",
         k_path="k",
@@ -846,7 +853,7 @@ def test_linear_attention_emits_state_window_only_when_enabled(state_window, exp
     ]
     assert values == [("/linear_attention/output_0", ir.DataType.FLOAT16, ["batch_size", "sequence_length", 16])]
 
-def test_linear_attention_gate_emitter():
+def test_trt_rtx_linear_attention_gate_emitter():
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
     nodes = []
@@ -857,7 +864,7 @@ def test_linear_attention_gate_emitter():
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
     shape = ["batch_size", "sequence_length", 16]
 
-    model.make_linear_attention_gate("/gate", "a", "dt_bias", "decay_scale", "b", shape)
+    TRT_RTX.make_linear_attention_gate(model, "/gate", "a", "dt_bias", "decay_scale", "b", shape)
 
     assert nodes == [
         (
