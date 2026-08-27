@@ -50,6 +50,71 @@ jobs:
       echo
       echo '=== nvcc files under /usr/local and /opt ==='
       find /usr/local /opt -maxdepth 5 -name nvcc -print 2>/dev/null || true
+
+      echo
+      echo '=== CUDA-related environment and profiles ==='
+      env | sort | grep -Ei 'cuda|nvidia' || true
+      grep -RniE 'CUDA_HOME|CUDA_PATH|/cuda[^ ]*/bin' \
+        /etc/environment /etc/profile /etc/profile.d /home/cloudtest/.profile /home/cloudtest/.bashrc \
+        2>/dev/null || true
+
+      echo
+      echo '=== Installed CUDA/NVIDIA packages ==='
+      if command -v dpkg-query >/dev/null 2>&1; then
+        dpkg-query -W -f='${binary:Package}\t${Version}\n' 2>/dev/null | \
+          grep -Ei 'cuda|nvidia|cudnn|nccl' || true
+      fi
+      if command -v rpm >/dev/null 2>&1; then
+        rpm -qa | grep -Ei 'cuda|nvidia|cudnn|nccl' || true
+      fi
+
+      echo
+      echo '=== Linker-visible CUDA libraries ==='
+      ldconfig -p 2>/dev/null | grep -Ei 'cuda|cudart|cublas|cudnn|nvrtc|nccl' || true
+
+      echo
+      echo '=== CUDA headers, compilers, and runtime libraries ==='
+      for root in /usr /usr/local /opt /mnt /home /datadisks /data /scratch; do
+        if [ -d "$root" ]; then
+          echo "--- searching $root ---"
+          find "$root" -maxdepth 7 \
+            \( -path '/mnt/vss/_work' -o -path '/home/cloudtest/vss' \) -prune -o \
+            -type f \( -name nvcc -o -name cuda.h -o -name 'libcudart.so*' -o -name 'libnvrtc.so*' \) \
+            -print 2>/dev/null || true
+        fi
+      done
+
+      echo
+      echo '=== Candidate CUDA_HOME paths ==='
+      for root in /usr/local /opt /mnt /home /datadisks /data /scratch; do
+        if [ -d "$root" ]; then
+          find "$root" -maxdepth 7 -type f -path '*/bin/nvcc' -print 2>/dev/null | \
+            while read -r nvcc; do dirname "$(dirname "$nvcc")"; done
+          find "$root" -maxdepth 6 -type d -name 'cuda12.8' -print 2>/dev/null || true
+        fi
+      done | sort -u
+
+      echo
+      echo '=== Mounts and candidate directories ==='
+      findmnt 2>/dev/null | grep -Ei 'cuda|nvidia|container|mnt|opt' || true
+      for location in /usr/local/CloudTest /opt/microsoft /mnt /datadisks /data /scratch /usr/include /usr/lib/x86_64-linux-gnu; do
+        if [ -e "$location" ]; then
+          echo
+          echo "--- $location (depth 2) ---"
+          find "$location" -maxdepth 2 -mindepth 1 -printf '%y %p -> %l\n' 2>/dev/null | head -n 500 || true
+        fi
+      done
+
+      echo
+      echo '=== NVIDIA container runtime and local images ==='
+      if command -v nvidia-container-cli >/dev/null 2>&1; then
+        nvidia-container-cli --version || true
+      fi
+      if command -v docker >/dev/null 2>&1; then
+        docker info 2>/dev/null | grep -Ei 'runtime|nvidia|root dir|server version' || true
+        docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
+          grep -Ei 'cuda|nvidia|onnxruntime|manylinux' || true
+      fi
       true
     displayName: 'List CUDA installation locations'
 
