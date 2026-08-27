@@ -208,11 +208,7 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     }
   }
 
-  auto empty_shape = shape_;
-  if (Device().ShouldClampZeroLengthKeyValueCacheTensors()) {
-    empty_shape[2] = std::max<int64_t>(1, empty_shape[2]);
-  }
-  empty_past_ = OrtValue::CreateTensor(Allocator(), empty_shape, type_);
+  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   // Auto-detect per-layer KV cache shape from ONNX session input shapes.
   // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
@@ -273,9 +269,6 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
       for (int i = 0; i < layer_count_; ++i) {
         std::array<int64_t, 4> layer_empty_shape = layer_shapes_[i];
         layer_empty_shape[2] = 0;  // sequence length = 0 for empty past
-        if (Device().ShouldClampZeroLengthKeyValueCacheTensors()) {
-          layer_empty_shape[2] = 1;
-        }
         empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), layer_empty_shape, type_);
       }
     }
@@ -373,7 +366,7 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
       // tensors are placeholders (Update() reallocates presents_ at the real
       // total_length before every Run), but some device allocators reject
       // zero-sized buffers. Let the active device policy clamp when needed.
-      if (Device().ShouldClampZeroLengthKeyValueCacheTensors()) {
+      if (Device().ShouldClampZeroLengthKeyValueCacheOutputPlaceholders()) {
         tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
       }
 

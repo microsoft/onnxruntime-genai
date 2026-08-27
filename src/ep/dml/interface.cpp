@@ -170,7 +170,7 @@ struct InterfaceImpl : DeviceInterface {
     return CreateStandardKeyValueCache(state);
   }
 
-  bool ShouldClampZeroLengthKeyValueCacheTensors() const override { return true; }
+  bool ShouldClampZeroLengthKeyValueCacheOutputPlaceholders() const override { return true; }
 
   int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
     return GetKvCacheQuantizationBits(session_options, to_string(GetType()));

@@ -128,6 +128,11 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
     key_value_cache_ = model_->p_device_kvcache_->CreateKeyValueCache(*key_value_cache_state_);
     if (!key_value_cache_)
       throw std::runtime_error("The selected execution provider did not create a KV cache for the static Engine.");
+    if (key_value_cache_->IsModelManaged()) {
+      throw std::runtime_error(
+          "Static Engine does not support model-managed KV caches. Use the Generator API for stateful "
+          "execution-provider models, or use a model with exposed past/present KV cache tensors.");
+    }
 
     key_value_cache_->Add();
   }

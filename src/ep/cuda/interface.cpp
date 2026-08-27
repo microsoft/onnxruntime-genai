@@ -683,6 +683,10 @@ struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
     return true;
   }
 
+  bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const override {
+    return false;
+  }
+
   bool SupportsPhi3RopeRewind(const Config& config) const override {
     for (const auto& provider_options : config.model.decoder.session_options.provider_options) {
       if (provider_options.name != "NvTensorRtRtx")

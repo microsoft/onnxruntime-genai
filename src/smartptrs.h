@@ -291,12 +291,15 @@ struct DeviceInterface {
   // providers can replace the standard exposed past/present tensor implementation. Keep last for
   // vtable/ABI stability.
   virtual std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) = 0;
-  virtual bool ShouldClampZeroLengthKeyValueCacheTensors() const { return false; }
+  virtual bool ShouldClampZeroLengthKeyValueCacheOutputPlaceholders() const { return false; }
   virtual bool ShouldZeroKeyValueCacheTensors() const { return true; }
   virtual int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& /*decoder*/,
                                            const Config::Search& /*search*/,
                                            int /*max_length*/) const { return 0; }
-  virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& /*decoder*/) const { return false; }
+  virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const {
+    return decoder.sliding_window &&
+           decoder.sliding_window->slide_key_value_cache;
+  }
   virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
   virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
 #if defined(onnxruntime_genai_cuda_EXPORTS) || defined(ORTGENAI_CUDA_ADDON_COMPILATION)

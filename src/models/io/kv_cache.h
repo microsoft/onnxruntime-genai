@@ -39,6 +39,8 @@ struct KeyValueCache {
 
   virtual bool IsPartialUpdateSupported() const { return false; }
 
+  virtual bool IsModelManaged() const { return false; }
+
   virtual void PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                              std::span<const size_t> layer_indices_to_update) {
     throw std::runtime_error("PartialUpdate is not supported.");
