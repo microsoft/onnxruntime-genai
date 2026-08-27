@@ -4,12 +4,12 @@
 # --------------------------------------------------------------------------
 """Calibrate symmetric KV-cache scales for the ONNX Runtime GenAI model builder.
 
-Quantizing the KV cache (``extra_options["kv_cache_quant_type"]``) requires per-layer
+Quantizing the KV cache (``extra_options["kv_cache_quant_scheme"]``) requires per-layer
 scales, supplied to the builder through ``extra_options["kv_cache_scale_file"]``. This
 module produces that file.
 
 It runs an **FP16-KV baseline** ONNX model (the same model built without
-``kv_cache_quant_type``) over a set of calibration sequences, captures the
+``kv_cache_quant_scheme``) over a set of calibration sequences, captures the
 ``present.<layer>.key`` / ``present.<layer>.value`` outputs -- post-RoPE K and raw V,
 exactly the tensors the quantized ``GroupQueryAttention`` node quantizes -- and computes
 per-channel (or per-tensor) symmetric scales::
@@ -30,14 +30,14 @@ sparse for hybrid models where only full-attention layers own a KV cache.
 
 Typical two-step flow::
 
-    # 1. build the FP16-KV baseline (no kv_cache_quant_type)
+    # 1. build the FP16-KV baseline (no kv_cache_quant_scheme)
     python -m onnxruntime_genai.models.builder -m <hf_model> -o <baseline_dir> -p int4 -e cuda
 
     # 2. calibrate, then rebuild with the quantized KV cache
-    python -m onnxruntime_genai.models.kv_cache_calibration \
+    python -m onnxruntime_genai.models.quantization.kv_cache_calibration \
         --model <baseline_dir> --tokenizer <hf_model> --out kv_scales.json
     python -m onnxruntime_genai.models.builder -m <hf_model> -o <final_dir> -p int4 -e cuda \
-        --extra_options kv_cache_quant_type=int8_per_channel kv_cache_scale_file=kv_scales.json
+        --extra_options kv_cache_quant_scheme=int8_per_channel kv_cache_scale_file=kv_scales.json
 
 Layer count, KV head count and head size are auto-detected from the baseline model's
 ``past_key_values.*`` inputs, so the tool is model-agnostic.

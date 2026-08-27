@@ -7,6 +7,7 @@ import os
 import readline
 
 import onnxruntime_genai as og
+from common import register_ep
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
@@ -22,6 +23,7 @@ class Format:
 
 def run(args: argparse.Namespace):
     print("Loading model...")
+    register_ep(args.execution_provider, "", False)
     config = og.Config(args.model_path)
     if args.execution_provider != "follow_config":
         config.clear_providers()

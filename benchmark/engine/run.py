@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument("--cuda_visible_devices", required=True,
                         help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.")
     parser.add_argument(
-        "--verbose", "--versbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
+        "--verbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
     )
     args = parser.parse_args()
     benchmark_start = time.perf_counter()
@@ -39,6 +39,8 @@ def main() -> int:
     for gpu_id in gpu_ids:
         available_gpus.put(gpu_id)
 
+    if args.out.exists():
+        shutil.rmtree(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
 
     def run_scenario(item):
@@ -75,12 +77,17 @@ def main() -> int:
 
     work = list(enumerate(scenarios, 1))
     with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
-        failed = any(executor.map(run_scenario, work))
+        scenario_failed = list(executor.map(run_scenario, work))
+
+    failed_count = sum(1 for failed in scenario_failed if failed)
+    completed_count = len(scenario_failed) - failed_count
+    failed = failed_count > 0
 
     elapsed_seconds = time.perf_counter() - benchmark_start
     elapsed_minutes, elapsed_remainder = divmod(elapsed_seconds, 60)
     print(
-        f"Benchmark {'failed' if failed else 'completed'} in {int(elapsed_minutes)}m {elapsed_remainder:.2f}s",
+        f"Benchmark {'failed' if failed else 'completed'} in {int(elapsed_minutes)}m {elapsed_remainder:.2f}s "
+        f"(completed={completed_count}, failed={failed_count})",
         flush=True,
     )
     return 1 if failed else 0

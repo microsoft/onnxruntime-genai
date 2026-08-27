@@ -407,8 +407,10 @@ void Search_Cuda::ApplyMinLength(int min_length) {
   if (sequences_.GetSequenceLength() >= min_length)
     return;
 
-  for (auto eos_token_id : params_->config.model.eos_token_id)
-    cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, eos_token_id, std::numeric_limits<float>::lowest(), GetStream());
+  for (auto eos_token_id : params_->config.model.eos_token_id) {
+    if (eos_token_id >= 0 && eos_token_id < params_->config.model.vocab_size)
+      cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, eos_token_id, std::numeric_limits<float>::lowest(), GetStream());
+  }
 }
 
 void Search_Cuda::ApplyRepetitionPenalty(float penalty) {

@@ -10,7 +10,9 @@ import pytest
 import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
+
+from quantization import desugar_algo_config
 
 
 def _load_builder_module(module_name):
@@ -274,9 +276,8 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
 ):
     model = Model.__new__(Model)
     model.extra_options = {"algo_config": algo_config}
-    model.algo_config_name = algo_config
-    model.matmul_block_size = matmul_block_size
-    model.quant_attrs = {"is_symmetric": is_symmetric}
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
+    model.quant_attrs = {"is_symmetric": is_symmetric, "matmul_block_size": matmul_block_size}
 
     bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
 
@@ -288,10 +289,9 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
 
 def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
     model = Model.__new__(Model)
-    model.extra_options = {"algo_config": "unexpected"}
-    model.algo_config_name = "unexpected"
-    model.matmul_block_size = 32
-    model.quant_attrs = {"is_symmetric": True}
+    model.quantization_algo = "unexpected"
+    model.matmul_mixed_precision = {}
+    model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
 
     with pytest.raises(AssertionError, match="Unknown quantization algo config name detected"):
         model.make_tied_quantized_embedding_input_names()
@@ -301,12 +301,11 @@ def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetri
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.extra_options = {"algo_config": algo_config}
-    model.algo_config_name = algo_config
-    model.matmul_block_size = 32
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.hidden_size = 64
     model.vocab_size = 32000
     model.io_dtype = ir.DataType.FLOAT16
-    model.quant_attrs = {"is_symmetric": is_symmetric}
+    model.quant_attrs = {"is_symmetric": is_symmetric, "matmul_block_size": 32}
     model.quant_type = quant_type
     model.input_names = {"input_ids": "input_ids"}
     model.embed_attrs = {"scale": 1}

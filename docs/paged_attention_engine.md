@@ -8,7 +8,7 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
-The current dynamic path manages paged KV decoder state together with per-request search and sampler state. It does not bind or transactionally checkpoint hybrid recurrent, convolutional, or other mutable model state. Future support for such state must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed_conv` and `fixed_recurrent` manifest groups, but the dynamic Engine still rejects those groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
@@ -23,6 +23,7 @@ The main implementation is under `src/engine/`:
 | Batch planning and request admission | `scheduler.h`, `scheduler.cpp`, `decode_first_scheduler_policy.*` |
 | KV-cache capacity planning and ownership | `cache_manager.h`, `cache_manager.cpp`, `paged_key_value_cache.h`, `paged_key_value_cache.cpp` |
 | Speculative cache reservation | `paged_cache_reservation.h`, `paged_cache_reservation.cpp` |
+| Fixed recurrent and convolutional state slots | `fixed_state_pool.h`, `fixed_state_pool.cpp` |
 | Packed model inputs and logits selection | `decoders/varlen_decoder_io.h`, `decoders/varlen_decoder_io.cpp` |
 | Model execution boundary | `model_executor.h`, `model_executor.cpp`, `decoders/simple_decoder.cpp` |
 | Batched token sampling | `scheduled_requests.h`, `scheduled_requests.cpp` |
@@ -87,20 +88,20 @@ Without dynamic batching, the engine uses the older static batching path. Static
 
 ## Decoder state manifest
 
-`model.decoder.state_groups` can describe decoder-owned state without identifying a model family. The supported group kinds are `paged_kv` and `fixed`. Each group has logical layer IDs and typed input/output binding templates. Paged KV groups have key and value bindings; fixed groups have one state binding. Binding templates contain one `%d` placeholder for the logical layer ID. A layer may own both paged and fixed state, and multiple fixed groups may cover the same layer when it owns more than one independent state tensor. Layers omitted from a group do not own that kind of state.
+`model.decoder.state_groups` can describe decoder-owned state without identifying a model family. The supported group kinds are `paged_kv`, `fixed_conv`, and `fixed_recurrent`. Each group contains logical layer IDs. Tensor name templates live in the decoder's existing `inputs` and `outputs` objects: paged KV uses the key/value templates, while the two fixed kinds use their corresponding convolution or recurrent templates. Every referenced template contains one `%d` placeholder for the logical layer ID. A layer may own more than one group, and layers omitted from a group do not own that kind of state.
 
 The group kind defines the state transition:
 
 - Paged KV grows by appending token slots and commits by advancing logical occupancy.
 - Fixed convolution and recurrent state replace one request-indexed state value and require a staged output to be published at commit.
 
-Configuration loading rejects unknown kinds or layouts, missing or incompatible bindings, malformed templates, duplicate IDs or logical layers, and conflicting resolved bindings. Overlay application validates a complete copy and publishes it only on success. When `state_groups` is absent, the typed configuration retains the legacy dense paged-KV behavior over `0..num_hidden_layers-1` using the existing decoder key/value templates; it does not insert a synthetic group into the parsed configuration.
+Configuration loading rejects unknown kinds, malformed decoder templates, duplicate IDs or logical layers, and conflicting resolved names. Overlay application validates a complete copy and publishes it only on success. When `state_groups` is absent, the typed configuration retains the legacy dense paged-KV behavior over `0..num_hidden_layers-1` using the existing decoder key/value templates; it does not insert a synthetic group into the parsed configuration.
 
-When an explicit manifest is present, model loading expands every binding and verifies that its decoder input and output exist with compatible dtype and shape. Paged bindings must also have compatible rank-four geometry throughout their group.
+When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-Fixed groups remain unsupported by the Engine and are rejected until request-owned fixed-state storage and transactions are implemented.
+Fixed groups remain unsupported by the dynamic Engine: `ValidateDynamicEngineCompatibility` rejects `fixed_conv` and `fixed_recurrent` until request-owned fixed-state transactions are integrated. A standalone `FixedStatePool` (below) can already validate, allocate, and transactionally stage those groups, but the Engine does not construct it or bind it to model execution, so they still only describe graph state.
 
 ## Request lifecycle
 
@@ -621,6 +622,99 @@ Window blocks participate in the same reservation, rollback, commit, removal, an
 as full-context blocks, but accounting is validated independently for the two pools. CUDA graph
 capture is supported: the runtime builds a persistent window block table with the same bucketed
 shape as the full-context table.
+
+## Fixed request-state pools
+
+`FixedStatePool` is a model-independent owner for the manifest's `fixed_conv` and
+`fixed_recurrent` groups. It validates the manifest
+against session metadata and, for every fixed binding, additionally checks that
+the input and output describe one per-request row of identical, statically known,
+non-batch geometry with a batch axis (axis 0) that is either dynamic or a positive
+fixed extent. A fixed batch on either the input or the output constrains the whole
+binding: it is adopted as the pool's fixed batch size and every reservation must
+match it, and the pool refuses to construct if that batch cannot fit in capacity.
+It rejects a zero batch, two different fixed batch extents on input and output,
+dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
+per-request row size is derived from that validated geometry, and state is
+allocated with the model state-device allocator. The initial implementation
+supports CPU and CUDA; other devices are rejected until they provide the required
+offset-copy and completion guarantees.
+
+Each resident request owns a stable slot identified by request identity and an
+allocation generation. A released and reused slot receives a new generation, so
+old handles are rejected. Each slot also tracks a `state_generation` (bumped on
+every commit) and a `committed_tokens` count (the processed-token length baked
+into its committed state). Admission is reservation-driven: the caller passes a
+`request_id` and a `target_tokens` per scheduled row, and the pool infers
+ownership. A request that already owns a committed slot is treated as resident and
+keeps that slot; any other identity is admitted provisionally into a free slot
+that is not discoverable as committed ownership until commit. There is no separate
+allocation surface.
+
+A reservation accepts requests in scheduled row order and exposes ordered handles,
+bindings, and target tokens. It gathers each resident row from the slot's active
+persistent bank and each freshly admitted row from a single reusable zeroed row,
+into contiguous model inputs, and allocates distinct staged output tensors. It
+never binds an output over committed state. All host validation and slot planning
+complete before any device copy is enqueued; once gather copies are in flight the
+pool synchronizes before returning, and a failure drains the device and marks the
+pool unhealthy without leaving partially mutated slots. The reservation reports its
+`PlannedStagingBytes` (gather plus staged output) up front.
+
+Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
+records which bank is currently active (holds its visible committed state). This
+double buffering lets the commit be split into three phases so that a composite
+Engine transaction can validate and stage all of its resources, synchronize once,
+and then publish them at a single infallible boundary:
+
+- **`ValidateCommit()`** is the fallible host-side preflight. It is `const`, mutates
+  nothing, and proves every checkpointed slot is exactly where the reservation
+  left it (ownership, identity, generation, and reservation id), that publishing it
+  cannot overflow a generation, and that no row regresses below its slot's
+  `committed_tokens`.
+- **`PrepareCommit()`** is the fallible device-staging phase: it re-validates, then
+  copies each staged output row into the slot's **inactive** bank and synchronizes.
+  The active (visible) bank is never touched, so a failure leaves committed state
+  exactly as it was; it drains the device and marks the pool unhealthy because the
+  inactive banks may be left partially written. The reservation becomes `Prepared`.
+- **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
+  flips each slot to its freshly written bank, advances `state_generation`, sets
+  `committed_tokens` to the row's `target_tokens`, and publishes provisional
+  ownership. Because a prepared commit only wrote invisible banks, its output is
+  invisible until this flip.
+
+`Commit()` is a convenience wrapper that runs the three phases in order. `Discard()`
+is valid from either `Reserved` or `Prepared`: it preserves every resident slot's
+active state, generation, and committed tokens, and returns only provisional slots
+to the free pool. A failed `PrepareCommit` also returns the reservation's
+provisional slots to the pool and marks the pool unhealthy (it leaves state
+consistent but cannot prove the inactive banks are whole), and `Discard()` on a
+failed reservation is a no-op.
+
+Only one reservation is live at a time. A reservation holds the pool's
+single-reservation lock and its gather/output staging memory for its whole
+lifetime, and both are released when the reservation object is destroyed (an
+uncommitted or prepared reservation also discards itself then). `ActiveStagingBytes`
+therefore tracks the live reservation. The caller admits the next batch by letting
+the previous reservation go out of scope after committing or discarding it; a
+committed reservation's accessors stay valid until then because they read
+reservation-owned storage.
+
+Zeroing is minimized. Only the reusable per-tensor zero row is zeroed at
+construction; it is the gather source for freshly admitted rows. A slot's active
+bank is written by the commit that publishes it before it is ever gathered, and a
+slot's inactive bank is only ever written (never read) before it becomes active, so
+the persistent banks never need construction-time zeroing. The pool therefore does
+not zero on release, and does not zero gather or staged tensors. It reports its
+persistent bank bytes (both banks), reusable zeroing scratch bytes, and active
+gather/output staging bytes separately. The two-bank design trades roughly double
+the persistent footprint for a publish that is a host-only bank flip with no device
+copy, which is what lets `PublishCommit()` be `noexcept`.
+
+This pool is not yet part of the Engine transaction, scheduler capacity model, or
+decoder bindings, and the dynamic Engine still rejects fixed-state groups. Those
+integrations must commit paged KV, fixed state, request/search state, and ready
+events at one boundary before hybrid execution is enabled.
 
 ## Prefill, decode, and mixed batches
 

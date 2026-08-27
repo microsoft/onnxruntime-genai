@@ -23,6 +23,13 @@ struct Embeddings {
 
   void ReuseEmbeddingsBuffer(const Embeddings& other);
 
+  // Prefill chunking support (input mode only): temporarily replaces the input embeddings
+  // tensor with a non-owning view of the [offset, offset + length) slice along the sequence
+  // dimension, so a long prompt can be fed to the decoder in several smaller runs.
+  // Only supported for a batch-beam size of 1, where the slice is contiguous in memory.
+  void UseChunkView(size_t offset, size_t length);
+  void RestoreFullView();
+
   OrtValue* Get() { return embeddings_.get(); }
 
   auto& GetShape() const { return shape_; }
@@ -35,6 +42,7 @@ struct Embeddings {
   const Mode mode_{};
   const std::string name_;
   std::unique_ptr<OrtValue> embeddings_;
+  std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
   size_t index_{};
 };
 

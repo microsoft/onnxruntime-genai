@@ -10,31 +10,30 @@
 
 namespace Generators {
 
+std::string ComposeCacheName(const std::string& template_string, int index) {
+  constexpr int32_t CacheNameLength = 64;
+  char cache_name[CacheNameLength];
+  if (auto length = snprintf(cache_name, std::size(cache_name), template_string.c_str(), index);
+      length < 0 || length >= CacheNameLength) {
+    throw std::runtime_error("Unable to compose cache name from the provided template " + template_string +
+                             ". This could be either due to an encoding error or the name being too long.");
+  }
+  return std::string(cache_name);
+}
+
 RecurrentState::RecurrentState(State& state)
     : state_{state} {
-  const auto& past_key_template = model_.config_->model.decoder.inputs.past_key_names;
-  const auto& present_key_template = model_.config_->model.decoder.outputs.present_key_names;
-
-  // Derive recurrent name templates from KV name templates
-  auto derive_template = [](const std::string& kv_template, const std::string& suffix) -> std::string {
-    auto pos = kv_template.rfind('.');
-    if (pos == std::string::npos) return "";
-    return kv_template.substr(0, pos + 1) + suffix;
-  };
-
-  std::string past_conv_template = derive_template(past_key_template, "conv_state");
-  std::string past_recurrent_template = derive_template(past_key_template, "recurrent_state");
-  std::string present_conv_template = derive_template(present_key_template, "conv_state");
-  std::string present_recurrent_template = derive_template(present_key_template, "recurrent_state");
-
-  if (past_conv_template.empty()) return;
-
   // Discover recurrent layer indices by scanning all session input names
+  const auto& past_recurrent_template = model_.config_->model.decoder.inputs.past_recurrent_names;
+  const auto placeholder_pos = past_recurrent_template.find("%d");
+  if (placeholder_pos == std::string::npos) return;
+
+  const auto prefix = past_recurrent_template.substr(0, placeholder_pos);
+  const auto suffix = past_recurrent_template.substr(placeholder_pos + 2);
+
   for (const auto& name : model_.session_info_.GetInputNames()) {
-    // Try to match against the conv_state template (e.g. "past_key_values.%d.conv_state")
+    // Try to match against the recurrent state template (e.g. "past.%d.recurrent")
     // Extract the layer index from names that match
-    auto prefix = past_conv_template.substr(0, past_conv_template.find('%'));
-    auto suffix = past_conv_template.substr(past_conv_template.find('%') + 2);  // skip %d
     if (name.size() > prefix.size() + suffix.size() &&
         name.compare(0, prefix.size(), prefix) == 0 &&
         name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
@@ -57,10 +56,10 @@ RecurrentState::RecurrentState(State& state)
                       return s; }() + ")");
 
   for (int idx : layer_indices_) {
-    input_name_strings_.push_back(ComposeKeyValueName(past_conv_template, idx));
-    input_name_strings_.push_back(ComposeKeyValueName(past_recurrent_template, idx));
-    output_name_strings_.push_back(ComposeKeyValueName(present_conv_template, idx));
-    output_name_strings_.push_back(ComposeKeyValueName(present_recurrent_template, idx));
+    input_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.inputs.past_conv_names, idx));
+    input_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.inputs.past_recurrent_names, idx));
+    output_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.outputs.present_conv_names, idx));
+    output_name_strings_.push_back(ComposeCacheName(model_.config_->model.decoder.outputs.present_recurrent_names, idx));
   }
 
   conv_type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
@@ -87,8 +86,8 @@ RecurrentState::RecurrentState(State& state)
                                  std::to_string(shape[i]) + " at axis " + std::to_string(i));
     }
   };
-  validate_shape(conv_shape_, "conv_state");
-  validate_shape(recurrent_shape_, "recurrent_state");
+  validate_shape(conv_shape_, "conv");
+  validate_shape(recurrent_shape_, "recurrent");
 
   // A model built with `state_window=W` carries a LEADING window axis (conv_state
   // becomes rank 4 and recurrent_state rank 5). Only the last W per-token states are kept, which

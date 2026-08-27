@@ -248,15 +248,25 @@ TEST(CAPITests, ChatTemplate) {
       "|{{ reasoning_effort }}|{{ level }}";
   const char* template_kwargs =
       R"({"enable_thinking":false,"reasoning_effort":"low","level":2})";
-  auto kwargs_output = tokenizer->ApplyChatTemplateWithOptions(
-      kwargs_template, messages_json, nullptr, template_kwargs, true);
+  const char* option_keys[] = {"chat_template_kwargs"};
+  const char* option_values[] = {template_kwargs};
+  tokenizer->UpdateOptions(option_keys, option_values, 1);
+  auto kwargs_output = tokenizer->ApplyChatTemplate(
+      kwargs_template, messages_json, nullptr, true);
   ASSERT_STREQ("NO_THINK|low|2", kwargs_output);
 
-  auto legacy_output = tokenizer->ApplyChatTemplate(
-      "{{ messages[0].content }}", messages_json, nullptr, true);
-  auto null_options_output = tokenizer->ApplyChatTemplateWithOptions(
-      "{{ messages[0].content }}", messages_json, nullptr, nullptr, true);
-  ASSERT_STREQ(legacy_output, null_options_output);
+  option_values[0] = "{}";
+  tokenizer->UpdateOptions(option_keys, option_values, 1);
+  auto cleared_output = tokenizer->ApplyChatTemplate(
+      "{% if enable_thinking is defined %}SET{% else %}CLEARED{% endif %}",
+      messages_json, nullptr, true);
+  ASSERT_STREQ("CLEARED", cleared_output);
+
+  option_values[0] = template_kwargs;
+  tokenizer->UpdateOptions(option_keys, option_values, 1);
+  auto reapplied_output = tokenizer->ApplyChatTemplate(
+      kwargs_template, messages_json, nullptr, true);
+  ASSERT_STREQ("NO_THINK|low|2", reapplied_output);
 
 #endif
 }
