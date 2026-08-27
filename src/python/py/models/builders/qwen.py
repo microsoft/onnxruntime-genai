@@ -593,10 +593,16 @@ class Qwen35MoETextModel(Qwen35TextModel):
 class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
 
+    def get_decoder_model_class(self):
+        return Qwen35MoETextModel
+
+    def get_mtp_model_class(self):
+        return Qwen35MTPModel
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__()
         decoder_options = self.make_mtp_init(config, extra_options)
-        self.decoder = Qwen35MoETextModel(
+        self.decoder = self.get_decoder_model_class()(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
         self.mtp = None
@@ -640,11 +646,12 @@ class Qwen35MoEModel(MTPModel):
         self.resolve_mtp_model_config(extra_options)
 
         mtp_options = self.mtp_attrs["extra_options"]
+        self.drop_unusable_mtp_kv_scales(mtp_options)
         mtp_options["exclude_embeds"] = False
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
-        self.mtp = Qwen35MTPModel(
+        self.mtp = self.get_mtp_model_class()(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
             self.mtp_attrs["onnx_dtype"],
@@ -652,6 +659,19 @@ class Qwen35MoEModel(MTPModel):
             cache_dir,
             mtp_options,
         )
+
+    def drop_unusable_mtp_kv_scales(self, mtp_options):
+        scale_file = mtp_options.get("kv_cache_scale_file")
+        if not scale_file:
+            return
+        try:
+            with open(scale_file, encoding="utf-8") as handle:
+                has_mtp_section = "mtp" in json.load(handle)
+        except (OSError, ValueError):
+            return
+        if not has_mtp_section:
+            mtp_options.pop("kv_cache_quant_scheme", None)
+            mtp_options.pop("kv_cache_scale_file", None)
 
     def make_model(self, input_path):
         self.decoder.make_model(input_path)
@@ -713,6 +733,8 @@ class Qwen35MoEModel(MTPModel):
 
 class Qwen35MTPModel(Qwen35MoETextModel):
     """Qwen3.6 multi-token-prediction self-speculative head builder."""
+
+    is_moe_mtp = True
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.is_mtp_head = True
@@ -783,6 +805,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             self.mtp_layer_config,
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
+            is_moe=self.is_moe_mtp,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
@@ -836,3 +859,22 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+
+class Qwen35DenseMTPModel(Qwen35MTPModel):
+    """Dense Qwen3.5/Qwen3.8 MTP head with one full-attention decoder layer."""
+
+    is_moe_mtp = False
+
+    def make_layer(self, layer_id, layer):
+        return Qwen35TextModel.make_layer(self, layer_id, layer)
+
+
+class Qwen35Model(Qwen35MoEModel):
+    """Composite dense Qwen3.5/Qwen3.8 builder with an optional MTP graph."""
+
+    def get_decoder_model_class(self):
+        return Qwen35TextModel
+
+    def get_mtp_model_class(self):
+        return Qwen35DenseMTPModel

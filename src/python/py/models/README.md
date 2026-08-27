@@ -26,7 +26,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
-    - [Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)](#export-a-modelopt-nvfp4fp8-checkpoint-qwen36)
+    - [Export a ModelOpt or compressed-tensors NVFP4/FP8 Checkpoint](#export-a-modelopt-or-compressed-tensors-nvfp4fp8-checkpoint)
     - [MTP Head (Qwen3.6)](#mtp-head-qwen36)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
@@ -362,7 +362,7 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=true
 ```
 
-#### Export a ModelOpt NVFP4/FP8 Checkpoint (Qwen3.6)
+#### Export a ModelOpt or compressed-tensors NVFP4/FP8 Checkpoint
 
 This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized by NVIDIA TensorRT Model Optimizer and you want to carry its NVFP4/FP8 tensors into the ONNX model instead of dequantizing to fp16 and re-quantizing to int4.
 
@@ -371,9 +371,9 @@ This scenario is for when your Qwen3.6 MoE checkpoint has already been quantized
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p bf16 -e cuda -c cache_dir_to_store_temp_files
 ```
 
-When `config.json` declares `quant_method=modelopt`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. KV-cache quantization remains explicit and requires calibrated scales supplied through `kv_cache_quant_scheme` and `kv_cache_scale_file`. CUDA linear-attention gate fusion is enabled automatically.
+When `config.json` declares `quant_method=modelopt` or `quant_method=compressed-tensors`, the builder preserves the checkpoint's original quantized data types automatically: routed experts use native NVFP4 `QMoE`, dense NVFP4 modules use `MatMulBlockQuantizedFp4Weight`, and FP8 attention projections use `MatMulBlockQuantizedFp8Weight`. The compressed-tensors loader accepts packed NVFP4 weights with reciprocal global scales and scalar or per-channel FP8 weight scales. KV-cache quantization remains explicit and requires calibrated scales supplied through `kv_cache_quant_scheme` and `kv_cache_scale_file`. CUDA linear-attention gate fusion is enabled automatically.
 
-The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt export requires the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
+The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt and compressed-tensors export require the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
 #### MTP Head (Qwen3.6)
 
@@ -389,11 +389,11 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 Qwen3.5 MoE checkpoints (`Qwen3_5MoeForConditionalGeneration`) that declare MTP layers must ship `mtp.*` weights in their safetensors. For those models, the builder rejects `exclude_lm_head=true` and `prune_lm_head=true` because the exported MTP workflow requires the main LM head. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load. To disable MTP during inference, remove the `model.mtp` section from `genai_config.json`; rebuilding the ONNX models is not required.
 
-By default the MTP head inherits the main model's settings. For a ModelOpt checkpoint, the builder preserves each original MTP tensor format: native NVFP4 linears and experts remain NVFP4, FP8 attention projections remain FP8, and unquantized tensors follow the requested graph precision.
+By default the MTP head inherits the main model's settings. For a ModelOpt or compressed-tensors checkpoint, the builder preserves each original MTP tensor format: native NVFP4 linears and experts remain NVFP4, FP8 attention projections remain FP8, and unquantized tensors follow the requested graph precision.
 
 To configure the MTP model independently, use `mtp_quant_config` with an inline JSON object or a JSON file using the structured `QuantConfig` schema. Its `io_dtype`, `weights`, `moe`, and `runtime` targets are independent. For example, `mtp_quant_config='{"io_dtype":"bf16","weights":{"type":"int4","block_size":64},"moe":{"type":"nvfp4"}}'` exports INT4 dense MTP MatMuls, NVFP4 MTP experts, and BF16 I/O.
 
-Supplying `mtp_quant_config` explicitly dequantizes native ModelOpt MTP tensors before applying the MTP configuration. Dense `weights.type` supports integer or unquantized formats; use `moe.type=mxfp4/nvfp4` to select FP4 experts independently. Without an explicit MTP configuration, pre-quantized ModelOpt NVFP4 dense weights remain `MatMulBlockQuantizedFp4Weight` and native FP8 attention projections remain `MatMulBlockQuantizedFp8Weight`.
+Supplying `mtp_quant_config` explicitly dequantizes native ModelOpt or compressed-tensors MTP tensors before applying the MTP configuration. Dense `weights.type` supports integer or unquantized formats; use `moe.type=mxfp4/nvfp4` to select FP4 experts independently. Without an explicit MTP configuration, pre-quantized NVFP4 dense weights remain `MatMulBlockQuantizedFp4Weight` and native FP8 attention projections remain `MatMulBlockQuantizedFp8Weight`.
 
 The head always exports `hidden_states_out` (its own post-final-norm hidden state), which a multi-token loop feeds back as the next chained draft's `hidden_states` input. It is required for `num_speculative_tokens > 1` and ignored otherwise.
 

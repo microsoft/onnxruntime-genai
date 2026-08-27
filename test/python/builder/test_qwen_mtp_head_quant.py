@@ -4,14 +4,16 @@
 """The MTP model resolves quantization independently from the main model."""
 
 import json
+import sys
+import types
 from types import SimpleNamespace
 
 import onnx_ir as ir
 import pytest
 import torch
-
-from models.builders.qwen import Qwen35MoEModel
 from loaders.qwen import QwenMTPModel
+
+from models.builders.qwen import Qwen35Model, Qwen35MoEModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -68,6 +70,19 @@ def test_composite_with_mtp_creates_separate_components(monkeypatch):
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
 
 
+def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
+    monkeypatch.setitem(Qwen35Model.__init__.__globals__, "Qwen35TextModel", FakeComponent)
+    monkeypatch.setitem(Qwen35Model.__init__.__globals__, "Qwen35DenseMTPModel", FakeComponent)
+    config = SimpleNamespace(mtp_num_hidden_layers=1)
+
+    model = Qwen35Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cpu", None, {})
+
+    assert isinstance(model.decoder, FakeComponent)
+    assert isinstance(model.mtp, FakeComponent)
+    assert model.decoder.extra_options["include_hidden_states"] is True
+    assert model.mtp.extra_options["filename"] == "mtp.onnx"
+
+
 def test_declared_mtp_layers_include_hidden_states():
     original = {}
     model = object.__new__(Qwen35MoEModel)
@@ -120,6 +135,28 @@ def test_mtp_export_rejects_incompatible_lm_head_options(option):
 
     with pytest.raises(ValueError, match=option):
         model.make_mtp_init(config, {option: True})
+
+
+def test_mtp_drops_main_model_kv_scales_without_mtp_section(tmp_path):
+    scales = tmp_path / "kv_scales.json"
+    scales.write_text(json.dumps({"scales": {"k_scales": [1.0], "v_scales": [1.0]}}))
+    options = {"kv_cache_quant_scheme": "fp8_per_tensor", "kv_cache_scale_file": str(scales)}
+
+    Qwen35MoEModel.drop_unusable_mtp_kv_scales(object(), options)
+
+    assert "kv_cache_quant_scheme" not in options
+    assert "kv_cache_scale_file" not in options
+
+
+def test_mtp_keeps_explicit_mtp_kv_scales(tmp_path):
+    scales = tmp_path / "kv_scales.json"
+    scales.write_text(json.dumps({"mtp": {"scales": {"k_scales": [1.0], "v_scales": [1.0]}}}))
+    options = {"kv_cache_quant_scheme": "fp8_per_tensor", "kv_cache_scale_file": str(scales)}
+
+    Qwen35MoEModel.drop_unusable_mtp_kv_scales(object(), options)
+
+    assert options["kv_cache_quant_scheme"] == "fp8_per_tensor"
+    assert options["kv_cache_scale_file"] == str(scales)
 
 
 def test_no_mtp_config_inherits_main_model_settings():
@@ -199,3 +236,68 @@ def test_modelopt_mtp_loader_consumes_parsed_modules():
     assert mtp.lm_head is lm_head
     assert mtp.fc is fc
     assert mtp.layers == [layer]
+
+
+def test_compressed_tensors_mtp_loader_consumes_parsed_modules():
+    layer = SimpleNamespace()
+    parsed = SimpleNamespace(
+        embedding=SimpleNamespace(weight=torch.ones((2, 2), dtype=torch.bfloat16)),
+        lm_head=SimpleNamespace(),
+        mtp=SimpleNamespace(
+            fc=SimpleNamespace(),
+            pre_fc_norm_embedding=SimpleNamespace(),
+            pre_fc_norm_hidden=SimpleNamespace(),
+            norm=SimpleNamespace(),
+            layers=[layer],
+        ),
+    )
+
+    mtp = QwenMTPModel.from_pretrained(
+        "compressed-tensors",
+        "checkpoint",
+        "checkpoint",
+        layer_config=None,
+        preserve_quantization=True,
+        load_quantized_model=lambda _: parsed,
+        is_moe=False,
+    )
+
+    assert mtp.embedding is parsed.embedding
+    assert mtp.layers == [layer]
+
+
+def test_dense_mtp_state_uses_dense_decoder_layer(monkeypatch):
+    class FakeDenseDecoderLayer:
+        def __init__(self, config, layer_idx):
+            self.config = config
+            self.layer_idx = layer_idx
+
+        def load_state_dict(self, state, strict):
+            self.state = state
+            return [], []
+
+        def eval(self):
+            return self
+
+    module_name = "transformers.models.qwen3_5.modeling_qwen3_5"
+    modeling_module = types.ModuleType(module_name)
+    modeling_module.Qwen3_5DecoderLayer = FakeDenseDecoderLayer
+    monkeypatch.setitem(sys.modules, module_name, modeling_module)
+    mtp_state = {
+        "mtp.fc.weight": torch.ones((2, 4)),
+        "mtp.pre_fc_norm_embedding.weight": torch.ones(2),
+        "mtp.pre_fc_norm_hidden.weight": torch.ones(2),
+        "mtp.norm.weight": torch.ones(2),
+        "mtp.layers.0.marker": torch.tensor(1.0),
+    }
+
+    mtp = QwenMTPModel.from_state(
+        mtp_state,
+        torch.ones((4, 2)),
+        torch.ones((4, 2)),
+        layer_config=SimpleNamespace(),
+        is_moe=False,
+    )
+
+    assert isinstance(mtp.layers[0], FakeDenseDecoderLayer)
+    assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
