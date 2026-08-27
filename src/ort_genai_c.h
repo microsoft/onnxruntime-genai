@@ -583,6 +583,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMtpGenerator(const OgaModel* main_mo
 OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_AppendTokens(OgaMtpGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 /** \brief Produce the next token via the draft/verify loop. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_GenerateNextToken(OgaMtpGenerator* generator);
+/** \brief Reset to an un-primed, empty request while retaining allocated state and captured graphs.
+ * Call OgaMtpGenerator_AppendTokens before generating again. This invalidates any pointer
+ * previously returned by OgaMtpGenerator_GetSequenceData.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMtpGenerator_Reset(OgaMtpGenerator* generator);
 /** \brief Whether generation has reached EOS or max length. */
 OGA_EXPORT bool OGA_API_CALL OgaMtpGenerator_IsDone(const OgaMtpGenerator* generator);
 /** \brief Number of committed tokens (prompt + generated). */
@@ -988,6 +993,20 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
  * \return OgaResult* containing the error message if the function fails
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string);
+
+/**
+ * @brief Applies a chat template to input messages with additional template context values.
+ *
+ * \param[in] tokenizer OgaTokenizer used for template processing.
+ * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
+ * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] tools Null-terminated string containing the chat function calls if any. Use nullptr if none.
+ * \param[in] template_kwargs Null-terminated JSON object containing additional template context values. Use nullptr if none.
+ * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
+ * \param[out] out_string Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString.
+ * \return OgaResult* containing the error message if the function fails.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer*, const char* template_str, const char* messages, const char* tools, const char* template_kwargs, bool add_generation_prompt, const char** out_string);
 
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */

@@ -3,6 +3,7 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include "generators.h"
+#include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
 #include "json.h"
@@ -13,6 +14,7 @@
 #include <limits>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace Generators {
 
@@ -361,6 +363,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_names") {
+      v_.past_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
@@ -400,6 +404,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_names") {
+      v_.present_recurrent_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
@@ -495,6 +501,54 @@ struct SharedInitializers_Element : JSON::Element {
  private:
   std::vector<Config::Model::SharedInitializer>& v_;
   std::unique_ptr<SharedInitializer_Element> element_;
+};
+
+using DecoderStateGroup = Config::Model::Decoder::StateGroup;
+using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+struct StateGroup_Element : JSON::Element {
+  explicit StateGroup_Element(DecoderStateGroup& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name != "kind") {
+      throw JSON::unknown_value_error{};
+    }
+    const auto kind = JSON::Get<std::string_view>(value);
+    if (kind == "paged_kv") {
+      v_.kind = DecoderStateGroupKind::PagedKeyValue;
+    } else if (kind == "fixed_conv") {
+      v_.kind = DecoderStateGroupKind::FixedConv;
+    } else if (kind == "fixed_recurrent") {
+      v_.kind = DecoderStateGroupKind::FixedRecurrent;
+    } else {
+      throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "layer_ids") {
+      return layer_ids_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  DecoderStateGroup& v_;
+  IntArray_Element layer_ids_{v_.layer_ids};
+};
+
+struct StateGroups_Element : JSON::Element {
+  explicit StateGroups_Element(std::vector<DecoderStateGroup>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override {
+    auto& group = v_.emplace_back();
+    current_ = std::make_unique<StateGroup_Element>(group);
+    return *current_;
+  }
+
+ private:
+  std::vector<DecoderStateGroup>& v_;
+  std::unique_ptr<StateGroup_Element> current_;
 };
 
 struct StringStringMap_Element : JSON::Element {
@@ -738,6 +792,11 @@ struct Decoder_Element : JSON::Element {
     if (name == "shared_initializers") {
       return shared_initializers_;
     }
+    if (name == "state_groups") {
+      v_.state_groups.emplace();
+      state_groups_ = std::make_unique<StateGroups_Element>(*v_.state_groups);
+      return *state_groups_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -752,6 +811,7 @@ struct Decoder_Element : JSON::Element {
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  std::unique_ptr<StateGroups_Element> state_groups_;
 };
 
 struct MtpInputs_Element : JSON::Element {
@@ -1995,9 +2055,12 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
-  Root_Element root{config};
+  Config candidate{config};
+  Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  std::swap(config, candidate);
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {
@@ -2094,6 +2157,7 @@ void ValidateModelPaths(const Config& config) {
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+  ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

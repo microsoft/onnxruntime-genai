@@ -47,7 +47,6 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       {"execution_provider", config.execution_provider},
       {"concurrency", config.concurrency},
       {"prompt_length_k", config.prompt_length_k},
-      {"synthetic", config.synthetic},
       {"generation_tokens", config.generation_tokens},
       {"measured_runs", config.measured_runs}};
 
@@ -61,7 +60,8 @@ nlohmann::json ScenarioBase::Run(const ScenarioConfig& config, const BenchmarkCo
       raw_requests.push_back({{"request_id", request.request_id},
                               {"ttft_ms", request.ttft_ms},
                               {"inter_token_latency_ms", request.inter_token_latency_ms},
-                              {"completed", request.completed}});
+                              {"completed", request.completed},
+                              {"role", request.role}});
       incomplete_count += request.completed ? 0 : 1;
     }
 

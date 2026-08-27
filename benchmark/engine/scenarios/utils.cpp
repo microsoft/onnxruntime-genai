@@ -4,6 +4,12 @@
 #include "scenarios/utils.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+
+namespace fs = std::filesystem;
 
 #if defined(__linux__)
 #include <dlfcn.h>
@@ -152,6 +158,47 @@ uint64_t ReadPeakHostBytes() {
 }
 
 }  // namespace
+
+std::string ResolveModelPath(const std::string& model_path) {
+  std::string expanded_path = model_path;
+  if (expanded_path == "~" || expanded_path.rfind("~/", 0) == 0) {
+    const char* home = std::getenv("HOME");
+    if (home == nullptr) {
+      throw std::invalid_argument("Cannot expand '~' in model_path: HOME environment variable is not set");
+    }
+    expanded_path = std::string(home) + expanded_path.substr(1);
+  }
+
+  fs::path path = fs::absolute(expanded_path);
+  if (!fs::exists(path)) {
+    throw std::invalid_argument("model_path does not exist: " + path.string());
+  }
+
+  return path.string();
+}
+
+std::unique_ptr<OgaSequences> BuildRulerPromptTokens(
+    int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random) {
+  const fs::path prompts_path = fs::path(ORT_GENAI_BENCH_DATA_DIR) / "ruler" / "prompts.json";
+  std::ifstream prompts_file(prompts_path);
+  if (!prompts_file) {
+    throw std::runtime_error("Unable to open RULER prompts file: " + prompts_path.string());
+  }
+
+  nlohmann::json prompts_data;
+  prompts_file >> prompts_data;
+  const std::string bucket = std::to_string(prompt_length_k) + "k";
+  const auto& prompts = prompts_data.at("length_buckets").at(bucket);
+  if (!prompts.is_array() || prompts.empty()) {
+    throw std::runtime_error("RULER prompt bucket must contain at least one sample: " + bucket);
+  }
+
+  std::uniform_int_distribution<size_t> distribution(0, prompts.size() - 1);
+  auto prompt_tokens = OgaSequences::Create();
+  const std::string prompt = prompts.at(distribution(random)).get<std::string>();
+  tokenizer.Encode(prompt.c_str(), *prompt_tokens);
+  return prompt_tokens;
+}
 
 MemorySampler::MemorySampler(std::chrono::milliseconds interval) : interval_(interval) {}
 

@@ -431,6 +431,22 @@ std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* m
   return text_ptr;
 }
 
+std::string Tokenizer::ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
+                                                    const char* template_kwargs, bool add_generation_prompt) const {
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
+  CheckResult(OrtxApplyChatTemplateWithOptions(tokenizer_, template_str, messages, tools, template_kwargs,
+                                               templated_text.ToBeAssigned(), add_generation_prompt,
+                                               false /*tokenize*/));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
+
+  const char* text_ptr{};
+  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
+
+  return text_ptr;
+}
+
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
@@ -1030,6 +1046,7 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  std::unique_ptr<OrtSession> session;
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -1045,11 +1062,20 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
                                       external_initializers_path.string().c_str());
     }
-    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+    session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+  } else {
+    session = OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
   }
 
-  // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  if (config_->model.decoder.state_groups &&
+      config_->model.decoder.pipeline.empty() &&
+      model_filename == config_->model.decoder.filename) {
+    SessionInfo decoder_session_info;
+    decoder_session_info.Add(*session);
+    ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
+  }
+
+  return session;
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

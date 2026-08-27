@@ -34,6 +34,14 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   return logits;
 }
 
+DeviceSpan<float> LogitsFavoringToken(Model& model, int32_t preferred_token,
+                                      int32_t fallback_token) {
+  auto logits = LogitsForToken(model, preferred_token);
+  logits.CpuSpan()[fallback_token] = 50.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
 struct FailingContinuationControl {
   bool fail_append{};
   bool fail_restore{};
@@ -142,6 +150,40 @@ TEST_F(RequestLifecycleTest, EmptyAppendIsRejected) {
   auto request = NewRequest();
   EXPECT_THROW(request->AddTokens({}), std::runtime_error);
   EXPECT_THROW(request->Continue({}), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, InvalidEosTokenIsRejected) {
+  for (const int invalid_eos_token_id : {-1, 5}) {
+    const std::string overlay =
+        R"({ "model": { "vocab_size": 5, "eos_token_id": )" +
+        std::to_string(invalid_eos_token_id) + " } }";
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder", nullptr, overlay);
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto params = MakeGreedyParams(*model);
+
+    try {
+      [[maybe_unused]] auto request = std::make_shared<Request>(params);
+      FAIL() << "Expected invalid eos_token_id to be rejected";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos);
+    }
+  }
+}
+
+TEST_F(RequestLifecycleTest, InvalidVocabSizeIsRejected) {
+  for (const int invalid_vocab_size : {-1, 0}) {
+    Config config;
+    config.model.vocab_size = invalid_vocab_size;
+    config.model.eos_token_id.clear();
+    auto params = std::make_shared<GeneratorParams>(config);
+
+    try {
+      [[maybe_unused]] auto request = std::make_shared<Request>(params);
+      FAIL() << "Expected invalid vocab_size to be rejected";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("vocab_size must be 1 or greater"), std::string::npos);
+    }
+  }
 }
 
 TEST_F(RequestLifecycleTest, EmptyRequestIsRejectedBeforeAssignment) {
@@ -549,6 +591,104 @@ TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
       },
       std::runtime_error);
 }
+
+TEST_F(RequestLifecycleTest, RequestRejectsGuidanceFastForwardTokens) {
+  auto params = MakeGreedyParams(*model_);
+  params->SetGuidance("regex", "[0-9]+", true);
+
+  EXPECT_THROW(
+      {
+        auto request = std::make_shared<Request>(params);
+        static_cast<void>(request);
+      },
+      std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RequestRejectsIncompleteGuidanceConfiguration) {
+  for (bool omit_type : {false, true}) {
+    auto params = MakeGreedyParams(*model_);
+    params->guidance_type = omit_type ? "" : "regex";
+    params->guidance_data = omit_type ? "[0-9]+" : "";
+
+    try {
+      auto request = std::make_shared<Request>(params);
+      FAIL() << "Expected incomplete guidance configuration to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "Guidance type and data must be provided together.");
+    }
+  }
+}
+
+#if USE_GUIDANCE
+TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto expected_tokens = tokenizer->Encode("!");
+  const auto invalid_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(expected_tokens.size(), 1u);
+  ASSERT_EQ(invalid_tokens.size(), 1u);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "!!", false);
+  auto request = std::make_shared<Request>(params);
+  params->guidance_data = "a";
+  auto prompt = Prompt();
+  request->AddTokens(prompt);
+  request->Assign(guidance_engine.engine);
+
+  auto first_logits = LogitsFavoringToken(
+      *guidance_model, invalid_tokens.front(), expected_tokens.front());
+  request->SaveStateForTransaction();
+  const auto staged_first = request->ApplyLogitsForTransaction(first_logits);
+  EXPECT_EQ(staged_first.token, expected_tokens.front());
+  request->RestoreStateForTransaction();
+
+  request->SaveStateForTransaction();
+  const auto retried_first = request->ApplyLogitsForTransaction(first_logits);
+  EXPECT_EQ(retried_first.token, expected_tokens.front());
+  request->CommitStateForTransaction();
+
+  auto second_logits = LogitsFavoringToken(
+      *guidance_model, invalid_tokens.front(), expected_tokens.front());
+  request->SaveStateForTransaction();
+  const auto staged_second = request->ApplyLogitsForTransaction(second_logits);
+  EXPECT_EQ(staged_second.token, expected_tokens.front());
+  request->RestoreStateForTransaction();
+}
+
+TEST_F(RequestLifecycleTest, StaticCpuGenerationAdvancesGuidanceCursor) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto first_tokens = tokenizer->Encode("!");
+  const auto second_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(first_tokens.size(), 1u);
+  ASSERT_EQ(second_tokens.size(), 1u);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "!a", false);
+  auto request = std::make_shared<Request>(params);
+  request->AddTokens(Prompt());
+  request->Assign(guidance_engine.engine);
+
+  auto first_logits = LogitsFavoringToken(
+      *guidance_model, second_tokens.front(), first_tokens.front());
+  request->GenerateNextTokens(first_logits);
+  request->CompleteGeneration();
+  EXPECT_EQ(request->UnseenToken(), first_tokens.front());
+
+  auto second_logits = LogitsFavoringToken(
+      *guidance_model, first_tokens.front(), second_tokens.front());
+  request->GenerateNextTokens(second_logits);
+  request->CompleteGeneration();
+  EXPECT_EQ(request->UnseenToken(), second_tokens.front());
+}
+#endif
 
 }  // namespace
 }  // namespace test
