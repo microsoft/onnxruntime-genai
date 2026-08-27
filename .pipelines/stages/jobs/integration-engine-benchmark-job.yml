@@ -12,8 +12,6 @@ jobs:
   variables:
   - name: buildConfig
     value: RelWithDebInfo
-  - name: benchmarkDir
-    value: '$(Build.Repository.LocalPath)/build/Linux/$(buildConfig)/benchmark/engine'
   - name: benchmarkOut
     value: '$(Build.ArtifactStagingDirectory)/engine-benchmark'
 
@@ -22,187 +20,137 @@ jobs:
     clean: true
     submodules: recursive
 
-  - task: UsePythonVersion@0
+  - displayName: 'Initialize benchmark output'
+    bash: mkdir -p '$(benchmarkOut)'
+
+  # ACR login and the CUDA build-container pattern follow integration-build-job.yml.
+  - displayName: 'Login to Azure container registry'
+    task: Docker@2
     inputs:
-      versionSpec: '3.11'
-      addToPath: true
-      architecture: 'x64'
+      containerRegistry: 'onnxruntimebuildcache'
+      command: 'login'
+      addPipelineData: false
 
-  - bash: mkdir -p '$(benchmarkOut)'
-    displayName: 'Initialize benchmark output'
-
-  - bash: |
-      echo '=== CUDA environment ==='
-      echo "PATH=$PATH"
-      echo "CUDA_HOME=${CUDA_HOME:-<unset>}"
-      echo "CUDA_PATH=${CUDA_PATH:-<unset>}"
-      echo "nvcc on PATH: $(command -v nvcc 2>/dev/null || echo '<not found>')"
-
-      echo '=== Common CUDA locations ==='
-      for location in /usr/local /usr/local/cuda /usr/local/cuda-* /opt /opt/cuda /opt/cuda-* /usr/lib/cuda /usr/bin; do
-        if [ -e "$location" ]; then
-          echo
-          echo "--- $location ---"
-          ls -la "$location" || true
-        fi
-      done
-
-      echo
-      echo '=== nvcc files under /usr/local and /opt ==='
-      find /usr/local /opt -maxdepth 5 -name nvcc -print 2>/dev/null || true
-
-      echo
-      echo '=== CUDA-related environment and profiles ==='
-      env | sort | grep -Ei 'cuda|nvidia' || true
-      grep -RniE 'CUDA_HOME|CUDA_PATH|/cuda[^ ]*/bin' \
-        /etc/environment /etc/profile /etc/profile.d /home/cloudtest/.profile /home/cloudtest/.bashrc \
-        2>/dev/null || true
-
-      echo
-      echo '=== Installed CUDA/NVIDIA packages ==='
-      if command -v dpkg-query >/dev/null 2>&1; then
-        dpkg-query -W -f='${binary:Package}\t${Version}\n' 2>/dev/null | \
-          grep -Ei 'cuda|nvidia|cudnn|nccl' || true
-      fi
-      if command -v rpm >/dev/null 2>&1; then
-        rpm -qa | grep -Ei 'cuda|nvidia|cudnn|nccl' || true
-      fi
-
-      echo
-      echo '=== Linker-visible CUDA libraries ==='
-      ldconfig -p 2>/dev/null | grep -Ei 'cuda|cudart|cublas|cudnn|nvrtc|nccl' || true
-
-      echo
-      echo '=== CUDA headers, compilers, and runtime libraries ==='
-      for root in /usr /usr/local /opt /mnt /home /datadisks /data /scratch; do
-        if [ -d "$root" ]; then
-          echo "--- searching $root ---"
-          find "$root" -maxdepth 7 \
-            \( -path '/mnt/vss/_work' -o -path '/home/cloudtest/vss' \) -prune -o \
-            -type f \( -name nvcc -o -name cuda.h -o -name 'libcudart.so*' -o -name 'libnvrtc.so*' \) \
-            -print 2>/dev/null || true
-        fi
-      done
-
-      echo
-      echo '=== Candidate CUDA_HOME paths ==='
-      for root in /usr/local /opt /mnt /home /datadisks /data /scratch; do
-        if [ -d "$root" ]; then
-          find "$root" -maxdepth 7 -type f -path '*/bin/nvcc' -print 2>/dev/null | \
-            while read -r nvcc; do dirname "$(dirname "$nvcc")"; done
-          find "$root" -maxdepth 6 -type d -name 'cuda12.8' -print 2>/dev/null || true
-        fi
-      done | sort -u
-
-      echo
-      echo '=== Mounts and candidate directories ==='
-      findmnt 2>/dev/null | grep -Ei 'cuda|nvidia|container|mnt|opt' || true
-      for location in /usr/local/CloudTest /opt/microsoft /mnt /datadisks /data /scratch /usr/include /usr/lib/x86_64-linux-gnu; do
-        if [ -e "$location" ]; then
-          echo
-          echo "--- $location (depth 2) ---"
-          find "$location" -maxdepth 2 -mindepth 1 -printf '%y %p -> %l\n' 2>/dev/null | head -n 500 || true
-        fi
-      done
-
-      echo
-      echo '=== NVIDIA container runtime and local images ==='
-      if command -v nvidia-container-cli >/dev/null 2>&1; then
-        nvidia-container-cli --version || true
-      fi
-      if command -v docker >/dev/null 2>&1; then
-        docker info 2>/dev/null | grep -Ei 'runtime|nvidia|root dir|server version' || true
-        docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | \
-          grep -Ei 'cuda|nvidia|onnxruntime|manylinux' || true
-      fi
-      true
-    displayName: 'List CUDA installation locations'
-
-  - bash: |
-      set -euo pipefail
-      python -m pip install --upgrade pip
-      python -m pip install -r requirements-dev.txt
-      python -m pip install -r benchmark/requirements.txt
-      python --version
-      patchelf --version
-      nvidia-smi
-      nvcc --version
-    displayName: 'Install benchmark prerequisites'
+  - displayName: 'Build engine benchmark in CUDA container'
+    bash: |
+      set -e -x
+      docker run --rm \
+        -v '$(Build.Repository.LocalPath):/ort_genai_src' \
+        -w /ort_genai_src \
+        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
+        /bin/bash -c '
+          set -e -x
+          PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
+          export PATH=/opt/python/cp312-cp312/bin:$PATH
+          $PYTHON_EXE -m pip install --upgrade pip
+          $PYTHON_EXE -m pip install -r requirements-dev.txt
+          $PYTHON_EXE -m pip install -r benchmark/requirements.txt
+          $PYTHON_EXE build.py --update --build \
+            --config $(buildConfig) \
+            --parallel \
+            --use_cuda \
+            --cuda_home /usr/local/cuda \
+            --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=90 \
+            --cmake_extra_defines PYTHON_EXECUTABLE=$PYTHON_EXE \
+            --skip_tests \
+            --skip_examples \
+            --build_engine_benchmark
+        '
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - bash: |
-      set -euo pipefail
-      cuda_home="${CUDA_HOME:-/usr/local/cuda}"
-      if [ ! -x "$cuda_home/bin/nvcc" ]; then
-        echo "CUDA compiler not found at $cuda_home/bin/nvcc" >&2
-        exit 1
-      fi
+  - displayName: 'Build benchmark models in CUDA container'
+    bash: |
+      set -e -x
+      docker run --rm \
+        -v '$(Build.Repository.LocalPath):/ort_genai_src' \
+        -w /ort_genai_src \
+        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
+        /bin/bash -c '
+          set -e -x
+          PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
+          export PATH=/opt/python/cp312-cp312/bin:$PATH
+          $PYTHON_EXE -m pip install --upgrade pip
+          $PYTHON_EXE -m pip install -r test/python/requirements.txt
+          $PYTHON_EXE -m pip install -r test/python/cuda/torch/requirements.txt
 
-      python build.py --update --build \
-        --config $(buildConfig) \
-        --parallel \
-        --use_cuda \
-        --cuda_home "$cuda_home" \
-        --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES=90 \
-        --skip_tests \
-        --skip_examples \
-        --build_engine_benchmark
-    displayName: 'Build engine benchmark'
+          export HOME=/ort_genai_src/build/engine-benchmark-home
+          MODEL_ROOT=$HOME/models
+          MODEL_CACHE=/ort_genai_src/build/engine-benchmark-model-cache
+          mkdir -p "$MODEL_ROOT" "$MODEL_CACHE"
+
+          # The smoke-test.json config uses the 0.5B model for a quick run, but
+          # the full config.json uses 1.5B and 7B models as well. Add/remove models
+          # here to match the config used in the next step.
+          declare -A models=(
+            [qwen2.5-0.5b-instruct]=Qwen/Qwen2.5-0.5B-Instruct
+          )
+          declare -A full_models=(
+            [qwen2.5-1.5b-instruct]=Qwen/Qwen2.5-1.5B-Instruct
+            [qwen2.5-7b-instruct]=Qwen/Qwen2.5-7B-Instruct
+          )
+          if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
+            for name in "${!full_models[@]}"; do
+              models[$name]="${full_models[$name]}"
+            done
+          fi
+
+          # PagedAttention builder options follow the regeneration command in
+          # test/python/integration/README.md.
+          for name in "${!models[@]}"; do
+            source="${models[$name]}"
+            output="$MODEL_ROOT/$name"
+            rm -rf "$output"
+            $PYTHON_EXE src/python/py/models/builder.py \
+              -m "$source" \
+              -o "$output" \
+              -p int4 \
+              -e cuda \
+              -c "$MODEL_CACHE" \
+              --extra_options use_paged_attention=true shared_embeddings=false hf_token=false
+            test -f "$output/genai_config.json"
+            test -f "$output/model.onnx"
+          done
+        '
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: AzureCLI@2
-    displayName: 'Download benchmark models'
-    inputs:
-      azureSubscription: 'ortcibuild_readonly_mi2-ONNX Runtime'
-      scriptType: 'bash'
-      scriptLocation: 'inlineScript'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-      inlineScript: |
-        set -euo pipefail
-
-        models=(qwen2.5-0.5b-instruct)
-        if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
-          models+=(qwen2.5-1.5b-instruct qwen2.5-7b-instruct)
-        fi
-
-        export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
-        for model in "${models[@]}"; do
-          destination="$HOME/models/$model"
-          mkdir -p "$destination"
-          echo "Downloading staging/paged-attention/$model to $destination"
-          azcopy copy \
-            "https://foundrylocalmodels.blob.core.windows.net/staging/paged-attention/$model/*" \
-            "$destination" \
-            --recursive
-        done
-
-  - bash: |
-      set -euo pipefail
+  # GPU-enabled container execution follows integration-pytest-step.yml.
+  - displayName: 'Run engine benchmark in CUDA container'
+    bash: |
+      set -e -x
       config='benchmark/engine/configs/smoke-test.json'
       if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
         config='benchmark/engine/configs/config.json'
       fi
 
-      gpu_ids=$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
-      if [ -z "$gpu_ids" ]; then
-        echo 'No NVIDIA GPUs detected.' >&2
-        exit 1
-      fi
+      docker run --rm --gpus all \
+        -e HOME=/ort_genai_src/build/engine-benchmark-home \
+        -v '$(Build.Repository.LocalPath):/ort_genai_src' \
+        -v '$(benchmarkOut):/benchmark-out' \
+        -w /ort_genai_src \
+        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
+        /bin/bash -c "
+          set -e -x
+          PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
+          gpu_ids=\$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
+          test -n \"\$gpu_ids\"
 
-      mkdir -p '$(benchmarkOut)'
-      export LD_LIBRARY_PATH="${CUDA_HOME:-/usr/local/cuda}/lib64:$(benchmarkDir):${LD_LIBRARY_PATH:-}"
-      echo "Running $config on GPU(s): $gpu_ids"
-      python benchmark/engine/run.py \
-        --executable '$(benchmarkDir)/engine_benchmark' \
-        --config "$config" \
-        --out '$(benchmarkOut)' \
-        --cuda_visible_devices "$gpu_ids" \
-        --verbose
-    displayName: 'Run engine benchmark'
+          # Set relevant env vars for the benchmark executable to find its dependencies
+          CUDA_LIB_DIR=/usr/local/cuda/lib64
+          BENCHMARK_LIB_DIR=/ort_genai_src/build/Linux/$(buildConfig)/benchmark/engine
+          export LD_LIBRARY_PATH=\$CUDA_LIB_DIR:\$BENCHMARK_LIB_DIR:\${LD_LIBRARY_PATH:-}
+          echo \"LD_LIBRARY_PATH=\$LD_LIBRARY_PATH\"
+
+          \$PYTHON_EXE benchmark/engine/run.py \
+            --executable /ort_genai_src/build/Linux/$(buildConfig)/benchmark/engine/engine_benchmark \
+            --config \"$config\" \
+            --out /benchmark-out \
+            --cuda_visible_devices \"\$gpu_ids\" \
+            --verbose
+        "
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: PublishPipelineArtifact@1
-    displayName: 'Publish engine benchmark results'
+  - displayName: 'Publish engine benchmark results'
+    task: PublishPipelineArtifact@1
     condition: always()
     inputs:
       artifactName: 'engine-benchmark-results'

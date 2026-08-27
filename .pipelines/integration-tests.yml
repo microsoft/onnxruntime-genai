@@ -32,6 +32,8 @@
 #   account. Each test job (one per model × ep combination) uses the
 #   agent's managed identity to azcopy just its own model directory, then
 #   runs pytest against that local copy.
+#   The Engine benchmark is self-contained: it uses the source model builder
+#   to export its selected Hugging Face models with PagedAttention enabled.
 #
 # Pipeline structure
 #   Per (os, arch):
