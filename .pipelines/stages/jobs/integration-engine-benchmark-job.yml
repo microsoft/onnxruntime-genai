@@ -55,7 +55,7 @@ jobs:
             --skip_examples \
             --build_engine_benchmark
         '
-    displayName: 'Build engine benchmark in CUDA container'
+    displayName: 'Build engine benchmark'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - bash: |
@@ -110,7 +110,7 @@ jobs:
             test -f "$output/model.onnx"
           done
         '
-    displayName: 'Build benchmark models in CUDA container'
+    displayName: 'Build benchmark model(s)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   # GPU-enabled container execution follows integration-pytest-step.yml.
@@ -146,7 +146,7 @@ jobs:
             --cuda_visible_devices \"\$gpu_ids\" \
             --verbose
         "
-    displayName: 'Run engine benchmark in CUDA container'
+    displayName: 'Run engine benchmark'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: PublishPipelineArtifact@1
