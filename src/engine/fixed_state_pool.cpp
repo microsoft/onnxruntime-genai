@@ -850,34 +850,34 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->staged_outputs.reserve(impl_->tensors.size());
   storage->input_names.reserve(impl_->tensors.size());
   storage->output_names.reserve(impl_->tensors.size());
-    storage->state_update_tensors.reserve(capture_state_updates ? impl_->tensors.size() : 0);
-    storage->state_update_value_names.reserve(capture_state_updates ? impl_->tensors.size() : 0);
-    storage->state_update_capsule_names.reserve(capture_state_updates ? impl_->tensors.size() : 0);
+  storage->state_update_tensors.reserve(capture_state_updates ? impl_->tensors.size() : 0);
+  storage->state_update_value_names.reserve(capture_state_updates ? impl_->tensors.size() : 0);
+  storage->state_update_capsule_names.reserve(capture_state_updates ? impl_->tensors.size() : 0);
   storage->bindings.reserve(impl_->tensors.size());
 
   const size_t batch_rows = requests.size();
-    if (impl_->state_update_capacity != 0) {
+  if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};
     storage->state_update_capture_count = OrtValue::CreateTensor(
-      impl_->device->GetAllocator(), capture_count_shape,
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        impl_->device->GetAllocator(), capture_count_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
     storage->staging_bytes = CheckedAdd(
-      storage->staging_bytes,
-      CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
-      "capture_count staging allocation");
+        storage->staging_bytes,
+        CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
+        "capture_count staging allocation");
     if (!impl_->state_update_active_name.empty()) {
       storage->state_update_active_name = impl_->state_update_active_name;
       const std::array<int64_t, 1> active_shape{1};
       storage->state_update_active = OrtValue::CreateTensor(
-        impl_->model->allocator_cpu_, active_shape,
-        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+          impl_->model->allocator_cpu_, active_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
       storage->state_update_active->GetTensorMutableData<int32_t>()[0] =
-        capture_state_updates ? 1 : 0;
+          capture_state_updates ? 1 : 0;
       storage->staging_bytes = CheckedAdd(
-        storage->staging_bytes, sizeof(int32_t), "state_update active staging allocation");
+          storage->staging_bytes, sizeof(int32_t), "state_update active staging allocation");
     }
-    }
+  }
   for (auto& spec : impl_->tensors) {
     const auto shape = StorageShape(batch_rows, spec.session_shape);
     auto gathered = OrtValue::CreateTensor(
@@ -962,10 +962,13 @@ FixedStateReservation FixedStatePool::Reserve(
   // Phase 3: enqueue the gather copies, then synchronize. Once device work is in flight the staging
   // buffers must outlive it, so a failure drains the device before the buffers unwind and marks the
   // pool unhealthy. No visible slot state has changed yet, so there is nothing to roll back.
+  DeviceSpan<int32_t> capture_count_span;
+  if (storage->state_update_capture_count) {
+    capture_count_span =
+        WrapTensor<int32_t>(*impl_->device, *storage->state_update_capture_count);
+  }
   try {
-    if (storage->state_update_capture_count) {
-      auto capture_count_span =
-          WrapTensor<int32_t>(*impl_->device, *storage->state_update_capture_count);
+    if (!capture_count_span.empty()) {
       auto host_counts = capture_count_span.CpuSpan();
       for (size_t row = 0; row < requests.size(); ++row) {
         host_counts[row] = capture_state_updates
