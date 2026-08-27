@@ -2,12 +2,14 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "models/model.h"
+#include "models/io/adapters.h"
 
 namespace Generators {
 
-Adapter::Adapter(const char* adapter_file_path, Ort::Allocator* allocator)
-    : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str(), *allocator)} {}
+Adapter::Adapter(const char* adapter_file_path)
+    // Keep adapter parameters CPU-backed so ORT copies them through the session's
+    // data transfer manager, which supports both plugin and provider-bridge EPs.
+    : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str())} {}
 
 const OrtLoraAdapter* Adapter::AcquireRef() {
   // Private; only callable by Adapters (friend), which holds Adapters::mutex_
@@ -32,7 +34,7 @@ int32_t Adapter::RefCount() const {
   return ref_count_;
 }
 
-Adapters::Adapters(const Model* model) : model_{model} {}
+Adapters::Adapters(const Model*) {}
 
 void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& adapter_name) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -40,10 +42,7 @@ void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& ada
     throw std::runtime_error("Adapter already loaded: " + std::string{adapter_name});
   }
 
-  adapters_.emplace(adapter_name, std::make_unique<Adapter>(adapter_file_path,
-                                                            model_->p_device_->GetType() == DeviceType::CUDA
-                                                                ? &model_->p_device_->GetAllocator()
-                                                                : nullptr));
+  adapters_.emplace(adapter_name, std::make_unique<Adapter>(adapter_file_path));
 }
 
 void Adapters::UnloadAdapter(const std::string& adapter_name) {

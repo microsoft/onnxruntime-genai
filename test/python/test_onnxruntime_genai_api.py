@@ -885,6 +885,8 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     if device == "dml":
         pytest.skip("EP DML does not support preset extra inputs")
+    if device == "cuda" and not extra_inputs[1]:
+        pytest.skip("Missing-input error handling is covered by non-CUDA EPs")
 
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)

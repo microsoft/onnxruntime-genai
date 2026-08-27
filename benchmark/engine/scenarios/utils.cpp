@@ -171,7 +171,7 @@ std::string ResolveModelPath(const std::string& model_path) {
 
   fs::path path = fs::absolute(expanded_path);
   if (!fs::exists(path)) {
-    throw std::invalid_argument("model_path does not exist: " + model_path);
+    throw std::invalid_argument("model_path does not exist: " + path.string());
   }
 
   return path.string();

@@ -104,6 +104,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static readonly KeyValuePair<string, string>[] _knownEpLibraries = new[]
         {
             new KeyValuePair<string, string>("WebGpuExecutionProvider", "onnxruntime_providers_webgpu"),
+            new KeyValuePair<string, string>("CUDA.GenAI", "onnxruntime_providers_cuda"),
         };
 
         // Resolves the directory containing the execution provider plugin libraries to register.
