@@ -185,8 +185,8 @@ jobs:
           python -m pip uninstall -y onnxruntime-gpu
           python -m pip install -r test\python\requirements.txt
           python -m pip install -r test\python\cuda\torch\requirements.txt
-          python -m pip install --additional-index-url $env:ORT_EP_PYPI_SOURCE -r test\python\cuda\ort\requirements.txt
-          python -m pip install --additional-index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
+          python -m pip install --index-url https://pypi.org/simple --extra-index-url $env:ORT_EP_PYPI_SOURCE -r test\python\cuda\ort\requirements.txt
+          python -m pip install --index-url https://pypi.org/simple --extra-index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
       - name: Run the synthetic Engine Python tests
