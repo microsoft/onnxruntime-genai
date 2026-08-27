@@ -1270,6 +1270,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
           {"mistral3", Processor::Create<Mistral3ImageProcessor>},
+          {"muse_glimmer", Processor::Create<QwenImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
