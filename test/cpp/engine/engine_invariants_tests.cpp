@@ -43,7 +43,7 @@ PagedCacheSnapshot MakeValidCache() {
 }
 
 RequestStateSnapshot MakeValidRequest(const void* id, RequestStatus status, int64_t current,
-                                      int64_t processed, int64_t) {
+                                      int64_t processed) {
   RequestStateSnapshot request;
   request.request_id = id;
   request.status = status;
@@ -300,17 +300,17 @@ TEST(InvariantValidatorTest, ZeroBlockTableColumnsIsAllowed) {
 
 TEST(InvariantValidatorTest, ValidRequestHasNoViolations) {
   EXPECT_TRUE(ValidateRequestInvariants(
-                  MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 6))
+                  MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4))
                   .empty());
 }
 
 TEST(InvariantValidatorTest, ProcessedBeyondCurrentReported) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 12, 6);
+  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 12);
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, ZeroTurnIdIsValidWhenAssigned) {
-  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4, 10);
+  auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4);
   request.current_turn_id = 0;
   request.has_current_turn = true;
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
@@ -319,19 +319,19 @@ TEST(InvariantValidatorTest, ZeroTurnIdIsValidWhenAssigned) {
 TEST(InvariantValidatorTest, TurnCompleteRequestWithFinalUnprocessedTokenIsValid) {
   // At completion the just-generated final token is appended but never fed back to the model, so a
   // TurnComplete Request may legitimately report unprocessed tokens. This must not fire.
-  auto request = MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 9, 10);
+  auto request = MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 9);
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, TurnCompleteRequestFullyProcessedIsValid) {
   EXPECT_TRUE(ValidateRequestInvariants(
-                  MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10))
+                  MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10))
                   .empty());
 }
 
 TEST(InvariantValidatorTest, ExecutableRequestRequiresTurnMetadata) {
   auto request =
-      MakeValidRequest(kRequestA, RequestStatus::Active, 10, 10, 10);
+      MakeValidRequest(kRequestA, RequestStatus::Active, 10, 10);
   request.has_current_turn = false;
   request.finish_reason = GenerationFinishReason::Canceled;
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
@@ -339,14 +339,14 @@ TEST(InvariantValidatorTest, ExecutableRequestRequiresTurnMetadata) {
 
 TEST(InvariantValidatorTest, TurnCompleteRequestRequiresFinishReason) {
   auto request =
-      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10, 10);
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 10);
   request.finish_reason = GenerationFinishReason::None;
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, CanceledTurnMayRetainUnprocessedInput) {
   auto request =
-      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 4, 4);
+      MakeValidRequest(kRequestA, RequestStatus::TurnComplete, 10, 4);
   request.is_prefill = true;
   request.finish_reason = GenerationFinishReason::Canceled;
   EXPECT_TRUE(ValidateRequestInvariants(request).empty());
@@ -359,8 +359,8 @@ TEST(InvariantValidatorTest, CanceledTurnMayRetainUnprocessedInput) {
 TEST(InvariantValidatorTest, ConsistentSnapshotsValidateClean) {
   const auto cache = MakeValidCache();
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
-      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4),
   };
   EXPECT_TRUE(ValidateInvariants(cache, requests).empty());
   EXPECT_NO_THROW(ThrowIfInvariantsViolated(cache, requests));
@@ -369,7 +369,7 @@ TEST(InvariantValidatorTest, ConsistentSnapshotsValidateClean) {
 TEST(InvariantValidatorTest, BlockTableForUnknownRequestReported) {
   const auto cache = MakeValidCache();  // owns tables for A and B
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9),
       // B is missing from the request set, yet the cache holds a block table for it.
   };
   EXPECT_FALSE(ValidateInvariants(cache, requests).empty());
@@ -379,8 +379,8 @@ TEST(InvariantValidatorTest, ThrowWrapperListsViolations) {
   auto cache = MakeValidCache();
   cache.free_blocks = 0;  // break block accounting
   const std::vector<RequestStateSnapshot> requests{
-      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9, 9),
-      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4, 4),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 9, 9),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 4, 4),
   };
   EXPECT_THROW(ThrowIfInvariantsViolated(cache, requests), std::runtime_error);
 }
