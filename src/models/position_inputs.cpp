@@ -916,11 +916,40 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensor to GPU and expand by num_beams
-  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  if (ShouldUseStaticMaskHandling()) {
+    InitializeStaticMask<T>(*attention_mask);
+  } else {
+    attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
+    attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  }
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
+
+template <typename T>
+void Qwen2VLPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
+  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  attention_mask_shape_[1] = state_.params_->search.max_length;
+  attention_mask_->CreateTensor(attention_mask_shape_, true);
+  auto output_span = attention_mask_->GetDeviceSpan<T>();
+  output_span.Zero();
+
+  auto input_span = WrapTensor<T>(*GetDeviceInterface(DeviceType::CPU), cpu_attention_mask);
+  auto input_shape = cpu_attention_mask.GetTensorTypeAndShapeInfo()->GetShape();
+  auto batch_size = input_shape[0];
+  auto num_beams = state_.params_->search.num_beams;
+  auto new_kv_length = input_shape[1];
+  auto max_length = attention_mask_shape_[1];
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < num_beams; j++) {
+      auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, new_kv_length);
+      auto input_subspan = input_span.subspan(i * new_kv_length, new_kv_length);
+      output_subspan.CopyFrom(input_subspan);
+    }
+  }
+}
+
+template void Qwen2VLPositionInputs::InitializeStaticMask<int32_t>(OrtValue& cpu_attention_mask);
+template void Qwen2VLPositionInputs::InitializeStaticMask<int64_t>(OrtValue& cpu_attention_mask);
 
 void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   // This is the generation step (decode)
@@ -939,13 +968,43 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask() {
+void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
+  if (ShouldUseStaticMaskHandling()) {
+    if (!model_.p_device_inputs_->UpdateAttentionMask(nullptr,
+                                                      attention_mask_->GetMutableRawData(),
+                                                      static_cast<int>(attention_mask_shape_[0]),
+                                                      new_kv_length,
+                                                      total_length,
+                                                      state_.params_->search.max_length,
+                                                      true,
+                                                      type_)) {
+      auto attention_mask_span = attention_mask_->GetByteSpan();
+      GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(nullptr,
+                                                               attention_mask_span.CopyDeviceToCpu().data(),
+                                                               static_cast<int>(attention_mask_shape_[0]),
+                                                               new_kv_length,
+                                                               total_length,
+                                                               state_.params_->search.max_length,
+                                                               true,
+                                                               type_);
+      attention_mask_span.CopyCpuToDevice();
+    }
+    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+    return;
+  }
+
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
   DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
 
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
+}
+
+bool Qwen2VLPositionInputs::ShouldUseStaticMaskHandling() const {
+  return state_.params_->use_graph_capture ||
+         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
@@ -963,8 +1022,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       attention_mask_shape_[1] = new_length;
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
-      attention_mask_shape_[1] = total_length;
-      UpdateAttentionMask();
+      if (!ShouldUseStaticMaskHandling()) {
+        attention_mask_shape_[1] = total_length;
+      }
+      UpdateAttentionMask(total_length, new_length);
     }
   }
 
@@ -985,7 +1046,8 @@ void Qwen2VLPositionInputs::RewindTo(size_t index) {
 }
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
-  // Check for Qwen-VL family models which require 3D mRoPE position IDs
+  // Qwen2VLPositionInputs is shared by the Qwen-VL family, including Qwen3.5 VLM,
+  // because they use the same 3D mRoPE position IDs and attention-mask layout.
   if (ModelType::IsQwenVLFamily(state.model_.config_->model.type)) {
     return std::make_unique<Qwen2VLPositionInputs>(state.model_, state, sequence_lengths);
   }

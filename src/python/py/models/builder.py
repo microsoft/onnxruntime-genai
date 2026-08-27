@@ -57,6 +57,9 @@ from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
 
 
+_QWEN_VLM_ARCHITECTURES = {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}
+
+
 def add_special_token_ids(config, tokenizer):
     """Add supported tool-call and reasoning token IDs to a model config."""
     token_options = {
@@ -101,7 +104,14 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except (KeyError, ValueError) as error:
+        if not extra_options.get("qwen_vlm", False):
+            raise
+        from builders.expansions.trt_rtx_qwen35_vlm_export import maybe_load_qwen35_config
+
+        config = maybe_load_qwen35_config(hf_name, token=hf_token, cache_dir=extra_kwargs.get("cache_dir"), error=error)
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
@@ -149,6 +159,7 @@ def check_extra_options(
         "use_webgpu_fp32",
         "use_cuda_bf16",
         "shared_embeddings",
+        "qwen_vlm",
         "hf_remote",
         "disable_qkv_fusion",
         "fuse_qk_norm_gqa",
@@ -303,6 +314,15 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if extra_options.get("qwen_vlm", False):
+        if execution_provider not in {"NvTensorRtRtx", "trt-rtx"}:
+            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
+        if getattr(config, "architectures", [None])[0] not in _QWEN_VLM_ARCHITECTURES:
+            raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
+        if extra_options.get("exclude_embeds") is False:
+            raise ValueError("qwen_vlm=true requires exclude_embeds=true so the decoder consumes inputs_embeds.")
+        extra_options["exclude_embeds"] = True
+
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
         layer_types = getattr(config, "layer_types", None)
@@ -332,7 +352,7 @@ def check_extra_options(
 
     # Resolve shared_embeddings: use explicit value if provided, otherwise default to whether model ties embeddings
     if "shared_embeddings" not in extra_options:
-        extra_options["shared_embeddings"] = hf_tie_word_embeddings
+        extra_options["shared_embeddings"] = hf_tie_word_embeddings and not extra_options.get("qwen_vlm", False)
 
     if extra_options["shared_embeddings"]:
         # For an untied model (config.tie_word_embeddings is False) the token embedding and LM head are
@@ -586,6 +606,22 @@ def create_model(
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
 
+    if not config_only and extra_options.get("qwen_vlm", False):
+        if execution_provider != "trt-rtx":
+            raise ValueError("qwen_vlm=true currently supports TRT-RTX/NvTensorRtRtx export only.")
+        if config.architectures[0] not in _QWEN_VLM_ARCHITECTURES:
+            raise ValueError("qwen_vlm=true currently supports Qwen3.5/Qwen3.6 VLM architectures only.")
+        from builders.expansions.trt_rtx_qwen35_vlm_export import export_qwen35_vlm_components
+
+        export_qwen35_vlm_components(
+            hf_name,
+            output_dir,
+            cache_dir,
+            extra_options.get("hf_token", True),
+            execution_provider,
+            io_dtype,
+        )
+
 
 def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
@@ -704,6 +740,8 @@ def get_args():
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
+                qwen_vlm = true/false: Export Qwen3.5 VLM auxiliary embedding and vision models for TRT-RTX alongside the text decoder. Default is false.
+                    Requires execution_provider=NvTensorRtRtx, a Qwen3.5/Qwen3.6 VLM architecture, and exclude_embeds=true; the builder sets exclude_embeds=true unless exclude_embeds=false is explicitly provided.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.

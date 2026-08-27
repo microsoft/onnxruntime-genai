@@ -24,6 +24,37 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
     og.set_log_options(enabled=True, model_input_values=inputs, model_output_values=outputs)
 
 
+def _get_model_session_options_overlay(
+    path: str, ep: str, ep_options: dict[str, str]
+) -> dict[str, Any]:
+    config_path = os.path.join(path, "genai_config.json")
+    if not os.path.exists(config_path):
+        return {}
+
+    with open(config_path, encoding="utf-8") as f:
+        model_config = json.load(f).get("model", {})
+
+    provider_options = [] if ep == "cpu" else [{ep: dict(ep_options)}]
+    session_options = {"provider_options": provider_options}
+    model_overlay = {}
+    for component in [
+        "decoder",
+        "draft",
+        "encoder",
+        "vision",
+        "speech",
+        "embedding",
+        "joiner",
+        "vad",
+        "mtp",
+    ]:
+        component_config = model_config.get(component)
+        if isinstance(component_config, dict) and "session_options" in component_config:
+            model_overlay[component] = {"session_options": session_options}
+
+    return {"model": model_overlay} if model_overlay else {}
+
+
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
     Register an execution provider from an explicit path, Windows ML, or an installed plugin package.
@@ -105,8 +136,14 @@ def get_config(
     config = og.Config(path)
     if not ep_path and ep != "follow_config":
         config.clear_providers()
+        model_provider_overlay = _get_model_session_options_overlay(
+            path, ep, ep_options
+        )
         if ep != "cpu":
             print(f"Setting model to {ep}")
+        if model_provider_overlay:
+            config.overlay(json.dumps(model_provider_overlay))
+        elif ep != "cpu":
             config.append_provider(ep)
 
     # Set any EP-specific options
@@ -315,8 +352,8 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
         audio_tags = "".join([f"<|audio_{i + 1}|>\n" for i in range(num_audios)])
         content = image_tags + audio_tags + prompt
-    elif model_type in {"qwen2_5_vl", "qwen3_vl", "fara"}:
-        # Qwen-2.5 VL, Qwen-3 VL, Fara
+    elif model_type in {"qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "fara"}:
+        # Qwen-2.5 VL, Qwen-3 VL, Qwen-3.5, Fara
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
     elif model_type == "mistral3":

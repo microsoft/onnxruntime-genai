@@ -18,7 +18,9 @@ sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
+    spec = importlib.util.spec_from_file_location(
+        f"models.builders.{module_name}", BUILDERS_DIR.joinpath(*module_name.split(".")).with_suffix(".py")
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"models.builders.{module_name}"] = module
     spec.loader.exec_module(module)
@@ -31,11 +33,13 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
+trt_rtx_module = _load_builder_module("expansions.trt_rtx")
 Model = base_module.Model
 Qwen25VLTextModel = qwen_module.Qwen25VLTextModel
 Qwen3VLTextModel = qwen_module.Qwen3VLTextModel
 Qwen35TextModel = qwen_module.Qwen35TextModel
 Qwen35MoETextModel = qwen_module.Qwen35MoETextModel
+TRT_RTX = trt_rtx_module.TRT_RTX
 
 
 def test_base_matmul_honors_module_quantization_exclusion(monkeypatch):
@@ -172,7 +176,7 @@ def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
         (1, [24, 20, 20]),
     ],
 )
-def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
+def test_trt_rtx_lowers_mrotary_embedding_to_rotary_embedding(layout, sections):
     model = Model.__new__(Model)
     model.head_size = 128
     model.rope_attrs = {
@@ -183,8 +187,9 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     }
     model.nodes = []
     model.values = []
+    model.initializers = []
 
-    def make_node(op_type, inputs, outputs, name, domain, **attributes):
+    def make_node(op_type, inputs, outputs, *, name, domain="", **attributes):
         model.nodes.append(
             {
                 "op_type": op_type,
@@ -198,8 +203,10 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
 
     model.make_node = make_node
     model.make_value = lambda name, dtype, shape: model.values.append((name, dtype, shape))
+    model.make_initializer = lambda tensor, name, **_kwargs: model.initializers.append((tensor, name))
 
-    model.make_mrotary_embedding(
+    TRT_RTX.make_mrotary_embedding(
+        model,
         "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
         "q",
         "q_rotated",
@@ -210,15 +217,13 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
         dtype=ir.DataType.FLOAT,
     )
 
-    node = model.nodes[0]
-    assert node["op_type"] == "MRotaryEmbedding"
-    assert node["domain"] == "com.microsoft"
-    assert node["inputs"] == ["q", "position_ids", "cos_cache", "sin_cache"]
-    assert node["attributes"]["num_heads"] == 16
-    assert node["attributes"]["mrope_section"] == sections
-    assert node["attributes"]["mrope_layout"] == layout
-    assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
-
+    op_types = [node["op_type"] for node in model.nodes]
+    assert "MRotaryEmbedding" not in op_types
+    rotary_node = next(node for node in model.nodes if node["op_type"] == "RotaryEmbedding")
+    assert rotary_node["domain"] == "com.microsoft"
+    assert rotary_node["attributes"]["num_heads"] == 16
+    assert rotary_node["attributes"]["rotary_embedding_dim"] == 0
+    assert model.values[-1] == ("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])
 
 def test_qwen3_vl_keeps_qk_norm_outputs_in_fp32(monkeypatch):
     model = Qwen3VLTextModel.__new__(Qwen3VLTextModel)
@@ -489,73 +494,221 @@ def test_qwen35_moe_uses_base_layer_route():
     assert "make_layer" not in Qwen35MoETextModel.__dict__
 
 
-@pytest.mark.parametrize(
-    "method_name,expected_op_type,inputs,attributes",
-    [
-        (
-            "make_gated_rms_norm",
-            "GatedRMSNorm",
-            ["x", "scale", "gate"],
-            {"epsilon": 1e-6},
-        ),
-        (
-            "make_gated_add",
-            "GatedAdd",
-            ["x", "y", "gate"],
-            {},
-        ),
-    ],
-)
-def test_gated_contrib_op_emitters(method_name, expected_op_type, inputs, attributes):
+def test_trt_rtx_gated_rms_norm_emitter_decomposes_to_supported_ops():
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
+    model.linear_value_dim = 2048
+    model.linear_num_value_heads = 16
+    model.linear_value_head_dim = 128
     nodes = []
     values = []
-    model.make_node = lambda op_type, inputs, outputs, name, domain, **kwargs: nodes.append(
+    model.make_node = lambda op_type, inputs, outputs, *, name, domain="", **kwargs: nodes.append(
         (op_type, inputs, outputs, name, domain, kwargs)
     )
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
     shape = ["batch_size", "sequence_length", 2048]
 
-    if method_name == "make_gated_rms_norm":
-        model.make_gated_rms_norm("/gated", inputs[0], inputs[1], inputs[2], shape, epsilon=1e-6)
-    else:
-        model.make_gated_add("/gated", inputs[0], inputs[1], inputs[2], shape)
+    TRT_RTX.make_gated_rms_norm(model, "/gated", "x", "scale", "gate", shape, epsilon=1e-6)
 
-    assert nodes == [(expected_op_type, inputs, ["/gated/output_0"], "/gated", "com.microsoft", attributes)]
-    assert values == [("/gated/output_0", ir.DataType.FLOAT16, shape)]
+    assert [node[0] for node in nodes] == [
+        "Reshape",
+        "SimplifiedLayerNormalization",
+        "Reshape",
+        "Cast",
+        "Sigmoid",
+        "Mul",
+        "Cast",
+        "Mul",
+        "Cast",
+    ]
+    assert nodes[0] == (
+        "Reshape",
+        ["x", "/model/constants/INT64/[0, 0, 16, 128]"],
+        ["/gated/input_flat/Reshape/output_0"],
+        "/gated/input_flat/Reshape",
+        "",
+        {},
+    )
+    assert nodes[1] == (
+        "SimplifiedLayerNormalization",
+        ["/gated/input_flat/Reshape/output_0", "scale"],
+        ["/gated/SimplifiedLayerNormalization/output_0"],
+        "/gated/SimplifiedLayerNormalization",
+        "",
+        {"epsilon": 1e-6, "axis": -1, "stash_type": 1},
+    )
+    assert nodes[-1] == (
+        "Cast",
+        ["/gated/gated/Mul/output_0"],
+        ["/gated/output_0"],
+        "/gated/output/Cast",
+        "",
+        {"to": ir.DataType.FLOAT16},
+    )
+    assert values[-1] == ("/gated/output_0", ir.DataType.FLOAT16, shape)
 
 
-def test_linear_attention_gate_emitter():
+def test_gated_add_emitter():
     model = Model.__new__(Model)
     model.io_dtype = ir.DataType.FLOAT16
     nodes = []
     values = []
-    model.make_node = lambda op_type, inputs, outputs, name, domain, **kwargs: nodes.append(
+    model.make_node = lambda op_type, inputs, outputs, *, name, domain="", **kwargs: nodes.append(
+        (op_type, inputs, outputs, name, domain, kwargs)
+    )
+    model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
+    shape = ["batch_size", "sequence_length", 2048]
+
+    model.make_gated_add("/gated", "x", "y", "gate", shape)
+
+    assert nodes == [("GatedAdd", ["x", "y", "gate"], ["/gated/output_0"], "/gated", "com.microsoft", {})]
+    assert values == [("/gated/output_0", ir.DataType.FLOAT16, shape)]
+
+
+@pytest.mark.parametrize(
+    ("state_window", "expected_attributes"),
+    [
+        (0, {"ndim": 1, "activation": "silu"}),
+        (3, {"ndim": 1, "activation": "silu", "state_window": 3}),
+    ],
+)
+def test_trt_rtx_causal_conv_with_state_emits_state_window_only_when_enabled(state_window, expected_attributes):
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.context_length_attrs = {"state_window": state_window}
+    nodes = []
+    values = []
+    model.make_node = lambda op_type, inputs, outputs, *, name, domain="", **kwargs: nodes.append(
+        (op_type, inputs, outputs, name, domain, kwargs)
+    )
+    model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
+
+    TRT_RTX.make_causal_conv_with_state(
+        model,
+        "/conv",
+        root_input="x",
+        weight="w",
+        bias="bias",
+        past_conv_state="past.conv",
+        present_conv_state="present.conv",
+        channels=32,
+    )
+
+    assert nodes == [
+        (
+            "CausalConvWithState",
+            ["x", "w", "bias", "past.conv"],
+            ["/conv/output_0", "present.conv"],
+            "/conv",
+            "com.microsoft",
+            expected_attributes,
+        )
+    ]
+    assert values == [("/conv/output_0", ir.DataType.FLOAT16, ["batch_size", 32, "sequence_length"])]
+
+
+@pytest.mark.parametrize(
+    ("state_window", "expected_attributes"),
+    [
+        (0, {"q_num_heads": 4, "kv_num_heads": 2, "update_rule": "gated_delta", "scale": 0.5}),
+        (3, {"q_num_heads": 4, "kv_num_heads": 2, "update_rule": "gated_delta", "scale": 0.5, "state_window": 3}),
+    ],
+)
+def test_trt_rtx_linear_attention_emits_state_window_only_when_enabled(state_window, expected_attributes):
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.linear_value_dim = 16
+    model.context_length_attrs = {"state_window": state_window}
+    nodes = []
+    values = []
+    model.make_node = lambda op_type, inputs, outputs, *, name, domain="", **kwargs: nodes.append(
+        (op_type, inputs, outputs, name, domain, kwargs)
+    )
+    model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
+
+    TRT_RTX.make_linear_attention(
+        model,
+        "/linear_attention",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        past_recurrent_state="past.recurrent",
+        present_recurrent_state="present.recurrent",
+        decay="decay",
+        beta="beta",
+        q_num_heads=4,
+        kv_num_heads=2,
+        scale=0.5,
+    )
+
+    assert nodes == [
+        (
+            "LinearAttention",
+            ["q", "k", "v", "past.recurrent", "decay", "beta"],
+            ["/linear_attention/output_0", "present.recurrent"],
+            "/linear_attention",
+            "com.microsoft",
+            expected_attributes,
+        )
+    ]
+    assert values == [("/linear_attention/output_0", ir.DataType.FLOAT16, ["batch_size", "sequence_length", 16])]
+
+def test_trt_rtx_linear_attention_gate_emitter():
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    nodes = []
+    values = []
+    model.make_node = lambda op_type, inputs, outputs, *, name, domain="", **kwargs: nodes.append(
         (op_type, inputs, outputs, name, domain, kwargs)
     )
     model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
     shape = ["batch_size", "sequence_length", 16]
 
-    model.make_linear_attention_gate("/gate", "a", "dt_bias", "decay_scale", "b", shape)
+    TRT_RTX.make_linear_attention_gate(model, "/gate", "a", "dt_bias", "decay_scale", "b", shape)
 
     assert nodes == [
         (
-            "LinearAttentionGate",
-            ["a", "dt_bias", "decay_scale", "b"],
-            ["/gate/output_0", "/gate/output_1"],
-            "/gate",
-            "com.microsoft",
+            "Add",
+            ["a", "dt_bias"],
+            ["/gate/Add/output_0"],
+            "/gate/Add",
+            "",
             {},
-        )
+        ),
+        (
+            "Softplus",
+            ["/gate/Add/output_0"],
+            ["/gate/Softplus/output_0"],
+            "/gate/Softplus",
+            "",
+            {},
+        ),
+        (
+            "Mul",
+            ["/gate/Softplus/output_0", "decay_scale"],
+            ["/gate/output_0"],
+            "/gate/Mul",
+            "",
+            {},
+        ),
+        (
+            "Sigmoid",
+            ["b"],
+            ["/gate/output_1"],
+            "/gate/Sigmoid",
+            "",
+            {},
+        ),
     ]
     assert values == [
+        ("/gate/Add/output_0", ir.DataType.FLOAT16, shape),
+        ("/gate/Softplus/output_0", ir.DataType.FLOAT16, shape),
         ("/gate/output_0", ir.DataType.FLOAT16, shape),
         ("/gate/output_1", ir.DataType.FLOAT16, shape),
     ]
 
 
-def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
+def test_qwen35_linear_attention_uses_gate_helper(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_key_dim = 8
@@ -591,8 +744,8 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
     )
 
     assert [item[1:] for item in initializers] == [
-        ("model.layers.3.linear_attn.dt_bias", ir.DataType.FLOAT),
-        ("model.layers.3.linear_attn.neg_exp_A", ir.DataType.FLOAT),
+        ("model.layers.3.linear_attn.dt_bias", ir.DataType.FLOAT16),
+        ("model.layers.3.linear_attn.neg_exp_A", ir.DataType.FLOAT16),
     ]
     torch.testing.assert_close(initializers[1][0], -torch.ones(4))
     assert gate_calls == [

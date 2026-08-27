@@ -18,6 +18,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
+    - [Export Qwen3.5/Qwen3.6 VLM Components for TRT-RTX](#export-qwen35-vlm-components-for-trt-rtx)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
@@ -226,6 +227,20 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
+```
+
+#### Export Qwen3.5/Qwen3.6 VLM Components for TRT-RTX
+
+Set `qwen_vlm=true` with `-e NvTensorRtRtx` to export a full Qwen3.5/Qwen3.6 VLM package from one builder invocation. The option exports the text decoder plus `embedding.onnx`, `vision.onnx`, and `processor_config.json`, and patches `genai_config.json` for multimodal loading. The default is `false`.
+
+This option currently supports TRT-RTX exports for Hugging Face configs whose architecture is `Qwen3_5ForConditionalGeneration` or `Qwen3_5MoeForConditionalGeneration`. It requires the decoder to consume `inputs_embeds`; the builder sets `exclude_embeds=true` automatically unless `exclude_embeds=false` is explicitly provided, which raises a `ValueError`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m Qwen/Qwen3.5-0.8B -o qwen35_08b_qdq -p int4 -e NvTensorRtRtx -c hf_cache_qwen35 --extra_options qwen_vlm=true filename=text.onnx hf_token=false quant_mode=int4 int4_accuracy_level=4 int4_block_size=32 use_qdq=true
+
+# From source:
+python builder.py -m Qwen/Qwen3.5-0.8B -o qwen35_08b_qdq -p int4 -e NvTensorRtRtx -c hf_cache_qwen35 --extra_options qwen_vlm=true filename=text.onnx hf_token=false quant_mode=int4 int4_accuracy_level=4 int4_block_size=32 use_qdq=true
 ```
 
 #### Exclude Embedding Layer
