@@ -12,16 +12,14 @@ jobs:
   variables:
   - name: buildConfig
     value: RelWithDebInfo
-  - name: benchmarkOut
-    value: '$(Build.ArtifactStagingDirectory)/engine-benchmark'
 
   steps:
   - checkout: self
     clean: true
     submodules: recursive
 
-  - bash: mkdir -p '$(benchmarkOut)'
-    displayName: 'Initialize benchmark output'
+  - bash: mkdir -p '$(Build.ArtifactStagingDirectory)/engine-benchmark' '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models'
+    displayName: 'Initialize benchmark directories'
 
   # ACR login and the CUDA build-container pattern follow integration-build-job.yml.
   - task: Docker@2
@@ -58,61 +56,52 @@ jobs:
     displayName: 'Build engine benchmark'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
+  # These immutable models were built for the ORT/CUDA plugin versions pinned by the benchmark.
+  - task: UniversalPackages@0
+    displayName: 'Download Qwen 2.5 0.5B benchmark model'
+    inputs:
+      command: download
+      feedsToUse: internal
+      vstsFeed: '4c7631f5-24c0-4307-8822-1aa8f180c325'
+      vstsFeedPackage: 'engine-benchmark-qwen2-5-0-5b-instruct'
+      vstsPackageVersion: '1.0.0'
+      downloadDirectory: '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-0.5b-instruct'
+
+  - ${{ if eq(parameters.run_full_engine_benchmark, true) }}:
+    - task: UniversalPackages@0
+      displayName: 'Download Qwen 2.5 1.5B benchmark model'
+      inputs:
+        command: download
+        feedsToUse: internal
+        vstsFeed: '4c7631f5-24c0-4307-8822-1aa8f180c325'
+        vstsFeedPackage: 'engine-benchmark-qwen2-5-1-5b-instruct'
+        vstsPackageVersion: '1.0.0'
+        downloadDirectory: '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-1.5b-instruct'
+
+    - task: UniversalPackages@0
+      displayName: 'Download Qwen 2.5 7B benchmark model'
+      inputs:
+        command: download
+        feedsToUse: internal
+        vstsFeed: '4c7631f5-24c0-4307-8822-1aa8f180c325'
+        vstsFeedPackage: 'engine-benchmark-qwen2-5-7b-instruct'
+        vstsPackageVersion: '1.0.0'
+        downloadDirectory: '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-7b-instruct'
+
   - bash: |
       set -e -x
-      docker run --rm \
-        -v '$(Build.Repository.LocalPath):/ort_genai_src' \
-        -w /ort_genai_src \
-        onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
-        /bin/bash -c '
-          set -e -x
-          PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
-          export PATH=/opt/python/cp312-cp312/bin:$PATH
-          $PYTHON_EXE -m pip install --upgrade pip
-          $PYTHON_EXE -m pip install -r test/python/requirements.txt
-          $PYTHON_EXE -m pip install -r test/python/cuda/ort/requirements.txt
-          $PYTHON_EXE -m pip install -r test/python/cuda/torch/requirements.txt
+      test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-0.5b-instruct/genai_config.json'
+      test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-0.5b-instruct/model.onnx'
+    displayName: 'Validate smoke benchmark model'
 
-          export HOME=/ort_genai_src/build/engine-benchmark-home
-          MODEL_ROOT=$HOME/models
-          MODEL_CACHE=/ort_genai_src/build/engine-benchmark-model-cache
-          mkdir -p "$MODEL_ROOT" "$MODEL_CACHE"
-
-          # The smoke-test.json config uses the 0.5B model for a quick run, but
-          # the full config.json uses 1.5B and 7B models as well. Add/remove models
-          # here to match the config used in the next step.
-          declare -A models=(
-            [qwen2.5-0.5b-instruct]=Qwen/Qwen2.5-0.5B-Instruct
-          )
-          declare -A full_models=(
-            [qwen2.5-1.5b-instruct]=Qwen/Qwen2.5-1.5B-Instruct
-            [qwen2.5-7b-instruct]=Qwen/Qwen2.5-7B-Instruct
-          )
-          if [ '${{ parameters.run_full_engine_benchmark }}' = 'True' ]; then
-            for name in "${!full_models[@]}"; do
-              models[$name]="${full_models[$name]}"
-            done
-          fi
-
-          # PagedAttention builder options follow the regeneration command in
-          # test/python/integration/README.md.
-          for name in "${!models[@]}"; do
-            source="${models[$name]}"
-            output="$MODEL_ROOT/$name"
-            rm -rf "$output"
-            $PYTHON_EXE src/python/py/models/builder.py \
-              -m "$source" \
-              -o "$output" \
-              -p int4 \
-              -e cuda \
-              -c "$MODEL_CACHE" \
-              --extra_options use_paged_attention=true hf_token=false gpu_utilization_factor=0.3
-            test -f "$output/genai_config.json"
-            test -f "$output/model.onnx"
-          done
-        '
-    displayName: 'Build benchmark model(s)'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  - ${{ if eq(parameters.run_full_engine_benchmark, true) }}:
+    - bash: |
+        set -e -x
+        test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-1.5b-instruct/genai_config.json'
+        test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-1.5b-instruct/model.onnx'
+        test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-7b-instruct/genai_config.json'
+        test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-7b-instruct/model.onnx'
+      displayName: 'Validate full benchmark models'
 
   # GPU-enabled container execution follows integration-pytest-step.yml.
   - bash: |
@@ -123,10 +112,11 @@ jobs:
       fi
 
       benchmark_status=0
+      # HOME env var matches the config paths to the downloaded packages without rewriting configs.
       docker run --rm --gpus all \
         -e HOME=/ort_genai_src/build/engine-benchmark-home \
         -v '$(Build.Repository.LocalPath):/ort_genai_src' \
-        -v '$(benchmarkOut):/benchmark-out' \
+        -v '$(Build.ArtifactStagingDirectory)/engine-benchmark:/benchmark-out' \
         -w /ort_genai_src \
         onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc14:20251017.1 \
         /bin/bash -c "
@@ -154,7 +144,7 @@ jobs:
         printf '\n===== %s =====\n' "$output_file"
         cat "$output_file"
         printf '\n===== end %s =====\n' "$output_file"
-      done < <(find '$(benchmarkOut)' -type f -print0 | sort -z)
+      done < <(find '$(Build.ArtifactStagingDirectory)/engine-benchmark' -type f -print0 | sort -z)
 
       exit "$benchmark_status"
     displayName: 'Run engine benchmark'
@@ -164,4 +154,4 @@ jobs:
     displayName: 'Publish engine benchmark results'
     inputs:
       artifactName: 'engine-benchmark-results'
-      targetPath: '$(benchmarkOut)'
+      targetPath: '$(Build.ArtifactStagingDirectory)/engine-benchmark'
