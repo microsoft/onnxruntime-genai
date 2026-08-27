@@ -70,6 +70,7 @@ jobs:
           export PATH=/opt/python/cp312-cp312/bin:$PATH
           $PYTHON_EXE -m pip install --upgrade pip
           $PYTHON_EXE -m pip install -r test/python/requirements.txt
+          $PYTHON_EXE -m pip install -r test/python/cuda/ort/requirements.txt
           $PYTHON_EXE -m pip install -r test/python/cuda/torch/requirements.txt
 
           export HOME=/ort_genai_src/build/engine-benchmark-home
