@@ -463,14 +463,17 @@ class Gemma4MoEModel(Gemma4Model):
             config.num_local_experts = config.num_experts
         if not hasattr(config, "num_experts_per_tok"):
             config.num_experts_per_tok = config.top_k_experts
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Base __init__ prefers config.moe_intermediate_size for self.intermediate_size
-        # when present. Gemma4 keeps a parallel DENSE MLP alongside the experts, so pin
-        # self.intermediate_size back to the dense size (config.intermediate_size) and
-        # track the expert size separately as moe_intermediate_size.
-        self.intermediate_size = config.intermediate_size
-        self.moe_intermediate_size = config.moe_intermediate_size
+        # Base __init__ prefers config.moe_intermediate_size when setting self.intermediate_size,
+        # but Gemma4 keeps a parallel DENSE MLP alongside the experts and needs self.intermediate_size
+        # to stay the dense size. Hide moe_intermediate_size across super().__init__ so base sets the
+        # dense value (config.intermediate_size) directly, then restore it and track the expert size
+        # separately. (Assigning self.intermediate_size after super() would overwrite the base value.)
+        moe_intermediate_size = config.moe_intermediate_size
+        del config.moe_intermediate_size
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        config.moe_intermediate_size = moe_intermediate_size
+        self.moe_intermediate_size = moe_intermediate_size
 
         # Gemma4 experts use GeGLU (gelu_pytorch_tanh(gate) * up). This maps to the fused QMoE
         # op's "geglu" activation with swiglu_fusion=1 (interleaved gate|up), which applies the

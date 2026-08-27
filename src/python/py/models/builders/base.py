@@ -951,7 +951,12 @@ class Model:
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        self.moe_attrs["moe_op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        # Both keys carry the resolved op: the shared emitters (make_moe_expert_initializers /
+        # make_moe_op) read "op_type", while the gemma parallel-FFN path reads "moe_op_type". Setting
+        # only one left quantized experts on the float "MoE" op, which rejects uint8 weights.
+        moe_op_type = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        self.moe_attrs["op_type"] = moe_op_type
+        self.moe_attrs["moe_op_type"] = moe_op_type
         if moe_descriptor.kind == "mx":
             self.moe_attrs["qmoe_quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
