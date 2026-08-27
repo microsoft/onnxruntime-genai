@@ -539,7 +539,7 @@ def _patch_genai_config(out_dir: str, config, execution_provider: str):
         genai_config = json.load(f)
 
     model_config = genai_config["model"]
-    model_config["type"] = "qwen3_5"
+    model_config["type"] = getattr(config, "model_type", "qwen3_5")
     model_config["image_token_id"] = config.image_token_id
     model_config["video_token_id"] = getattr(config, "video_token_id", 0)
     model_config["vision_start_token_id"] = config.vision_start_token_id
