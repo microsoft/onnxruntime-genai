@@ -399,9 +399,9 @@ TEST_F(FixedStatePoolTest, MoveTransfersLiveReservationOwnership) {
 TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   auto pool = MakePool(3);
   constexpr size_t bytes_per_request =
-      2 * (2 * 3) * sizeof(float) +  // convolution: 2 layers, row [2, 3]
+      2 * (2 * 3) * sizeof(float) +     // convolution: 2 layers, row [2, 3]
       2 * (2 * 2 * 2) * sizeof(float);  // recurrent: 2 layers, row [2, 2, 2]
-    constexpr size_t state_update_control_bytes = 2 * sizeof(int32_t) + sizeof(int32_t);
+  constexpr size_t state_update_control_bytes = 2 * sizeof(int32_t) + sizeof(int32_t);
   // Two persistent banks per tensor so publish is a bank flip with no device copy.
   EXPECT_EQ(pool->PersistentBytes(), 2 * 3 * bytes_per_request);
   EXPECT_EQ(pool->ZeroingScratchBytes(), bytes_per_request);
@@ -412,9 +412,9 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
     const std::array<Request, 2> requests{Request{kRequestA, 1}, Request{kRequestB, 1}};  // A resident, B provisional.
     auto reservation = pool->Reserve(requests);
     EXPECT_EQ(reservation.PlannedStagingBytes(),
-          4 * bytes_per_request + state_update_control_bytes);
+              4 * bytes_per_request + state_update_control_bytes);
     EXPECT_EQ(pool->ActiveStagingBytes(),
-          4 * bytes_per_request + state_update_control_bytes);
+              4 * bytes_per_request + state_update_control_bytes);
     const auto snapshot = pool->Snapshot();
     EXPECT_EQ(snapshot.free_slots, 1u);
     EXPECT_EQ(snapshot.reserved_slots, 1u);
@@ -507,16 +507,16 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   const auto fill_tensor = [&](OrtValue& tensor, std::span<const float> values) {
     auto tensor_span = WrapTensor<float>(device, tensor);
     ASSERT_EQ(tensor_span.size(), values.size());
-    std::copy(values.begin(), values.end(), tensor_span.CpuSpan().begin());
-    tensor_span.CopyCpuToDevice();
+    tensor_span.CopyFromCpu(values);
   };
   const auto fill_tensor_value = [&](OrtValue& tensor, float value) {
     auto tensor_span = WrapTensor<float>(device, tensor);
-    std::fill(tensor_span.CpuSpan().begin(), tensor_span.CpuSpan().end(), value);
-    tensor_span.CopyCpuToDevice();
+    std::vector<float> values(tensor_span.size(), value);
+    tensor_span.CopyFromCpu(values);
   };
   const auto expect_tensor = [&](OrtValue& tensor, std::span<const float> expected) {
-    const auto actual = WrapTensor<float>(device, tensor).CopyDeviceToCpu();
+    auto tensor_span = WrapTensor<float>(device, tensor);
+    const auto actual = tensor_span.CopyDeviceToCpu();
     ASSERT_EQ(actual.size(), expected.size());
     for (size_t index = 0; index < expected.size(); ++index) {
       EXPECT_FLOAT_EQ(actual[index], expected[index]);

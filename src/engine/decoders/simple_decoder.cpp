@@ -14,7 +14,7 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
     : model_{model}, cache_manager_{cache_manager} {
   const ModelStateManifest manifest{model_->config_->model.decoder};
   has_fixed_state_groups_ = manifest.HasFixedStateGroups();
-    const bool has_position_ids = model_->session_info_.HasInput(
+  const bool has_position_ids = model_->session_info_.HasInput(
       model_->config_->model.decoder.inputs.position_ids);
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching() &&
