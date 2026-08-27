@@ -60,7 +60,7 @@ stages:
       displayName: 'Check pr_models / all_models match models.py'
 
 - stage: integration_engine_benchmark_linux_x64
-  displayName: 'Engine Benchmark · Linux x64'
+  displayName: 'Engine Benchmark'
   dependsOn: []
   jobs:
   - template: jobs/integration-engine-benchmark-job.yml
