@@ -106,7 +106,7 @@ jobs:
               -p int4 \
               -e cuda \
               -c "$MODEL_CACHE" \
-              --extra_options use_paged_attention=true shared_embeddings=false hf_token=false
+              --extra_options use_paged_attention=true shared_embeddings=false hf_token=false gpu_utilization_factor=0.3
             test -f "$output/genai_config.json"
             test -f "$output/model.onnx"
           done
@@ -132,8 +132,6 @@ jobs:
         /bin/bash -c "
           set -e -x
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
-          gpu_ids=\$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
-          test -n \"\$gpu_ids\"
 
           # Set relevant env vars for the benchmark executable to find its dependencies
           CUDA_LIB_DIR=/usr/local/cuda/lib64
@@ -147,7 +145,7 @@ jobs:
             --executable /ort_genai_src/build/Linux/$(buildConfig)/benchmark/engine/engine_benchmark \
             --config \"$config\" \
             --out /benchmark-out \
-            --cuda_visible_devices \"\$gpu_ids\" \
+            --cuda_visible_devices 0 \
             --verbose
         " || benchmark_status=$?
 
