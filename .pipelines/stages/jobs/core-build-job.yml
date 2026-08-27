@@ -45,7 +45,7 @@ jobs:
   ${{ if eq(parameters.os, 'win') }}:
     pool:
       ${{ if eq(parameters.arch, 'arm64') }}:
-        name: onnxruntime-medium-arm64-scus
+        name: 'onnxruntime-medium-arm64-scus'
         hostArchitecture: Arm64
       ${{ else }}:
         name: 'onnxruntime-Win-CPU-2022'
