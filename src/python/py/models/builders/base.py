@@ -3806,6 +3806,11 @@ class Model:
 
     def make_gated_delta_net(self, name, **kwargs):
         """Emit dense GatedDeltaNet with token-major inputs and V-major float32 state."""
+        if self.io_dtype == ir.DataType.BFLOAT16:
+            raise ValueError(
+                "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
+                "the current ORT kernel registers float and float16 only"
+            )
         if kwargs.get("checkpoints") or kwargs.get("state_checkpoints"):
             raise ValueError("GatedDeltaNet checkpoint outputs are no longer supported")
 
