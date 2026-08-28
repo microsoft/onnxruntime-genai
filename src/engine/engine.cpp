@@ -44,7 +44,11 @@ void ValidateAppendLength(size_t max_total_tokens,
   if (current_sequence_length >= max_total_tokens ||
       token_count >= max_total_tokens - current_sequence_length) {
     throw std::runtime_error(
-        "Input tokens must leave room for at least one generated token before max_total_tokens (" +
+        "Appending input_tokens_count (" + std::to_string(token_count) +
+        ") to current_sequence_length (" +
+        std::to_string(current_sequence_length) +
+        ") must leave room for at least one generated token before "
+        "max_total_tokens (" +
         std::to_string(max_total_tokens) + ").");
   }
 }
@@ -132,10 +136,17 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
     throw std::runtime_error(
         "Engine request parameters must belong to the Engine's model.");
   }
+  if (params.search.max_length <= 0) {
+    throw std::runtime_error(
+        "max_length must be greater than zero; actual value is " +
+        std::to_string(params.search.max_length) + ".");
+  }
   if (max_total_tokens == 0 ||
       max_total_tokens > static_cast<size_t>(params.search.max_length)) {
     throw std::runtime_error(
-        "max_total_tokens must be greater than zero and no greater than max_length.");
+        "max_total_tokens (" + std::to_string(max_total_tokens) +
+        ") must be greater than zero and no greater than max_length (" +
+        std::to_string(params.search.max_length) + ").");
   }
 
   auto request = std::make_shared<Request>(
@@ -161,7 +172,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   }
   if (max_generated_tokens && *max_generated_tokens == 0) {
     throw std::runtime_error(
-        "max_generated_tokens must be greater than zero.");
+        "max_generated_tokens (0) must be greater than zero.");
   }
   if (tokens.empty()) {
     throw std::runtime_error(
@@ -438,7 +449,9 @@ void Engine::ValidateRequestCanContinue(
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->ResidentRequestCount() > 1) {
     throw std::runtime_error(
-        "Continuous decoding is only supported when a static engine batch contains one request.");
+        "Continuous decoding requires exactly one resident request in a "
+        "static engine batch; actual resident request count is " +
+        std::to_string(cache_manager_->ResidentRequestCount()) + ".");
   }
 }
 

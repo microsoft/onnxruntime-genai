@@ -138,21 +138,16 @@ typedef struct OgaTurnUsage {
 /**
  * \brief One caller-buffered Engine event.
  *
- * Zero-initialize each structure and set struct_size to the size of that record before every
- * OgaEngineRun call. Pump OgaEngineRun while work remains and inspect flags as a bitmask: Token and
- * TurnFinished may be combined. request is a borrowed identity alias for the caller-owned
- * OgaRequest, and turn_id identifies the Request-local Turn. Consume token only when Token is set.
- * The borrowed request remains valid only while the caller retains the owned OgaRequest handle.
- * Larger structures are accepted when struct_size does not exceed the supplied event stride.
- * struct_size is preserved, and trailing bytes are not written.
+ * Pump OgaEngineRun while work remains and inspect flags as a bitmask: Token and TurnFinished may be
+ * combined. request is a borrowed identity alias for the caller-owned OgaRequest, and turn_id
+ * identifies the Request-local Turn. Consume token only when Token is set. The borrowed request
+ * remains valid only while the caller retains the owned OgaRequest handle.
  */
 typedef struct OgaEngineEvent {
-  uint32_t struct_size;
   uint32_t flags;
   OgaRequest* request;
   uint64_t turn_id;
   int32_t token;
-  uint32_t reserved;
   OgaFinishReason finish_reason;
   OgaErrorCode error_code;
   OgaTurnUsage usage;
@@ -1276,28 +1271,24 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
 /**
  * \brief Runs synchronous Engine progress and copies typed events to caller-owned storage.
  *
- * For positive event_capacity, event_buffer must be aligned for OgaEngineEvent and event_stride
- * must be an aligned stride of at least sizeof(OgaEngineEvent). Every slot's struct_size and
- * reserved fields are validated before any Engine progress. A call drains retained events or
- * executes at most one model transaction, but never both. Capacity one provides one-event-at-a-time
- * behavior through this same operation. A successful partial prefill may return zero events while
- * work remains pending. out_event_count must not overlap the event storage.
+ * For positive event_capacity, events must point to a contiguous array of OgaEngineEvent records. A
+ * call drains retained events or executes at most one model transaction, but never both. Capacity
+ * one provides one-event-at-a-time behavior through this same operation. A successful partial
+ * prefill may return zero events while work remains pending. out_event_count must not overlap the
+ * event storage.
  *
- * For zero event_capacity, event_buffer may be null and event_stride is ignored. The call validates
- * the Engine owner thread and health, sets *out_event_count to zero, and performs no other Engine
- * work.
+ * For zero event_capacity, events may be null. The call validates the Engine owner thread and
+ * health, sets *out_event_count to zero, and performs no other Engine work.
  *
  * \param[in] engine The Engine to advance.
- * \param[in,out] event_buffer Caller-owned event storage.
- * \param[in] event_capacity Number of event records available in event_buffer.
- * \param[in] event_stride Byte stride between event records.
- * \param[out] out_event_count Number of records written, in the prefix of event_buffer.
+ * \param[out] events Caller-owned contiguous event storage.
+ * \param[in] event_capacity Number of event records available in events.
+ * \param[out] out_event_count Number of records written, in the prefix of events.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(
     OgaEngine* engine,
-    void* event_buffer,
+    OgaEngineEvent* events,
     size_t event_capacity,
-    size_t event_stride,
     size_t* out_event_count);
 
 /**

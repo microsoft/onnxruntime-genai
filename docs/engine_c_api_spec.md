@@ -26,7 +26,7 @@ The redesign must:
 - cancel only the intended Turn;
 - return typed, caller-buffered Engine events;
 - deliver tokens only through events;
-- keep ABI-visible structures fixed-width and extensible;
+- keep ABI-visible structures concrete and fixed-width;
 - preserve the single-host-owner-thread contract.
 
 ## C API
@@ -173,14 +173,12 @@ typedef enum OgaErrorCode {
 } OgaErrorCode;
 
 typedef struct OgaEngineEvent {
-  uint32_t struct_size;
   uint32_t flags;
 
   OgaRequest* request; /* Borrowed; NULL for Engine-level events. */
   uint64_t turn_id;
 
   int32_t token;
-  uint32_t reserved;
 
   OgaFinishReason finish_reason;
   OgaErrorCode error_code;
@@ -204,19 +202,16 @@ Payload validity is determined by flags:
 | `TurnFinished \| Failed` | Request/Turn failure; finish reason is `Failed` |
 | `Failed` without `TurnFinished` | Engine-level failure; `request` is null |
 
-Invalid arguments, invalid structure sizes, incompatible handles, and owner-thread misuse return
-`OgaResult`; they do not produce `Failed` events. Capacity pressure is operational and does not set
-`Failed`.
+Invalid arguments, incompatible handles, and owner-thread misuse return `OgaResult`; they do not
+produce `Failed` events. Capacity pressure is operational and does not set `Failed`.
 
 `prompt_tokens` is the number of input IDs accepted by the current `BeginTurn`.
 `generated_tokens` is the number of visible output tokens committed for the Turn.
 `cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
 Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
-`OgaEngineEvent` records are caller-allocated. The caller sets every slot's `struct_size` before
-each call. The implementation validates the complete buffer before making progress, preserves each
-size, writes no bytes beyond the declared `OgaEngineEvent` fields, and fully initializes those
-fields in the populated prefix.
+`OgaEngineEvent` records are caller-allocated as a contiguous array. The implementation validates
+the complete buffer range before making progress and fully initializes the populated prefix.
 
 Every function returning `OgaResult*` returns null on success or an owned error object on failure;
 the caller releases that object with `OgaDestroyResult`, and its diagnostic string is valid until
@@ -257,9 +252,8 @@ void OgaDestroyRequest(OgaRequest* request);
 
 OgaResult* OgaEngineRun(
     OgaEngine* engine,
-    void* event_buffer,
+    OgaEngineEvent* events,
     size_t event_capacity,
-    size_t event_stride,
     size_t* out_event_count);
 
 OgaResult* OgaEngineHasPendingRequests(
@@ -332,29 +326,25 @@ Turn returns true, and later calls return false.
 `OgaEngineRun` uses caller-owned reusable storage:
 
 - `event_capacity` is the number of records available.
-- `event_stride` is the byte distance between record starts. It must be aligned for
-  `OgaEngineEvent` and at least `sizeof(OgaEngineEvent)`.
 - `out_event_count` receives the number of records written in the buffer prefix and is set to zero
   before later validation or Engine work. It must not overlap the event storage. The complete
   `size_t` object is checked for overlap before the implementation writes through the pointer, so
   the count remains unchanged for that specific validation error. Callers must not rely on the
   count value after any invalid call.
-- Every positive-capacity slot must be aligned, have
-  `sizeof(OgaEngineEvent) <= struct_size <= event_stride`, and have `reserved == 0`.
-- The complete storage layout, including checked `event_capacity * event_stride`, is validated
-  before Request reclamation, event draining, scheduling, mutation, or model progress. An invalid
-  later slot therefore cannot cause partial event writes or partial Engine progress.
-- The caller's `struct_size` is preserved for every returned record. Declared `OgaEngineEvent`
-  fields are fully initialized, trailing bytes are untouched, and unused slots are untouched.
+- For positive capacity, `events` points to a contiguous, aligned array of `OgaEngineEvent`.
+- The complete storage range, including checked
+  `event_capacity * sizeof(OgaEngineEvent)`, is validated before Request reclamation, event
+  draining, scheduling, mutation, or model progress.
+- Populated records are fully initialized, and unused slots are untouched.
 
 The caller-owned buffer is the public output storage, not an allocation-free guarantee for the C
 adapter: the current C implementation creates temporary internal event storage for a positive
 capacity call. The C++20 span wrapper passes that caller storage to `OgaEngineRun`, so it has the
 same C-adapter allocation behavior.
 
-Capacity zero is an owner-thread-validated no-op. `event_buffer` may be null, `event_stride` is
-ignored, the count becomes zero, and the call performs no reclamation, event drain, scheduling, or
-model work. A permanently unhealthy Engine still returns its stored fatal error.
+Capacity zero is an owner-thread-validated no-op. `events` may be null, the count becomes zero, and
+the call performs no reclamation, event drain, scheduling, or model work. A permanently unhealthy
+Engine still returns its stored fatal error.
 
 ## State machine
 
@@ -376,10 +366,11 @@ Any state -- Close --> Closed
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.
 
-There is no public Request rewind operation. Classic `Generator::RewindToLength` is unrelated.
-Dynamic Engine transactions may restore Search checkpoints and release uncommitted cache
-reservations after a failed step or failed continuation admission. Cancellation and completion do
-not rewind committed state.
+Request Rewind has not yet been implemented. Classic `Generator::RewindToLength` is a separate
+Generator API and does not provide Request Rewind. Dynamic Engine transactions may restore Search
+checkpoints and release uncommitted cache reservations after a failed step or failed continuation
+admission, but that internal rollback is not Request Rewind. Cancellation and completion do not
+rewind committed state.
 
 ## Event production and delivery
 
@@ -539,9 +530,7 @@ than parsing diagnostic strings.
 ### Request IDs
 
 Initial events use borrowed pointer identity. Pointer comparison is a constant-time machine-word
-comparison. A later version may append an Engine-local monotonic `request_id` to
-`OgaEngineEvent` and add `OgaRequestGetId`. The single caller-sized event structure permits this
-without writing beyond older callers' buffers. No ID lookup API is planned.
+comparison. No separate Request ID or lookup API is planned.
 
 ### Engine-bound Request parameters
 
@@ -549,13 +538,6 @@ A future `OgaRequestParams` may be created from an Engine and replace `OgaGenera
 Request creation. It should preserve search setters while hiding internal `GeneratorParams`.
 This is deferred until Search, RNG, sampling, guidance, and execution ownership are separated from
 the classic Generator parameter type.
-
-### Larger event records
-
-Future event fields can be appended to `OgaEngineEvent`. Callers opt in by supplying a larger
-record, setting `struct_size` to that record size, and using an aligned stride at least that large.
-The implementation preserves the size and trailing bytes rather than assuming the extra fields
-exist.
 
 ## Language surfaces
 
@@ -569,9 +551,6 @@ exist.
 - When compiled as C++20 or later, `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
   `std::span<const OgaEngineEvent>` over the populated prefix. The C++17 wrapper still exposes
   the pointer/count overload.
-- The convenience wrapper accepts standard `OgaEngineEvent` storage and initializes only
-  `struct_size` and `reserved` in every reusable slot. Future-sized or padded records use the C API
-  directly.
 - No unseen-token methods.
 
 ### Python
@@ -606,7 +585,7 @@ is part of the current source surface.
 ## Implemented phases
 
 1. Added public `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
-   usage, and caller-sized event declarations.
+   usage, and caller-buffered event declarations.
 2. Implemented Turn parameter creation, supported limit snapshotting, explicit unsupported setters,
    zero-based Turn IDs, and named cancellation.
 3. Replaced internal ready-Request retention with pre-reserved pending event storage.
@@ -622,13 +601,9 @@ commit buildable; the completed change exposes events only.
 ### ABI and validation
 
 - Published sizes and offsets are asserted for supported ABIs.
-- Null positive-capacity buffers, null count pointers, misaligned buffers, short or misaligned
-  strides, multiplication overflow, undersized records, `struct_size > stride`, and nonzero
-  reserved fields are rejected before mutation or progress.
-- Every slot is validated before any slot is written; invalid later slots leave the complete event
-  buffer unchanged.
-- Larger structures and padded strides are accepted. Caller `struct_size`, trailing bytes, unused
-  slots, and reusable headers are preserved.
+- Null positive-capacity buffers, null count pointers, misaligned buffers, multiplication overflow,
+  address-range overflow, and overlapping output counts are rejected before mutation or progress.
+- Populated records are fully initialized and unused slots are preserved.
 - Capacity zero validates the owner thread and otherwise does no work.
 - `uint64_t` counts that do not fit internal types are rejected.
 - Unsupported Turn setters return explicit not-implemented errors.

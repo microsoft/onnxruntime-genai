@@ -39,10 +39,6 @@ struct RequestStepResult {
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
 };
 
-// Every Engine Request has one sequence and one beam, so a chunk-complete step can append at most
-// one generated-output index.
-inline constexpr size_t kMaxGeneratedTokenIndicesPerStep = 1;
-
 /**
  * @class Request
  * @brief Manages the state and lifecycle of a user request within the engine.
@@ -256,8 +252,6 @@ struct Request : std::enable_shared_from_this<Request>,
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
   bool IsExternallyAbandoned() const noexcept;
-  // Runs before a scheduled step can execute.
-  void PrepareForStep(size_t max_generated_token_indices);
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the

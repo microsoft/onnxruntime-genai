@@ -65,20 +65,12 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
     if (remaining <= 0 || entry.unprocessed_token_count == 0 ||
         entry.unprocessed_token_count > static_cast<size_t>(remaining)) {
       throw std::runtime_error(
-          "The dynamic step token count must be positive and no greater than the remaining tokens.");
+          "The dynamic step token count (" +
+          std::to_string(entry.unprocessed_token_count) +
+          ") must be positive and no greater than the remaining token count (" +
+          std::to_string(remaining) + ").");
     }
     request_ids.push_back(entry.request_id);
-  }
-  // Complete every potentially allocating output-bookkeeping operation before binding the plan or
-  // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
-  // request can append at most one generated index.
-  for (const auto& entry : plan.requests) {
-    const auto remaining =
-        static_cast<size_t>(entry.request->CurrentSequenceLength() -
-                            entry.request->ProcessedSequenceLength());
-    if (entry.unprocessed_token_count == remaining) {
-      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
-    }
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(

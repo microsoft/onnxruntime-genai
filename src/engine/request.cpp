@@ -3,6 +3,8 @@
 
 #include "request.h"
 
+#include <cmath>
+
 #include "engine.h"
 #include "sequence_positions.h"
 #include "../constrained_logits_processor.h"
@@ -40,12 +42,18 @@ Request::Request(std::shared_ptr<GeneratorParams> params, size_t max_total_token
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
   if (params->search.batch_size != 1) {
-    throw std::runtime_error("A request must have search.batch_size == 1; batch across requests instead.");
+    throw std::runtime_error(
+        "Engine requests require search.batch_size == 1; actual value is " +
+        std::to_string(params->search.batch_size) +
+        ". Batch across requests instead.");
   }
   // Beam search does not implement the deferred completion contract below, so its next tokens would
   // never be copied back from the device.
   if (params->search.num_beams != 1) {
-    throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
+    throw std::runtime_error(
+        "Engine requests require search.num_beams == 1; actual value is " +
+        std::to_string(params->search.num_beams) +
+        ". Beam search is not supported by the Engine.");
   }
   if (params->guidance_ff_tokens_enabled) {
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
@@ -86,8 +94,6 @@ void Request::OnLastExternalReference() noexcept {
 bool Request::IsExternallyAbandoned() const noexcept {
   return externally_abandoned_.load(std::memory_order_acquire);
 }
-
-void Request::PrepareForStep(size_t) {}
 
 void Request::Schedule() {
   if (status_ != RequestStatus::Assigned) {
@@ -180,7 +186,9 @@ void Request::BindScheduledTokenCount(size_t token_count) {
   if (remaining <= 0 || token_count == 0 ||
       token_count > static_cast<size_t>(remaining)) {
     throw std::runtime_error(
-        "The dynamic step token count must be positive and no greater than the remaining tokens.");
+        "The dynamic step token count (" + std::to_string(token_count) +
+        ") must be positive and no greater than the remaining token count (" +
+        std::to_string(remaining) + ").");
   }
   scheduled_token_count_ = token_count;
 }
@@ -227,10 +235,15 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
     // Sanity checks
-    if (search_params.top_p < 0.0f || search_params.top_p > 1.0f)
-      throw std::runtime_error("top_p must be between 0.0 and 1.0");
+    if (!std::isfinite(search_params.top_p) ||
+        search_params.top_p < 0.0f || search_params.top_p > 1.0f)
+      throw std::runtime_error(
+          "top_p (" + std::to_string(search_params.top_p) +
+          ") must be finite and between 0.0 and 1.0.");
     if (search_params.top_k < 0)
-      throw std::runtime_error("top_k must be 0 or greater");
+      throw std::runtime_error(
+          "top_k (" + std::to_string(search_params.top_k) +
+          ") must be 0 or greater.");
 
     if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
       search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
@@ -249,11 +262,16 @@ void Request::ValidateEngineCompatibility() const {
   if (search.batch_size != 1 || search.num_beams != 1) {
     throw std::runtime_error("Engine requests require batch_size and num_beams to both be 1.");
   }
-  if (search.top_p < 0.0f || search.top_p > 1.0f) {
-    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  if (!std::isfinite(search.top_p) ||
+      search.top_p < 0.0f || search.top_p > 1.0f) {
+    throw std::runtime_error(
+        "top_p (" + std::to_string(search.top_p) +
+        ") must be finite and between 0.0 and 1.0.");
   }
   if (search.top_k < 0) {
-    throw std::runtime_error("top_k must be 0 or greater");
+    throw std::runtime_error(
+        "top_k (" + std::to_string(search.top_k) +
+        ") must be 0 or greater.");
   }
 }
 

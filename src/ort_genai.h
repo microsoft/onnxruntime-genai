@@ -1003,45 +1003,15 @@ struct OgaEngine : OgaAbstract {
    * Runs one drain-or-execute Engine operation into OgaEngineEvent storage.
    */
   size_t Run(OgaEngineEvent* storage, size_t capacity) {
-    if (capacity != 0) {
-      if (!storage) {
-        throw std::runtime_error(
-            "storage must not be null when capacity is positive.");
-      }
-      const uintptr_t storage_begin =
-          reinterpret_cast<uintptr_t>(storage);
-      if (storage_begin % alignof(OgaEngineEvent) != 0) {
-        throw std::runtime_error(
-            "storage must be aligned for OgaEngineEvent.");
-      }
-      if (capacity >
-          std::numeric_limits<size_t>::max() / sizeof(OgaEngineEvent)) {
-        throw std::overflow_error(
-            "capacity * sizeof(OgaEngineEvent) overflows size_t.");
-      }
-      const size_t storage_size = capacity * sizeof(OgaEngineEvent);
-      if (storage_size >
-          std::numeric_limits<uintptr_t>::max() - storage_begin) {
-        throw std::overflow_error(
-            "storage address range overflows uintptr_t.");
-      }
-    }
-    for (size_t index = 0; index < capacity; ++index) {
-      storage[index].struct_size = sizeof(OgaEngineEvent);
-      storage[index].reserved = 0;
-    }
     size_t event_count{};
     OgaCheckResult(OgaEngineRun(
-        this, storage, capacity, sizeof(OgaEngineEvent), &event_count));
+        this, storage, capacity, &event_count));
     return event_count;
   }
 
 #if OGA_USE_SPAN
   /**
    * Runs one drain-or-execute Engine operation into OgaEngineEvent storage.
-   *
-   * This wrapper initializes only the required slot headers. Use OgaEngineRun directly
-   * for caller-defined future-sized records or padded strides.
    */
   std::span<const OgaEngineEvent> Run(std::span<OgaEngineEvent> storage) {
     return storage.first(Run(storage.data(), storage.size()));

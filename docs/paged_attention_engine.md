@@ -195,13 +195,14 @@ while any event for the Request is pending fails without mutation. Turn-scoped
 generated count and limit reset only after all validation, input allocation, Search append, and
 scheduler preparation succeeds.
 
-Cancellation does not rewind the Search sequence or committed cache. Accepted continuation input
-and generated output therefore remain part of the logical request. A canceled resident request can
-begin a later turn after its terminal notification is drained. A first turn canceled before
-admission has no cache state, but it can likewise begin a later turn: the retained initial input and
-new continuation input are prefetched together. If retained model state has otherwise ceased to be
-resident, continuation still fails. Callers that need to discard canceled input or release capacity
-must `Close()` and create a new Request.
+Request Rewind has not yet been implemented. Cancellation does not rewind the Search sequence or
+committed cache, so accepted continuation input and generated output remain part of the logical
+request. A canceled resident request can begin a later turn after its terminal notification is
+drained. A first turn canceled before admission has no cache state, but it can likewise begin a
+later turn: the retained initial input and new continuation input are prefetched together. If
+retained model state has otherwise ceased to be resident, continuation still fails. Until Request
+Rewind is implemented, callers that need to discard canceled input or release capacity must
+`Close()` and create a new Request.
 
 Every completed Turn publishes exactly one terminal event. A final visible token and completion may
 be combined in one event. An unserviceable Request receives `TurnFinished | Failed`; fatal Engine
@@ -296,20 +297,18 @@ This separation between search length and processed length is what lets each mod
 ## `Engine::Run()` and event draining
 
 The low-level engine API advances through repeated calls to synchronous bulk `Run()`. The canonical
-C operation receives a caller buffer, record capacity, byte stride, and output count. The C++
-wrapper receives a `std::span<OgaEngineEvent>` and returns a const span over the populated prefix.
-Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
+C operation receives a contiguous `OgaEngineEvent` array, record capacity, and output count. The
+C++ wrapper receives a `std::span<OgaEngineEvent>` and returns a const span over the populated
+prefix. Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
 
-Every positive-capacity C call validates the complete output layout before any Request reclamation,
+Every positive-capacity C call validates the complete output range before any Request reclamation,
 event draining, scheduling, mutation, or model progress: non-null buffer and count, buffer
-alignment, minimum/aligned stride, checked capacity-times-stride, and every slot's `struct_size`
-range and zero `reserved` field. Invalid later slots therefore cause no partial writes or progress.
-Returned records preserve each caller `struct_size`, initialize every declared `OgaEngineEvent`
-field, and do not touch trailing bytes or unused slots.
+alignment, checked capacity-times-record-size, address range, and count overlap. Returned records
+initialize every `OgaEngineEvent` field and do not touch unused slots.
 
-Capacity zero is an owner-thread-validated no-op: the buffer may be null, stride is ignored, count
-becomes zero, and no reclamation, draining, scheduling, or model work occurs. A permanently
-unhealthy Engine still returns its stored fatal error.
+Capacity zero is an owner-thread-validated no-op: the buffer may be null, count becomes zero, and no
+reclamation, draining, scheduling, or model work occurs. A permanently unhealthy Engine still
+returns its stored fatal error.
 
 A positive-capacity call is strictly drain-or-execute:
 

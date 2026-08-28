@@ -8,6 +8,7 @@
 // TurnComplete, and Closed.
 
 #include <memory>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -744,12 +745,51 @@ TEST_F(RequestLifecycleTest, EosCompletesWithoutAppendingVisibleToken) {
 TEST_F(RequestLifecycleTest, RequestRejectsMultiSequenceSearch) {
   auto params = MakeGreedyParams(*model_);
   params->search.batch_size = 2;
-  EXPECT_THROW(
-      {
-        auto request = engine_.engine->CreateRequest(*params);
-        static_cast<void>(request);
-      },
-      std::runtime_error);
+  try {
+    static_cast<void>(engine_.engine->CreateRequest(*params));
+    FAIL() << "Expected batch_size != 1 to be rejected.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("batch_size == 1"),
+              std::string::npos);
+    EXPECT_NE(std::string(error.what()).find("actual value is 2"),
+              std::string::npos);
+  }
+}
+
+TEST_F(RequestLifecycleTest, RequestRejectsInvalidSamplingLimits) {
+  {
+    auto params = MakeGreedyParams(*model_);
+    params->search.top_p = 1.5f;
+    try {
+      static_cast<void>(engine_.engine->CreateRequest(*params));
+      FAIL() << "Expected top_p above 1.0 to be rejected.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("top_p (1.500000)"),
+                std::string::npos);
+      EXPECT_NE(std::string(error.what()).find("between 0.0 and 1.0"),
+                std::string::npos);
+    }
+  }
+
+  {
+    auto params = MakeGreedyParams(*model_);
+    params->search.top_p = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_THROW(
+        static_cast<void>(engine_.engine->CreateRequest(*params)),
+        std::runtime_error);
+  }
+
+  {
+    auto params = MakeGreedyParams(*model_);
+    params->search.top_k = -1;
+    try {
+      static_cast<void>(engine_.engine->CreateRequest(*params));
+      FAIL() << "Expected negative top_k to be rejected.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("top_k (-1)"),
+                std::string::npos);
+    }
+  }
 }
 
 TEST_F(RequestLifecycleTest, RequestRejectsGuidanceFastForwardTokens) {

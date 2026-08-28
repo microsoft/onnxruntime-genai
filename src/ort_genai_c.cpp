@@ -113,14 +113,6 @@ T* ReturnUnique(std::unique_ptr<U> p) {
 
 namespace {
 
-void ValidateOptionsStructSize(
-    size_t actual_size, size_t minimum_size, const char* struct_name) {
-  if (actual_size < minimum_size) {
-    throw std::runtime_error(
-        std::string{struct_name} + ".struct_size is too small.");
-  }
-}
-
 OgaFinishReason ToCFinishReason(
     Generators::GenerationFinishReason finish_reason) {
   using Generators::GenerationFinishReason;
@@ -143,32 +135,16 @@ OgaFinishReason ToCFinishReason(
   throw std::logic_error("Unknown generation finish reason.");
 }
 
-static_assert(
-    static_cast<uint32_t>(Generators::GenerationFinishReason::None) ==
-        OgaFinishReason_None &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::EosToken) ==
-        OgaFinishReason_Eos &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::StopToken) ==
-        OgaFinishReason_StopSequence &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::TurnLimit) ==
-        OgaFinishReason_MaxGeneratedTokens &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::ContextLimit) ==
-        OgaFinishReason_MaxSessionTokens &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::Canceled) ==
-        OgaFinishReason_Cancelled &&
-    static_cast<uint32_t>(Generators::GenerationFinishReason::Failed) ==
-        OgaFinishReason_Failed);
-
 static_assert(sizeof(OgaFinishReason) == sizeof(uint32_t));
 static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
 static_assert(sizeof(OgaRequestOptions) == 8);
-static_assert(offsetof(OgaRequestOptions, max_session_tokens) == 0);
 static_assert(sizeof(OgaTurnUsage) == 24);
 static_assert(sizeof(OgaEngineEvent) == 64);
 static_assert(offsetof(OgaEngineEvent, request) == 8);
 static_assert(offsetof(OgaEngineEvent, turn_id) == 16);
 static_assert(offsetof(OgaEngineEvent, token) == 24);
-static_assert(offsetof(OgaEngineEvent, finish_reason) == 32);
+static_assert(offsetof(OgaEngineEvent, finish_reason) == 28);
+static_assert(offsetof(OgaEngineEvent, error_code) == 32);
 static_assert(offsetof(OgaEngineEvent, usage) == 40);
 
 }  // namespace
@@ -1446,14 +1422,26 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
 
 OgaResult* OgaEngineRun(
     OgaEngine* engine,
-    void* event_buffer,
+    OgaEngineEvent* events,
     size_t event_capacity,
-    size_t event_stride,
     size_t* out_event_count) {
   OGA_TRY
   if (!out_event_count) {
     throw std::runtime_error("out_event_count must not be null.");
   }
+  const uintptr_t event_count_begin =
+      reinterpret_cast<uintptr_t>(out_event_count);
+  if (event_count_begin >
+      std::numeric_limits<uintptr_t>::max() - sizeof(*out_event_count)) {
+    throw std::overflow_error(
+        "out_event_count address (" + std::to_string(event_count_begin) +
+        ") plus sizeof(size_t) (" +
+        std::to_string(sizeof(*out_event_count)) +
+        ") exceeds the maximum uintptr_t value (" +
+        std::to_string(std::numeric_limits<uintptr_t>::max()) + ").");
+  }
+  const uintptr_t event_count_end =
+      event_count_begin + sizeof(*out_event_count);
 
   if (event_capacity == 0) {
     *out_event_count = 0;
@@ -1463,85 +1451,63 @@ OgaResult* OgaEngineRun(
     engine->Run({});
     return nullptr;
   }
-  if (!event_buffer) {
+  if (!events) {
     *out_event_count = 0;
     throw std::runtime_error(
-        "event_buffer must not be null when event_capacity is positive.");
+        "events must not be null when event_capacity is positive.");
   }
-  if (event_stride != 0 &&
-      event_capacity > std::numeric_limits<size_t>::max() / event_stride) {
+  if (event_capacity >
+      std::numeric_limits<size_t>::max() / sizeof(OgaEngineEvent)) {
     *out_event_count = 0;
-    throw std::overflow_error("event_capacity * event_stride overflows size_t.");
-  }
-  const size_t event_buffer_size = event_capacity * event_stride;
-  if (event_buffer_size >
-      std::numeric_limits<uintptr_t>::max() -
-          reinterpret_cast<uintptr_t>(event_buffer)) {
-    *out_event_count = 0;
-    throw std::overflow_error("event_buffer address range overflows uintptr_t.");
-  }
-  const uintptr_t event_buffer_begin =
-      reinterpret_cast<uintptr_t>(event_buffer);
-  const uintptr_t event_buffer_end =
-      event_buffer_begin + event_buffer_size;
-  const uintptr_t event_count_begin =
-      reinterpret_cast<uintptr_t>(out_event_count);
-  if (event_count_begin >
-      std::numeric_limits<uintptr_t>::max() - sizeof(*out_event_count)) {
     throw std::overflow_error(
-        "out_event_count address range overflows uintptr_t.");
+        "event_capacity (" + std::to_string(event_capacity) +
+        ") multiplied by sizeof(OgaEngineEvent) (" +
+        std::to_string(sizeof(OgaEngineEvent)) +
+        ") exceeds the maximum size_t value (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
   }
-  const uintptr_t event_count_end =
-      event_count_begin + sizeof(*out_event_count);
-  if (event_count_begin < event_buffer_end &&
-      event_count_end > event_buffer_begin) {
+  const size_t events_size =
+      event_capacity * sizeof(OgaEngineEvent);
+  if (events_size >
+      std::numeric_limits<uintptr_t>::max() -
+          reinterpret_cast<uintptr_t>(events)) {
+    *out_event_count = 0;
+    throw std::overflow_error(
+        "events address (" +
+        std::to_string(reinterpret_cast<uintptr_t>(events)) +
+        ") plus storage size (" + std::to_string(events_size) +
+        ") exceeds the maximum uintptr_t value (" +
+        std::to_string(std::numeric_limits<uintptr_t>::max()) + ").");
+  }
+  const uintptr_t events_begin = reinterpret_cast<uintptr_t>(events);
+  const uintptr_t events_end = events_begin + events_size;
+  if (event_count_begin < events_end &&
+      event_count_end > events_begin) {
     throw std::runtime_error(
-        "out_event_count must not overlap event_buffer.");
+        "out_event_count must not overlap events.");
   }
   *out_event_count = 0;
-  if (reinterpret_cast<uintptr_t>(event_buffer) % alignof(OgaEngineEvent) != 0) {
+  if (events_begin % alignof(OgaEngineEvent) != 0) {
     throw std::runtime_error(
-        "event_buffer must be aligned for OgaEngineEvent.");
-  }
-  if (event_stride < sizeof(OgaEngineEvent)) {
-    throw std::runtime_error(
-        "event_stride must be at least sizeof(OgaEngineEvent).");
-  }
-  if (event_stride % alignof(OgaEngineEvent) != 0) {
-    throw std::runtime_error(
-        "event_stride must preserve OgaEngineEvent alignment.");
+        "events must be aligned for OgaEngineEvent: address (" +
+        std::to_string(events_begin) +
+        ") is not a multiple of alignof(OgaEngineEvent) (" +
+        std::to_string(alignof(OgaEngineEvent)) + ").");
   }
   if (!engine) {
     throw std::runtime_error("engine must not be null.");
   }
 
-  auto* const buffer = static_cast<std::byte*>(event_buffer);
-  for (size_t i = 0; i < event_capacity; ++i) {
-    const auto* const event =
-        reinterpret_cast<const OgaEngineEvent*>(buffer + i * event_stride);
-    ValidateOptionsStructSize(
-        event->struct_size, sizeof(OgaEngineEvent), "OgaEngineEvent");
-    if (event->struct_size > event_stride) {
-      throw std::runtime_error(
-          "OgaEngineEvent.struct_size must not exceed event_stride.");
-    }
-    if (event->reserved != 0) {
-      throw std::runtime_error("OgaEngineEvent.reserved must be zero.");
-    }
-  }
-
-  std::vector<Generators::EngineEvent> events(event_capacity);
-  const size_t event_count = engine->Run(events);
+  std::vector<Generators::EngineEvent> internal_events(event_capacity);
+  const size_t event_count = engine->Run(internal_events);
   for (size_t i = 0; i < event_count; ++i) {
-    auto* const out_event =
-        reinterpret_cast<OgaEngineEvent*>(buffer + i * event_stride);
-    const auto& event = events[i];
+    auto* const out_event = &events[i];
+    const auto& event = internal_events[i];
     out_event->flags = event.flags;
     out_event->request =
         event.request ? ReturnBorrowed<OgaRequest>(event.request) : nullptr;
     out_event->turn_id = event.turn_id;
     out_event->token = event.token;
-    out_event->reserved = 0;
     out_event->finish_reason = ToCFinishReason(event.finish_reason);
     out_event->error_code = static_cast<OgaErrorCode>(event.error_code);
     out_event->usage = {
@@ -1589,7 +1555,9 @@ OgaResult* OgaEngineCreateRequest(
   }
   if (max_session_tokens > std::numeric_limits<size_t>::max()) {
     throw std::overflow_error(
-        "max_session_tokens does not fit the internal size type.");
+        "max_session_tokens (" + std::to_string(max_session_tokens) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
   }
   const size_t max_total_tokens =
       max_session_tokens == 0
@@ -1631,7 +1599,10 @@ OgaResult* OgaTurnParamsSetMaxGeneratedTokens(
   params->ValidateOwnerThread();
   if (max_generated_tokens > std::numeric_limits<size_t>::max()) {
     throw std::overflow_error(
-        "max_generated_tokens does not fit the internal size type.");
+        "max_generated_tokens (" +
+        std::to_string(max_generated_tokens) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
   }
   if (max_generated_tokens == 0) {
     params->max_generated_tokens.reset();
@@ -1714,7 +1685,9 @@ OgaResult* OgaRequestBeginTurn(
   }
   if (input_ids_count > std::numeric_limits<size_t>::max()) {
     throw std::overflow_error(
-        "input_ids_count does not fit the internal size type.");
+        "input_ids_count (" + std::to_string(input_ids_count) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
   }
   *out_turn_id = request->BeginTurn(
       std::span<const int32_t>{
