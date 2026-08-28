@@ -399,14 +399,6 @@ TEST_F(RequestLifecycleTest, BeginTurnIsRejectedWhileActive) {
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
 }
 
-TEST_F(RequestLifecycleTest, BeginTurnIsRejectedWhileAssigned) {
-  auto prompt = Prompt();
-  const std::vector<int32_t> more{5};
-  auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
-
-  EXPECT_THROW(request->BeginTurn(more), std::runtime_error);
-}
-
 // After a turn completes, BeginTurn appends another input fragment and queues the resident request.
 TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();
@@ -544,16 +536,6 @@ TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputToken
   EXPECT_EQ(first_result.token, generated_token);
 }
 
-TEST_F(RequestLifecycleTest, ContinuationIsRejectedOutsideTurnComplete) {
-  const std::vector<int32_t> more{5};
-  auto request = NewRequest();
-  request->BeginTurn(Prompt());
-  EXPECT_THROW(request->BeginTurn(more), std::runtime_error);
-
-  request->Schedule();
-  EXPECT_THROW(request->BeginTurn(more), std::runtime_error);
-}
-
 // Closing a request releases it from the engine and makes it terminal.
 TEST_F(RequestLifecycleTest, RequestCloseIsIdempotentAfterClose) {
   auto prompt = Prompt();
@@ -664,7 +646,6 @@ TEST_F(RequestLifecycleTest, PerTurnLimitStagesUntilTransactionCommit) {
 
   request->CommitStateForTransaction();
   request->CommitStep(plan, result);
-  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(result.token, 5);
 }

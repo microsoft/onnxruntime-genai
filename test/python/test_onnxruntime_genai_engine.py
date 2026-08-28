@@ -332,13 +332,19 @@ def test_zero_turn_budget_uses_default_limit(model):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=16)
     request = engine.create_request(params)
+    sink = _Sink()
+    sinks = {request: sink}
     prompt = np.asarray(_PROMPT_A, dtype=np.int32)
 
     turn_params = og.TurnParams(request)
     turn_params.set_max_generated_tokens(0)
     assert request.begin_turn(prompt, turn_params) == 0
-    assert engine.has_pending_requests()
-    assert _next_event(engine).request is request
+    _run(engine, sinks, close_completed=False)
+
+    expected_generated_tokens = 16 - len(prompt)
+    assert sink.tokens == predicted_tokens(_PROMPT_A, expected_generated_tokens)
+    assert sink.finish_reason == og.FinishReason.MAX_SESSION_TOKENS
+    assert sink.usage.generated_tokens == expected_generated_tokens
     request.close()
 
 
@@ -514,36 +520,30 @@ def test_close_is_valid_and_idempotent_from_every_state(model, state):
 
 def test_events_deliver_tokens_across_turns(model):
     follow_up = np.asarray([_EOS_TOKEN_ID, 12], dtype=np.int32)
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=64)
+    request = engine.create_request(params)
 
-    def run_two_turns():
-        engine = og.Engine(model)
-        params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=False, max_length=64)
-        request = engine.create_request(params)
-        request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
+    def run_turn(input_tokens, expected_turn_id):
+        assert request.begin_turn(input_tokens) == expected_turn_id
         tokens = []
-
         finished = False
         while not finished:
             event = _next_event(engine)
             assert event.request is request
+            assert event.turn_id == expected_turn_id
             if event.token is not None:
                 tokens.append(event.token)
             finished = bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
-
-        request.begin_turn(follow_up)
-        finished = False
-        while not finished:
-            event = _next_event(engine)
-            assert event.request is request
-            if event.token is not None:
-                tokens.append(event.token)
-            finished = bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
-
-        request.close()
         return tokens
 
-    assert run_two_turns()
+    first_turn_tokens = run_turn(np.asarray(_PROMPT_A, dtype=np.int32), 0)
+    second_turn_tokens = run_turn(follow_up, 1)
+
+    assert first_turn_tokens
+    assert second_turn_tokens
+    request.close()
 
 
 def test_last_handle_release_reclaims_retained_capacity(model):
