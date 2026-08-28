@@ -37,6 +37,11 @@ Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromConfig(JNIEnv* env, jobje
 
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromPath(JNIEnv* env, jobject thiz, jstring model_path) {
+  if (model_path == nullptr) {
+    ThrowException(env, "modelPath must not be null");
+    return 0;
+  }
+
   CString path{env, model_path};
   OgaTokenizer* tokenizer = nullptr;
 
