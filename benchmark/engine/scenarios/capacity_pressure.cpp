@@ -110,8 +110,7 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
 
       try {
         auto request = engineResources.engine->CreateRequest(*params.back());
-        request->BeginTurn(std::span<const int32_t>{
-            prompt->SequenceData(0), prompt_count});
+        request->BeginTurn(prompt->SequenceData(0), prompt_count);
         request_indices.emplace(request.get(), request_index);
         requests.push_back(std::move(request));
       } catch (const std::exception& ex) {
@@ -128,15 +127,15 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     // so deferred peers can reuse their cache capacity.
     std::vector<OgaEngineEvent> event_storage(
         static_cast<size_t>(config.concurrency));
+    size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
-      const auto events = engineResources.engine->Run(event_storage);
+      const size_t event_count = engineResources.engine->Run(
+          event_storage.data(), event_storage.size());
       const auto now = std::chrono::steady_clock::now();
-      for (const auto& event : events) {
-        if (!event.request) {
-          if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
-            throw std::runtime_error(
-                Name() + ": Engine failed without a request-specific outcome");
-          }
+      for (size_t event_index = 0; event_index < event_count; ++event_index) {
+        const auto& event = event_storage[event_index];
+        if (!RequireRequestEvent(
+                event, Name(), consecutive_retries)) {
           continue;
         }
 

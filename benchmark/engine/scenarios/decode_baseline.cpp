@@ -113,16 +113,23 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
       requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
       request_states_by_request.emplace(
           requests.back().get(), &request_state);
-      requests.back()->BeginTurn(std::span<const int32_t>{
-          prompt_tokens->SequenceData(0), prompt_token_count});
+      requests.back()->BeginTurn(
+          prompt_tokens->SequenceData(0), prompt_token_count);
     }
 
     std::vector<OgaEngineEvent> event_storage(
         static_cast<size_t>(config.concurrency));
+    size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
-      const auto events = engineResources.engine->Run(event_storage);
+      const size_t event_count = engineResources.engine->Run(
+          event_storage.data(), event_storage.size());
       const auto now = std::chrono::steady_clock::now();
-      for (const auto& event : events) {
+      for (size_t event_index = 0; event_index < event_count; ++event_index) {
+        const auto& event = event_storage[event_index];
+        if (!RequireRequestEvent(
+                event, Name(), consecutive_retries)) {
+          continue;
+        }
         const auto state_it =
             request_states_by_request.find(event.request);
         if (state_it == request_states_by_request.end()) {

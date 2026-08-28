@@ -98,8 +98,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       turn_params.back()->SetMaxGeneratedTokens(
           static_cast<uint64_t>(config.generation_tokens));
       requests.back()->BeginTurn(
-          std::span<const int32_t>{
-              base_prompt->SequenceData(0), base_prompt_count},
+          base_prompt->SequenceData(0), base_prompt_count,
           turn_params.back().get());
     }
 
@@ -117,15 +116,15 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       // Drain the current turn for the resident requests before beginning their next Turns.
       std::vector<OgaEngineEvent> event_storage(
           static_cast<size_t>(config.concurrency));
+      size_t consecutive_retries = 0;
       while (engineResources.engine->HasPendingRequests()) {
-        const auto events = engineResources.engine->Run(event_storage);
+        const size_t event_count = engineResources.engine->Run(
+            event_storage.data(), event_storage.size());
         const auto now = std::chrono::steady_clock::now();
-        for (const auto& event : events) {
-          if (!event.request) {
-            if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
-              throw std::runtime_error(
-                  Name() + ": Engine failed without a request-specific outcome");
-            }
+        for (size_t event_index = 0; event_index < event_count; ++event_index) {
+          const auto& event = event_storage[event_index];
+          if (!RequireRequestEvent(
+                  event, Name(), consecutive_retries)) {
             continue;
           }
 
@@ -190,9 +189,8 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
             throw std::runtime_error(Name() + ": no generated tokens available for continuation");
           }
           requests[request_index]->BeginTurn(
-              std::span<const int32_t>{
-                  generated_segments[request_index].data(),
-                  generated_segments[request_index].size()},
+              generated_segments[request_index].data(),
+              generated_segments[request_index].size(),
               turn_params[request_index].get());
           request_tokens[request_index].insert(
               request_tokens[request_index].end(), generated_segments[request_index].begin(),

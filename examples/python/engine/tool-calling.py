@@ -16,6 +16,20 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 
 
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.FAILED:
+        outcome = "failed"
+    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
+
+
 def tool_result_fragment(tool_result):
     return (
         "<|im_end|>\n<|im_start|>user\n<tool_response>\n"
@@ -30,7 +44,7 @@ def generate(engine, request, tokenizer):
     token_ids = []
     while engine.has_pending_requests():
         for event in engine.run(8):
-            if event.request is not request:
+            if require_request_event(event) is not request:
                 raise RuntimeError("Engine returned an unknown request")
             if event.flags & og.EngineEventFlags.TOKEN:
                 token_id = event.token
@@ -125,8 +139,20 @@ def run(args):
         print(f"Tool call: {tool_call_output}")
         print(f"Tool result: {json.dumps(tool_result)}")
 
-        continuation_tokens = tokenizer.encode(tool_result_fragment(tool_result))
-        request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32))
+        continuation_tokens = list(tokenizer.encode(tool_result_fragment(tool_result)))
+        if args.guidance:
+            request.close()
+            final_params = og.GeneratorParams(model)
+            final_params.set_search_options(
+                do_sample=False, max_length=args.max_length
+            )
+            request = engine.create_request(final_params)
+            final_context = prompt_tokens + tool_call_tokens + continuation_tokens
+            request.begin_turn(np.asarray(final_context, dtype=np.int32))
+        else:
+            request.begin_turn(
+                np.asarray(continuation_tokens, dtype=np.int32)
+            )
 
         final_output, _ = generate(engine, request, tokenizer)
         final_output = final_output.strip()

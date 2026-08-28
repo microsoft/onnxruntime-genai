@@ -1375,7 +1375,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
  * \brief Cancels the named queued or active Turn.
  *
  * Cancellation is synchronous and owner-thread-only. A matching queued or active Turn produces one
- * terminal Cancelled event. Stale, unknown, and completed IDs return success with false.
+ * terminal Cancelled event. Stale, unknown, and completed IDs return success with false. A Request
+ * that has never begun a Turn or has already been closed returns an error.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled);

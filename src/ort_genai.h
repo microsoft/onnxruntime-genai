@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -991,6 +993,43 @@ struct OgaEngine : OgaAbstract {
     return std::unique_ptr<OgaRequest>(request);
   }
 
+  /**
+   * Runs one drain-or-execute Engine operation into exact Version 1 event storage.
+   */
+  size_t Run(OgaEngineEvent* storage, size_t capacity) {
+    if (capacity != 0) {
+      if (!storage) {
+        throw std::invalid_argument(
+            "storage must not be null when capacity is positive.");
+      }
+      const uintptr_t storage_begin =
+          reinterpret_cast<uintptr_t>(storage);
+      if (storage_begin % alignof(OgaEngineEvent) != 0) {
+        throw std::invalid_argument(
+            "storage must be aligned for OgaEngineEvent.");
+      }
+      if (capacity >
+          std::numeric_limits<size_t>::max() / sizeof(OgaEngineEvent)) {
+        throw std::overflow_error(
+            "capacity * sizeof(OgaEngineEvent) overflows size_t.");
+      }
+      const size_t storage_size = capacity * sizeof(OgaEngineEvent);
+      if (storage_size >
+          std::numeric_limits<uintptr_t>::max() - storage_begin) {
+        throw std::overflow_error(
+            "storage address range overflows uintptr_t.");
+      }
+    }
+    for (size_t index = 0; index < capacity; ++index) {
+      storage[index].struct_size = sizeof(OgaEngineEvent);
+      storage[index].reserved = 0;
+    }
+    size_t event_count{};
+    OgaCheckResult(OgaEngineRun(
+        this, storage, capacity, sizeof(OgaEngineEvent), &event_count));
+    return event_count;
+  }
+
 #if OGA_USE_SPAN
   /**
    * Runs one drain-or-execute Engine operation into exact Version 1 event storage.
@@ -999,15 +1038,7 @@ struct OgaEngine : OgaAbstract {
    * for caller-defined future-sized records or padded strides.
    */
   std::span<const OgaEngineEvent> Run(std::span<OgaEngineEvent> storage) {
-    for (auto& event : storage) {
-      event.struct_size = sizeof(OgaEngineEvent);
-      event.reserved = 0;
-    }
-    size_t event_count{};
-    OgaCheckResult(OgaEngineRun(
-        this, storage.data(), storage.size(), sizeof(OgaEngineEvent),
-        &event_count));
-    return storage.first(event_count);
+    return storage.first(Run(storage.data(), storage.size()));
   }
 #endif
 

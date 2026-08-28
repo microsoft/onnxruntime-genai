@@ -13,6 +13,20 @@ import tqdm
 from datasets import load_dataset
 
 
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.FAILED:
+        outcome = "failed"
+    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
+
+
 def get_random_prompts(num_questions: int, split="validation") -> list[str]:
     dataset = load_dataset("squad_v2", split=split)
     questions = [item["question"] for item in dataset]
@@ -86,7 +100,7 @@ class RequestPool:
         self.next_admission_time = time.monotonic() + 1
 
     def drain(self, event: og.EngineEvent):
-        request = event.request
+        request = require_request_event(event)
         client_request = self.requests.get(request)
         assert client_request is not None, "Canonical request not found in the pool"
         token_count = 0

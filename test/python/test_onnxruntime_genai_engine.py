@@ -439,6 +439,53 @@ def test_request_rejects_second_turn_while_active(model):
     request.close()
 
 
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        np.asarray([5, 99, 9, 99, 13], dtype=np.int32)[::2],
+        np.asarray(_PROMPT_A, dtype=np.int32)[::-1],
+    ],
+    ids=["positive-stride", "negative-stride"],
+)
+def test_begin_turn_copies_non_contiguous_token_views(model, tokens):
+    logical_tokens = tokens.tolist()
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False, max_length=len(logical_tokens) + 3
+    )
+    request = engine.create_request(params)
+    sink = _Sink()
+    sinks = {request: sink}
+
+    request.begin_turn(tokens)
+    _run(engine, sinks)
+
+    assert sink.tokens == predicted_tokens(logical_tokens, 3)
+
+
+def test_begin_turn_accepts_read_only_tokens_and_rejects_multiple_dimensions(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False, max_length=len(_PROMPT_A) + 1
+    )
+
+    read_only_tokens = np.asarray(_PROMPT_A, dtype=np.int32)
+    read_only_tokens.setflags(write=False)
+    request = engine.create_request(params)
+    request.begin_turn(read_only_tokens)
+    assert _next_event(engine).request is request
+    request.close()
+
+    invalid_request = engine.create_request(params)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        invalid_request.begin_turn(
+            np.asarray([_PROMPT_A, _PROMPT_A], dtype=np.int32)
+        )
+    invalid_request.close()
+
+
 def test_request_lifecycle_operations(model):
     engine = og.Engine(model)
     sink = _Sink()

@@ -10,6 +10,20 @@ import onnxruntime_genai as og
 MAX_LENGTH = 1024
 
 
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.FAILED:
+        outcome = "failed"
+    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
+
+
 def run(args: argparse.Namespace):
     config = og.Config(args.model_path)
     config.clear_providers()
@@ -66,7 +80,7 @@ def run(args: argparse.Namespace):
 
             while engine.has_pending_requests():
                 for event in engine.run(8):
-                    if event.request is not request:
+                    if require_request_event(event) is not request:
                         raise RuntimeError("Engine returned an unknown request")
                     if event.flags & og.EngineEventFlags.TOKEN:
                         token = int(event.token)

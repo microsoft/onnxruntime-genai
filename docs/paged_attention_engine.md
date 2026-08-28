@@ -939,6 +939,12 @@ turn_id = request.begin_turn(initial_tokens, turn_params)
 
 while engine.has_pending_requests():
     for event in engine.run(max_events=8):
+        if event.request is None:
+            # CapacityBlocked and Retryable leave the Engine reusable; production hosts may retry
+            # with admission control/backoff. This minimal loop surfaces every Engine-level event.
+            raise RuntimeError(
+                f"Engine-level event: flags={event.flags}, error_code={event.error_code}"
+            )
         if event.flags & og.EngineEventFlags.TOKEN:
             # event.request is a borrowed identity alias; event.turn_id is Request-local.
             token = event.token

@@ -341,11 +341,10 @@ Turn returns true, and later calls return false.
 - `event_stride` is the byte distance between record starts. It must be aligned for
   `OgaEngineEvent` and at least `sizeof(OgaEngineEvent)`.
 - `out_event_count` receives the number of records written in the buffer prefix and is set to zero
-  before later validation or Engine work. It must not overlap the event storage. On the specific
-  overlap error detected by Version 1, the implementation restores the caller's original count
-  value before returning the error. Version 1 detects a count pointer whose starting address lies
-  inside the event range; callers must keep the complete `size_t` object outside that range and
-  must not rely on the count value after any invalid call.
+  before later validation or Engine work. It must not overlap the event storage. The complete
+  `size_t` object is checked for overlap before the implementation writes through the pointer, so
+  the count remains unchanged for that specific validation error. Callers must not rely on the
+  count value after any invalid call.
 - Every positive-capacity slot must be aligned, have
   `sizeof(OgaEngineEvent) <= struct_size <= event_stride`, and have `reserved == 0`.
 - The complete storage layout, including checked `event_capacity * event_stride`, is validated
@@ -510,8 +509,8 @@ Callers must never read `event.token` merely because a record was returned. They
 - A fatal Engine failure produces `Failed` with a null Request and prevents later model execution.
 - Detailed diagnostics continue to use the library's established result/error facilities.
 - Output validation, API misuse, and owner-thread violations return `OgaResult` with count zero and
-  no Engine progress, except that the specifically detected `out_event_count` overlap case
-  restores the original count value as described above.
+  no Engine progress, except that an overlapping `out_event_count` is rejected before the count can
+  safely be written.
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
   typed events. After the fatal event is delivered, later `Run` calls return the stored fatal error.
 
@@ -570,9 +569,11 @@ Version 1 preserves the size and trailing bytes rather than assuming the extra f
 - RAII `OgaTurnParams`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
+- `OgaEngine::Run(OgaEngineEvent*, size_t)` returns the populated record count and is available in
+  C++17 and later.
 - When compiled as C++20 or later, `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
   `std::span<const OgaEngineEvent>` over the populated prefix. The C++17 wrapper still exposes
-  the non-span Engine operations and callers use the C API for `Run`.
+  the pointer/count overload.
 - The convenience wrapper accepts exact Version 1 storage and initializes only `struct_size` and
   `reserved` in every reusable slot. Future-sized or padded records use the C API directly.
 - No unseen-token methods.
@@ -591,9 +592,9 @@ Version 1 preserves the size and trailing bytes rather than assuming the extra f
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
   and usage. The event object does not retain the Request; keep the original Python `Request`
   object alive while using `event.request`.
-- `Request.begin_turn` currently flattens the `numpy` array's data pointer and element count through
-  the binding's `ToSpan` helper; the binding does not explicitly validate rank before calling the
-  C++ wrapper.
+- `Request.begin_turn` requires one logical dimension and converts input to a C-contiguous `int32`
+  array when necessary before calling the C++ wrapper. Read-only and strided arrays are accepted
+  through that conversion; multidimensional arrays are rejected.
 - No `has_unseen_tokens` or `get_unseen_token`.
 
 Examples and integration tests must consume `event.token` and use flag checks. Managed wrappers must

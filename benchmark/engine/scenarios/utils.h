@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -125,6 +126,37 @@ inline double Percentile(std::vector<double> values, double p) {
   const auto hi = static_cast<size_t>(std::ceil(rank));
   const double t = rank - static_cast<double>(lo);
   return values[lo] + (values[hi] - values[lo]) * t;
+}
+
+inline bool RequireRequestEvent(
+    const OgaEngineEvent& event, const std::string& scenario,
+    size_t& consecutive_retries) {
+  if (event.request) {
+    consecutive_retries = 0;
+    return true;
+  }
+
+  if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+    throw std::runtime_error(
+        scenario + ": Engine failed with error code " +
+        std::to_string(static_cast<int>(event.error_code)));
+  }
+  if ((event.flags & (OgaEngineEventFlag_CapacityBlocked |
+                      OgaEngineEventFlag_Retryable)) != 0) {
+    constexpr size_t kMaxConsecutiveRetries = 100;
+    if (++consecutive_retries > kMaxConsecutiveRetries) {
+      throw std::runtime_error(
+          scenario + ": Engine made no request progress after " +
+          std::to_string(kMaxConsecutiveRetries) +
+          " retryable events; last error code " +
+          std::to_string(static_cast<int>(event.error_code)));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return false;
+  }
+  throw std::runtime_error(
+      scenario + ": Engine returned an invalid request-less event with error code " +
+      std::to_string(static_cast<int>(event.error_code)));
 }
 
 std::string ResolveModelPath(const std::string& model_path);

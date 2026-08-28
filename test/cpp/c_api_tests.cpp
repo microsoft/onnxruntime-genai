@@ -1103,6 +1103,13 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   EXPECT_EQ(event_count, 0u);
   EXPECT_TRUE(engine->HasPendingRequests());
 
+  size_t output_only_event_count;
+  EXPECT_EQ(
+      OgaEngineRun(
+          engine.get(), nullptr, 0, 0, &output_only_event_count),
+      nullptr);
+  EXPECT_EQ(output_only_event_count, 0u);
+
   OgaResult* zero_capacity_off_thread_result{};
   size_t zero_capacity_off_thread_count = 17;
   std::thread zero_capacity_off_thread([&] {
@@ -1358,6 +1365,10 @@ TEST(CAPITests, EngineCppRunReturnsPopulatedStoragePrefix) {
   };
   auto first = create_request();
   auto second = create_request();
+
+  EXPECT_THROW(
+      static_cast<void>(engine->Run(nullptr, 1)),
+      std::invalid_argument);
 
   std::array<OgaEngineEvent, 4> storage{};
   storage[2].flags = 0x1234;

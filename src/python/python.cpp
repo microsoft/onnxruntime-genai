@@ -784,9 +784,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(
           "begin_turn",
           [](OgaRequest& request,
-             pybind11::array_t<int32_t> tokens,
+             pybind11::array_t<
+                 int32_t,
+                 pybind11::array::c_style | pybind11::array::forcecast>
+                 tokens,
              OgaTurnParams* turn_params) -> uint64_t {
-            return request.BeginTurn(ToSpan(tokens), turn_params);
+            if (tokens.ndim() != 1) {
+              throw pybind11::value_error(
+                  "tokens must be a one-dimensional array.");
+            }
+            return request.BeginTurn(
+                tokens.data(), static_cast<size_t>(tokens.size()),
+                turn_params);
           },
           pybind11::arg("tokens"),
           pybind11::arg("turn_params") = pybind11::none())

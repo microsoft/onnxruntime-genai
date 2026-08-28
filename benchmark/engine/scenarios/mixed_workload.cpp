@@ -109,22 +109,21 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       requests.emplace_back(
           engineResources.engine->CreateRequest(*params.back()));
       request_indices.emplace(requests.back().get(), static_cast<size_t>(i));
-      requests.back()->BeginTurn(std::span<const int32_t>{
-          prompt->SequenceData(0), prompt_count});
+      requests.back()->BeginTurn(prompt->SequenceData(0), prompt_count);
     }
 
     // Measure whether the long prefill delays decode first-token and inter-token latency.
     std::vector<OgaEngineEvent> event_storage(
         static_cast<size_t>(config.concurrency));
+    size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
-      const auto events = engineResources.engine->Run(event_storage);
+      const size_t event_count = engineResources.engine->Run(
+          event_storage.data(), event_storage.size());
       const auto now = std::chrono::steady_clock::now();
-      for (const auto& event : events) {
-        if (!event.request) {
-          if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
-            throw std::runtime_error(
-                Name() + ": Engine failed without a request-specific outcome");
-          }
+      for (size_t event_index = 0; event_index < event_count; ++event_index) {
+        const auto& event = event_storage[event_index];
+        if (!RequireRequestEvent(
+                event, Name(), consecutive_retries)) {
           continue;
         }
 

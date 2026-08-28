@@ -1454,20 +1454,51 @@ OgaResult* OgaEngineRun(
   if (!out_event_count) {
     throw std::runtime_error("out_event_count must not be null.");
   }
-  const size_t original_event_count = *out_event_count;
-  *out_event_count = 0;
-  if (!engine) {
-    throw std::runtime_error("engine must not be null.");
-  }
 
   if (event_capacity == 0) {
+    *out_event_count = 0;
+    if (!engine) {
+      throw std::runtime_error("engine must not be null.");
+    }
     engine->Run({});
     return nullptr;
   }
   if (!event_buffer) {
+    *out_event_count = 0;
     throw std::runtime_error(
         "event_buffer must not be null when event_capacity is positive.");
   }
+  if (event_stride != 0 &&
+      event_capacity > std::numeric_limits<size_t>::max() / event_stride) {
+    *out_event_count = 0;
+    throw std::overflow_error("event_capacity * event_stride overflows size_t.");
+  }
+  const size_t event_buffer_size = event_capacity * event_stride;
+  if (event_buffer_size >
+      std::numeric_limits<uintptr_t>::max() -
+          reinterpret_cast<uintptr_t>(event_buffer)) {
+    *out_event_count = 0;
+    throw std::overflow_error("event_buffer address range overflows uintptr_t.");
+  }
+  const uintptr_t event_buffer_begin =
+      reinterpret_cast<uintptr_t>(event_buffer);
+  const uintptr_t event_buffer_end =
+      event_buffer_begin + event_buffer_size;
+  const uintptr_t event_count_begin =
+      reinterpret_cast<uintptr_t>(out_event_count);
+  if (event_count_begin >
+      std::numeric_limits<uintptr_t>::max() - sizeof(*out_event_count)) {
+    throw std::overflow_error(
+        "out_event_count address range overflows uintptr_t.");
+  }
+  const uintptr_t event_count_end =
+      event_count_begin + sizeof(*out_event_count);
+  if (event_count_begin < event_buffer_end &&
+      event_count_end > event_buffer_begin) {
+    throw std::runtime_error(
+        "out_event_count must not overlap event_buffer.");
+  }
+  *out_event_count = 0;
   if (reinterpret_cast<uintptr_t>(event_buffer) % alignof(OgaEngineEvent) != 0) {
     throw std::runtime_error(
         "event_buffer must be aligned for OgaEngineEvent.");
@@ -1480,26 +1511,8 @@ OgaResult* OgaEngineRun(
     throw std::runtime_error(
         "event_stride must preserve OgaEngineEvent alignment.");
   }
-  if (event_capacity > std::numeric_limits<size_t>::max() / event_stride) {
-    throw std::overflow_error("event_capacity * event_stride overflows size_t.");
-  }
-  const size_t event_buffer_size = event_capacity * event_stride;
-  if (event_buffer_size >
-      std::numeric_limits<uintptr_t>::max() -
-          reinterpret_cast<uintptr_t>(event_buffer)) {
-    throw std::overflow_error("event_buffer address range overflows uintptr_t.");
-  }
-  const uintptr_t event_buffer_begin =
-      reinterpret_cast<uintptr_t>(event_buffer);
-  const uintptr_t event_buffer_end =
-      event_buffer_begin + event_buffer_size;
-  const uintptr_t event_count_begin =
-      reinterpret_cast<uintptr_t>(out_event_count);
-  if (event_count_begin >= event_buffer_begin &&
-      event_count_begin < event_buffer_end) {
-    *out_event_count = original_event_count;
-    throw std::runtime_error(
-        "out_event_count must not overlap event_buffer.");
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
   }
 
   auto* const buffer = static_cast<std::byte*>(event_buffer);
