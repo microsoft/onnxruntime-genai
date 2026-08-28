@@ -276,7 +276,12 @@ def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
 
     model_path = tmp_path / "packed_mrope.onnx"
     ir.save(model.model, model_path)
-    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    try:
+        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        if "MRotaryEmbedding(-1) is not a registered function/op" in str(error):
+            pytest.skip("Installed ONNX Runtime does not include MRotaryEmbedding")
+        raise
 
     q = np.arange(96, dtype=np.float32).reshape(6, model.hidden_size)
     position_ids = np.array(
