@@ -760,7 +760,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         self.preserve_mtp_quantization = "_quant_config" not in extra_options
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
-        self.input_shapes["hidden_states"] = ["batch_size", "sequence_length", self.hidden_size]
+        self.input_shapes["hidden_states"] = self.make_hidden_state_shape()
 
     def make_model(self, input_path):
         self.make_inputs_and_outputs()
@@ -787,7 +787,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         hidden_states_value = self.make_value(
             hidden_states_output,
             self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
+            shape=self.make_hidden_state_shape(),
         )
         self.model.graph.outputs.append(hidden_states_value)
 
@@ -824,7 +824,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             axis=-1,
             stash_type=1,
         )
-        self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
         return output
 
     def make_mtp_input_projection(self):
@@ -840,7 +840,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             outputs=[embed_output],
             name=embed_gather,
         )
-        self.make_value(embed_output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+        self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
             f"{basename}/pre_fc_norm_embedding", embed_output, self.mtp_weights.pre_fc_norm_embedding.weight
@@ -856,7 +856,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             concat_name,
             [embedding_norm, hidden_states_norm],
             self.io_dtype,
-            ["batch_size", "sequence_length", 2 * self.hidden_size],
+            self.make_hidden_state_shape(last_dim=2 * self.hidden_size),
             axis=-1,
         )
 
